@@ -24,12 +24,13 @@ pub struct Camera {
     pub zoom: f64,
 }
 
-/// Elementos da cena. MVP começa só com `rect`; os demais tipos do §6.1
-/// entram conforme as ferramentas existirem.
+/// Scene elements (§6.1). Types enter as their tools exist: `rect` from the
+/// scaffold, `path` with the pencil.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Element {
     Rect(Rect),
+    Path(Path),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -42,6 +43,16 @@ pub struct Rect {
     pub stroke: Option<String>,
     pub fill: Option<String>,
     pub text: Option<String>,
+}
+
+/// Freehand pen stroke: a polyline in world units, `width` in world units
+/// too (ink scales with zoom). Points are stored as `[x, y]` pairs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Path {
+    pub id: String,
+    pub points: Vec<[f64; 2]>,
+    pub stroke: String,
+    pub width: f64,
 }
 
 impl Default for Camera {
@@ -105,16 +116,24 @@ mod tests {
                 y: 0.0,
                 zoom: 1.0,
             },
-            elements: vec![Element::Rect(Rect {
-                id: "el_01".into(),
-                x: 40.0,
-                y: 80.0,
-                w: 220.0,
-                h: 80.0,
-                stroke: Some("#222".into()),
-                fill: None,
-                text: Some("API Gateway".into()),
-            })],
+            elements: vec![
+                Element::Rect(Rect {
+                    id: "el_01".into(),
+                    x: 40.0,
+                    y: 80.0,
+                    w: 220.0,
+                    h: 80.0,
+                    stroke: Some("#222".into()),
+                    fill: None,
+                    text: Some("API Gateway".into()),
+                }),
+                Element::Path(Path {
+                    id: "el_02".into(),
+                    points: vec![[1.0, 2.0], [3.5, 4.0], [6.0, 4.0]],
+                    stroke: "#1f1f1f".into(),
+                    width: 2.0,
+                }),
+            ],
         }
     }
 
@@ -177,10 +196,51 @@ mod tests {
         let doc = Document::from_json(json).unwrap();
         assert_eq!(doc.title, "auth flow");
         assert_eq!(doc.elements.len(), 1);
-        let Element::Rect(r) = &doc.elements[0];
+        let Element::Rect(r) = &doc.elements[0] else {
+            panic!("expected a rect, got {:?}", doc.elements[0]);
+        };
         assert_eq!((r.x, r.y, r.w, r.h), (40.0, 80.0, 220.0, 80.0));
         assert_eq!(r.stroke.as_deref(), Some("#222"));
         assert_eq!(r.fill, None);
+    }
+
+    #[test]
+    fn path_serializes_flat_with_point_pairs() {
+        let doc = sample_doc();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+        let el = &v["elements"][1];
+        // Pen strokes are `type: "path"` with points as [x, y] pairs: compact
+        // on disk and trivial for an exporter or agent to read.
+        assert_eq!(el["type"], "path");
+        assert_eq!(el["id"], "el_02");
+        assert_eq!(
+            el["points"],
+            serde_json::json!([[1.0, 2.0], [3.5, 4.0], [6.0, 4.0]])
+        );
+        assert_eq!(el["stroke"], "#1f1f1f");
+        assert_eq!(el["width"].as_f64(), Some(2.0));
+    }
+
+    #[test]
+    fn parses_path_element_with_integer_coordinates() {
+        let json = r##"{
+            "schema": 1,
+            "id": "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "title": "sketch",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [
+                { "id": "p1", "type": "path", "points": [[0, 0], [10, 5]],
+                  "stroke": "#000", "width": 3 }
+            ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Path(p) = &doc.elements[0] else {
+            panic!("expected a path, got {:?}", doc.elements[0]);
+        };
+        assert_eq!(p.points, vec![[0.0, 0.0], [10.0, 5.0]]);
+        assert_eq!(p.stroke, "#000");
+        assert_eq!(p.width, 3.0);
     }
 
     #[test]

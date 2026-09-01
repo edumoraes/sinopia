@@ -84,7 +84,7 @@ fn srgb_to_linear(c: f32) -> f32 {
 pub fn rect_instances(doc: &Document, vp: Viewport) -> Vec<RectInstance> {
     let mut out = Vec::new();
     for element in &doc.elements {
-        let Element::Rect(r) = element;
+        let Element::Rect(r) = element else { continue };
         let (sx, sy) = world_to_screen(&doc.camera, vp, r.x, r.y);
         let (sx, sy) = (sx as f32, sy as f32);
         let sw = (r.w * doc.camera.zoom) as f32;
