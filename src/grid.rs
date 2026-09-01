@@ -16,7 +16,7 @@ pub const DOT_RADIUS: f64 = 1.25;
 pub fn spacing(view: &View) -> f64 {
     let ppw = view.px_per_world();
     let mut s = BASE_SPACING;
-    if !(ppw > 0.0) || !ppw.is_finite() {
+    if ppw <= 0.0 || !ppw.is_finite() {
         return s;
     }
     while s * ppw < MIN_SPACING_PX * view.scale {
@@ -28,7 +28,7 @@ pub fn spacing(view: &View) -> f64 {
 /// Every dot that touches the viewport, row-major.
 pub fn prims(view: &View, color: Rgba) -> Vec<Prim> {
     let ppw = view.px_per_world();
-    if !(ppw > 0.0) || !ppw.is_finite() {
+    if ppw <= 0.0 || !ppw.is_finite() {
         return Vec::new();
     }
     let s = spacing(view);

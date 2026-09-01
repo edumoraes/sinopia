@@ -76,7 +76,7 @@ pub fn try_parse_color(hex: &str) -> Option<Rgba> {
         _ => return None,
     };
     let mut rgb = [0.0f32; 3];
-    for (i, pair) in expanded.chunks_exact(2).enumerate() {
+    for (i, pair) in expanded.as_chunks::<2>().0.iter().enumerate() {
         let text = std::str::from_utf8(pair).ok()?;
         let byte = u8::from_str_radix(text, 16).ok()?;
         rgb[i] = srgb_to_linear(f32::from(byte) / 255.0);
@@ -322,7 +322,12 @@ pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
                 }
             }
             Element::Path(p) => {
-                out.extend(stroke_prims(&p.points, p.width, parse_color(&p.stroke), view));
+                out.extend(stroke_prims(
+                    &p.points,
+                    p.width,
+                    parse_color(&p.stroke),
+                    view,
+                ));
             }
         }
     }

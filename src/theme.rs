@@ -83,9 +83,15 @@ mod tests {
         assert_eq!(t.bg, parse_color("#f5f5f4"));
         assert_eq!(t.ink_hex, "#1f1f1f");
         assert_eq!(t.ink, parse_color("#1f1f1f"));
-        assert!(luminance(t.panel) > luminance(t.bg), "dock panel pops off the canvas");
+        assert!(
+            luminance(t.panel) > luminance(t.bg),
+            "dock panel pops off the canvas"
+        );
         for ch in 0..3 {
-            assert!(between(t.dot[ch], t.bg[ch], t.ink[ch]), "dots are a tint of the ink");
+            assert!(
+                between(t.dot[ch], t.bg[ch], t.ink[ch]),
+                "dots are a tint of the ink"
+            );
         }
         assert!(t.shadow[3] < 1.0, "shadow is translucent");
         assert_eq!(t.bg[3], 1.0, "canvas is opaque");
@@ -99,7 +105,10 @@ mod tests {
         assert_eq!(t.ink, parse_color("#eee"));
         assert_eq!(t.ink_hex, "#eee");
         assert_eq!(t.icon_active, parse_color("#7aa"));
-        assert!(luminance(t.panel) > luminance(t.bg), "panel lifts off a dark canvas too");
+        assert!(
+            luminance(t.panel) > luminance(t.bg),
+            "panel lifts off a dark canvas too"
+        );
         assert!(luminance(t.active_bg) > luminance(t.panel));
         for ch in 0..3 {
             assert!(between(t.dot[ch], t.bg[ch], t.ink[ch]));

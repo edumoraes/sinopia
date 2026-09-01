@@ -190,7 +190,11 @@ mod tests {
         let d = Dock::layout(VP, 1.0, &TOOLS);
         assert_eq!(d.hit(381.0, 556.0), Some(Hit::Tool(Tool::Select)));
         assert_eq!(d.hit(419.0, 556.0), Some(Hit::Tool(Tool::Pencil)));
-        assert_eq!(d.hit(359.0, 534.0), Some(Hit::Panel), "padding swallows the click");
+        assert_eq!(
+            d.hit(359.0, 534.0),
+            Some(Hit::Panel),
+            "padding swallows the click"
+        );
         assert_eq!(d.hit(100.0, 100.0), None);
         assert_eq!(d.hit(400.0, 531.0), None, "just above the panel is canvas");
     }
@@ -213,7 +217,11 @@ mod tests {
             .filter(|p| p.color == theme.active_bg)
             .map(|p| p.bounds())
             .collect();
-        assert_eq!(highlights, vec![d.buttons[1].1], "only the active tool is highlighted");
+        assert_eq!(
+            highlights,
+            vec![d.buttons[1].1],
+            "only the active tool is highlighted"
+        );
 
         let icons: Vec<&Prim> = prims.iter().filter(|p| p.kind == KIND_SEGMENT).collect();
         assert!(!icons.is_empty());
@@ -241,7 +249,10 @@ mod tests {
             for line in strokes {
                 assert!(line.len() >= 2, "{t:?}");
                 for &(x, y) in *line {
-                    assert!((0.0..=24.0).contains(&x) && (0.0..=24.0).contains(&y), "{t:?}");
+                    assert!(
+                        (0.0..=24.0).contains(&x) && (0.0..=24.0).contains(&y),
+                        "{t:?}"
+                    );
                 }
             }
         }
