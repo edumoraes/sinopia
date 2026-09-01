@@ -227,6 +227,15 @@ JSON versionado, cena retida — não um replay de input.
 
 Tipos do MVP: `path` (caneta), `rect`, `ellipse`, `arrow`, `line`, `text`, `sticky`, `image` (blob referenciado por hash local, não path absoluto).
 
+Landed — `path` (pencil strokes):
+
+```json
+{ "id": "el_02", "type": "path", "points": [[40, 80], [52, 91]], "stroke": "#1f1f1f", "width": 2 }
+```
+
+Points are `[x, y]` pairs in world units; `width` is in world units too, so
+ink scales with zoom. A world unit is one logical pixel at zoom 1.
+
 Por que JSON plano agora, e não Automerge já:
 
 - Menos dependência, debug com `$EDITOR`, diff no git se o usuário commitar o export.
@@ -259,6 +268,13 @@ Objetivo: vetor 2D em Wayland (Hyprland), input de mouse/tablet, texto editável
 
 Recomendação: **winit + wgpu**. Cena retida na CPU (árvore de elementos + AABB). GPU só rasteriza frames sujos (dirty rect ou layer da viewport). Caneta: buffer de pontos na ferramenta ativa; no mouseup vira um `path` no documento — evita gravar 120 Hz no JSON.
 
+Landed: one instanced wgpu pipeline of signed-distance primitives — rounded
+box or round-capped segment, evaluated per fragment with analytic
+antialiasing — draws everything: grid dots, pen strokes (one segment per
+span, overlapping caps make the joins), rect edges, the dock and its icons.
+No tessellation, no MSAA. Per-element caching and dirty rects wait for real
+profiling.
+
 Texto: um editor inline mínimo (cosmic-text / parley), não um webview. IME via winit/smithay-client no Wayland; testar no Hyprland cedo, é a armadilha clássica.
 
 Imagens: decode (image crate) → textura wgpu. Guardar original em `~/.local/share/omawhite/blobs/<sha256>`. Elemento no JSON só aponta o hash.
@@ -284,6 +300,10 @@ Portais: `xdg-desktop-portal` para “abrir imagem” / “salvar PNG em outro l
 | Ctrl+Shift+E | export para o último cwd conhecido ou diálogo |
 
 Borracha vetorial (hit-test + delete) é mais simples e mais útil para o agente do que eraser de pixel. Highlighter pode ser caneta com alpha, fase 1.1.
+
+Landed: tools live in a dock centered at the bottom of the canvas (rounded
+panel, one button per tool, active tool highlighted); the canvas has a
+dotted background fixed in world space. Select and Pencil so far.
 
 Snap e conectores estilo Omaboard: fase 1.1. No MVP, seta é geometria, não binding vivo.
 

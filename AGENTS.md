@@ -31,8 +31,9 @@ XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- --socket /tmp/omawhite-smoke.sock
 Module layout is in the README. The shape that matters:
 
 - **Single instance.** `main.rs` maps CLI flags to an IPC request; if the socket answers, the intent is forwarded and the process exits — only otherwise does it become the main instance and start the winit loop. `--export` and `--shutdown` never spawn a window.
-- **Pure core, thin shell.** `doc` (serde data, versioned schema), `scene` (camera + document → rect instances), `store` (XDG persistence), `cli`, and `ipc` are pure-ish and carry the whole test suite. `app` (winit event loop, socket → event-loop bridge) and `gfx` (wgpu instanced-quad pipeline) are the untested shell — keep logic out of them so it stays testable.
-- **Frame data flow:** document + camera → `scene` instances → `gfx` pipeline.
+- **Pure core, thin shell.** `doc` (serde data, versioned schema), `scene` (view + document → SDF prims), `grid`, `theme`, `editor` (tool + stroke in progress), `dock`, `store` (XDG persistence), `cli`, and `ipc` are pure and carry the whole test suite. `app` (winit event loop, input routing, socket → event-loop bridge) and `gfx` (one instanced SDF pipeline) are the untested shell — keep logic out of them so it stays testable.
+- **Frame data flow:** grid + document + live stroke + dock → `scene` prims → `gfx` pipeline.
+- **Units:** world unit = logical pixel at zoom 1; `View` folds the window scale factor in. Dock and grid are sized in logical px.
 
 # Security Invariants
 
