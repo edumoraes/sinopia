@@ -26,13 +26,6 @@ impl Tool {
         let c = c.to_ascii_lowercase();
         Tool::ALL.into_iter().find(|t| t.hotkey() == c)
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Tool::Select => "Select",
-            Tool::Pencil => "Pencil",
-        }
-    }
 }
 
 /// Pen width in world units (logical px at zoom 1).
@@ -141,7 +134,6 @@ mod tests {
         assert_eq!(Tool::from_hotkey('x'), None);
         for t in Tool::ALL {
             assert_eq!(Tool::from_hotkey(t.hotkey()), Some(t));
-            assert!(!t.label().is_empty());
         }
     }
 

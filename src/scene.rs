@@ -143,6 +143,7 @@ impl ScreenRect {
         }
     }
 
+    #[cfg(test)]
     pub fn contains_rect(&self, other: &ScreenRect) -> bool {
         other.x >= self.x
             && other.y >= self.y
@@ -211,7 +212,9 @@ impl Prim {
         }
     }
 
-    /// Painted area, ignoring the antialiasing ramp.
+    /// Painted area, ignoring the antialiasing ramp. Test-only until
+    /// hit-testing needs it.
+    #[cfg(test)]
     pub fn bounds(&self) -> ScreenRect {
         let [a, b, c, d] = self.geom;
         if self.kind == KIND_SEGMENT {
