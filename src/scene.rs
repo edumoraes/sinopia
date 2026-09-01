@@ -125,6 +125,7 @@ impl ScreenRect {
         (self.x + self.w / 2.0, self.y + self.h / 2.0)
     }
 
+    /// Shrinks by `d` on every side (grows for negative `d`).
     pub fn inset(&self, d: f32) -> ScreenRect {
         ScreenRect {
             x: self.x + d,
@@ -132,6 +133,21 @@ impl ScreenRect {
             w: self.w - 2.0 * d,
             h: self.h - 2.0 * d,
         }
+    }
+
+    pub fn offset(&self, dx: f32, dy: f32) -> ScreenRect {
+        ScreenRect {
+            x: self.x + dx,
+            y: self.y + dy,
+            ..*self
+        }
+    }
+
+    pub fn contains_rect(&self, other: &ScreenRect) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.x + other.w <= self.x + self.w
+            && other.y + other.h <= self.y + self.h
     }
 }
 
@@ -438,6 +454,17 @@ mod tests {
         assert!(!r.contains(20.0, 60.01));
         assert_eq!(r.center(), (25.0, 40.0));
         assert_eq!(r.inset(5.0), sr(15.0, 25.0, 20.0, 30.0));
+        assert_eq!(r.inset(-1.0), sr(9.0, 19.0, 32.0, 42.0));
+        assert_eq!(r.offset(1.0, -2.0), sr(11.0, 18.0, 30.0, 40.0));
+    }
+
+    #[test]
+    fn screen_rect_contains_rect_requires_full_containment() {
+        let r = sr(10.0, 20.0, 30.0, 40.0);
+        assert!(r.contains_rect(&sr(10.0, 20.0, 30.0, 40.0)));
+        assert!(r.contains_rect(&sr(15.0, 25.0, 5.0, 5.0)));
+        assert!(!r.contains_rect(&sr(5.0, 25.0, 10.0, 5.0)));
+        assert!(!r.contains_rect(&sr(15.0, 25.0, 30.0, 5.0)));
     }
 
     #[test]

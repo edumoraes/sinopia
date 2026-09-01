@@ -6,6 +6,7 @@
 mod app;
 mod cli;
 mod doc;
+mod dock;
 mod editor;
 mod gfx;
 mod grid;
