@@ -6,6 +6,7 @@
 mod app;
 mod cli;
 mod doc;
+mod editor;
 mod gfx;
 mod grid;
 mod ipc;
