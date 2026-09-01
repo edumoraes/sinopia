@@ -10,6 +10,7 @@ mod gfx;
 mod ipc;
 mod scene;
 mod store;
+mod theme;
 
 use anyhow::Context as _;
 use clap::Parser as _;

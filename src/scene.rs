@@ -64,25 +64,24 @@ pub const FALLBACK_COLOR: Rgba = [0.5, 0.5, 0.5, 1.0];
 
 /// CSS hex (`#rgb` or `#rrggbb`) → linear RGBA. Invalid → fallback.
 pub fn parse_color(hex: &str) -> Rgba {
-    let Some(s) = hex.strip_prefix('#') else {
-        return FALLBACK_COLOR;
-    };
+    try_parse_color(hex).unwrap_or(FALLBACK_COLOR)
+}
+
+/// CSS hex (`#rgb` or `#rrggbb`) → linear RGBA, or `None` if malformed.
+pub fn try_parse_color(hex: &str) -> Option<Rgba> {
+    let s = hex.strip_prefix('#')?;
     let expanded: Vec<u8> = match s.len() {
         3 => s.bytes().flat_map(|b| [b, b]).collect(),
         6 => s.bytes().collect(),
-        _ => return FALLBACK_COLOR,
+        _ => return None,
     };
     let mut rgb = [0.0f32; 3];
     for (i, pair) in expanded.chunks_exact(2).enumerate() {
-        let Ok(text) = std::str::from_utf8(pair) else {
-            return FALLBACK_COLOR;
-        };
-        let Ok(byte) = u8::from_str_radix(text, 16) else {
-            return FALLBACK_COLOR;
-        };
+        let text = std::str::from_utf8(pair).ok()?;
+        let byte = u8::from_str_radix(text, 16).ok()?;
         rgb[i] = srgb_to_linear(f32::from(byte) / 255.0);
     }
-    [rgb[0], rgb[1], rgb[2], 1.0]
+    Some([rgb[0], rgb[1], rgb[2], 1.0])
 }
 
 fn srgb_to_linear(c: f32) -> f32 {
@@ -411,7 +410,9 @@ mod tests {
     fn invalid_colors_fall_back_to_gray() {
         for bad in ["", "#", "#12", "#12345", "red", "#gggggg"] {
             assert_eq!(parse_color(bad), FALLBACK_COLOR, "color {bad:?}");
+            assert_eq!(try_parse_color(bad), None, "color {bad:?}");
         }
+        assert_eq!(try_parse_color("#fff"), Some(WHITE));
     }
 
     #[test]
