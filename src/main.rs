@@ -7,6 +7,7 @@ mod app;
 mod cli;
 mod doc;
 mod gfx;
+mod grid;
 mod ipc;
 mod scene;
 mod store;
