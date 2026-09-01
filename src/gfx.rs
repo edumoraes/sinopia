@@ -1,15 +1,17 @@
-//! Render wgpu (ARCHITECTURE.md §7): cena retida na CPU, GPU só rasteriza.
+//! wgpu renderer (ARCHITECTURE.md §7): the scene stays on the CPU, the GPU
+//! only rasterizes.
 //!
-//! MVP do scaffold: um pipeline de quads instanciados — cada `RectInstance`
-//! (pos/size em px de tela, cor linear) vira dois triângulos no shader.
-//! Sem atlas, sem texto, sem tesselação: isso entra com as ferramentas.
+//! One pipeline of instanced quads. Each [`Prim`] is a signed-distance
+//! primitive (rounded box or round-capped segment) evaluated per fragment,
+//! which gives analytic antialiasing and soft shadows without MSAA or any
+//! tessellation. Instances are blended in submission order.
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use wgpu::util::DeviceExt as _;
 
-use crate::scene::RectInstance;
+use crate::scene::{Prim, Rgba};
 
 const SHADER: &str = r#"
 struct Globals {
@@ -19,15 +21,23 @@ struct Globals {
 @group(0) @binding(0) var<uniform> globals: Globals;
 
 struct Inst {
-    @location(0) pos: vec2<f32>,
-    @location(1) size: vec2<f32>,
-    @location(2) color: vec4<f32>,
+    @location(0) geom: vec4<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) radius: f32,
+    @location(3) feather: f32,
+    @location(4) kind: u32,
 };
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec4<f32>,
+    @location(0) px: vec2<f32>,
+    @location(1) @interpolate(flat) geom: vec4<f32>,
+    @location(2) @interpolate(flat) color: vec4<f32>,
+    @location(3) @interpolate(flat) params: vec2<f32>,
+    @location(4) @interpolate(flat) kind: u32,
 };
+
+const KIND_SEGMENT: u32 = 1u;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
@@ -35,21 +45,59 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
         vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
     );
-    let px = inst.pos + corners[vi] * inst.size;
-    // px de tela (y para baixo) -> NDC (y para cima).
+    // Rasterize the primitive's bounds plus room for the edge ramp.
+    let margin = max(inst.feather, 1.0) * 0.5 + 1.0;
+    var lo: vec2<f32>;
+    var hi: vec2<f32>;
+    if (inst.kind == KIND_SEGMENT) {
+        lo = min(inst.geom.xy, inst.geom.zw) - vec2<f32>(inst.radius + margin);
+        hi = max(inst.geom.xy, inst.geom.zw) + vec2<f32>(inst.radius + margin);
+    } else {
+        lo = inst.geom.xy - vec2<f32>(margin);
+        hi = inst.geom.xy + inst.geom.zw + vec2<f32>(margin);
+    }
+    let px = mix(lo, hi, corners[vi]);
+    // Screen px (y down) -> NDC (y up).
     let ndc = vec2<f32>(
         px.x / globals.viewport.x * 2.0 - 1.0,
         1.0 - px.y / globals.viewport.y * 2.0,
     );
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    out.px = px;
+    out.geom = inst.geom;
     out.color = inst.color;
+    out.params = vec2<f32>(inst.radius, inst.feather);
+    out.kind = inst.kind;
     return out;
+}
+
+fn sd_box(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - half + vec2<f32>(r);
+    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * h);
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    var d: f32;
+    if (in.kind == KIND_SEGMENT) {
+        d = sd_segment(in.px, in.geom.xy, in.geom.zw) - in.params.x;
+    } else {
+        let half = in.geom.zw * 0.5;
+        // A radius beyond the half extents would invert the field.
+        let r = min(in.params.x, min(half.x, half.y));
+        d = sd_box(in.px - (in.geom.xy + half), half, r);
+    }
+    let ramp = max(in.params.y, 1.0);
+    let coverage = clamp(0.5 - d / ramp, 0.0, 1.0);
+    return vec4<f32>(in.color.rgb, in.color.a * coverage);
 }
 "#;
 
@@ -61,39 +109,38 @@ pub struct Gfx {
     pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    /// Cor de fundo em RGBA linear; trocada pelo `op: theme`.
-    pub background: [f32; 4],
 }
 
 impl Gfx {
     pub fn new(window: Arc<winit::window::Window>) -> anyhow::Result<Gfx> {
-        // Sem display handle: só o backend GL o usa; Vulkan (nosso alvo,
-        // §10.1) ignora. Trocar por OwnedDisplayHandle do winit se GL entrar.
+        // No display handle: only the GL backend needs one; Vulkan (our
+        // target, §10.1) ignores it. Switch to winit's OwnedDisplayHandle if
+        // GL ever comes in.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
-            .context("criando surface Wayland")?;
+            .context("creating the Wayland surface")?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            // Whiteboard não justifica acordar dGPU.
+            // A whiteboard does not justify waking a discrete GPU.
             power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
-        .context("nenhum adapter de GPU compatível")?;
+        .context("no compatible GPU adapter")?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("omawhite"),
             ..Default::default()
         }))
-        .context("criando device wgpu")?;
+        .context("creating the wgpu device")?;
 
         let size = window.inner_size();
         let config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .context("surface sem configuração default")?;
+            .context("surface has no default configuration")?;
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("omawhite-rects"),
+            label: Some("omawhite-prims"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
 
@@ -131,19 +178,21 @@ impl Gfx {
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rects"),
+            label: Some("prims"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<RectInstance>() as u64,
+                    array_stride: std::mem::size_of::<Prim>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x2, // pos
-                        1 => Float32x2, // size
-                        2 => Float32x4, // color
+                        0 => Float32x4, // geom
+                        1 => Float32x4, // color
+                        2 => Float32,   // radius
+                        3 => Float32,   // feather
+                        4 => Uint32,    // kind
                     ],
                 })],
             },
@@ -172,7 +221,6 @@ impl Gfx {
             pipeline,
             globals_buf,
             bind_group,
-            background: crate::scene::parse_color("#1a1a1a"),
         })
     }
 
@@ -186,9 +234,10 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Renderiza um frame. `Ok(false)` = frame pulado (surface ocluída ou
-    /// perdida temporariamente); o chamador pode tentar de novo depois.
-    pub fn render(&mut self, instances: &[RectInstance]) -> anyhow::Result<bool> {
+    /// Renders one frame: clear to `background`, then `prims` in order.
+    /// `Ok(false)` = frame skipped (surface occluded or temporarily lost);
+    /// the caller may try again later.
+    pub fn render(&mut self, background: Rgba, prims: &[Prim]) -> anyhow::Result<bool> {
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -200,7 +249,7 @@ impl Gfx {
                 return Ok(false);
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                anyhow::bail!("erro de validação ao adquirir frame da surface");
+                anyhow::bail!("validation error acquiring the surface frame");
             }
         };
         let view = texture
@@ -216,13 +265,13 @@ impl Gfx {
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::cast_slice(&globals));
 
-        // Cena de scaffold é pequena; buffer por frame é o mais simples que
-        // funciona. Dirty-rect e reuso entram com a profiling de verdade (§3).
+        // A buffer per frame is the simplest thing that works; reuse and
+        // per-element caching come with real profiling (§3).
         let instance_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("rect-instances"),
-                contents: bytemuck::cast_slice(instances),
+                label: Some("prims"),
+                contents: bytemuck::cast_slice(prims),
                 usage: wgpu::BufferUsages::VERTEX,
             });
 
@@ -232,7 +281,7 @@ impl Gfx {
                 label: Some("frame"),
             });
         {
-            let [r, g, b, a] = self.background;
+            let [r, g, b, a] = background;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("canvas"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -254,11 +303,11 @@ impl Gfx {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !instances.is_empty() {
+            if !prims.is_empty() {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, instance_buf.slice(..));
-                pass.draw(0..6, 0..instances.len() as u32);
+                pass.draw(0..6, 0..prims.len() as u32);
             }
         }
         self.queue.submit([encoder.finish()]);

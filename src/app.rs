@@ -16,7 +16,7 @@ use crate::doc::Document;
 use crate::gfx::Gfx;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
-use crate::scene::{self, Viewport};
+use crate::scene::{self, Rgba, View, Viewport};
 use crate::store::Store;
 
 /// Estado visível para a thread do servidor (respostas de `ping`).
@@ -35,6 +35,8 @@ struct App {
     shared: Arc<Mutex<SharedState>>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
+    /// Canvas color in linear RGBA; replaced by `op: theme`.
+    background: Rgba,
     /// Modo smoke test: sai limpo depois de N frames apresentados.
     smoke_frames_left: Option<u32>,
     exit_error: Option<anyhow::Error>,
@@ -103,10 +105,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.redraw();
             }
             WindowEvent::RedrawRequested => {
+                let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor());
                 let Some(gfx) = &mut self.gfx else { return };
                 let (w, h) = gfx.size();
-                let instances = scene::rect_instances(&self.doc, Viewport { w, h });
-                match gfx.render(&instances) {
+                let view = View {
+                    camera: self.doc.camera,
+                    viewport: Viewport { w, h },
+                    scale,
+                };
+                let prims = scene::document_prims(&self.doc, &view);
+                match gfx.render(self.background, &prims) {
                     Ok(presented) => {
                         if let Some(n) = &mut self.smoke_frames_left {
                             if presented {
@@ -155,9 +163,7 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
             }
             Request::Theme { colors } => {
-                if let Some(gfx) = &mut self.gfx {
-                    gfx.background = scene::parse_color(&colors.bg);
-                }
+                self.background = scene::parse_color(&colors.bg);
                 self.redraw();
             }
             // O servidor responde `denied` sem encaminhar; nunca chega aqui.
@@ -213,6 +219,7 @@ pub fn run(
         shared,
         window: None,
         gfx: None,
+        background: scene::parse_color("#1a1a1a"),
         smoke_frames_left: smoke_frames,
         exit_error: None,
     };

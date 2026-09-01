@@ -1,54 +1,69 @@
-//! Cena → dados de render, sem tocar GPU (testável puro).
+//! Scene → render data, without touching the GPU (pure, testable).
 //!
-//! Convenção de câmera: `camera.x/y` é o ponto do MUNDO que aparece no centro
-//! da viewport; `zoom` multiplica mundo → pixels de tela.
-//! `screen = (world - camera) * zoom + viewport/2`
+//! Camera convention: `camera.x/y` is the WORLD point shown at the viewport
+//! center; `zoom * scale` multiplies world units into physical pixels, so one
+//! world unit is one logical pixel at zoom 1 regardless of the display.
+//! `screen = (world - camera) * zoom * scale + viewport / 2`
+//!
+//! Everything drawn is a [`Prim`]: a signed-distance primitive the shader
+//! rasterizes with analytic antialiasing — a rounded box (rect fills, grid
+//! dots, dock panel) or a round-capped segment (pen strokes, icons). One
+//! pipeline, painter's order.
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::doc::{Camera, Document, Element};
 
-/// Viewport em pixels físicos.
+/// Viewport in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
     pub w: u32,
     pub h: u32,
 }
 
-/// Espessura de stroke no MVP, em pixels de tela (constante sob zoom).
+/// The whole world → screen mapping: camera, viewport and HiDPI scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View {
+    pub camera: Camera,
+    pub viewport: Viewport,
+    /// Window scale factor (physical px per logical px).
+    pub scale: f64,
+}
+
+impl View {
+    pub fn px_per_world(&self) -> f64 {
+        self.camera.zoom * self.scale
+    }
+
+    pub fn world_to_screen(&self, wx: f64, wy: f64) -> (f64, f64) {
+        let k = self.px_per_world();
+        (
+            (wx - self.camera.x) * k + f64::from(self.viewport.w) / 2.0,
+            (wy - self.camera.y) * k + f64::from(self.viewport.h) / 2.0,
+        )
+    }
+
+    pub fn screen_to_world(&self, sx: f64, sy: f64) -> (f64, f64) {
+        let k = self.px_per_world();
+        (
+            (sx - f64::from(self.viewport.w) / 2.0) / k + self.camera.x,
+            (sy - f64::from(self.viewport.h) / 2.0) / k + self.camera.y,
+        )
+    }
+}
+
+/// Linear RGBA, straight (non-premultiplied) alpha.
+pub type Rgba = [f32; 4];
+
+/// Rect outline thickness, in screen px (constant under zoom).
 pub const STROKE_PX: f32 = 2.0;
 
-/// Cor de fallback (cinza) para cor ausente ou hex inválido — documento com
-/// lixo não derruba o render.
-pub const FALLBACK_COLOR: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+/// Fallback (gray) for a missing or invalid color — a document with junk in
+/// it must not take the renderer down.
+pub const FALLBACK_COLOR: Rgba = [0.5, 0.5, 0.5, 1.0];
 
-/// Instância de retângulo sólido pronta para a GPU: origem e tamanho em
-/// pixels de tela (origem no canto superior esquerdo), cor RGBA linear.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
-pub struct RectInstance {
-    pub pos: [f32; 2],
-    pub size: [f32; 2],
-    pub color: [f32; 4],
-}
-
-pub fn world_to_screen(cam: &Camera, vp: Viewport, wx: f64, wy: f64) -> (f64, f64) {
-    (
-        (wx - cam.x) * cam.zoom + f64::from(vp.w) / 2.0,
-        (wy - cam.y) * cam.zoom + f64::from(vp.h) / 2.0,
-    )
-}
-
-#[allow(dead_code)] // inverso usado por hit-test/pan quando houver input
-pub fn screen_to_world(cam: &Camera, vp: Viewport, sx: f64, sy: f64) -> (f64, f64) {
-    (
-        (sx - f64::from(vp.w) / 2.0) / cam.zoom + cam.x,
-        (sy - f64::from(vp.h) / 2.0) / cam.zoom + cam.y,
-    )
-}
-
-/// Cor CSS-hex (`#rgb` ou `#rrggbb`) → RGBA linear. Inválida → fallback.
-pub fn parse_color(hex: &str) -> [f32; 4] {
+/// CSS hex (`#rgb` or `#rrggbb`) → linear RGBA. Invalid → fallback.
+pub fn parse_color(hex: &str) -> Rgba {
     let Some(s) = hex.strip_prefix('#') else {
         return FALLBACK_COLOR;
     };
@@ -78,56 +93,219 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-/// Achata o documento em instâncias de retângulo na ordem de pintura:
-/// fill primeiro, depois as quatro arestas do stroke (espessura constante
-/// em px de tela, alinhadas para dentro).
-pub fn rect_instances(doc: &Document, vp: Viewport) -> Vec<RectInstance> {
+/// Linear interpolation of the color channels; result is opaque.
+pub fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        1.0,
+    ]
+}
+
+pub fn with_alpha(c: Rgba, alpha: f32) -> Rgba {
+    [c[0], c[1], c[2], alpha]
+}
+
+/// Axis-aligned rectangle in screen px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl ScreenRect {
+    pub fn contains(&self, px: f64, py: f64) -> bool {
+        let (px, py) = (px as f32, py as f32);
+        px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
+    }
+
+    pub fn center(&self) -> (f32, f32) {
+        (self.x + self.w / 2.0, self.y + self.h / 2.0)
+    }
+
+    pub fn inset(&self, d: f32) -> ScreenRect {
+        ScreenRect {
+            x: self.x + d,
+            y: self.y + d,
+            w: self.w - 2.0 * d,
+            h: self.h - 2.0 * d,
+        }
+    }
+}
+
+pub const KIND_BOX: u32 = 0;
+pub const KIND_SEGMENT: u32 = 1;
+
+/// GPU-ready primitive. Layout mirrors the shader's instance input.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct Prim {
+    /// Box: `x, y, w, h`. Segment: `ax, ay, bx, by`. Screen px.
+    pub geom: [f32; 4],
+    pub color: Rgba,
+    /// Box corner radius, or segment half-width.
+    pub radius: f32,
+    /// Width of the edge ramp in px, centered on the outline. 0 = crisp
+    /// (one pixel of antialiasing); larger values make soft shadows.
+    pub feather: f32,
+    pub kind: u32,
+    pub _pad: u32,
+}
+
+impl Prim {
+    pub fn rect(r: ScreenRect, color: Rgba) -> Prim {
+        Prim::rounded(r, 0.0, color)
+    }
+
+    pub fn rounded(r: ScreenRect, radius: f32, color: Rgba) -> Prim {
+        Prim::soft(r, radius, 0.0, color)
+    }
+
+    pub fn soft(r: ScreenRect, radius: f32, feather: f32, color: Rgba) -> Prim {
+        Prim {
+            geom: [r.x, r.y, r.w, r.h],
+            color,
+            radius,
+            feather,
+            kind: KIND_BOX,
+            _pad: 0,
+        }
+    }
+
+    pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
+        let r = ScreenRect {
+            x: cx - radius,
+            y: cy - radius,
+            w: 2.0 * radius,
+            h: 2.0 * radius,
+        };
+        Prim::rounded(r, radius, color)
+    }
+
+    pub fn segment(a: (f32, f32), b: (f32, f32), half_width: f32, color: Rgba) -> Prim {
+        Prim {
+            geom: [a.0, a.1, b.0, b.1],
+            color,
+            radius: half_width,
+            feather: 0.0,
+            kind: KIND_SEGMENT,
+            _pad: 0,
+        }
+    }
+
+    /// Painted area, ignoring the antialiasing ramp.
+    pub fn bounds(&self) -> ScreenRect {
+        let [a, b, c, d] = self.geom;
+        if self.kind == KIND_SEGMENT {
+            let r = self.radius;
+            let (x0, x1) = (a.min(c) - r, a.max(c) + r);
+            let (y0, y1) = (b.min(d) - r, b.max(d) + r);
+            ScreenRect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            }
+        } else {
+            ScreenRect {
+                x: a,
+                y: b,
+                w: c,
+                h: d,
+            }
+        }
+    }
+}
+
+/// Polyline in screen px → one round-capped segment per span; overlapping
+/// caps make the joins. Repeated points are skipped; a degenerate polyline
+/// is still visible as a dot.
+pub fn polyline_prims(points: &[(f32, f32)], half_width: f32, color: Rgba) -> Vec<Prim> {
+    let Some(&first) = points.first() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut prev = first;
+    for &p in &points[1..] {
+        if p == prev {
+            continue;
+        }
+        out.push(Prim::segment(prev, p, half_width, color));
+        prev = p;
+    }
+    if out.is_empty() {
+        out.push(Prim::circle(first.0, first.1, half_width, color));
+    }
+    out
+}
+
+/// Pen stroke in world units → screen prims. Width scales with zoom but
+/// never drops below one pixel, so zoomed-out ink stays visible.
+pub fn stroke_prims(points: &[[f64; 2]], width: f64, color: Rgba, view: &View) -> Vec<Prim> {
+    let half_width = ((width * view.px_per_world()) as f32 / 2.0).max(0.5);
+    let screen: Vec<(f32, f32)> = points
+        .iter()
+        .map(|[x, y]| {
+            let (sx, sy) = view.world_to_screen(*x, *y);
+            (sx as f32, sy as f32)
+        })
+        .collect();
+    polyline_prims(&screen, half_width, color)
+}
+
+/// Flattens the document into prims in paint order. Rects paint fill first,
+/// then the four outline edges (constant px thickness, aligned inwards);
+/// paths become strokes.
+pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
     let mut out = Vec::new();
     for element in &doc.elements {
-        let Element::Rect(r) = element else { continue };
-        let (sx, sy) = world_to_screen(&doc.camera, vp, r.x, r.y);
-        let (sx, sy) = (sx as f32, sy as f32);
-        let sw = (r.w * doc.camera.zoom) as f32;
-        let sh = (r.h * doc.camera.zoom) as f32;
+        match element {
+            Element::Rect(r) => {
+                let (sx, sy) = view.world_to_screen(r.x, r.y);
+                let (sx, sy) = (sx as f32, sy as f32);
+                let sw = (r.w * view.px_per_world()) as f32;
+                let sh = (r.h * view.px_per_world()) as f32;
 
-        let fill = r.fill.as_deref().map(parse_color);
-        let stroke = r.stroke.as_deref().map(parse_color);
+                let fill = r.fill.as_deref().map(parse_color);
+                let stroke = r.stroke.as_deref().map(parse_color);
 
-        // Elemento sem cor nenhuma ainda precisa aparecer na tela.
-        if let Some(color) = fill.or(if stroke.is_none() {
-            Some(FALLBACK_COLOR)
-        } else {
-            None
-        }) {
-            out.push(RectInstance {
-                pos: [sx, sy],
-                size: [sw, sh],
-                color,
-            });
-        }
-        if let Some(color) = stroke {
-            let t = STROKE_PX;
-            let inner_h = (sh - 2.0 * t).max(0.0);
-            out.push(RectInstance {
-                pos: [sx, sy],
-                size: [sw, t],
-                color,
-            });
-            out.push(RectInstance {
-                pos: [sx, sy + sh - t],
-                size: [sw, t],
-                color,
-            });
-            out.push(RectInstance {
-                pos: [sx, sy + t],
-                size: [t, inner_h],
-                color,
-            });
-            out.push(RectInstance {
-                pos: [sx + sw - t, sy + t],
-                size: [t, inner_h],
-                color,
-            });
+                // An element with no color at all still has to show up.
+                let fill = fill.or(if stroke.is_none() {
+                    Some(FALLBACK_COLOR)
+                } else {
+                    None
+                });
+                if let Some(color) = fill {
+                    out.push(Prim::rect(
+                        ScreenRect {
+                            x: sx,
+                            y: sy,
+                            w: sw,
+                            h: sh,
+                        },
+                        color,
+                    ));
+                }
+                if let Some(color) = stroke {
+                    let t = STROKE_PX;
+                    let inner_h = (sh - 2.0 * t).max(0.0);
+                    let edges = [
+                        (sx, sy, sw, t),
+                        (sx, sy + sh - t, sw, t),
+                        (sx, sy + t, t, inner_h),
+                        (sx + sw - t, sy + t, t, inner_h),
+                    ];
+                    for (x, y, w, h) in edges {
+                        out.push(Prim::rect(ScreenRect { x, y, w, h }, color));
+                    }
+                }
+            }
+            Element::Path(p) => {
+                out.extend(stroke_prims(&p.points, p.width, parse_color(&p.stroke), view));
+            }
         }
     }
     out
@@ -136,17 +314,22 @@ pub fn rect_instances(doc: &Document, vp: Viewport) -> Vec<RectInstance> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{Camera, Rect};
+    use crate::doc::{Camera, Path, Rect};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
+    const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
 
-    fn cam(x: f64, y: f64, zoom: f64) -> Camera {
-        Camera { x, y, zoom }
+    fn view(x: f64, y: f64, zoom: f64) -> View {
+        View {
+            camera: Camera { x, y, zoom },
+            viewport: VP,
+            scale: 1.0,
+        }
     }
 
-    fn doc_with(elements: Vec<Element>, camera: Camera) -> Document {
+    fn doc_with(elements: Vec<Element>, view: &View) -> Document {
         let mut d = Document::new("t");
-        d.camera = camera;
+        d.camera = view.camera;
         d.elements = elements;
         d
     }
@@ -164,29 +347,45 @@ mod tests {
         })
     }
 
+    fn sr(x: f32, y: f32, w: f32, h: f32) -> ScreenRect {
+        ScreenRect { x, y, w, h }
+    }
+
     #[test]
     fn world_origin_lands_on_viewport_center() {
-        assert_eq!(
-            world_to_screen(&cam(0.0, 0.0, 1.0), VP, 0.0, 0.0),
-            (50.0, 50.0)
-        );
+        assert_eq!(view(0.0, 0.0, 1.0).world_to_screen(0.0, 0.0), (50.0, 50.0));
     }
 
     #[test]
     fn camera_pan_and_zoom_transform_points() {
-        // Câmera olhando (10, 20) com zoom 2: o próprio (10,20) fica no centro…
-        let c = cam(10.0, 20.0, 2.0);
-        assert_eq!(world_to_screen(&c, VP, 10.0, 20.0), (50.0, 50.0));
-        // …e um ponto 5 unidades à direita aparece 10px à direita do centro.
-        assert_eq!(world_to_screen(&c, VP, 15.0, 20.0), (60.0, 50.0));
+        // Camera looking at (10, 20) with zoom 2: (10, 20) itself is centered…
+        let v = view(10.0, 20.0, 2.0);
+        assert_eq!(v.world_to_screen(10.0, 20.0), (50.0, 50.0));
+        // …and a point 5 units to the right shows 10px right of center.
+        assert_eq!(v.world_to_screen(15.0, 20.0), (60.0, 50.0));
+    }
+
+    #[test]
+    fn scale_factor_multiplies_zoom() {
+        // World units are logical pixels at zoom 1: on a 2x display each
+        // maps to two physical pixels.
+        let v = View {
+            scale: 2.0,
+            ..view(0.0, 0.0, 1.0)
+        };
+        assert_eq!(v.px_per_world(), 2.0);
+        assert_eq!(v.world_to_screen(5.0, 0.0), (60.0, 50.0));
     }
 
     #[test]
     fn screen_to_world_inverts_world_to_screen() {
-        let c = cam(-3.5, 8.0, 2.5);
+        let v = View {
+            scale: 1.5,
+            ..view(-3.5, 8.0, 2.5)
+        };
         for (wx, wy) in [(0.0, 0.0), (10.0, -4.0), (123.25, 7.5)] {
-            let (sx, sy) = world_to_screen(&c, VP, wx, wy);
-            let (bx, by) = screen_to_world(&c, VP, sx, sy);
+            let (sx, sy) = v.world_to_screen(wx, wy);
+            let (bx, by) = v.screen_to_world(sx, sy);
             assert!(
                 (bx - wx).abs() < 1e-9 && (by - wy).abs() < 1e-9,
                 "({wx},{wy})"
@@ -197,109 +396,181 @@ mod tests {
     #[test]
     fn parses_hex_colors_to_linear_rgba() {
         assert_eq!(parse_color("#000"), [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(parse_color("#ffffff"), [1.0, 1.0, 1.0, 1.0]);
-        // #222 em sRGB: 0x22/255 ≈ 0.1333 → linear ≈ 0.0159963.
+        assert_eq!(parse_color("#ffffff"), WHITE);
+        // #222 in sRGB: 0x22/255 ≈ 0.1333 → linear ≈ 0.0159963.
         let c = parse_color("#222");
         assert!((c[0] - 0.0159963).abs() < 1e-4, "{c:?}");
         assert_eq!(c[0], c[1]);
         assert_eq!(c[1], c[2]);
         assert_eq!(c[3], 1.0);
-        // #rgb expande por dígito duplicado: #7aa == #77aaaa.
+        // #rgb expands by doubling each digit: #7aa == #77aaaa.
         assert_eq!(parse_color("#7aa"), parse_color("#77aaaa"));
     }
 
     #[test]
     fn invalid_colors_fall_back_to_gray() {
         for bad in ["", "#", "#12", "#12345", "red", "#gggggg"] {
-            assert_eq!(parse_color(bad), FALLBACK_COLOR, "cor {bad:?}");
+            assert_eq!(parse_color(bad), FALLBACK_COLOR, "color {bad:?}");
         }
     }
 
     #[test]
-    fn fill_only_rect_becomes_one_instance() {
-        let doc = doc_with(
-            vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))],
-            cam(0.0, 0.0, 1.0),
-        );
-        let got = rect_instances(&doc, VP);
+    fn mix_interpolates_channels_and_keeps_alpha_opaque() {
+        let black = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(mix(black, WHITE, 0.25), [0.25, 0.25, 0.25, 1.0]);
+        assert_eq!(mix(black, WHITE, 0.0), black);
+        assert_eq!(mix(black, WHITE, 1.0), WHITE);
+    }
+
+    #[test]
+    fn with_alpha_replaces_only_the_alpha_channel() {
+        assert_eq!(with_alpha(WHITE, 0.3), [1.0, 1.0, 1.0, 0.3]);
+    }
+
+    #[test]
+    fn screen_rect_contains_points_inside_and_on_the_near_edges() {
+        let r = sr(10.0, 20.0, 30.0, 40.0);
+        assert!(r.contains(10.0, 20.0));
+        assert!(r.contains(25.0, 50.0));
+        assert!(!r.contains(9.99, 30.0));
+        assert!(!r.contains(40.01, 30.0));
+        assert!(!r.contains(20.0, 60.01));
+        assert_eq!(r.center(), (25.0, 40.0));
+        assert_eq!(r.inset(5.0), sr(15.0, 25.0, 20.0, 30.0));
+    }
+
+    #[test]
+    fn fill_only_rect_becomes_one_box() {
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))], &v);
         assert_eq!(
-            got,
-            vec![RectInstance {
-                pos: [50.0, 50.0],
-                size: [10.0, 10.0],
-                color: [1.0, 1.0, 1.0, 1.0]
-            }]
+            document_prims(&doc, &v),
+            vec![Prim::rect(sr(50.0, 50.0, 10.0, 10.0), WHITE)]
         );
     }
 
     #[test]
     fn stroke_only_rect_becomes_four_inner_edges() {
-        let doc = doc_with(
-            vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)],
-            cam(0.0, 0.0, 1.0),
-        );
-        let got = rect_instances(&doc, VP);
-        let white = [1.0, 1.0, 1.0, 1.0];
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)], &v);
         let t = STROKE_PX;
         assert_eq!(
-            got,
+            document_prims(&doc, &v),
             vec![
-                // topo, base, esquerda, direita — alinhadas para dentro.
-                RectInstance {
-                    pos: [60.0, 60.0],
-                    size: [20.0, t],
-                    color: white
-                },
-                RectInstance {
-                    pos: [60.0, 80.0 - t],
-                    size: [20.0, t],
-                    color: white
-                },
-                RectInstance {
-                    pos: [60.0, 60.0 + t],
-                    size: [t, 20.0 - 2.0 * t],
-                    color: white
-                },
-                RectInstance {
-                    pos: [80.0 - t, 60.0 + t],
-                    size: [t, 20.0 - 2.0 * t],
-                    color: white
-                },
+                // top, bottom, left, right — aligned inwards.
+                Prim::rect(sr(60.0, 60.0, 20.0, t), WHITE),
+                Prim::rect(sr(60.0, 80.0 - t, 20.0, t), WHITE),
+                Prim::rect(sr(60.0, 60.0 + t, t, 20.0 - 2.0 * t), WHITE),
+                Prim::rect(sr(80.0 - t, 60.0 + t, t, 20.0 - 2.0 * t), WHITE),
             ]
         );
     }
 
     #[test]
     fn fill_and_stroke_paint_fill_first() {
+        let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(
             vec![rect(0.0, 0.0, 10.0, 10.0, Some("#000"), Some("#fff"))],
-            cam(0.0, 0.0, 1.0),
+            &v,
         );
-        let got = rect_instances(&doc, VP);
+        let got = document_prims(&doc, &v);
         assert_eq!(got.len(), 5);
-        assert_eq!(got[0].color, [1.0, 1.0, 1.0, 1.0], "fill primeiro");
-        assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke depois");
+        assert_eq!(got[0].color, WHITE, "fill first");
+        assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke after");
     }
 
     #[test]
-    fn zoom_scales_position_and_size() {
-        let doc = doc_with(
-            vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))],
-            cam(0.0, 0.0, 2.0),
-        );
-        let got = rect_instances(&doc, VP);
-        assert_eq!(got[0].pos, [52.0, 50.0]);
-        assert_eq!(got[0].size, [10.0, 10.0]);
+    fn zoom_scales_rect_position_and_size() {
+        let v = view(0.0, 0.0, 2.0);
+        let doc = doc_with(vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))], &v);
+        let got = document_prims(&doc, &v);
+        assert_eq!(got[0].geom, [52.0, 50.0, 10.0, 10.0]);
     }
 
     #[test]
     fn rect_without_any_color_still_paints_with_fallback() {
-        let doc = doc_with(
-            vec![rect(0.0, 0.0, 4.0, 4.0, None, None)],
-            cam(0.0, 0.0, 1.0),
-        );
-        let got = rect_instances(&doc, VP);
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(vec![rect(0.0, 0.0, 4.0, 4.0, None, None)], &v);
+        let got = document_prims(&doc, &v);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].color, FALLBACK_COLOR);
+    }
+
+    #[test]
+    fn single_point_polyline_is_a_dot() {
+        assert_eq!(
+            polyline_prims(&[(10.0, 10.0)], 2.0, WHITE),
+            vec![Prim::circle(10.0, 10.0, 2.0, WHITE)]
+        );
+        assert!(polyline_prims(&[], 2.0, WHITE).is_empty());
+    }
+
+    #[test]
+    fn polyline_becomes_one_segment_per_span_skipping_repeats() {
+        let got = polyline_prims(
+            &[(0.0, 0.0), (10.0, 0.0), (10.0, 0.0), (10.0, 5.0)],
+            1.5,
+            WHITE,
+        );
+        assert_eq!(
+            got,
+            vec![
+                Prim::segment((0.0, 0.0), (10.0, 0.0), 1.5, WHITE),
+                Prim::segment((10.0, 0.0), (10.0, 5.0), 1.5, WHITE),
+            ]
+        );
+        // A polyline whose points all coincide is still visible as a dot.
+        assert_eq!(
+            polyline_prims(&[(3.0, 3.0), (3.0, 3.0)], 1.0, WHITE),
+            vec![Prim::circle(3.0, 3.0, 1.0, WHITE)]
+        );
+    }
+
+    #[test]
+    fn prim_bounds_cover_the_painted_area() {
+        assert_eq!(
+            Prim::segment((0.0, 0.0), (10.0, 0.0), 2.0, WHITE).bounds(),
+            sr(-2.0, -2.0, 14.0, 4.0)
+        );
+        assert_eq!(
+            Prim::circle(5.0, 5.0, 3.0, WHITE).bounds(),
+            sr(2.0, 2.0, 6.0, 6.0)
+        );
+        assert_eq!(
+            Prim::rounded(sr(1.0, 2.0, 3.0, 4.0), 1.0, WHITE).bounds(),
+            sr(1.0, 2.0, 3.0, 4.0)
+        );
+    }
+
+    #[test]
+    fn path_element_is_stroked_in_screen_space() {
+        let v = view(0.0, 0.0, 2.0);
+        let doc = doc_with(
+            vec![Element::Path(Path {
+                id: "p".into(),
+                points: vec![[0.0, 0.0], [10.0, 0.0]],
+                stroke: "#000".into(),
+                width: 2.0,
+            })],
+            &v,
+        );
+        // Width is in world units: 2 * zoom 2 = 4px wide → half-width 2.
+        assert_eq!(
+            document_prims(&doc, &v),
+            vec![Prim::segment(
+                (50.0, 50.0),
+                (70.0, 50.0),
+                2.0,
+                [0.0, 0.0, 0.0, 1.0]
+            )]
+        );
+    }
+
+    #[test]
+    fn stroke_width_never_drops_below_one_pixel() {
+        let v = view(0.0, 0.0, 0.1);
+        let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], 2.0, WHITE, &v);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].radius, 0.5);
     }
 }
