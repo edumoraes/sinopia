@@ -351,7 +351,7 @@ mod tests {
     fn the_sheet_is_white_where_it_is_opaque() {
         let a = atlas();
         assert_eq!(a.bitmap.rgba.len(), (a.bitmap.w * a.bitmap.h * 4) as usize);
-        let painted = a.bitmap.rgba.chunks_exact(4).find(|t| t[3] > 0);
+        let painted = a.bitmap.rgba.as_chunks::<4>().0.iter().find(|t| t[3] > 0);
         assert_eq!(painted.map(|t| &t[..3]), Some(&[255u8, 255, 255][..]));
     }
 

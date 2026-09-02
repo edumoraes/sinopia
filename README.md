@@ -6,10 +6,10 @@ the real architecture emerges from development.
 
 ## Status
 
-Scaffold (§15 items 1–2), the pencil (item 4), selection, navigation and
-pasted images:
+Scaffold (§15 items 1–2), the pencil (item 4), selection, navigation,
+pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 208 tests.
+- `cargo build` clean, `cargo test` with 286 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -52,13 +52,29 @@ pasted images:
   for one unit (25%) in, right-click for one out;
   the wheel zooms at the cursor while Zoom is active; pinch on the
   trackpad. Range 10%–1000%. The camera is saved with the board.
+- Projects and tabs: several boards open at once, one tab each, with
+  the board's name, a dot while it has unsaved changes, a close cross
+  and a `+` for a new one. Every tab keeps its own tool, selection and
+  camera. `Ctrl+S` saves — asking for a name the first time, unless the
+  board came from the store, where it already has one; `Ctrl+Shift+S`
+  always asks; `Ctrl+O` opens one or more `.omawhite` files, each in its
+  own tab; `Ctrl+W` closes the tab, asking first if work would be lost.
+  Nothing autosaves any more: a drawing change dirties the tab, a pan or
+  a zoom does not. A project file holds exactly the document JSON;
+  images stay in the store's `blobs/`, so a file carried to another
+  machine shows placeholders.
+- Text: a glyph atlas from a font shipped inside the binary, drawn by
+  the same pipeline as the images — one white sheet, alpha for coverage,
+  a UV cell per glyph. It dresses the tabs; the text *tool* is still
+  ahead.
 - Versioned JSON document (schema 1) + XDG persistence (0700/0600, atomic
-  save).
+  save). Project files chosen through the portal keep the umask instead.
 - IPC protocol §5 (closed schema) + single instance via socket.
 - CLI: `--new`, `--open <id>`, `--export <dir>`, `--shutdown`,
   `--socket <path>`.
 
-Not yet: eraser, text, shapes, undo, export, Omarchy plugin, thumbnails.
+Not yet: eraser, the text tool, shapes, undo, export, Omarchy plugin,
+thumbnails.
 
 ## Controls
 
@@ -75,6 +91,11 @@ Not yet: eraser, text, shapes, undo, export, Omarchy plugin, thumbnails.
 | `Ctrl` + drag a corner handle | Resize about the center (`Shift` too: both) |
 | Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
 | `Ctrl` + `V` | Paste the clipboard image onto the board |
+| `Ctrl` + `S` | Save the tab; asks for a name the first time |
+| `Ctrl` + `Shift` + `S` | Save as — always asks |
+| `Ctrl` + `O` | Open boards, one tab each |
+| `Ctrl` + `W` | Close the tab; asks if there is unsaved work |
+| Click a tab / its `✕` / the `+` | Switch / close / new board |
 | `Delete` / `Backspace` | Delete the selection |
 | Left drag (Pencil) | Draw; the stroke is fitted to Béziers on release |
 | Left drag (Hand), `Space` + drag, middle drag | Pan |
@@ -118,14 +139,25 @@ src/grid.rs      dotted background (pure, tested)
 src/theme.rs     palette: light default, derived from op: theme (pure, tested)
 src/editor.rs    active tool, held keys, stroke, pan/zoom gesture, selection and its drag (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
+src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
+src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)
+src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
 src/gfx.rs       wgpu 30: the instanced SDF pipeline, image textures
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
 src/clipboard.rs selection reads (wl_data_device) → event loop bridge
+src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
+assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay + dock
-→ `scene`/`select` prims → `gfx`.
++ tab strip → `scene`/`select`/`tabs` prims → `gfx`.
 
 User data: `~/.local/share/omawhite/`. Socket:
-`$XDG_RUNTIME_DIR/omawhite.sock`.
+`$XDG_RUNTIME_DIR/omawhite.sock`. Project files go wherever the user
+puts them.
+
+Dialogs come from `xdg-desktop-portal` (any backend with a file
+chooser). The unsaved-work question has no portal of its own and uses
+`zenity`; without it the answer reads as a cancel, so a tab is never
+closed by its absence.
