@@ -2,7 +2,7 @@
 //! the pointer, the handles around a selection and the transforms those
 //! handles drive. Pure — `editor` decides when, this decides what.
 
-use crate::curve;
+use crate::curve::{self, Cubic};
 use crate::doc::{Document, Element, Rect};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::{Prim, ScreenRect, View, with_alpha};
@@ -34,18 +34,28 @@ pub enum Handle {
 }
 
 /// The oriented box an element occupies, in world units: a rect's own box
-/// and turn; a path's ink (curve bounds grown by half the width), unturned.
-/// `None` for a path with no curves.
+/// and turn; for a path, the box around its ink (curve bounds grown by
+/// half the width) as it was drawn, turned by the path's rotation. `None`
+/// for a path with no curves.
 pub fn frame(el: &Element) -> Option<Frame> {
     match el {
         Element::Rect(r) => Some(rect_frame(r)),
         Element::Path(p) => {
-            let (lo, hi) = curve::bounds(&p.curves)?;
+            let angle = p.rotation.to_radians();
+            let back = Affine::rotate(-angle);
+            let drawn: Vec<Cubic> = p
+                .curves
+                .iter()
+                .map(|c| c.map(|point| back.apply(point)))
+                .collect();
+            let (lo, hi) = curve::bounds(&drawn)?;
             let pad = p.width / 2.0;
-            Some(Frame::spanning(
-                [lo[0] - pad, lo[1] - pad],
-                [hi[0] + pad, hi[1] + pad],
-            ))
+            let unturned = Frame::spanning([lo[0] - pad, lo[1] - pad], [hi[0] + pad, hi[1] + pad]);
+            Some(Frame {
+                center: Affine::rotate(angle).apply(unturned.center),
+                half: unturned.half,
+                angle,
+            })
         }
     }
 }
@@ -127,10 +137,9 @@ pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
         .collect()
 }
 
-/// Applies `m` to an element. Path control points map exactly; a rect maps
-/// its frame (see [`Frame::transformed`]). The rotation is rounded to a
-/// nanodegree: degrees do not survive a trip through radians otherwise,
-/// and a turn that cancels out must land on exactly zero to stay off disk.
+/// Applies `m` to an element. Path control points map exactly and the
+/// path's rotation follows the map's turn; a rect maps its frame (see
+/// [`Frame::transformed`]).
 pub fn transform(el: &mut Element, m: &Affine) {
     match el {
         Element::Path(p) => {
@@ -139,6 +148,7 @@ pub fn transform(el: &mut Element, m: &Affine) {
                     *point = m.apply(*point);
                 }
             }
+            p.rotation = turned(p.rotation, m);
         }
         Element::Rect(r) => {
             let f = rect_frame(r).transformed(m);
@@ -146,9 +156,26 @@ pub fn transform(el: &mut Element, m: &Affine) {
             r.y = f.center[1] - f.half[1];
             r.w = 2.0 * f.half[0];
             r.h = 2.0 * f.half[1];
-            r.rotation = (f.angle.to_degrees() * 1e9).round() / 1e9 + 0.0;
+            r.rotation = degrees(f.angle);
         }
     }
+}
+
+/// A rotation (degrees) after `m`: what the map does to that orientation.
+fn turned(rotation: f64, m: &Affine) -> f64 {
+    let f = Frame {
+        center: [0.0, 0.0],
+        half: [1.0, 1.0],
+        angle: rotation.to_radians(),
+    };
+    degrees(f.transformed(m).angle)
+}
+
+/// Radians → degrees, rounded to a nanodegree: degrees do not survive a
+/// trip through radians otherwise, and a turn that cancels out must land
+/// on exactly zero to stay off disk.
+fn degrees(angle: f64) -> f64 {
+    (angle.to_degrees() * 1e9).round() / 1e9 + 0.0
 }
 
 /// The map that drags `corner` of `f` to `pointer` along the frame's own
@@ -173,13 +200,25 @@ pub fn resize_map(f: &Frame, corner: Corner, pointer: Point) -> Affine {
         .then(to_world)
 }
 
-/// The turn about the center of `f` that sweeps the pointer from `from` to
-/// `to`.
-pub fn rotate_map(f: &Frame, from: Point, to: Point) -> Affine {
+/// The angle (radians) the pointer swept about the center of `f` going
+/// from `from` to `to`.
+pub fn sweep(f: &Frame, from: Point, to: Point) -> f64 {
     let c = f.center;
     let before = (from[1] - c[1]).atan2(from[0] - c[0]);
     let after = (to[1] - c[1]).atan2(to[0] - c[0]);
-    Affine::rotate(after - before).about(c)
+    after - before
+}
+
+/// The turn by `delta` radians about the center of `f`.
+pub fn rotate_map(f: &Frame, delta: f64) -> Affine {
+    Affine::rotate(delta).about(f.center)
+}
+
+/// The part of a `delta` turn that lands `reference + delta` on a multiple
+/// of `step` — snapping counts from the creation state, not from where the
+/// drag began.
+pub fn snap_turn(reference: f64, delta: f64, step: f64) -> f64 {
+    ((reference + delta) / step).round() * step - reference
 }
 
 /// Every handle with its screen position: the four resize handles on the
@@ -316,6 +355,11 @@ mod tests {
         })
     }
 
+    fn path_rotation(el: &Element) -> f64 {
+        let Element::Path(p) = el else { panic!() };
+        p.rotation
+    }
+
     fn doc(elements: Vec<Element>) -> Document {
         let mut d = Document::new("t");
         d.elements = elements;
@@ -364,6 +408,58 @@ mod tests {
         assert_eq!(f.half, [5.5, 1.0]);
         assert_eq!(f.angle, 0.0);
         assert_eq!(frame(&path("p", vec![], 2.0)), None);
+    }
+
+    #[test]
+    fn path_frame_turns_with_its_rotation() {
+        // The same straight stroke, drawn along x and then turned a quarter:
+        // its ink now runs along y, but its box is the drawn one, turned.
+        let along_y = [[0.0, 0.0], [0.0, 3.0], [0.0, 6.0], [0.0, 9.0]];
+        let mut el = path("p", vec![along_y], 2.0);
+        let Element::Path(p) = &mut el else { panic!() };
+        p.rotation = 90.0;
+        let f = frame(&el).unwrap();
+        assert_close(f.center, [0.0, 4.5]);
+        assert_close(f.half, [5.5, 1.0]);
+        assert!((f.angle - QUARTER).abs() < 1e-12);
+        assert_close(f.corner(Corner::TopLeft), [1.0, -1.0]);
+        assert_close(f.corner(Corner::BottomRight), [-1.0, 10.0]);
+    }
+
+    #[test]
+    fn transform_turns_a_path_rotation_with_the_map() {
+        let mut p = path(
+            "p",
+            vec![[[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]],
+            2.0,
+        );
+        transform(&mut p, &Affine::rotate(QUARTER).about([0.0, 0.0]));
+        assert_eq!(path_rotation(&p), 90.0);
+        let Element::Path(inner) = &p else { panic!() };
+        assert_close(inner.curves[0][3], [0.0, 9.0]);
+        // A move and a stretch along its own axes leave the turn alone.
+        transform(&mut p, &Affine::translate(5.0, -1.0));
+        assert_eq!(path_rotation(&p), 90.0);
+        let f = frame(&p).unwrap();
+        transform(
+            &mut p,
+            &resize_map(&f, Corner::BottomRight, f.corner(Corner::BottomRight)),
+        );
+        assert_eq!(path_rotation(&p), 90.0);
+        transform(&mut p, &Affine::rotate(-QUARTER).about([0.0, 0.0]));
+        assert_eq!(path_rotation(&p), 0.0);
+    }
+
+    #[test]
+    fn snap_turn_rounds_the_total_angle_to_the_step() {
+        let step = 15f64.to_radians();
+        let deg = |d: f64| d.to_radians();
+        // From the creation state: 7° rounds down, 8° rounds up.
+        assert!((snap_turn(0.0, deg(7.0), step) - 0.0).abs() < 1e-12);
+        assert!((snap_turn(0.0, deg(8.0), step) - deg(15.0)).abs() < 1e-12);
+        // Already at 10°: a 12° sweep lands on 15°, not on 25°.
+        assert!((snap_turn(deg(10.0), deg(12.0), step) - deg(5.0)).abs() < 1e-12);
+        assert!((snap_turn(deg(10.0), deg(-12.0), step) - deg(-10.0)).abs() < 1e-12);
     }
 
     #[test]
@@ -520,7 +616,9 @@ mod tests {
             half: [3.0, 3.0],
             angle: 0.0,
         };
-        let m = rotate_map(&f, [20.0, 10.0], [10.0, 20.0]);
+        let delta = sweep(&f, [20.0, 10.0], [10.0, 20.0]);
+        assert!((delta - QUARTER).abs() < 1e-12);
+        let m = rotate_map(&f, delta);
         assert_close(m.apply([20.0, 10.0]), [10.0, 20.0]);
         assert_close(m.apply([10.0, 10.0]), [10.0, 10.0]);
         assert_close(m.apply([10.0, 0.0]), [20.0, 10.0]);

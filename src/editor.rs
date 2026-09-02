@@ -435,7 +435,8 @@ impl Editor {
                 frame,
                 snapshot,
             }) => {
-                apply(doc, snapshot, &select::rotate_map(frame, *origin, world));
+                let delta = select::sweep(frame, *origin, world);
+                apply(doc, snapshot, &select::rotate_map(frame, delta));
                 Change::Scene
             }
             Some(Drag::Marquee {
