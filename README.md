@@ -65,7 +65,8 @@ selection, navigation, pasted images, and projects in tabs:
   at its edge, and shows a thumb for how much of the stack is in view;
   the wheel over it walks the list. Picking an element on the canvas
   makes its layer active, and the panel glides to bring that card into
-  sight. A layer holds one of two things. A raster
+  sight. A layer holds one of two things, and its card says which — a
+  grid of pixels or a curve, at the end opposite the eye. A raster
   layer accumulates: brush strokes pile up on the active one, and a
   pasted image opens one of its own so the next stroke paints over the
   picture instead of beside it. A vector layer holds the one object it

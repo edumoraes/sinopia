@@ -240,6 +240,9 @@ pub struct Row {
     /// What is drawn: the rect less the gap that separates two cards.
     pub card: ScreenRect,
     pub eye: ScreenRect,
+    /// Where the mark saying what the layer holds is drawn — pixels or a
+    /// curve. It is not a control: nothing hits it.
+    pub mark: ScreenRect,
     /// The name, cut down to what fits.
     pub label: String,
     /// Where the label's pen starts.
@@ -352,7 +355,13 @@ impl Panel {
             } else {
                 0.0
             };
-            let room = rect.x + rect.w - PADDING * s - gutter - label_x;
+            let mark = ScreenRect {
+                x: rect.x + rect.w - PADDING * s - gutter - side,
+                y: eye.y,
+                w: side,
+                h: side,
+            };
+            let room = mark.x - LABEL_GAP * s - label_x;
             let label = if room > 0.0 {
                 atlas.truncate(&layer.name, room)
             } else {
@@ -363,6 +372,7 @@ impl Panel {
                 rect,
                 card: rect.inset(CARD_INSET * s),
                 eye,
+                mark,
                 label,
                 label_x,
             });
@@ -602,6 +612,21 @@ impl Panel {
             let (cx, cy) = row.eye.center();
             out.push(Prim::circle(cx, cy, PUPIL / 24.0 * ICON_BOX * s, color));
         }
+        // What the layer holds, at the card's other end: it says where the
+        // next stroke goes, so it is read, never clicked.
+        let holds = match layer.kind {
+            Kind::Raster => PIXELS,
+            Kind::Vector => CURVE,
+        };
+        out.extend(icon_prims(
+            holds,
+            row.mark,
+            24.0,
+            ICON_BOX,
+            ICON_STROKE,
+            s,
+            theme.muted,
+        ));
         if !row.label.is_empty() {
             let ink = if is_active { theme.ink } else { theme.icon };
             let baseline = atlas.baseline_in(row.rect);
@@ -826,6 +851,27 @@ const EYE: &[&[(f32, f32)]] = &[ALMOND];
 /// The same almond, struck through.
 const EYE_HIDDEN: &[&[(f32, f32)]] = &[ALMOND, &[(4.0, 20.0), (20.0, 4.0)]];
 
+/// What a raster layer holds: a grid of pixels.
+const PIXELS: &[&[(f32, f32)]] = &[
+    &[(5.0, 5.0), (19.0, 5.0), (19.0, 19.0), (5.0, 19.0), (5.0, 5.0)],
+    &[(12.0, 5.0), (12.0, 19.0)],
+    &[(5.0, 12.0), (19.0, 12.0)],
+];
+
+/// What a vector layer holds: one curve, flattened the way the renderer
+/// flattens the real ones.
+const CURVE: &[&[(f32, f32)]] = &[&[
+    (4.0, 18.0),
+    (6.0, 13.5),
+    (8.0, 10.5),
+    (10.0, 9.5),
+    (12.0, 11.0),
+    (14.0, 14.0),
+    (16.0, 15.0),
+    (18.0, 13.0),
+    (20.0, 8.0),
+]];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,6 +933,40 @@ mod tests {
             assert!(r.rect.contains_rect(&r.eye), "the eye sits in its row");
             assert!(r.label_x > r.eye.x + r.eye.w, "the label follows the eye");
         }
+    }
+
+    #[test]
+    fn a_row_marks_what_its_layer_holds() {
+        let theme = Theme::light();
+        let a = atlas();
+        let mut ls = layers(2);
+        ls[1].kind = Kind::Vector;
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        for row in &p.rows {
+            assert!(row.card.contains_rect(&row.mark), "the mark sits in the card");
+            assert!(
+                row.label_x + a.measure(&row.label) <= row.mark.x,
+                "the name stops short of it"
+            );
+        }
+        let prims = p.prims(&ls, &showing(0, None), &a, 7, &theme);
+        // Where the segments fall inside the mark, not where the mark is.
+        let mark = |row: &Row| -> Vec<(f32, f32, f32, f32)> {
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_SEGMENT && row.mark.contains_rect(&q.bounds()))
+                .map(|q| {
+                    let b = q.bounds();
+                    (b.x - row.mark.x, b.y - row.mark.y, b.w, b.h)
+                })
+                .collect()
+        };
+        // Rows list the top layer first, so row 0 holds the vector one.
+        let vector = mark(&p.rows[0]);
+        let raster = mark(&p.rows[1]);
+        assert!(!vector.is_empty(), "the vector layer is marked");
+        assert!(!raster.is_empty(), "the raster layer is marked");
+        assert_ne!(vector, raster, "and not with the same drawing");
     }
 
     #[test]
