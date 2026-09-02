@@ -51,9 +51,6 @@ struct App {
     gfx: Option<Gfx>,
     theme: Theme,
     editor: Editor,
-    /// Texture slot per blob hash, mirroring what `gfx` holds. Images the
-    /// renderer has not caught up with paint as placeholders.
-    images: ImageSlots,
     /// Last pointer position in physical px, while inside the window.
     cursor: Option<(f64, f64)>,
     modifiers: Modifiers,
@@ -121,8 +118,12 @@ impl App {
     /// Everything on screen, back to front: grid, document, the stroke in
     /// progress, the selection frame and marquee, the dock.
     fn frame(&self, view: &View) -> Vec<Prim> {
+        // Before the window exists there are no textures, so every image
+        // is a placeholder — which is what an empty map says.
+        let none = ImageSlots::new();
+        let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
         let mut prims = grid::prims(view, self.theme.dot);
-        prims.extend(scene::document_prims(&self.doc, view, &self.images));
+        prims.extend(scene::document_prims(&self.doc, view, images));
         if let Some(points) = self.editor.stroke() {
             prims.extend(scene::stroke_prims(points, PEN_WIDTH, self.theme.ink, view));
         }
@@ -527,7 +528,6 @@ pub fn run(
         gfx: None,
         theme: Theme::light(),
         editor: Editor::new(),
-        images: ImageSlots::new(),
         cursor: None,
         modifiers: Modifiers::default(),
         cursor_icon: CursorIcon::Default,

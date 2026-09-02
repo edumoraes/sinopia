@@ -334,6 +334,53 @@ impl Prim {
     }
 }
 
+/// A stretch of prims the renderer can draw in one go: they all sample
+/// the same texture, so one bind group covers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    /// Instance range, `start..end`.
+    pub start: u32,
+    pub end: u32,
+    /// The texture every [`KIND_IMAGE`] prim in the range samples.
+    pub slot: u32,
+}
+
+/// Cuts `prims` into runs by the texture they need. Only [`KIND_IMAGE`]
+/// prims sample, so a run breaks where one image follows another with a
+/// different texture — never on the flat prims between them. Paint order
+/// is preserved, which is what keeps a board's z-order honest with a
+/// single instance buffer.
+pub fn runs(prims: &[Prim]) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::new();
+    let mut start = 0u32;
+    let mut slot: Option<u32> = None;
+    for (i, p) in prims.iter().enumerate() {
+        if p.kind != KIND_IMAGE {
+            continue;
+        }
+        match slot {
+            Some(s) if s != p.slot => {
+                out.push(Run {
+                    start,
+                    end: i as u32,
+                    slot: s,
+                });
+                start = i as u32;
+                slot = Some(p.slot);
+            }
+            _ => slot = Some(p.slot),
+        }
+    }
+    if !prims.is_empty() {
+        out.push(Run {
+            start,
+            end: prims.len() as u32,
+            slot: slot.unwrap_or(0),
+        });
+    }
+    out
+}
+
 /// Polyline in screen px → one round-capped segment per span; overlapping
 /// caps make the joins. Repeated points are skipped; a degenerate polyline
 /// is still visible as a dot.
@@ -931,5 +978,71 @@ mod tests {
         assert_eq!(got[0].kind, KIND_BOX);
         assert_eq!(got[0].color, PLACEHOLDER_COLOR);
         assert_close4(got[0].geom, [50.0, 50.0, 20.0, 10.0]);
+    }
+
+    fn img_prim(slot: u32) -> Prim {
+        Prim::image(sr(0.0, 0.0, 1.0, 1.0), (0.5, 0.5), 0.0, slot)
+    }
+
+    #[test]
+    fn prims_without_an_image_are_one_run() {
+        let prims = [Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE); 3];
+        assert_eq!(
+            runs(&prims),
+            vec![Run {
+                start: 0,
+                end: 3,
+                slot: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn nothing_to_draw_is_no_runs() {
+        assert_eq!(runs(&[]), vec![]);
+    }
+
+    #[test]
+    fn plain_prims_ride_along_with_the_image_around_them() {
+        // Only images sample, so a run breaks on a second texture, never
+        // on the flat prims between.
+        let flat = Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE);
+        let prims = [flat, img_prim(4), flat, img_prim(4), flat];
+        assert_eq!(
+            runs(&prims),
+            vec![Run {
+                start: 0,
+                end: 5,
+                slot: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn a_second_texture_breaks_the_run_at_its_own_prim() {
+        // Paint order is the document's; the cut lands exactly where the
+        // texture changes, so what was drawn before stays underneath.
+        let flat = Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE);
+        let prims = [img_prim(1), flat, img_prim(2), flat, img_prim(1)];
+        assert_eq!(
+            runs(&prims),
+            vec![
+                Run {
+                    start: 0,
+                    end: 2,
+                    slot: 1
+                },
+                Run {
+                    start: 2,
+                    end: 4,
+                    slot: 2
+                },
+                Run {
+                    start: 4,
+                    end: 5,
+                    slot: 1
+                },
+            ]
+        );
     }
 }

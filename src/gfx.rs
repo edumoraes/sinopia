@@ -5,13 +5,19 @@
 //! primitive (rounded box or round-capped segment) evaluated per fragment,
 //! which gives analytic antialiasing and soft shadows without MSAA or any
 //! tessellation. Instances are blended in submission order.
+//!
+//! An image is that same box with a texture in it: the frame's instances
+//! are cut into [`scene::runs`] wherever the texture changes, and each run
+//! is one draw over the same buffer — so the document's paint order
+//! survives without a second pipeline or an atlas.
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use wgpu::util::DeviceExt as _;
 
-use crate::scene::{Prim, Rgba};
+use crate::bitmap::Bitmap;
+use crate::scene::{self, ImageSlots, Prim, Rgba};
 
 const SHADER: &str = r#"
 struct Globals {
@@ -40,6 +46,10 @@ struct VsOut {
 };
 
 const KIND_SEGMENT: u32 = 1u;
+const KIND_IMAGE: u32 = 2u;
+
+@group(1) @binding(0) var tex: texture_2d<f32>;
+@group(1) @binding(1) var samp: sampler;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
@@ -96,6 +106,7 @@ fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var d: f32;
+    var rgba = in.color;
     if (in.kind == KIND_SEGMENT) {
         d = sd_segment(in.px, in.geom.xy, in.geom.zw) - in.params.x;
     } else {
@@ -106,11 +117,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let p = in.px - (in.geom.xy + half);
         let c = cos(in.angle);
         let s = sin(in.angle);
-        d = sd_box(vec2<f32>(c * p.x + s * p.y, c * p.y - s * p.x), half, r);
+        let local = vec2<f32>(c * p.x + s * p.y, c * p.y - s * p.x);
+        d = sd_box(local, half, r);
+        if (in.kind == KIND_IMAGE) {
+            // The box's own axes are already the texture's: the corner at
+            // -half is (0, 0). There is no mip chain to pick from, and
+            // asking for level 0 keeps the sample out of the derivative
+            // rules that a branch like this one would otherwise break.
+            let uv = (local + half) / max(in.geom.zw, vec2<f32>(1e-6));
+            rgba = textureSampleLevel(tex, samp, uv, 0.0) * in.color;
+        }
     }
     let ramp = max(in.params.y, 1.0);
     let coverage = clamp(0.5 - d / ramp, 0.0, 1.0);
-    return vec4<f32>(in.color.rgb, in.color.a * coverage);
+    return vec4<f32>(rgba.rgb, rgba.a * coverage);
 }
 "#;
 
@@ -122,6 +142,13 @@ pub struct Gfx {
     pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Layout every texture bind group is built with.
+    tex_bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// One bind group per slot; slot 0 is the 1x1 white stand-in bound by
+    /// the runs that draw no image, so every draw has group 1.
+    textures: Vec<wgpu::BindGroup>,
+    slots: ImageSlots,
 }
 
 impl Gfx {
@@ -185,9 +212,40 @@ impl Gfx {
             }],
         });
 
+        let tex_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("omawhite"),
-            bind_group_layouts: &[Some(&bgl)],
+            bind_group_layouts: &[Some(&bgl), Some(&tex_bgl)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -207,6 +265,7 @@ impl Gfx {
                         3 => Float32,   // feather
                         4 => Uint32,    // kind
                         5 => Float32,   // angle
+                        // `slot` stays on the CPU: it picks the bind group.
                     ],
                 })],
             },
@@ -227,6 +286,21 @@ impl Gfx {
             cache: None,
         });
 
+        // Slot 0: what the runs with no image bind. White and opaque, so
+        // the shader path is the same whatever it lands on.
+        let blank = upload(
+            &device,
+            &queue,
+            &tex_bgl,
+            &sampler,
+            texture_format(config.format),
+            &Bitmap {
+                w: 1,
+                h: 1,
+                rgba: vec![255, 255, 255, 255],
+            },
+        )?;
+
         Ok(Gfx {
             surface,
             device,
@@ -235,7 +309,44 @@ impl Gfx {
             pipeline,
             globals_buf,
             bind_group,
+            tex_bgl,
+            sampler,
+            textures: vec![blank],
+            slots: ImageSlots::new(),
         })
+    }
+
+    /// Which blob is in which texture slot — what `scene` needs to decide
+    /// between a textured box and a placeholder.
+    pub fn image_slots(&self) -> &ImageSlots {
+        &self.slots
+    }
+
+    /// Uploads `bmp` as the texture for `blob`, and answers its slot.
+    /// Uploading the same blob twice keeps the first texture.
+    pub fn upload_image(&mut self, blob: &str, bmp: &Bitmap) -> anyhow::Result<u32> {
+        if let Some(&slot) = self.slots.get(blob) {
+            return Ok(slot);
+        }
+        let max = self.device.limits().max_texture_dimension_2d;
+        anyhow::ensure!(
+            bmp.w <= max && bmp.h <= max,
+            "image is {}x{} px, over this GPU's {max} px texture limit",
+            bmp.w,
+            bmp.h
+        );
+        let group = upload(
+            &self.device,
+            &self.queue,
+            &self.tex_bgl,
+            &self.sampler,
+            texture_format(self.config.format),
+            bmp,
+        )?;
+        let slot = self.textures.len() as u32;
+        self.textures.push(group);
+        self.slots.insert(blob.to_owned(), slot);
+        Ok(slot)
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -248,7 +359,8 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Renders one frame: clear to `background`, then `prims` in order.
+    /// Renders one frame: clear to `background`, then `prims` in order,
+    /// one draw per texture run.
     /// `Ok(false)` = frame skipped (surface occluded or temporarily lost);
     /// the caller may try again later.
     pub fn render(&mut self, background: Rgba, prims: &[Prim]) -> anyhow::Result<bool> {
@@ -321,11 +433,93 @@ impl Gfx {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, instance_buf.slice(..));
-                pass.draw(0..6, 0..prims.len() as u32);
+                for run in scene::runs(prims) {
+                    let group = self
+                        .textures
+                        .get(run.slot as usize)
+                        .unwrap_or(&self.textures[0]);
+                    pass.set_bind_group(1, group, &[]);
+                    pass.draw(0..6, run.start..run.end);
+                }
             }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(texture);
         Ok(true)
     }
+}
+
+/// The texture format that matches the surface: the pipeline writes its
+/// colors straight through, so an image has to go in the same space the
+/// surface reads out.
+fn texture_format(surface: wgpu::TextureFormat) -> wgpu::TextureFormat {
+    if surface.is_srgb() {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    }
+}
+
+/// One texture from RGBA8 texels, with its bind group.
+fn upload(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    format: wgpu::TextureFormat,
+    bmp: &Bitmap,
+) -> anyhow::Result<wgpu::BindGroup> {
+    anyhow::ensure!(
+        bmp.rgba.len() as u64 == 4 * u64::from(bmp.w) * u64::from(bmp.h),
+        "{}x{} px needs {} bytes, got {}",
+        bmp.w,
+        bmp.h,
+        4 * u64::from(bmp.w) * u64::from(bmp.h),
+        bmp.rgba.len()
+    );
+    let size = wgpu::Extent3d {
+        width: bmp.w.max(1),
+        height: bmp.h.max(1),
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("image"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bmp.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * bmp.w),
+            rows_per_image: Some(bmp.h),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("image"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    }))
 }
