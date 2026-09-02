@@ -16,7 +16,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::bitmap::{self, Bitmap};
-use crate::brush::Brush;
+use crate::brush::{self, Brush};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
@@ -28,13 +28,17 @@ use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
+use crate::layers::{Panel, PanelHit};
 use crate::project::{self, Origin, Project};
-use crate::scene::{self, Frame, ImageSlots, View, Viewport};
+use crate::scene::{self, Frame, ImageSlots, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
 use crate::store::{self, Store};
-use crate::tabs::{TabHit, Tabs};
+use crate::tabs::{self, TabHit, Tabs};
 use crate::text::{Atlas, Font};
 use crate::theme::Theme;
+
+/// How much of the ink the brush's ring is drawn with.
+const RING_ALPHA: f32 = 0.6;
 
 /// State the server thread reads (replies to `ping`).
 struct SharedState {
@@ -99,6 +103,8 @@ struct App {
     /// What `B` paints with. One brush for the window, whichever tab is
     /// in front, as in Photoshop.
     brush: Brush,
+    /// `Shift+L`: the layers panel is up.
+    layers_shown: bool,
     /// Built once the scale factor is known, rebuilt when it changes.
     atlas: Option<Atlas>,
     atlas_slot: u32,
@@ -516,6 +522,65 @@ impl App {
         ))
     }
 
+    /// The layers panel, when it is up and there is an atlas to letter
+    /// it with.
+    fn panel(&self, view: &View) -> Option<Panel> {
+        if !self.layers_shown {
+            return None;
+        }
+        let atlas = self.atlas.as_ref()?;
+        let top = (tabs::HEIGHT * view.scale as f32).round();
+        Some(Panel::layout(
+            view.viewport,
+            view.scale,
+            top,
+            atlas,
+            &self.doc().layers,
+        ))
+    }
+
+    /// Whether `screen` is over the strip, the panel or the dock rather
+    /// than the canvas.
+    fn over_chrome(&self, view: &View, screen: (f64, f64)) -> bool {
+        let (x, y) = screen;
+        self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
+            || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
+            || self.dock(view).hit(x, y).is_some()
+    }
+
+    /// A click on the layers panel, handed to the editor.
+    fn panel_hit(&mut self, hit: PanelHit) {
+        let (editor, doc) = self.active();
+        let change = match hit {
+            PanelHit::Select(i) => editor.select_layer(doc, i),
+            PanelHit::Toggle(i) => editor.toggle_layer(doc, i),
+            PanelHit::Add => editor.add_layer(doc),
+            PanelHit::Remove => editor.remove_layer(doc),
+            PanelHit::Up => editor.move_layer(doc, true),
+            PanelHit::Down => editor.move_layer(doc, false),
+            PanelHit::Panel => Change::None,
+        };
+        self.apply(change);
+    }
+
+    /// A key that adjusts the brush, while the brush tool is selected:
+    /// `[` `]` size, `{` `}` hardness, a digit the opacity. True if it
+    /// was one.
+    fn brush_key(&mut self, c: char) -> bool {
+        if self.editor().tool() != Tool::Brush {
+            return false;
+        }
+        match c {
+            '[' => self.brush.shrink(),
+            ']' => self.brush.grow(),
+            '{' => self.brush.softer(),
+            '}' => self.brush.harder(),
+            '0'..='9' => self.brush.set_opacity_digit(c as u8 - b'0'),
+            _ => return false,
+        }
+        true
+    }
+
     /// Builds and uploads the glyph atlas for the current scale factor,
     /// unless the one in hand already matches.
     fn ensure_atlas(&mut self) {
@@ -538,7 +603,8 @@ impl App {
     }
 
     /// Everything on screen, back to front: grid, document, the stroke in
-    /// progress, the selection frame and marquee, the dock, the strip.
+    /// progress, the selection frame and marquee, the brush's ring, the
+    /// dock, the layers panel, the strip.
     fn frame(&self, view: &View) -> Frame {
         // Before the window exists there are no textures, so every image
         // is a placeholder — which is what an empty map says.
@@ -557,7 +623,32 @@ impl App {
         if let Some((a, b)) = self.editor().marquee() {
             frame.extend(select::marquee_prims(a, b, &self.theme));
         }
+        // The brush shows its size before it paints: a ring at the
+        // pointer, wherever the next press would paint.
+        if let Some((x, y)) = self.cursor
+            && !self.over_chrome(view, (x, y))
+            && self.editor().pointer_tool(self.doc(), view, (x, y)) == Tool::Brush
+        {
+            let radius = (self.brush.size / 2.0 * view.px_per_world()) as f32;
+            let ink = with_alpha(self.theme.ink, RING_ALPHA);
+            frame.extend(brush::ring_prims(
+                (x as f32, y as f32),
+                radius,
+                view.scale as f32,
+                ink,
+            ));
+        }
         frame.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
+        if let (Some(panel), Some(atlas)) = (self.panel(view), self.atlas.as_ref()) {
+            let active = self.editor().active_layer(self.doc());
+            frame.extend(panel.prims(
+                &self.doc().layers,
+                active,
+                atlas,
+                self.atlas_slot,
+                &self.theme,
+            ));
+        }
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
             frame.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
         }
@@ -589,7 +680,7 @@ impl App {
         let (Some(view), Some((x, y))) = (self.view(), self.cursor) else {
             return;
         };
-        // The strip is over the dock is over the canvas.
+        // The strip is over the panel is over the dock is over the canvas.
         if let Some(hit) = self.tabs(&view).and_then(|t| t.hit(x, y)) {
             if button == Button::Left {
                 match hit {
@@ -598,6 +689,12 @@ impl App {
                     TabHit::New => self.open_project(Project::untitled()),
                     TabHit::Strip => {}
                 }
+            }
+            return self.update_cursor_icon();
+        }
+        if let Some(hit) = self.panel(&view).and_then(|p| p.hit(x, y)) {
+            if button == Button::Left {
+                self.panel_hit(hit);
             }
             return self.update_cursor_icon();
         }
@@ -636,6 +733,10 @@ impl App {
             let (editor, doc) = self.active();
             let change = editor.moved(&view, (x, y), doc);
             self.apply(change);
+        }
+        // The brush's ring follows the pointer, so every move is a frame.
+        if self.editor().tool() == Tool::Brush {
+            self.redraw();
         }
         self.update_cursor_icon();
     }
@@ -692,17 +793,29 @@ impl App {
                     return;
                 }
                 let mut chars = text.chars();
-                if let (Some(c), None) = (chars.next(), chars.next())
-                    && let Some(tool) = Tool::from_hotkey(c)
-                {
-                    let (editor, doc) = self.active();
-                    editor.set_tool(tool, doc);
-                    self.redraw();
+                if let (Some(c), None) = (chars.next(), chars.next()) {
+                    self.plain_key(c, mods.shift_key());
                 }
             }
             _ => {}
         }
         self.update_cursor_icon();
+    }
+
+    /// A character typed with no modifier but Shift: `Shift+L` shows or
+    /// hides the layers, a tool's letter selects it, and the brush's
+    /// keys adjust it while it is selected.
+    fn plain_key(&mut self, c: char, shift: bool) {
+        if shift && c.eq_ignore_ascii_case(&'l') {
+            self.layers_shown = !self.layers_shown;
+            self.redraw();
+        } else if let Some(tool) = Tool::from_hotkey(c) {
+            let (editor, doc) = self.active();
+            editor.set_tool(tool, doc);
+            self.redraw();
+        } else if self.brush_key(c) {
+            self.redraw();
+        }
     }
 
     fn modifiers_changed(&mut self, modifiers: Modifiers) {
@@ -739,13 +852,12 @@ impl App {
     }
 
     /// Cursor for the tool the pointer would use over the canvas; arrow
-    /// over the dock; resize and rotate cursors over the selection
+    /// over the chrome; resize and rotate cursors over the selection
     /// handles.
     fn update_cursor_icon(&mut self) {
         let (over_chrome, handle, tool) = match (self.view(), self.cursor) {
             (Some(view), Some((x, y))) => (
-                self.dock(&view).hit(x, y).is_some()
-                    || self.tabs(&view).and_then(|t| t.hit(x, y)).is_some(),
+                self.over_chrome(&view, (x, y)),
                 self.editor().hover(self.doc(), &view, (x, y)),
                 self.editor().pointer_tool(self.doc(), &view, (x, y)),
             ),
@@ -873,6 +985,10 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
+                // The ring goes with the pointer.
+                if self.editor().tool() == Tool::Brush {
+                    self.redraw();
+                }
                 self.update_cursor_icon();
             }
             WindowEvent::Focused(false) => self.focus_lost(),
@@ -1033,6 +1149,7 @@ pub fn run(
         theme: Theme::light(),
         font: Font::bundled(),
         brush: Brush::default(),
+        layers_shown: false,
         atlas: None,
         atlas_slot: 0,
         clipboard: None,

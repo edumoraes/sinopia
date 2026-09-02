@@ -5,10 +5,6 @@
 //! Photoshop, and only the keyboard changes them: `[` `]` for size, `{`
 //! `}` for hardness, the digits for opacity.
 
-// Reached from the editor and the window once they paint with it; until
-// then only the tests call this.
-#![allow(dead_code)]
-
 use crate::doc::Path;
 use crate::editor::PEN_WIDTH;
 use crate::scene::{Prim, Rgba, polyline_prims};

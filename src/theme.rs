@@ -16,6 +16,8 @@ pub struct Theme {
     pub shadow: Rgba,
     pub icon: Rgba,
     pub icon_active: Rgba,
+    /// A control that is off — a hidden layer's eye.
+    pub muted: Rgba,
     pub active_bg: Rgba,
     /// Selection outline, handles' border, marquee.
     pub selection: Rgba,
@@ -59,6 +61,7 @@ impl Theme {
             shadow: with_alpha(BLACK, if light { 0.16 } else { 0.5 }),
             icon: mix(ink, bg_c, 0.15),
             icon_active: parse_color(accent),
+            muted: mix(panel, ink, 0.35),
             active_bg: mix(panel, ink, 0.09),
             selection: parse_color(accent),
             handle: panel,

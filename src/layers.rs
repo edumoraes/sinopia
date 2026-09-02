@@ -240,7 +240,7 @@ impl Panel {
             let (eye, color) = if layer.visible {
                 (EYE, theme.icon)
             } else {
-                (EYE_HIDDEN, theme.border)
+                (EYE_HIDDEN, theme.muted)
             };
             out.extend(icon_prims(eye, row.eye, 24.0, ICON_BOX, ICON_STROKE, s, color));
             if layer.visible {
@@ -438,7 +438,7 @@ mod tests {
             let expected = if ls[row.index].visible {
                 theme.icon
             } else {
-                theme.border
+                theme.muted
             };
             let eye: Vec<&Prim> = prims
                 .iter()
