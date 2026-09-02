@@ -71,6 +71,21 @@ pub fn fit(points: &[Point], max_error: f64) -> Vec<Cubic> {
     out
 }
 
+/// Polyline through `c` that stays within `tolerance` of it, endpoints
+/// exact. Always at least two points.
+pub fn flatten(c: &Cubic, tolerance: f64) -> Vec<Point> {
+    // Wang's bound: n uniform steps keep a cubic within tolerance when
+    // n² ≥ (3/4) · max‖second difference‖ / tolerance.
+    let dd = len(add(sub(c[0], scale(c[1], 2.0)), c[2]))
+        .max(len(add(sub(c[1], scale(c[2], 2.0)), c[3])));
+    let n = (0.75 * dd / tolerance.max(1e-9)).sqrt().ceil();
+    let n = (n as usize).clamp(1, MAX_FLATTEN_STEPS);
+    (0..=n).map(|i| eval(c, i as f64 / n as f64)).collect()
+}
+
+/// Caps the prims one cubic can turn into at extreme zoom.
+const MAX_FLATTEN_STEPS: usize = 256;
+
 /// Newton–Raphson passes before giving up and splitting.
 const MAX_ITERATIONS: usize = 4;
 
@@ -365,6 +380,43 @@ mod tests {
         assert_eq!(eval(&c, 0.0), [0.0, 0.0]);
         assert_eq!(eval(&c, 1.0), [3.0, 0.0]);
         assert_eq!(eval(&c, 0.5), [1.5, 2.25]);
+    }
+
+    #[test]
+    fn flatten_of_a_straight_cubic_is_its_endpoints() {
+        let c = [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0]];
+        assert_eq!(flatten(&c, 0.25), vec![[0.0, 0.0], [3.0, 0.0]]);
+    }
+
+    #[test]
+    fn flatten_of_a_degenerate_cubic_is_a_repeated_point() {
+        assert_eq!(flatten(&[[2.0, 2.0]; 4], 0.25), vec![[2.0, 2.0]; 2]);
+    }
+
+    #[test]
+    fn flatten_keeps_chord_midpoints_within_tolerance() {
+        let c = [[0.0, 0.0], [0.0, 55.0], [45.0, 100.0], [100.0, 100.0]];
+        for tol in [1.0, 0.25, 0.05] {
+            let pts = flatten(&c, tol);
+            assert_eq!(pts[0], c[0]);
+            assert_eq!(pts[pts.len() - 1], c[3]);
+            let n = pts.len() - 1;
+            for (i, w) in pts.windows(2).enumerate() {
+                let mid = scale(add(w[0], w[1]), 0.5);
+                let on_curve = eval(&c, (i as f64 + 0.5) / n as f64);
+                let d = dist(mid, on_curve);
+                assert!(d <= tol, "tol {tol}: chord {i} of {n} is {d} off");
+            }
+        }
+    }
+
+    #[test]
+    fn flatten_uses_fewer_points_for_a_looser_tolerance() {
+        let c = [[0.0, 0.0], [0.0, 55.0], [45.0, 100.0], [100.0, 100.0]];
+        let fine = flatten(&c, 0.05).len();
+        let coarse = flatten(&c, 1.0).len();
+        assert!(coarse > 2, "a curve needs more than a chord: {coarse}");
+        assert!(fine > coarse, "{fine} vs {coarse}");
     }
 
     #[test]
