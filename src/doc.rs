@@ -173,6 +173,37 @@ fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
+/// The nib a stroke was stamped with: what one dab is, beyond the
+/// width, opacity and hardness the stroke already names. A stroke
+/// carrying none was swept, not stamped — the pencil's.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Stamp {
+    /// The gap between two dabs, in tip widths.
+    pub spacing: f64,
+    /// 1 is a round nib; less flattens it across its own y.
+    pub roundness: f64,
+    /// The nib's own angle, in degrees, clockwise.
+    pub rotation: f64,
+}
+
+impl Stamp {
+    /// The same nib if the canvas could stamp it, or why it could not.
+    /// A board is not trusted to hold a turn of four hundred degrees or
+    /// a gap of nothing, whatever wrote it.
+    fn checked(self) -> Result<Stamp, String> {
+        if !is_unit(self.roundness) {
+            return Err(format!("roundness {} is not between 0 and 1", self.roundness));
+        }
+        if !(self.spacing.is_finite() && self.spacing > 0.0) {
+            return Err(format!("spacing {} is not a gap between two dabs", self.spacing));
+        }
+        if !(self.rotation.is_finite() && (0.0..=360.0).contains(&self.rotation)) {
+            return Err(format!("rotation {} is not a turn of a nib", self.rotation));
+        }
+        Ok(self)
+    }
+}
+
 /// Freehand stroke — the pencil's or the brush's: a chain of cubic
 /// Béziers in world units, each one self-contained as `[a, c1, c2, b]`
 /// and starting where the previous ended. `width` is in world units too
@@ -199,6 +230,9 @@ pub struct Path {
     pub hardness: f64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rotation: f64,
+    /// The nib it was stamped with, if it was stamped at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<Stamp>,
 }
 
 /// What a `path` may look like on disk: `curves` today, or the raw
@@ -220,6 +254,8 @@ struct PathOnDisk {
     hardness: f64,
     #[serde(default)]
     rotation: f64,
+    #[serde(default)]
+    stamp: Option<Stamp>,
 }
 
 /// Fit tolerance for legacy polylines, in world units (one pixel at
@@ -253,6 +289,7 @@ impl TryFrom<PathOnDisk> for Path {
             opacity: p.opacity,
             hardness: p.hardness,
             rotation: p.rotation,
+            stamp: p.stamp.map(Stamp::checked).transpose()?,
         })
     }
 }
@@ -286,6 +323,9 @@ pub struct Stroke {
     pub opacity: f64,
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub hardness: f64,
+    /// The nib it was stamped with, if it was stamped at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<Stamp>,
 }
 
 /// What a stroke may look like on disk. Checked on the way in, like a
@@ -299,6 +339,8 @@ struct StrokeOnDisk {
     opacity: f64,
     #[serde(default = "one")]
     hardness: f64,
+    #[serde(default)]
+    stamp: Option<Stamp>,
 }
 
 impl TryFrom<StrokeOnDisk> for Stroke {
@@ -317,6 +359,7 @@ impl TryFrom<StrokeOnDisk> for Stroke {
             width: s.width,
             opacity: s.opacity,
             hardness: s.hardness,
+            stamp: s.stamp.map(Stamp::checked).transpose()?,
         })
     }
 }
@@ -594,6 +637,7 @@ mod tests {
                     opacity: 1.0,
                     hardness: 1.0,
                     rotation: 0.0,
+                    stamp: None,
                 }),
                 Element::Image(Image {
                     id: "el_03".into(),
@@ -792,6 +836,64 @@ mod tests {
         assert_eq!(v["elements"][1]["opacity"].as_f64(), Some(0.5));
         assert_eq!(v["elements"][1]["hardness"].as_f64(), Some(0.25));
         assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_stroke_keeps_the_nib_it_was_stamped_with() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": [ { "id": "pt1", "type": "paint", "layer": "l1", "strokes": [
+                { "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]], "stroke": "#000", "width": 8,
+                  "stamp": { "spacing": 0.4, "roundness": 0.5, "rotation": 30 } },
+                { "curves": [[[0, 9], [3, 9], [7, 9], [10, 9]]], "stroke": "#000", "width": 3 }
+            ] } ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Paint(p) = &doc.elements[0] else {
+            panic!("expected a paint");
+        };
+        assert_eq!(
+            p.strokes[0].stamp,
+            Some(Stamp {
+                spacing: 0.4,
+                roundness: 0.5,
+                rotation: 30.0,
+            }),
+            "a brush stroke says which nib laid it"
+        );
+        assert_eq!(p.strokes[1].stamp, None, "a pencil stroke sweeps");
+
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][0]["strokes"][0]["stamp"]["spacing"].as_f64(), Some(0.4));
+        assert!(
+            v["elements"][0]["strokes"][1].get("stamp").is_none(),
+            "a board with no nib in it keeps saying nothing: {v}"
+        );
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_nib_the_canvas_could_not_stamp_is_refused() {
+        for (nib, want) in [
+            (r#"{ "spacing": 0.4, "roundness": 2, "rotation": 0 }"#, "roundness"),
+            (r#"{ "spacing": 0, "roundness": 1, "rotation": 0 }"#, "spacing"),
+            (r#"{ "spacing": 0.4, "roundness": 1, "rotation": 400 }"#, "rotation"),
+        ] {
+            let json = format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "elements": [ {{ "id": "p1", "type": "path",
+                        "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]],
+                        "stroke": "#000", "width": 3, "stamp": {nib} }} ]
+                }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains(want), "{nib} → {err}");
+        }
     }
 
     #[test]

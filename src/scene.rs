@@ -14,7 +14,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::brush::Tip;
 use crate::curve::{self, Cubic};
-use crate::doc::{Camera, Document, Element};
+use crate::doc::{Camera, Document, Element, Stamp};
 
 /// Viewport in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +403,24 @@ impl Prim {
         }
     }
 
+    /// One dab of a stamped stroke: a nib `half` px across each way,
+    /// ramping over `feather`, turned by `angle` about its own center.
+    /// A round nib when its half extents are equal; a flattened capsule
+    /// when they are not, which is as close to an ellipse as the box
+    /// field comes.
+    pub fn dab(center: (f32, f32), half: (f32, f32), feather: f32, angle: f32, color: Rgba) -> Prim {
+        let r = ScreenRect {
+            x: center.0 - half.0,
+            y: center.1 - half.1,
+            w: 2.0 * half.0,
+            h: 2.0 * half.1,
+        };
+        Prim {
+            angle,
+            ..Prim::soft(r, half.0.min(half.1), feather, color)
+        }
+    }
+
     pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
         let r = ScreenRect {
             x: cx - radius,
@@ -612,6 +630,72 @@ pub fn soft_radius(width: f64, hardness: f64, view: &View) -> (f32, f32) {
     (r - feather / 2.0, feather)
 }
 
+/// The closest two dabs are allowed to sit, in px. Below this they stop
+/// telling apart and only cost: a hair-thin brush at the tightest
+/// spacing would otherwise lay tens of thousands of them per stroke.
+const STAMP_STEP_MIN: f32 = 1.0;
+
+/// A nib is never let vanish, however flat it is squished.
+const NIB_MIN_PX: f32 = 0.5;
+
+/// The dabs a stamped nib lays along `points` (screen px): one where
+/// the press was, then one every `spacing` widths of arc length after
+/// it. The tail left over past the last dab is not stamped — a stroke
+/// ends on a dab, as it does in Sketchbook, and the nib's own radius
+/// covers the gap at any spacing anyone paints with.
+pub fn stamp_prims(
+    points: &[(f32, f32)],
+    stamp: Stamp,
+    radius: f32,
+    feather: f32,
+    color: Rgba,
+) -> Vec<Prim> {
+    let Some(&first) = points.first() else {
+        return Vec::new();
+    };
+    let width = 2.0 * radius + feather;
+    let step = (stamp.spacing as f32 * width).max(STAMP_STEP_MIN);
+    let half = (
+        radius,
+        (radius * stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX),
+    );
+    let angle = (stamp.rotation as f32).to_radians();
+    let dab = |at: (f32, f32)| Prim::dab(at, half, feather, angle, color);
+
+    let mut out = vec![dab(first)];
+    // How far the walk has come since the last dab, carried across the
+    // polyline's corners so the spacing is of the stroke, not of a span.
+    let mut carry = 0.0f32;
+    let mut prev = first;
+    for &p in &points[1..] {
+        let (dx, dy) = (p.0 - prev.0, p.1 - prev.1);
+        let span = dx.hypot(dy);
+        if span <= 0.0 {
+            continue;
+        }
+        let mut at = step - carry;
+        while at <= span {
+            let k = at / span;
+            out.push(dab((prev.0 + dx * k, prev.1 + dy * k)));
+            at += step;
+        }
+        carry = span - (at - step);
+        prev = p;
+    }
+    out
+}
+
+/// What a tip lays along a screen polyline: a row of dabs if it stamps,
+/// one swept span per segment if it does not. The pencil sweeps; every
+/// brush stamps.
+fn tip_prims(screen: &[(f32, f32)], tip: Tip, color: Rgba, view: &View) -> Vec<Prim> {
+    let (radius, feather) = soft_radius(tip.width, tip.hardness, view);
+    match tip.stamp {
+        Some(stamp) => stamp_prims(screen, stamp, radius, feather, color),
+        None => soft_polyline_prims(screen, radius, feather, color),
+    }
+}
+
 /// Stroke in progress (a raw polyline in world units) → screen prims.
 pub fn stroke_prims(points: &[[f64; 2]], tip: Tip, color: Rgba, view: &View) -> Vec<Prim> {
     let screen: Vec<(f32, f32)> = points
@@ -621,8 +705,7 @@ pub fn stroke_prims(points: &[[f64; 2]], tip: Tip, color: Rgba, view: &View) -> 
             (sx as f32, sy as f32)
         })
         .collect();
-    let (radius, feather) = soft_radius(tip.width, tip.hardness, view);
-    soft_polyline_prims(&screen, radius, feather, color)
+    tip_prims(&screen, tip, color, view)
 }
 
 /// How far the flattened polyline may stray from the curve, in px.
@@ -644,8 +727,7 @@ pub fn path_prims(curves: &[Cubic], tip: Tip, color: Rgba, view: &View) -> Vec<P
                 .map(|[x, y]| (x as f32, y as f32)),
         );
     }
-    let (radius, feather) = soft_radius(tip.width, tip.hardness, view);
-    soft_polyline_prims(&screen, radius, feather, color)
+    tip_prims(&screen, tip, color, view)
 }
 
 /// A stretch of a frame's prims that is composited as one shape: drawn
@@ -958,6 +1040,7 @@ mod tests {
             width,
             opacity,
             hardness,
+            stamp: None,
         }
     }
 
@@ -971,6 +1054,7 @@ mod tests {
             opacity: tip.opacity,
             hardness: tip.hardness,
             rotation: 0.0,
+            stamp: tip.stamp,
         })
     }
 
@@ -1002,6 +1086,70 @@ mod tests {
         assert_eq!(dot[0].geom, [48.0, 48.0, 4.0, 4.0]);
     }
 
+    /// A round nib, dabbed half a width apart.
+    const ROUND: Stamp = Stamp {
+        spacing: 0.5,
+        roundness: 1.0,
+        rotation: 0.0,
+    };
+
+    fn stamped(width: f64, stamp: Stamp) -> Tip {
+        Tip {
+            width,
+            opacity: 1.0,
+            hardness: 1.0,
+            stamp: Some(stamp),
+        }
+    }
+
+    #[test]
+    fn a_stamped_tip_lays_a_nib_every_spacing_instead_of_sweeping() {
+        let v = view(0.0, 0.0, 1.0);
+        // A 40-px line with an 8-wide nib half a width apart: a dab
+        // where the press was and one every 4 px along it.
+        let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], stamped(8.0, ROUND), WHITE, &v);
+        assert_eq!(got.len(), 11, "40 px at a 4 px step, the ends counted");
+        for p in &got {
+            assert_eq!(p.kind, KIND_BOX, "a dab is a nib, not a swept segment");
+            assert_eq!((p.radius, p.feather), (4.0, 0.0));
+            assert_eq!([p.geom[2], p.geom[3]], [8.0, 8.0], "as wide as the brush, and round");
+        }
+        let xs: Vec<f32> = got.iter().map(|p| p.geom[0] + p.geom[2] / 2.0).collect();
+        assert_eq!(xs.first(), Some(&30.0), "the first dab is at the press");
+        assert_eq!(xs.last(), Some(&70.0), "the last one at the release");
+        for w in xs.windows(2) {
+            assert!((w[1] - w[0] - 4.0).abs() < 1e-4, "evenly spaced: {xs:?}");
+        }
+        for p in &got {
+            assert!((p.geom[1] + p.geom[3] / 2.0 - 50.0).abs() < 1e-4, "on the line");
+        }
+    }
+
+    #[test]
+    fn a_flattened_nib_keeps_its_width_and_is_turned_by_its_own_angle() {
+        let v = view(0.0, 0.0, 1.0);
+        let flat = Stamp {
+            spacing: 0.5,
+            roundness: 0.25,
+            rotation: 90.0,
+        };
+        let got = stroke_prims(&[[0.0, 0.0]], stamped(8.0, flat), WHITE, &v);
+        assert_eq!(got.len(), 1, "a tap is one dab");
+        let d = got[0];
+        assert_eq!([d.geom[2], d.geom[3]], [8.0, 2.0], "squished across its own y");
+        assert_eq!(d.radius, 1.0, "the cap is the smaller of the two halves");
+        assert!((d.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6, "a quarter turn");
+        assert_eq!(d.bounds().center(), (50.0, 50.0), "turned about itself");
+
+        // However flat it is squished, a nib still marks the paper.
+        let hair = Stamp {
+            roundness: 0.0,
+            ..flat
+        };
+        let got = stroke_prims(&[[0.0, 0.0]], stamped(8.0, hair), WHITE, &v);
+        assert_eq!(got[0].geom[3], 1.0, "a nib is never let vanish");
+    }
+
     fn path_of(curves: Vec<Cubic>, tip: Tip) -> Element {
         Element::Path(Path {
             id: "p".into(),
@@ -1012,6 +1160,7 @@ mod tests {
             opacity: tip.opacity,
             hardness: tip.hardness,
             rotation: 0.0,
+            stamp: tip.stamp,
         })
     }
 
@@ -1022,6 +1171,7 @@ mod tests {
             width: tip.width,
             opacity: tip.opacity,
             hardness: tip.hardness,
+            stamp: tip.stamp,
         }
     }
 
@@ -1682,6 +1832,7 @@ mod tests {
                 opacity: 1.0,
                 hardness: 1.0,
                 rotation: 0.0,
+                stamp: None,
             })],
             &v,
         );

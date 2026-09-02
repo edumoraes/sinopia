@@ -37,24 +37,27 @@ selection, navigation, pasted images, and projects in tabs:
   units), `{` `}` the hardness by a quarter, `1`–`9` and `0` set the
   opacity to 10%–90% and 100% — all of them writing into the brush that
   is painting, which keeps the change when another is picked up and
-  put down again. The brush also carries what the stamp engine will
-  need — flow, spacing, roundness, rotation and its dynamics, the tip's
-  profile, texture depth, randomness per property, and what the pen's
-  pressure drives — all of it read off the real sets, described
-  truthfully now and painted with when that engine lands. Two thirds of
-  the shipped brushes (167 of 211) are told apart by a shape or a
-  texture the canvas does not stamp yet, and the library says so per
-  brush. A ring the size of the brush follows the pointer.
+  put down again. A brush is a **nib stamped along the stroke**, never
+  a swept line: its `spacing`, `roundness` and `rotation` are what one
+  dab is and how far apart they sit, and the canvas paints with all
+  three. The rest of the body is read off the real sets and described
+  truthfully while the engine grows into it — flow, dynamics, the
+  tip's profile, texture depth, randomness per property, and what the
+  pen's pressure drives. Two thirds of the shipped brushes (167 of
+  211) are told apart by a shape or a texture the canvas does not
+  stamp yet, and the library says so per brush. A ring the size of the
+  brush follows the pointer.
   The stroke joins the `paint` on the layer it lands on — one object
   per raster layer, however many strokes went into it — each stroke
   keeping the ink it was laid with: `stroke`, `width`, and `opacity`
-  and `hardness` when they are not 1. The paint selects, moves and
-  turns as one. A soft or translucent stroke is composited as one
-  shape: its segments are drawn into an offscreen texture as the union
-  of their coverage, then laid on the frame once at the stroke's
-  opacity — so a stroke crossing itself does not darken, and a soft
-  edge has no beads at the joints. Hardness spends `1 − hardness` of
-  the radius on the edge ramp, inside the nominal width.
+  and `hardness` when they are not 1, and the `stamp` — the nib — when
+  it was stamped rather than swept. The paint selects, moves and turns
+  as one. A soft or translucent stroke is composited as one shape: its
+  dabs are drawn into an offscreen texture as the union of their
+  coverage, then laid on the frame once at the stroke's opacity — so a
+  stroke crossing itself does not darken, and a soft edge has no beads
+  at the joints. Hardness spends `1 − hardness` of the radius on the
+  edge ramp, inside the nominal width.
 - Brush palette: picking the brush brings up Sketchbook's Brush Library
   on the left. Every set stands one under the next in a single scroll —
   its name, then its brushes as a grid of icons six across, drawn with
@@ -78,11 +81,11 @@ selection, navigation, pasted images, and projects in tabs:
   Opacity, Flow, Rotation, Spacing), each section under its own
   heading. Closed and open never show the same slider twice, and the
   line above does not move or change width when the panel drops. The
-  three the canvas actually paints with — Size, Opacity and Edge — are
-  drawn in ink; every other slider is muted. It still moves, and it
-  still writes the brush's own value, but the muting is the bar saying
-  it does not promise paint yet: the stamp engine those belong to is
-  still ahead. The palette's `≡` opens the same panel.
+  ones the canvas actually paints with — Size, Opacity, Edge, and the
+  whole Stamp section — are drawn in ink; every other slider is muted.
+  It still moves, and it still writes the brush's own value, but the
+  muting is the bar saying it does not promise paint yet. The
+  palette's `≡` opens the same panel.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it

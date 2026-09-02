@@ -452,6 +452,7 @@ mod tests {
             opacity: 1.0,
             hardness: 1.0,
             rotation: 0.0,
+            stamp: None,
         })
     }
 
@@ -467,6 +468,7 @@ mod tests {
                     width,
                     opacity: 1.0,
                     hardness: 1.0,
+                    stamp: None,
                 })
                 .collect(),
             rotation: 0.0,

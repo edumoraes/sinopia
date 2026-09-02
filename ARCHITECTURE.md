@@ -419,16 +419,16 @@ state (§6.2) and is dropped on a tool switch.
 Brush (`B`) landed, and then took Sketchbook's shape rather than
 Photoshop's: a `Library` of named brushes on shelves, one in the hand,
 and an edit that belongs to the brush — the keyboard (`[` `]`, `{` `}`,
-the digits) and the palette's rails write into the brush that is
-painting, and `reset` takes it back to what it shipped as. `Brush` is
+the digits) and the properties bar's sliders write into the brush that
+is painting, and `reset` takes it back to what it shipped as. `Brush` is
 the whole of Brush Properties; `Property::honored` is the one list of
-what the canvas paints with (size, opacity, hardness), and the rest —
-flow, spacing, roundness, rotation and its dynamics, texture depth,
-randomness, pressure — describe a brush truthfully while the stamp
-engine that honours them is written. Picking the tool brings up the
-palette on the left — a row per brush showing a dab drawn with that
-brush's own settings, and the size/opacity rail Sketchbook stands down
-its right edge — and the properties bar under the strip: the name and
+what the canvas paints with — size, opacity, hardness and the nib
+(spacing, roundness, rotation) — and the rest — flow and its dynamics,
+texture depth, randomness, pressure — describe a brush truthfully while
+the stamp engine grows into them. A brush stamps a nib along the stroke
+rather than sweeping a line. Picking the tool brings up Sketchbook's
+Brush Library on the left — every shelf in one scroll, its brushes a
+grid of their own icons — and the properties bar under the strip: the name and
 the basic pair, with a chevron dropping the whole Advanced layout
 (Pressure, Stamp, Nib, Randomness) in two columns. A slider the canvas
 does not answer to is drawn muted rather than hidden: the brush keeps

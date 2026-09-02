@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::doc::{Path, Stroke};
+use crate::doc::{Path, Stamp, Stroke};
 use crate::editor::PEN_WIDTH;
 use crate::scene::{Prim, Rgba, polyline_prims};
 
@@ -27,9 +27,7 @@ pub const SIZE_MAX: f64 = 700.0;
 /// What `{` and `}` change the hardness by.
 pub const HARDNESS_STEP: f64 = 0.25;
 /// Sketchbook's own band for the gap between two stamps, in tip widths.
-#[allow(dead_code)] // named for `Property::range`; the stamp engine reads it
 pub const SPACING_MIN: f64 = 0.1;
-#[allow(dead_code)] // named for `Property::range`; the stamp engine reads it
 pub const SPACING_MAX: f64 = 10.0;
 
 /// The shape of the tip's own falloff, from its middle to its edge.
@@ -285,12 +283,17 @@ impl Property {
         }
     }
 
-    /// Whether the canvas paints with it yet. The three that do are the
-    /// ones [`Tip`] carries; the rest wait on the stamp engine.
+    /// Whether the canvas paints with it yet: the ones [`Tip`] carries,
+    /// its [`Stamp`] included. The rest wait on the stamp engine.
     pub fn honored(self) -> bool {
         matches!(
             self,
-            Property::Size | Property::Opacity | Property::Hardness
+            Property::Size
+                | Property::Opacity
+                | Property::Hardness
+                | Property::Spacing
+                | Property::Roundness
+                | Property::Rotation
         )
     }
 
@@ -437,6 +440,11 @@ impl Brush {
             width: self.size,
             opacity: self.opacity,
             hardness: self.hardness,
+            stamp: Some(Stamp {
+                spacing: self.spacing,
+                roundness: self.roundness,
+                rotation: self.rotation,
+            }),
         }
     }
 }
@@ -449,6 +457,9 @@ pub struct Tip {
     pub width: f64,
     pub opacity: f64,
     pub hardness: f64,
+    /// The nib, when the stroke is stamped. A pencil sweeps and has
+    /// none.
+    pub stamp: Option<Stamp>,
 }
 
 impl Tip {
@@ -456,6 +467,7 @@ impl Tip {
         width: PEN_WIDTH,
         opacity: 1.0,
         hardness: 1.0,
+        stamp: None,
     };
 
     pub fn of(path: &Path) -> Tip {
@@ -463,6 +475,7 @@ impl Tip {
             width: path.width,
             opacity: path.opacity,
             hardness: path.hardness,
+            stamp: path.stamp,
         }
     }
 
@@ -473,6 +486,7 @@ impl Tip {
             width: s.width,
             opacity: s.opacity,
             hardness: s.hardness,
+            stamp: s.stamp,
         }
     }
 
@@ -806,7 +820,8 @@ mod tests {
             Tip {
                 width: PEN_WIDTH,
                 opacity: 1.0,
-                hardness: 1.0
+                hardness: 1.0,
+                stamp: None,
             }
         );
         assert!(Tip::PENCIL.is_direct(), "the pencil needs no compositing");
@@ -827,6 +842,26 @@ mod tests {
     }
 
     #[test]
+    fn a_brush_hands_its_nib_to_the_tip_and_a_pencil_has_none() {
+        assert_eq!(Tip::PENCIL.stamp, None, "a pencil sweeps, it does not stamp");
+        let b = Brush {
+            spacing: 0.4,
+            roundness: 0.5,
+            rotation: 30.0,
+            ..Brush::default()
+        };
+        assert_eq!(
+            b.tip().stamp,
+            Some(Stamp {
+                spacing: 0.4,
+                roundness: 0.5,
+                rotation: 30.0,
+            }),
+            "every brush is a nib stamped at a spacing"
+        );
+    }
+
+    #[test]
     fn tip_of_a_path_reads_its_fields() {
         let p = Path {
             id: "p".into(),
@@ -837,13 +872,15 @@ mod tests {
             opacity: 0.25,
             hardness: 0.75,
             rotation: 0.0,
+            stamp: None,
         };
         assert_eq!(
             Tip::of(&p),
             Tip {
                 width: 7.0,
                 opacity: 0.25,
-                hardness: 0.75
+                hardness: 0.75,
+                stamp: None,
             }
         );
     }
@@ -953,7 +990,15 @@ mod tests {
     #[test]
     fn only_what_the_engine_paints_with_is_honored() {
         for p in Property::ALL {
-            let honored = matches!(p, Property::Size | Property::Opacity | Property::Hardness);
+            let honored = matches!(
+                p,
+                Property::Size
+                    | Property::Opacity
+                    | Property::Hardness
+                    | Property::Spacing
+                    | Property::Roundness
+                    | Property::Rotation
+            );
             assert_eq!(p.honored(), honored, "{p:?}");
         }
         assert!(

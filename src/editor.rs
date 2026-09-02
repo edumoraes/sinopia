@@ -774,6 +774,7 @@ impl Editor {
                 width: tip.width,
                 opacity: tip.opacity,
                 hardness: tip.hardness,
+                stamp: tip.stamp,
             };
             if kind == Kind::Vector {
                 doc.elements.push(Element::Path(Path {
@@ -785,6 +786,7 @@ impl Editor {
                     opacity: laid.opacity,
                     hardness: laid.hardness,
                     rotation: 0.0,
+                    stamp: laid.stamp,
                 }));
                 return Change::Scene;
             }
