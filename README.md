@@ -8,7 +8,7 @@ the real architecture emerges from development.
 
 Scaffold (§15 items 1–2), the pencil (item 4), selection and navigation:
 
-- `cargo build` clean, `cargo test` with 167 tests.
+- `cargo build` clean, `cargo test` with 174 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -21,13 +21,16 @@ Scaffold (§15 items 1–2), the pencil (item 4), selection and navigation:
 - Select: click picks the topmost element, `Shift`+click toggles one in
   or out, dragging on empty canvas draws a marquee that selects whatever
   it overlaps (`Shift` adds to the selection). The selection shows its
-  frame — a lone rect keeps its own turn, anything else is the axis-aligned
-  box around every corner — with square handles on the corners and rings
-  just past them. Dragging the selection moves it; a corner handle resizes
-  with the opposite corner pinned; a ring rotates about the frame center.
-  `Delete`/`Backspace` removes the selection; `Esc` cancels the drag in
-  progress (putting things back), then clears the selection. Rects carry a
-  `rotation` in degrees; paths bake every transform into their curves.
+  frame — a lone element's own box, turned with it; several elements get
+  the axis-aligned box around every corner, which turns with them while a
+  rotation lasts — with square handles on the corners and rings just past
+  them. Dragging the selection moves it; a corner handle resizes with the
+  opposite corner pinned; a ring rotates about the frame center, in 15°
+  steps from the creation state while `Shift` is held. `Delete`/`Backspace`
+  removes the selection; `Esc` cancels the drag in progress (putting things
+  back), then clears the selection. Every element carries a `rotation` in
+  degrees since it was created; paths still bake transforms into their
+  curves, the field only turns their box and anchors the snap.
 - Tool dock centered at the bottom — Select `V`, Hand `H`, Pencil `P`,
   Zoom `Z`; `Esc` cancels the stroke, gesture or drag in progress.
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
@@ -56,7 +59,7 @@ Not yet: eraser, text, shapes, undo, export, Omarchy plugin, thumbnails.
 | Left drag on empty canvas (Select) | Marquee: selects what it overlaps (`Shift` adds) |
 | Left drag on the selection | Move |
 | Drag a corner handle | Resize, opposite corner pinned |
-| Drag a ring past a corner | Rotate about the selection's center |
+| Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
 | `Delete` / `Backspace` | Delete the selection |
 | Left drag (Pencil) | Draw; the stroke is fitted to Béziers on release |
 | Left drag (Hand), `Space` + drag, middle drag | Pan |

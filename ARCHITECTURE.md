@@ -244,12 +244,14 @@ pixel at zoom 1. The stroke is simplified and fitted on release
 written before the fit landed hold a raw `points` polyline instead; those
 are fitted on load and rewritten as `curves` on the next save.
 
-Landed — `rotation` on `rect`: degrees, clockwise on screen, about the
-rect's center; `x, y, w, h` describe the box before the turn. Absent when
-zero, so unrotated boards keep the shape above. Paths have no rotation
-field: the select tool bakes moves, turns and stretches into their control
-points (Béziers are affine-invariant), so the export never composes
-transforms.
+Landed — `rotation` on `rect` and `path`: degrees, clockwise on screen,
+counted from the element's creation; absent when zero, so older boards
+keep the shape above. A rect turns about its center; `x, y, w, h` describe
+the box before the turn. A path keeps moves, turns and stretches baked
+into its control points (Béziers are affine-invariant, and the export
+never composes transforms); its `rotation` only records how far it has
+been turned, so its box turns with it and rotation snapping counts from
+the creation state.
 
 Why plain JSON now, and not Automerge already:
 
@@ -332,10 +334,12 @@ bridge shape as the IPC server). The camera persists in the document and
 is saved when a gesture ends.
 
 Select (`V`) landed: click, Shift+click and a marquee pick elements (the
-marquee takes whatever it overlaps). The selection frame — a lone rect's
-own turned box, or the axis-aligned box around several elements — carries
-square resize handles on its corners and rings past them for rotation
-about the frame center; dragging the selection itself moves it. Drags
+marquee takes whatever it overlaps). The selection frame — a lone
+element's own box, turned with it, or the axis-aligned box around several
+elements, which turns with them while a rotation lasts and is re-wrapped
+on release — carries square resize handles on its corners and rings past
+them for rotation about the frame center (Shift snaps to 15° steps from
+the creation state); dragging the selection itself moves it. Drags
 transform the document live from a snapshot taken at the press, so `Esc`
 puts it back; `Delete`/`Backspace` removes. The selection is session
 state (§6.2) and is dropped on a tool switch.
