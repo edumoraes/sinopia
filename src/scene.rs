@@ -473,6 +473,35 @@ pub fn polyline_prims(points: &[(f32, f32)], half_width: f32, color: Rgba) -> Ve
     soft_polyline_prims(points, half_width, 0.0, color)
 }
 
+/// An icon drawn as polylines on a `grid`-unit square, mapped onto a
+/// `box_px` logical px box centered in `rect` and stroked `stroke_px`
+/// logical px wide with round caps and joins — how the chrome draws its
+/// icons. A closed outline repeats its first point.
+pub fn icon_prims(
+    lines: &[&[(f32, f32)]],
+    rect: ScreenRect,
+    grid: f32,
+    box_px: f32,
+    stroke_px: f32,
+    scale: f32,
+    color: Rgba,
+) -> Vec<Prim> {
+    let (cx, cy) = rect.center();
+    let unit = box_px / grid * scale;
+    let half_width = stroke_px / 2.0 * scale;
+    let half_grid = grid / 2.0;
+    lines
+        .iter()
+        .flat_map(|line| {
+            let points: Vec<(f32, f32)> = line
+                .iter()
+                .map(|&(x, y)| (cx + (x - half_grid) * unit, cy + (y - half_grid) * unit))
+                .collect();
+            polyline_prims(&points, half_width, color)
+        })
+        .collect()
+}
+
 /// [`polyline_prims`] with an edge ramp `feather` px wide on every span.
 pub fn soft_polyline_prims(
     points: &[(f32, f32)],

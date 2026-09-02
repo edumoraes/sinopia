@@ -4,7 +4,7 @@
 //! landed and what to draw.
 
 use crate::editor::Tool;
-use crate::scene::{Prim, Rgba, ScreenRect, Viewport, polyline_prims};
+use crate::scene::{self, Prim, Rgba, ScreenRect, Viewport};
 use crate::theme::Theme;
 
 // Logical px.
@@ -109,19 +109,7 @@ impl Dock {
 
 /// Maps a tool's icon from the 24-unit grid into its button.
 fn icon_prims(tool: Tool, button: ScreenRect, scale: f32, color: Rgba) -> Vec<Prim> {
-    let (cx, cy) = button.center();
-    let unit = ICON_BOX / 24.0 * scale;
-    let half_width = ICON_STROKE / 2.0 * scale;
-    icon(tool)
-        .iter()
-        .flat_map(|line| {
-            let points: Vec<(f32, f32)> = line
-                .iter()
-                .map(|&(x, y)| (cx + (x - 12.0) * unit, cy + (y - 12.0) * unit))
-                .collect();
-            polyline_prims(&points, half_width, color)
-        })
-        .collect()
+    scene::icon_prims(icon(tool), button, 24.0, ICON_BOX, ICON_STROKE, scale, color)
 }
 
 /// Icons as polylines on a 24×24 grid (Lucide-style coordinates), drawn

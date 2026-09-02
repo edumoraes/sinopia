@@ -18,6 +18,7 @@ mod gestures;
 mod gfx;
 mod grid;
 mod ipc;
+mod layers;
 mod project;
 mod scene;
 mod select;
