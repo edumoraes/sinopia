@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 428 tests.
+- `cargo build` clean, `cargo test` with 432 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -28,18 +28,23 @@ selection, navigation, pasted images, and projects in tabs:
   frame at the current zoom.
 - Brush (`B`): the same stroke with a body — a size, an opacity and a
   hardness — and, as in Sketchbook, a name and a shelf to live on. The
-  binary ships two brush sets: Essentials (Pencil, Ink Pen, Marker,
-  Highlighter, Hard Round, Soft Round, Airbrush) and Paint (Dry Edge,
-  Glaze, Blot, Wash). One brush is in the hand at a time and an edit
-  belongs to it: `[` `]` step the size (Photoshop's steps, 1–500 world
+  binary ships **Sketchbook's own seventeen sets, 211 brushes**: Basic,
+  Legacy, Markers, Fine Art, Traditional, Designer, Artist, Pastel,
+  Half Tone, Texture Essentials, Texture, Shape, Synthetic Paint,
+  Splatter, Glow, Smudge and Colorless, converted from the
+  `.skbrushes` files by `tools/import-skbrushes.py`. One brush is in
+  the hand at a time and an edit belongs to it: `[` `]` step the size (Photoshop's steps, 1–500 world
   units), `{` `}` the hardness by a quarter, `1`–`9` and `0` set the
   opacity to 10%–90% and 100% — all of them writing into the brush that
   is painting, which keeps the change when another is picked up and
   put down again. The brush also carries what the stamp engine will
-  need — flow, spacing, roundness, rotation and its dynamics, texture
-  depth, randomness per property, and what the pen's pressure drives —
-  described truthfully now and painted with when that engine lands.
-  A ring the size of the brush follows the pointer.
+  need — flow, spacing, roundness, rotation and its dynamics, the tip's
+  profile, texture depth, randomness per property, and what the pen's
+  pressure drives — all of it read off the real sets, described
+  truthfully now and painted with when that engine lands. Two thirds of
+  the shipped brushes (167 of 211) are told apart by a shape or a
+  texture the canvas does not stamp yet, and the library says so per
+  brush. A ring the size of the brush follows the pointer.
   The stroke joins the `paint` on the layer it lands on — one object
   per raster layer, however many strokes went into it — each stroke
   keeping the ink it was laid with: `stroke`, `width`, and `opacity`
@@ -259,6 +264,8 @@ src/ipc/         §5: proto (strict parser), client (forward), server (socket 06
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
 src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
 src/brush.rs     the brush library: sets, presets, a brush's body, its properties, the tip a stroke carries, the pointer's ring (pure, tested)
+tools/import-skbrushes.py  Sketchbook `.skbrushes` -> assets/brushes/ (parameters + icon sheet)
+assets/brushes/  library.json (17 sets, 211 brushes) and icons.png (211 cells), built into the binary
 src/scene.rs     View (camera + viewport + scale), document → SDF prims, frames, groups and passes (pure, tested)
 src/geom.rs      affine maps, corners and oriented frames (pure, tested)
 src/select.rs    selection: element frames, hit-testing, handles, transforms, overlay prims (pure, tested)

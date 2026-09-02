@@ -630,19 +630,35 @@ mod tests {
                 .find(|q| q.kind == KIND_SEGMENT && sw.contains_rect(&q.bounds()))
                 .unwrap_or_else(|| panic!("row {i} has no dab"))
         };
-        let names: Vec<&str> = s.presets.iter().map(|q| q.name.as_str()).collect();
-        let pencil = names.iter().position(|n| *n == "Pencil").unwrap();
-        let airbrush = names.iter().position(|n| *n == "Airbrush").unwrap();
-        let hard = names.iter().position(|n| *n == "Hard Round").unwrap();
+        // Picked by what they are, not by what they are called: the
+        // shelf is Sketchbook's own and its names are its business.
+        let pick = |f: &dyn Fn(&Brush) -> f64, most: bool| {
+            s.presets
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    let (x, y) = (f(&a.brush), f(&b.brush));
+                    if most { x.total_cmp(&y) } else { y.total_cmp(&x) }
+                })
+                .map(|(i, _)| i)
+                .expect("a shelf with brushes on it")
+        };
+        let widest = pick(&|b| b.size, true);
+        let finest = pick(&|b| b.size, false);
+        let softest = pick(&|b| b.hardness, false);
+        let crispest = pick(&|b| b.hardness, true);
+        let faintest = pick(&|b| b.opacity, false);
 
         assert!(
-            dab_of(pencil).radius < dab_of(airbrush).radius,
+            dab_of(finest).radius < dab_of(widest).radius,
             "a fatter brush previews fatter"
         );
-        assert_eq!(dab_of(hard).feather, 0.0, "a crisp brush previews crisp");
-        assert!(dab_of(airbrush).feather > 0.0, "a soft one previews soft");
         assert!(
-            dab_of(airbrush).color[3] < dab_of(hard).color[3],
+            dab_of(crispest).feather < dab_of(softest).feather,
+            "a softer brush previews softer"
+        );
+        assert!(
+            dab_of(faintest).color[3] <= dab_of(crispest).color[3],
             "a translucent brush previews translucent"
         );
     }

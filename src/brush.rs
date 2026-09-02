@@ -13,13 +13,17 @@
 //! canvas — [`Property::honored`] is the list — and the rest are the
 //! stamp engine's, kept on the brush because that is where they belong.
 
+use serde::{Deserialize, Serialize};
+
 use crate::doc::{Path, Stroke};
 use crate::editor::PEN_WIDTH;
 use crate::scene::{Prim, Rgba, polyline_prims};
 
-/// Brush size in world units (logical px at zoom 1): the diameter.
+/// Brush size in world units (logical px at zoom 1): the diameter. The
+/// top is the widest brush Sketchbook's own sets carry — a 350-unit
+/// radius — so nothing that ships is clamped on the way in.
 pub const SIZE_MIN: f64 = 1.0;
-pub const SIZE_MAX: f64 = 500.0;
+pub const SIZE_MAX: f64 = 700.0;
 /// What `{` and `}` change the hardness by.
 pub const HARDNESS_STEP: f64 = 0.25;
 /// Sketchbook's own band for the gap between two stamps, in tip widths.
@@ -28,10 +32,41 @@ pub const SPACING_MIN: f64 = 0.1;
 #[allow(dead_code)] // named for `Property::range`; the stamp engine reads it
 pub const SPACING_MAX: f64 = 10.0;
 
+/// The shape of the tip's own falloff, from its middle to its edge.
+/// Sketchbook picks one of four for every brush, and it is not the same
+/// question as hardness: hardness says how much of the radius the ramp
+/// takes, the profile says what the ramp does over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Profile {
+    /// The default: a plain ramp.
+    #[default]
+    #[serde(rename = "regularSolid")]
+    RegularSolid,
+    /// Falls away from the middle the whole way: the airbrush's cloud.
+    #[serde(rename = "airbrush")]
+    Airbrush,
+    /// Comes to a point.
+    #[serde(rename = "sharp")]
+    Sharp,
+    /// Flat to the edge, then over.
+    #[serde(rename = "hardSolid")]
+    HardSolid,
+}
+
+impl Profile {
+    #[allow(dead_code)] // the tests hold every shipped brush to it
+    pub const ALL: [Profile; 4] = [
+        Profile::RegularSolid,
+        Profile::Airbrush,
+        Profile::Sharp,
+        Profile::HardSolid,
+    ];
+}
+
 /// What turns a stamp as the stroke goes. Sketchbook's Rotation Dynamics:
 /// a pattern either keeps its angle, follows the stroke, or is turned by
 /// the way the stylus is held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[allow(dead_code)] // the Stamp section offers them; the stamp engine turns by them
 pub enum Dynamics {
     #[default]
@@ -44,7 +79,8 @@ pub enum Dynamics {
 
 /// How much of each property the stroke throws away at random, 0–1.
 /// Sketchbook's Randomness section: the same five it varies.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Jitter {
     pub size: f64,
     pub opacity: f64,
@@ -56,7 +92,8 @@ pub struct Jitter {
 /// How much of each property the pen's pressure drives, 0–1: 0 is a
 /// property pressure never touches, 1 one it drives from nothing to the
 /// value the brush names.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Pressure {
     pub size: f64,
     pub opacity: f64,
@@ -81,7 +118,8 @@ impl Default for Pressure {
 /// place they belong: a preset that says how far apart its stamps sit
 /// keeps saying it while the code that honours it is written.
 /// [`Property::honored`] is the list, and the only one.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Brush {
     pub size: f64,
     /// The stroke's opacity as one shape, 0–1.
@@ -96,6 +134,7 @@ pub struct Brush {
     /// The tip's own angle, in degrees.
     pub rotation: f64,
     pub dynamics: Dynamics,
+    pub profile: Profile,
     /// How much of the radius is crisp, 0–1: 1 is a pencil's edge, 0
     /// fades from the center out. Sketchbook's Edge.
     pub hardness: f64,
@@ -115,6 +154,7 @@ impl Default for Brush {
             roundness: 1.0,
             rotation: 0.0,
             dynamics: Dynamics::None,
+            profile: Profile::RegularSolid,
             hardness: 0.5,
             texture_depth: 0.0,
             jitter: Jitter::default(),
@@ -175,8 +215,10 @@ enum Unit {
     /// World units, whole numbers: the size.
     Px,
     Percent,
-    /// Tip widths, one decimal: the spacing.
-    Widths,
+    /// A quantity in the property's own unit, to one decimal: the gap
+    /// between two stamps in tip widths, or how far a randomness throws
+    /// the thing it varies.
+    Amount,
     Degrees,
 }
 
@@ -227,11 +269,18 @@ impl Property {
         }
     }
 
+    /// Randomness is not a fraction: Sketchbook varies a property by an
+    /// amount in that property's own units, and the sets that came with
+    /// it use the whole of these bands — a rotation thrown half a turn
+    /// either way, a radius thrown twenty units.
     pub fn range(self) -> (f64, f64) {
         match self {
             Property::Size => (SIZE_MIN, SIZE_MAX),
             Property::Spacing => (SPACING_MIN, SPACING_MAX),
             Property::Rotation => (0.0, 360.0),
+            Property::JitterSize | Property::JitterFlow => (0.0, 20.0),
+            Property::JitterOpacity | Property::JitterSpacing => (0.0, 5.0),
+            Property::JitterRotation => (0.0, 180.0),
             _ => (0.0, 1.0),
         }
     }
@@ -318,7 +367,7 @@ impl Property {
         match self.unit() {
             Unit::Px => format!("{}", v.round() as i64),
             Unit::Percent => format!("{}%", (v * 100.0).round() as i64),
-            Unit::Widths => format!("{v:.1}"),
+            Unit::Amount => format!("{v:.1}"),
             Unit::Degrees => format!("{}°", v.round() as i64),
         }
     }
@@ -326,8 +375,12 @@ impl Property {
     fn unit(self) -> Unit {
         match self {
             Property::Size => Unit::Px,
-            Property::Spacing => Unit::Widths,
-            Property::Rotation => Unit::Degrees,
+            Property::Spacing
+            | Property::JitterSize
+            | Property::JitterFlow
+            | Property::JitterOpacity
+            | Property::JitterSpacing => Unit::Amount,
+            Property::Rotation | Property::JitterRotation => Unit::Degrees,
             _ => Unit::Percent,
         }
     }
@@ -437,17 +490,17 @@ impl Tip {
 pub struct Preset {
     pub name: String,
     pub brush: Brush,
+    /// Its cell of the icon sheet: the art Sketchbook draws it with.
+    pub icon: u16,
+    /// Whether the brush is told apart by a shape or a texture of its
+    /// own. Two thirds of the shipped brushes are, and the canvas does
+    /// not stamp yet — so the icon promises a mark the ink cannot make.
+    /// Nothing reads this but the tests; the stamp engine will.
+    pub stamp: bool,
     factory: Brush,
 }
 
 impl Preset {
-    fn new(name: &str, brush: Brush) -> Preset {
-        Preset {
-            name: name.to_owned(),
-            brush,
-            factory: brush,
-        }
-    }
 
     /// Whether it has been moved off what it shipped as. The properties
     /// bar says so, and offers to take it back.
@@ -547,43 +600,120 @@ impl Library {
     }
 }
 
+/// Sketchbook's own sets, converted by `tools/import-skbrushes.py` and
+/// built into the binary. The originals are 34 MB of zip and 438 MB of
+/// shape and texture TIFFs once opened; this is the 73 KB of it the
+/// canvas can act on, plus a sheet of the icons.
+const SHIPPED: &str = include_str!("../assets/brushes/library.json");
+
+/// How many cells the icon sheet has. The palette needs it to cut the
+/// sheet up, and a brush pointing past it is an asset built wrong.
+#[allow(dead_code)] // the palette's grid cuts the sheet by it
+pub const ICONS: u16 = 211;
+
+/// What `library.json` looks like. It is built, not typed, but it is
+/// still read through a door: every number is put through its own
+/// `Property`, so an asset built wrong cannot seat a value the sliders
+/// could never reach.
+#[derive(Deserialize)]
+struct LibraryOnDisk {
+    icons: u16,
+    sets: Vec<SetOnDisk>,
+}
+
+#[derive(Deserialize)]
+struct SetOnDisk {
+    name: String,
+    brushes: Vec<PresetOnDisk>,
+}
+
+#[derive(Deserialize)]
+struct PresetOnDisk {
+    name: String,
+    icon: u16,
+    brush: Brush,
+    /// Absent when the brush ships at its factory settings, which is
+    /// every brush in the sets that came with it.
+    #[serde(default)]
+    factory: Option<Brush>,
+    #[serde(default)]
+    stamp: bool,
+}
+
+/// Holds every property inside the band its slider runs over, so what
+/// the file says and what the panels can reach are the same thing.
+fn settled(mut brush: Brush) -> Brush {
+    for p in Property::ALL {
+        let v = p.get(&brush);
+        p.set(&mut brush, v);
+    }
+    brush
+}
+
 impl Default for Library {
-    /// The brushes the binary ships with. They differ in the three the
-    /// canvas answers to, so picking one changes the ink; what they say
-    /// about flow and spacing is true of them and waits on the engine.
+    /// The brushes the binary ships with: Sketchbook's seventeen sets.
+    ///
+    /// The asset is built from the sets in `brushes/` and checked by the
+    /// tests, so a failure here is a broken build rather than bad input
+    /// — but it still costs nothing to be strict, and an asset that does
+    /// not parse leaves one plain brush to draw with instead of no
+    /// window at all.
     fn default() -> Library {
-        let b = |size, opacity, hardness, flow, spacing| Brush {
-            size,
-            opacity,
-            hardness,
-            flow,
-            spacing,
-            ..Brush::default()
+        let disk: LibraryOnDisk = match serde_json::from_str(SHIPPED) {
+            Ok(d) => d,
+            Err(e) => {
+                log::error!("brush library did not parse: {e}");
+                return Library::bare();
+            }
         };
+        let sets: Vec<Set> = disk
+            .sets
+            .into_iter()
+            .map(|s| Set {
+                name: s.name,
+                presets: s
+                    .brushes
+                    .into_iter()
+                    .map(|p| {
+                        let brush = settled(p.brush);
+                        Preset {
+                            name: p.name,
+                            factory: p.factory.map_or(brush, settled),
+                            brush,
+                            icon: p.icon.min(disk.icons.saturating_sub(1)),
+                            stamp: p.stamp,
+                        }
+                    })
+                    .collect(),
+            })
+            .filter(|s: &Set| !s.presets.is_empty())
+            .collect();
+        if sets.is_empty() {
+            return Library::bare();
+        }
         Library {
-            sets: vec![
-                Set {
-                    name: "Essentials".to_owned(),
-                    presets: vec![
-                        Preset::new("Pencil", b(2.0, 1.0, 1.0, 1.0, 1.2)),
-                        Preset::new("Ink Pen", b(5.0, 1.0, 1.0, 1.0, 0.5)),
-                        Preset::new("Marker", b(24.0, 0.65, 0.9, 0.8, 0.4)),
-                        Preset::new("Highlighter", b(36.0, 0.3, 1.0, 1.0, 0.3)),
-                        Preset::new("Hard Round", b(40.0, 1.0, 1.0, 1.0, 0.25)),
-                        Preset::new("Soft Round", b(48.0, 1.0, 0.25, 1.0, 0.25)),
-                        Preset::new("Airbrush", b(80.0, 0.4, 0.0, 0.35, 0.1)),
-                    ],
-                },
-                Set {
-                    name: "Paint".to_owned(),
-                    presets: vec![
-                        Preset::new("Dry Edge", b(30.0, 0.85, 0.75, 0.9, 0.6)),
-                        Preset::new("Glaze", b(64.0, 0.35, 0.15, 0.4, 0.2)),
-                        Preset::new("Blot", b(90.0, 0.9, 0.4, 1.0, 1.5)),
-                        Preset::new("Wash", b(120.0, 0.2, 0.0, 0.25, 0.2)),
-                    ],
-                },
-            ],
+            sets,
+            pinned: 0,
+            selected: (0, 0),
+        }
+    }
+}
+
+impl Library {
+    /// The one brush there is when the shipped sets cannot be read. Never
+    /// empty: every accessor assumes a brush in the hand.
+    fn bare() -> Library {
+        Library {
+            sets: vec![Set {
+                name: "Basic".to_owned(),
+                presets: vec![Preset {
+                    name: "Round".to_owned(),
+                    brush: Brush::default(),
+                    factory: Brush::default(),
+                    icon: 0,
+                    stamp: false,
+                }],
+            }],
             pinned: 0,
             selected: (0, 0),
         }
@@ -636,8 +766,9 @@ mod tests {
         b.grow();
         b.grow();
         assert_eq!(b.size, 400.0, "by a hundred past it");
-        b.grow();
-        b.grow();
+        for _ in 0..5 {
+            b.grow();
+        }
         assert_eq!(b.size, SIZE_MAX, "and never past the largest");
 
         b.size = 10.0;
@@ -885,6 +1016,11 @@ mod tests {
         assert_eq!(Property::Roundness.format(1.0), "100%");
         assert_eq!(Property::Spacing.format(1.2), "1.2");
         assert_eq!(Property::Rotation.format(45.0), "45°");
+        // Randomness throws a property by an amount in its own unit, so
+        // it is never written as a percentage of anything.
+        assert_eq!(Property::JitterSize.format(19.2), "19.2");
+        assert_eq!(Property::JitterRotation.format(180.0), "180°");
+        assert_eq!(Property::JitterSpacing.format(4.5), "4.5");
     }
 
     #[test]
@@ -899,13 +1035,69 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_library_opens_on_a_working_set_of_brushes() {
+    fn the_shipped_library_is_sketchbooks_own() {
         let lib = Library::default();
-        assert!(lib.sets().len() >= 2, "pinning needs somewhere to go");
-        assert!(lib.pinned().presets.len() >= 4, "a palette worth showing");
+        assert_eq!(lib.sets().len(), 17, "every set that came with it");
+        let total: usize = lib.sets().iter().map(|s| s.presets.len()).sum();
+        assert_eq!(total, 211);
+        assert_eq!(lib.sets()[0].name, "Basic", "the shelf it opens on");
         assert_eq!(lib.selected(), (0, 0), "the first brush of the first set");
         assert_eq!(*lib.brush(), lib.pinned().presets[0].brush);
         assert!(!lib.name().is_empty());
+        for name in ["Legacy", "Markers", "Fine Art", "Half Tone", "Smudge"] {
+            assert!(
+                lib.sets().iter().any(|s| s.name == name),
+                "{name} did not come through"
+            );
+        }
+    }
+
+    #[test]
+    fn every_shipped_brush_names_an_icon_of_its_own() {
+        let lib = Library::default();
+        let icons: Vec<u16> = lib
+            .sets()
+            .iter()
+            .flat_map(|s| s.presets.iter().map(|p| p.icon))
+            .collect();
+        let mut seen = icons.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), icons.len(), "two brushes share an icon");
+        assert_eq!(seen.len(), ICONS as usize, "the sheet has cells to spare");
+        assert!(icons.iter().all(|&i| i < ICONS), "an icon off the sheet");
+    }
+
+    #[test]
+    fn most_of_the_acquired_brushes_want_a_stamp_the_engine_owes_them() {
+        let lib = Library::default();
+        let all: Vec<&Preset> = lib.sets().iter().flat_map(|s| s.presets.iter()).collect();
+        let stamped = all.iter().filter(|p| p.stamp).count();
+        assert!(stamped > all.len() / 2, "{stamped} of {}", all.len());
+        assert!(
+            all.iter().any(|p| !p.stamp),
+            "and some paint with what there is"
+        );
+    }
+
+    #[test]
+    fn every_shipped_brush_carries_one_of_sketchbooks_four_profiles() {
+        let lib = Library::default();
+        for s in lib.sets() {
+            for p in &s.presets {
+                assert!(Profile::ALL.contains(&p.brush.profile), "{}", p.name);
+            }
+        }
+        // All four are in use, or the field is not worth carrying.
+        for profile in Profile::ALL {
+            assert!(
+                lib.sets()
+                    .iter()
+                    .flat_map(|s| s.presets.iter())
+                    .any(|p| p.brush.profile == profile),
+                "{profile:?} is on no brush"
+            );
+        }
     }
 
     #[test]
@@ -928,18 +1120,45 @@ mod tests {
     }
 
     #[test]
-    fn the_built_in_brushes_lay_different_ink() {
+    fn no_two_brushes_on_a_shelf_lay_the_same_ink_today() {
+        // A brush that carries a shape is told apart by the shape, which
+        // the canvas does not stamp yet — two of those may well paint
+        // alike for now. The ones that do not are the shelf's own, and
+        // picking one over its neighbour has to change something.
         let lib = Library::default();
-        let mut tips: Vec<Tip> = lib
+        for s in lib.sets() {
+            let mut tips: Vec<Tip> = s
+                .presets
+                .iter()
+                .filter(|p| !p.stamp)
+                .map(|p| p.brush.tip())
+                .collect();
+            let all = tips.len();
+            tips.sort_by(|a, b| {
+                a.width
+                    .total_cmp(&b.width)
+                    .then(a.opacity.total_cmp(&b.opacity))
+                    .then(a.hardness.total_cmp(&b.hardness))
+            });
+            tips.dedup();
+            assert_eq!(tips.len(), all, "{} has two brushes painting alike", s.name);
+        }
+    }
+
+    #[test]
+    fn the_size_range_reaches_the_widest_brush_that_came() {
+        let lib = Library::default();
+        let widest = lib
             .sets()
             .iter()
-            .flat_map(|s| s.presets.iter().map(|p| p.brush.tip()))
-            .collect();
-        let all = tips.len();
-        tips.dedup_by(|a, b| a == b);
-        tips.sort_by(|a, b| a.width.total_cmp(&b.width));
-        tips.dedup_by(|a, b| a == b);
-        assert_eq!(tips.len(), all, "two brushes that paint the same are one");
+            .flat_map(|s| s.presets.iter())
+            .map(|p| p.brush.size)
+            .fold(0.0, f64::max);
+        assert!(widest > 500.0, "the acquired sets go wider than that");
+        assert!(
+            widest <= SIZE_MAX,
+            "{widest} would be clamped on the way in"
+        );
     }
 
     #[test]
@@ -981,10 +1200,10 @@ mod tests {
     fn a_seat_that_is_not_there_is_refused() {
         let mut lib = Library::default();
         let held = lib.selected();
-        lib.select(99, 0);
-        lib.select(0, 99);
+        lib.select(999, 0);
+        lib.select(0, 999);
         assert_eq!(lib.selected(), held);
-        lib.pin(99);
+        lib.pin(999);
         assert_eq!(lib.pinned_index(), 0);
     }
 
