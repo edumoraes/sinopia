@@ -12,6 +12,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::brush::Tip;
 use crate::curve::{self, Cubic};
 use crate::doc::{Camera, Document, Element};
 
@@ -192,6 +193,46 @@ impl ScreenRect {
             && other.x + other.w <= self.x + self.w
             && other.y + other.h <= self.y + self.h
     }
+
+    /// The overlap, or `None` when there is no area to it.
+    pub fn intersect(&self, other: &ScreenRect) -> Option<ScreenRect> {
+        let x0 = self.x.max(other.x);
+        let y0 = self.y.max(other.y);
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        (x1 > x0 && y1 > y0).then_some(ScreenRect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+
+    /// The smallest rect holding both.
+    pub fn union(&self, other: &ScreenRect) -> ScreenRect {
+        let x0 = self.x.min(other.x);
+        let y0 = self.y.min(other.y);
+        let x1 = (self.x + self.w).max(other.x + other.w);
+        let y1 = (self.y + self.h).max(other.y + other.h);
+        ScreenRect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        }
+    }
+
+    /// Grown outward to whole pixels.
+    pub fn snapped(&self) -> ScreenRect {
+        let x0 = self.x.floor();
+        let y0 = self.y.floor();
+        ScreenRect {
+            x: x0,
+            y: y0,
+            w: (self.x + self.w).ceil() - x0,
+            h: (self.y + self.h).ceil() - y0,
+        }
+    }
 }
 
 pub const KIND_BOX: u32 = 0;
@@ -312,11 +353,22 @@ impl Prim {
     }
 
     pub fn segment(a: (f32, f32), b: (f32, f32), half_width: f32, color: Rgba) -> Prim {
+        Prim::soft_segment(a, b, half_width, 0.0, color)
+    }
+
+    /// A segment whose edge ramps over `feather` px instead of one.
+    pub fn soft_segment(
+        a: (f32, f32),
+        b: (f32, f32),
+        half_width: f32,
+        feather: f32,
+        color: Rgba,
+    ) -> Prim {
         Prim {
             geom: [a.0, a.1, b.0, b.1],
             color,
             radius: half_width,
-            feather: 0.0,
+            feather,
             kind: KIND_SEGMENT,
             angle: 0.0,
             uv: WHOLE,
@@ -324,9 +376,22 @@ impl Prim {
         }
     }
 
-    /// Painted area, ignoring the antialiasing ramp. Test-only until
-    /// hit-testing needs it.
-    #[cfg(test)]
+    /// The box `r` filled with the scratch texture's own pixels under it:
+    /// what lays a composited group back on the frame. The scratch holds
+    /// premultiplied color, so `opacity` scales every channel.
+    pub fn composite(r: ScreenRect, viewport: Viewport, slot: u32, opacity: f32) -> Prim {
+        let (w, h) = (viewport.w as f32, viewport.h as f32);
+        let uv = [r.x / w, r.y / h, (r.x + r.w) / w, (r.y + r.h) / h];
+        Prim::glyph(r, uv, slot, [opacity; 4])
+    }
+
+    /// The painted area plus the edge ramp: what the shader rasterizes,
+    /// and so what a wipe has to cover.
+    pub fn painted_bounds(&self) -> ScreenRect {
+        self.bounds().inset(-(self.feather.max(1.0) * 0.5 + 1.0))
+    }
+
+    /// Painted area, ignoring the antialiasing ramp.
     pub fn bounds(&self) -> ScreenRect {
         let [a, b, c, d] = self.geom;
         if self.kind == KIND_SEGMENT {
@@ -405,6 +470,16 @@ pub fn runs(prims: &[Prim]) -> Vec<Run> {
 /// caps make the joins. Repeated points are skipped; a degenerate polyline
 /// is still visible as a dot.
 pub fn polyline_prims(points: &[(f32, f32)], half_width: f32, color: Rgba) -> Vec<Prim> {
+    soft_polyline_prims(points, half_width, 0.0, color)
+}
+
+/// [`polyline_prims`] with an edge ramp `feather` px wide on every span.
+pub fn soft_polyline_prims(
+    points: &[(f32, f32)],
+    half_width: f32,
+    feather: f32,
+    color: Rgba,
+) -> Vec<Prim> {
     let Some(&first) = points.first() else {
         return Vec::new();
     };
@@ -414,11 +489,17 @@ pub fn polyline_prims(points: &[(f32, f32)], half_width: f32, color: Rgba) -> Ve
         if p == prev {
             continue;
         }
-        out.push(Prim::segment(prev, p, half_width, color));
+        out.push(Prim::soft_segment(prev, p, half_width, feather, color));
         prev = p;
     }
     if out.is_empty() {
-        out.push(Prim::circle(first.0, first.1, half_width, color));
+        let r = ScreenRect {
+            x: first.0 - half_width,
+            y: first.1 - half_width,
+            w: 2.0 * half_width,
+            h: 2.0 * half_width,
+        };
+        out.push(Prim::soft(r, half_width, feather, color));
     }
     out
 }
@@ -429,8 +510,19 @@ fn half_width_px(width: f64, view: &View) -> f32 {
     ((width * view.px_per_world()) as f32 / 2.0).max(0.5)
 }
 
+/// What a stroke `width` world units wide at `hardness` is drawn with:
+/// `(radius, feather)` in px. The ramp takes `1 − hardness` of the
+/// radius and the geometry gives it up, so the ramp ends where the crisp
+/// edge would have been: a soft stroke fades inside its width, it does
+/// not grow past it.
+pub fn soft_radius(width: f64, hardness: f64, view: &View) -> (f32, f32) {
+    let r = half_width_px(width, view);
+    let feather = (1.0 - hardness.clamp(0.0, 1.0)) as f32 * r;
+    (r - feather / 2.0, feather)
+}
+
 /// Stroke in progress (a raw polyline in world units) → screen prims.
-pub fn stroke_prims(points: &[[f64; 2]], width: f64, color: Rgba, view: &View) -> Vec<Prim> {
+pub fn stroke_prims(points: &[[f64; 2]], tip: Tip, color: Rgba, view: &View) -> Vec<Prim> {
     let screen: Vec<(f32, f32)> = points
         .iter()
         .map(|[x, y]| {
@@ -438,7 +530,8 @@ pub fn stroke_prims(points: &[[f64; 2]], width: f64, color: Rgba, view: &View) -
             (sx as f32, sy as f32)
         })
         .collect();
-    polyline_prims(&screen, half_width_px(width, view), color)
+    let (radius, feather) = soft_radius(tip.width, tip.hardness, view);
+    soft_polyline_prims(&screen, radius, feather, color)
 }
 
 /// How far the flattened polyline may stray from the curve, in px.
@@ -447,7 +540,7 @@ const FLATTEN_TOLERANCE_PX: f64 = 0.25;
 /// Committed `path` (cubics in world units) → screen prims. The control
 /// points are projected first — Béziers are affine-invariant — so the
 /// flattening tolerance is in pixels whatever the zoom.
-pub fn path_prims(curves: &[Cubic], width: f64, color: Rgba, view: &View) -> Vec<Prim> {
+pub fn path_prims(curves: &[Cubic], tip: Tip, color: Rgba, view: &View) -> Vec<Prim> {
     let mut screen: Vec<(f32, f32)> = Vec::new();
     for c in curves {
         let projected = c.map(|[x, y]| {
@@ -460,16 +553,153 @@ pub fn path_prims(curves: &[Cubic], width: f64, color: Rgba, view: &View) -> Vec
                 .map(|[x, y]| (x as f32, y as f32)),
         );
     }
-    polyline_prims(&screen, half_width_px(width, view), color)
+    let (radius, feather) = soft_radius(tip.width, tip.hardness, view);
+    soft_polyline_prims(&screen, radius, feather, color)
 }
 
-/// Flattens the document into prims in paint order. Rects paint fill first,
-/// then the four outline edges (constant px thickness, aligned inwards),
-/// all turned about the rect center by its rotation; paths become strokes;
-/// images become one textured box each, from `images`.
-pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Vec<Prim> {
-    let mut out = Vec::new();
-    for element in &doc.elements {
+/// A stretch of a frame's prims that is composited as one shape: drawn
+/// into the scratch texture as the union of their coverage, then laid on
+/// the frame once at `opacity`. `bounds` is what the shader rasterizes
+/// for them, ramp included.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Group {
+    pub start: u32,
+    pub end: u32,
+    pub opacity: f32,
+    pub bounds: ScreenRect,
+}
+
+/// Everything on screen: the prims in paint order, and which stretches
+/// of them are composited as groups. Groups never overlap and come in
+/// order.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Frame {
+    pub prims: Vec<Prim>,
+    pub groups: Vec<Group>,
+}
+
+impl Frame {
+    pub fn new() -> Frame {
+        Frame::default()
+    }
+
+    /// Prims drawn straight onto the frame.
+    pub fn extend(&mut self, prims: impl IntoIterator<Item = Prim>) {
+        self.prims.extend(prims);
+    }
+
+    /// Prims composited as one shape at `opacity`. Nothing to draw makes
+    /// no group.
+    pub fn group(&mut self, prims: Vec<Prim>, opacity: f32) {
+        let Some(bounds) = prims
+            .iter()
+            .map(Prim::painted_bounds)
+            .reduce(|a, b| a.union(&b))
+        else {
+            return;
+        };
+        let start = self.prims.len() as u32;
+        self.prims.extend(prims);
+        self.groups.push(Group {
+            start,
+            end: self.prims.len() as u32,
+            opacity,
+            bounds,
+        });
+    }
+
+    /// A stroke's prims, direct or grouped as its tip demands.
+    pub fn stroke(&mut self, prims: Vec<Prim>, tip: Tip) {
+        if tip.is_direct() {
+            self.extend(prims);
+        } else {
+            self.group(prims, tip.opacity as f32);
+        }
+    }
+
+    /// `other` painted after everything here.
+    pub fn append(&mut self, other: Frame) {
+        let offset = self.prims.len() as u32;
+        self.prims.extend(other.prims);
+        self.groups.extend(other.groups.into_iter().map(|g| Group {
+            start: g.start + offset,
+            end: g.end + offset,
+            ..g
+        }));
+    }
+}
+
+/// One render pass of a frame, over the prims [`passes`] hands back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pass {
+    /// Onto the window: `composite` first, if there is one — the group
+    /// the previous pass drew offscreen — then `start..end` in order.
+    /// The first pass of a frame clears the window; the rest load it.
+    Direct {
+        composite: Option<u32>,
+        start: u32,
+        end: u32,
+    },
+    /// Onto the scratch texture: the `wipe` box first, which clears the
+    /// group's bounds, then `start..end` with the union blend.
+    Offscreen { wipe: u32, start: u32, end: u32 },
+}
+
+/// The compositing plan for `frame`: its prims with one wipe and one
+/// composite box appended per group, and the passes to draw them in. A
+/// group whose bounds miss the viewport is dropped, prims and all — no
+/// pass covers them. Always begins with a `Direct` pass, so there is
+/// one to clear the window with.
+pub fn passes(frame: &Frame, viewport: Viewport, scratch: u32) -> (Vec<Prim>, Vec<Pass>) {
+    let window = ScreenRect {
+        x: 0.0,
+        y: 0.0,
+        w: viewport.w as f32,
+        h: viewport.h as f32,
+    };
+    let mut prims = frame.prims.clone();
+    let mut passes = Vec::new();
+    let mut cursor = 0u32;
+    let mut pending: Option<u32> = None;
+    let direct = |passes: &mut Vec<Pass>, composite: Option<u32>, start: u32, end: u32| {
+        if passes.is_empty() || composite.is_some() || end > start {
+            passes.push(Pass::Direct {
+                composite,
+                start,
+                end,
+            });
+        }
+    };
+    for g in &frame.groups {
+        direct(&mut passes, pending.take(), cursor, g.start);
+        if let Some(bounds) = g.bounds.intersect(&window) {
+            let bounds = bounds.snapped();
+            let wipe = prims.len() as u32;
+            prims.push(Prim::rect(bounds, [0.0; 4]));
+            passes.push(Pass::Offscreen {
+                wipe,
+                start: g.start,
+                end: g.end,
+            });
+            pending = Some(prims.len() as u32);
+            prims.push(Prim::composite(bounds, viewport, scratch, g.opacity));
+        }
+        cursor = g.end;
+    }
+    direct(&mut passes, pending.take(), cursor, frame.prims.len() as u32);
+    (prims, passes)
+}
+
+/// Flattens the document into a frame in paint order — the layers'
+/// order, then document order within a layer, hidden layers left out.
+/// Rects paint fill first, then the four outline edges (constant px
+/// thickness, aligned inwards), all turned about the rect center by its
+/// rotation; paths become strokes, direct or composited as their tip
+/// demands; images become one textured box each, from `images`.
+pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame {
+    let mut frame = Frame::new();
+    for (_, element) in doc.painted() {
+        let mut out = Vec::new();
         match element {
             Element::Rect(r) => {
                 let (sx, sy) = view.world_to_screen(r.x, r.y);
@@ -512,7 +742,9 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Vec<P
                 }
             }
             Element::Path(p) => {
-                out.extend(path_prims(&p.curves, p.width, parse_color(&p.stroke), view));
+                let tip = Tip::of(p);
+                frame.stroke(path_prims(&p.curves, tip, parse_color(&p.stroke), view), tip);
+                continue;
             }
             Element::Image(i) => {
                 let (sx, sy) = view.world_to_screen(i.x, i.y);
@@ -532,16 +764,327 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Vec<P
                 });
             }
         }
+        frame.extend(out);
     }
-    out
+    frame
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{Camera, Path, Rect};
+    use crate::brush::Tip;
+    use crate::doc::{Camera, Layer, Path, Rect};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
+
+    fn tip(width: f64, opacity: f64, hardness: f64) -> Tip {
+        Tip {
+            width,
+            opacity,
+            hardness,
+        }
+    }
+
+    fn path_with(tip: Tip) -> Element {
+        Element::Path(Path {
+            id: "p".into(),
+            layer: String::new(),
+            curves: vec![[[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]],
+            stroke: "#000".into(),
+            width: tip.width,
+            opacity: tip.opacity,
+            hardness: tip.hardness,
+            rotation: 0.0,
+        })
+    }
+
+    #[test]
+    fn soft_radius_keeps_the_stroke_inside_its_width() {
+        // Width 8 at zoom 1 is a radius of 4 px. Hardness 1 is the crisp
+        // edge; hardness 0 spends the whole radius on the ramp, so the
+        // geometry shrinks to half and the ramp ends where the edge was.
+        let v = view(0.0, 0.0, 1.0);
+        assert_eq!(soft_radius(8.0, 1.0, &v), (4.0, 0.0));
+        assert_eq!(soft_radius(8.0, 0.0, &v), (2.0, 4.0));
+        assert_eq!(soft_radius(8.0, 0.5, &v), (3.0, 2.0));
+        // The one-pixel floor still applies to the nominal radius.
+        assert_eq!(soft_radius(2.0, 0.0, &view(0.0, 0.0, 0.1)), (0.25, 0.5));
+    }
+
+    #[test]
+    fn soft_stroke_prims_carry_the_feather() {
+        let v = view(0.0, 0.0, 1.0);
+        let got = stroke_prims(&[[0.0, 0.0], [10.0, 0.0]], tip(8.0, 1.0, 0.5), WHITE, &v);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, KIND_SEGMENT);
+        assert_eq!((got[0].radius, got[0].feather), (3.0, 2.0));
+        // A tap is a dot, and a dot can be soft too.
+        let dot = stroke_prims(&[[0.0, 0.0]], tip(8.0, 1.0, 0.0), WHITE, &v);
+        assert_eq!(dot.len(), 1);
+        assert_eq!(dot[0].kind, KIND_BOX);
+        assert_eq!((dot[0].radius, dot[0].feather), (2.0, 4.0));
+        assert_eq!(dot[0].geom, [48.0, 48.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn a_hard_opaque_path_is_direct_and_a_soft_one_is_a_group() {
+        let v = view(0.0, 0.0, 1.0);
+        let none = ImageSlots::new();
+        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none);
+        assert_eq!(direct.prims.len(), 1);
+        assert!(direct.groups.is_empty(), "the pencil needs no compositing");
+
+        let soft = document_prims(&doc_with(vec![path_with(tip(8.0, 1.0, 0.5))], &v), &v, &none);
+        assert_eq!(soft.prims.len(), 1);
+        assert_eq!(soft.groups.len(), 1);
+        assert_eq!((soft.groups[0].start, soft.groups[0].end), (0, 1));
+        assert_eq!(soft.groups[0].opacity, 1.0);
+
+        let faint = document_prims(&doc_with(vec![path_with(tip(2.0, 0.5, 1.0))], &v), &v, &none);
+        assert_eq!(faint.groups.len(), 1);
+        assert_eq!(faint.groups[0].opacity, 0.5);
+    }
+
+    #[test]
+    fn group_bounds_wrap_the_prims_and_their_ramp() {
+        let mut f = Frame::new();
+        f.extend([Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)]);
+        // A segment 10 long, 2 half-wide, with a 4 px ramp: the shader
+        // rasterizes max(feather, 1) / 2 + 1 = 3 px past the geometry.
+        f.group(
+            vec![
+                Prim::soft_segment((0.0, 0.0), (10.0, 0.0), 2.0, 4.0, WHITE),
+                Prim::soft_segment((10.0, 0.0), (10.0, 5.0), 2.0, 4.0, WHITE),
+            ],
+            0.5,
+        );
+        assert_eq!(f.prims.len(), 3);
+        assert_eq!(f.groups.len(), 1);
+        let g = &f.groups[0];
+        assert_eq!((g.start, g.end, g.opacity), (1, 3, 0.5));
+        assert_eq!(g.bounds, sr(-5.0, -5.0, 20.0, 15.0));
+        // Nothing to draw makes no group.
+        f.group(vec![], 0.5);
+        assert_eq!(f.groups.len(), 1);
+    }
+
+    #[test]
+    fn frame_stroke_goes_direct_or_grouped_by_the_tip() {
+        let prims = vec![Prim::segment((0.0, 0.0), (1.0, 0.0), 1.0, WHITE)];
+        let mut f = Frame::new();
+        f.stroke(prims.clone(), Tip::PENCIL);
+        assert!(f.groups.is_empty());
+        f.stroke(prims, tip(2.0, 0.25, 1.0));
+        assert_eq!(f.groups.len(), 1);
+        assert_eq!((f.groups[0].start, f.groups[0].end), (1, 2));
+        assert_eq!(f.groups[0].opacity, 0.25);
+    }
+
+    #[test]
+    fn frame_append_offsets_the_groups() {
+        let mut a = Frame::new();
+        a.extend([Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE); 3]);
+        let mut b = Frame::new();
+        b.group(vec![Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)], 0.5);
+        b.extend([Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)]);
+        a.append(b);
+        assert_eq!(a.prims.len(), 5);
+        assert_eq!((a.groups[0].start, a.groups[0].end), (3, 4));
+    }
+
+    #[test]
+    fn screen_rect_intersect_and_union() {
+        let a = sr(0.0, 0.0, 10.0, 10.0);
+        let b = sr(5.0, -5.0, 10.0, 10.0);
+        assert_eq!(a.intersect(&b), Some(sr(5.0, 0.0, 5.0, 5.0)));
+        assert_eq!(a.union(&b), sr(0.0, -5.0, 15.0, 15.0));
+        assert_eq!(a.intersect(&sr(20.0, 0.0, 5.0, 5.0)), None);
+        assert_eq!(a.intersect(&sr(10.0, 0.0, 5.0, 5.0)), None, "touching is empty");
+    }
+
+    fn flat() -> Prim {
+        Prim::rect(sr(10.0, 10.0, 5.0, 5.0), WHITE)
+    }
+
+    /// Five prims — `a, b | g1, g2 | c` — with the middle two grouped.
+    fn framed(group_at_x: f32, opacity: f32) -> Frame {
+        let mut f = Frame::new();
+        f.extend([flat(), flat()]);
+        f.group(
+            vec![
+                Prim::segment((group_at_x, 20.0), (group_at_x + 10.0, 20.0), 2.0, WHITE),
+                Prim::segment((group_at_x + 10.0, 20.0), (group_at_x + 10.0, 30.5), 2.0, WHITE),
+            ],
+            opacity,
+        );
+        f.extend([flat()]);
+        f
+    }
+
+    #[test]
+    fn passes_split_around_a_group() {
+        let f = framed(20.0, 0.5);
+        let (prims, plan) = passes(&f, VP, 9);
+        assert_eq!(
+            plan,
+            vec![
+                Pass::Direct {
+                    composite: None,
+                    start: 0,
+                    end: 2
+                },
+                Pass::Offscreen {
+                    wipe: 5,
+                    start: 2,
+                    end: 4
+                },
+                Pass::Direct {
+                    composite: Some(6),
+                    start: 4,
+                    end: 5
+                },
+            ]
+        );
+        assert_eq!(prims.len(), 7);
+        assert_eq!(&prims[..5], &f.prims[..]);
+        // The wipe is the group's bounds, snapped out to whole pixels,
+        // in transparent black.
+        let bounds = f.groups[0].bounds;
+        assert_eq!(bounds, sr(16.5, 16.5, 17.0, 17.5));
+        let snapped = sr(16.0, 16.0, 18.0, 18.0);
+        assert_eq!(prims[5], Prim::rect(snapped, [0.0; 4]));
+        // The composite lays the scratch's own pixels back over the same
+        // box at the group's opacity.
+        assert_eq!(prims[6].kind, KIND_IMAGE);
+        assert_eq!(prims[6].slot, 9);
+        assert_eq!(prims[6].geom, [16.0, 16.0, 18.0, 18.0]);
+        assert_eq!(prims[6].color, [0.5; 4]);
+        assert_eq!(prims[6].uv, [0.16, 0.16, 0.34, 0.34]);
+    }
+
+    #[test]
+    fn a_group_outside_the_viewport_is_dropped_with_its_prims() {
+        let f = framed(200.0, 0.5);
+        let (prims, plan) = passes(&f, VP, 9);
+        assert_eq!(prims.len(), 5, "no wipe, no composite");
+        assert_eq!(
+            plan,
+            vec![
+                Pass::Direct {
+                    composite: None,
+                    start: 0,
+                    end: 2
+                },
+                Pass::Direct {
+                    composite: None,
+                    start: 4,
+                    end: 5
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_half_outside_is_clipped_to_the_viewport() {
+        let f = framed(95.0, 1.0);
+        let (prims, plan) = passes(&f, VP, 9);
+        assert_eq!(plan.len(), 3);
+        assert_eq!(prims[5].geom, [91.0, 16.0, 9.0, 18.0]);
+        assert_eq!(prims[6].uv, [0.91, 0.16, 1.0, 0.34]);
+    }
+
+    #[test]
+    fn a_frame_without_groups_is_one_direct_pass() {
+        let mut f = Frame::new();
+        f.extend([flat(), flat()]);
+        let (prims, plan) = passes(&f, VP, 9);
+        assert_eq!(prims.len(), 2);
+        assert_eq!(
+            plan,
+            vec![Pass::Direct {
+                composite: None,
+                start: 0,
+                end: 2
+            }]
+        );
+        // Even an empty frame is one pass: it is what clears the window.
+        let (prims, plan) = passes(&Frame::new(), VP, 9);
+        assert!(prims.is_empty());
+        assert_eq!(
+            plan,
+            vec![Pass::Direct {
+                composite: None,
+                start: 0,
+                end: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_group_that_opens_the_frame_still_gets_a_clearing_pass_first() {
+        let mut f = Frame::new();
+        f.group(vec![Prim::segment((10.0, 10.0), (20.0, 10.0), 2.0, WHITE)], 0.5);
+        let (_, plan) = passes(&f, VP, 9);
+        assert_eq!(
+            plan,
+            vec![
+                Pass::Direct {
+                    composite: None,
+                    start: 0,
+                    end: 0
+                },
+                Pass::Offscreen {
+                    wipe: 1,
+                    start: 0,
+                    end: 1
+                },
+                Pass::Direct {
+                    composite: Some(2),
+                    start: 1,
+                    end: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn composite_samples_the_scratch_over_its_own_bounds() {
+        let p = Prim::composite(sr(10.0, 20.0, 30.0, 40.0), Viewport { w: 100, h: 200 }, 4, 0.75);
+        assert_eq!(p.kind, KIND_IMAGE);
+        assert_eq!(p.slot, 4);
+        assert_eq!(p.geom, [10.0, 20.0, 30.0, 40.0]);
+        assert_eq!(p.uv, [0.1, 0.1, 0.4, 0.3]);
+        // Premultiplied texels: opacity scales every channel.
+        assert_eq!(p.color, [0.75; 4]);
+        assert_eq!(p.angle, 0.0);
+        assert_eq!(p.radius, 0.0);
+    }
+
+    #[test]
+    fn painted_order_puts_a_lower_layer_first_and_hides_a_hidden_one() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut doc = doc_with(
+            vec![
+                rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff")),
+                rect(20.0, 0.0, 10.0, 10.0, None, Some("#000")),
+            ],
+            &v,
+        );
+        doc.layers.push(Layer {
+            id: "top".into(),
+            name: "Layer 2".into(),
+            visible: true,
+        });
+        // The white rect is first in `elements` but on the top layer.
+        doc.elements[0].set_layer("top");
+        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].color, [0.0, 0.0, 0.0, 1.0], "the lower layer paints first");
+        assert_eq!(got[1].color, WHITE);
+        doc.layers[1].visible = false;
+        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        assert_eq!(got.len(), 1, "a hidden layer paints nothing");
+    }
     const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
 
@@ -782,7 +1325,7 @@ mod tests {
         if let Element::Rect(r) = &mut el {
             r.rotation = 90.0;
         }
-        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new());
+        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new()).prims;
         assert_eq!(got.len(), 5);
         let a = std::f32::consts::FRAC_PI_2;
         // The fill is the unturned box, turned in place.
@@ -802,7 +1345,7 @@ mod tests {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))], &v);
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new()),
+            document_prims(&doc, &v, &ImageSlots::new()).prims,
             vec![Prim::rect(sr(50.0, 50.0, 10.0, 10.0), WHITE)]
         );
     }
@@ -813,7 +1356,7 @@ mod tests {
         let doc = doc_with(vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)], &v);
         let t = STROKE_PX;
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new()),
+            document_prims(&doc, &v, &ImageSlots::new()).prims,
             vec![
                 // top, bottom, left, right — aligned inwards.
                 Prim::rect(sr(60.0, 60.0, 20.0, t), WHITE),
@@ -831,7 +1374,7 @@ mod tests {
             vec![rect(0.0, 0.0, 10.0, 10.0, Some("#000"), Some("#fff"))],
             &v,
         );
-        let got = document_prims(&doc, &v, &ImageSlots::new());
+        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
         assert_eq!(got.len(), 5);
         assert_eq!(got[0].color, WHITE, "fill first");
         assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke after");
@@ -841,7 +1384,7 @@ mod tests {
     fn zoom_scales_rect_position_and_size() {
         let v = view(0.0, 0.0, 2.0);
         let doc = doc_with(vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new());
+        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
         assert_eq!(got[0].geom, [52.0, 50.0, 10.0, 10.0]);
     }
 
@@ -849,7 +1392,7 @@ mod tests {
     fn rect_without_any_color_still_paints_with_fallback() {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 4.0, 4.0, None, None)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new());
+        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].color, FALLBACK_COLOR);
     }
@@ -918,7 +1461,7 @@ mod tests {
         );
         // Width is in world units: 2 * zoom 2 = 4px wide → half-width 2.
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new()),
+            document_prims(&doc, &v, &ImageSlots::new()).prims,
             vec![Prim::segment(
                 (50.0, 50.0),
                 (68.0, 50.0),
@@ -931,14 +1474,14 @@ mod tests {
     #[test]
     fn path_prims_flatten_curves_in_screen_pixels() {
         let c = [[0.0, 0.0], [0.0, 55.0], [45.0, 100.0], [100.0, 100.0]];
-        let at_1x = path_prims(&[c], 2.0, WHITE, &view(0.0, 0.0, 1.0));
+        let at_1x = path_prims(&[c], Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0));
         assert!(at_1x.len() > 1, "a curve is more than one segment");
         let first = at_1x[0].geom;
         let last = at_1x[at_1x.len() - 1].geom;
         assert_eq!((first[0], first[1]), (50.0, 50.0));
         assert_eq!((last[2], last[3]), (150.0, 150.0));
         // Flattening tolerance is in pixels, so zooming in adds segments.
-        let at_4x = path_prims(&[c], 2.0, WHITE, &view(0.0, 0.0, 4.0));
+        let at_4x = path_prims(&[c], Tip::PENCIL, WHITE, &view(0.0, 0.0, 4.0));
         assert!(
             at_4x.len() > at_1x.len(),
             "{} vs {}",
@@ -951,7 +1494,7 @@ mod tests {
     fn path_prims_join_consecutive_cubics_without_a_gap() {
         let a = [[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]];
         let b = [[9.0, 0.0], [12.0, 0.0], [15.0, 0.0], [18.0, 0.0]];
-        let got = path_prims(&[a, b], 2.0, WHITE, &view(0.0, 0.0, 1.0));
+        let got = path_prims(&[a, b], Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0));
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0].geom, [50.0, 50.0, 59.0, 50.0]);
         assert_eq!(got[1].geom, [59.0, 50.0, 68.0, 50.0]);
@@ -960,7 +1503,7 @@ mod tests {
     #[test]
     fn stroke_width_never_drops_below_one_pixel() {
         let v = view(0.0, 0.0, 0.1);
-        let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], 2.0, WHITE, &v);
+        let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], Tip::PENCIL, WHITE, &v);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].radius, 0.5);
     }
@@ -983,7 +1526,7 @@ mod tests {
         let v = view(0.0, 0.0, 2.0);
         let slots = ImageSlots::from([(BLOB.to_owned(), 7)]);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 90.0)], &v);
-        let got = document_prims(&doc, &v, &slots);
+        let got = document_prims(&doc, &v, &slots).prims;
         // One instance: the SDF box carries the texture, so the turn, the
         // rounded corners and the antialiasing come from the same field.
         assert_eq!(got.len(), 1, "{got:?}");
@@ -1027,7 +1570,7 @@ mod tests {
         // element still has to occupy its box.
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 0.0)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new());
+        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].kind, KIND_BOX);
         assert_eq!(got[0].color, PLACEHOLDER_COLOR);

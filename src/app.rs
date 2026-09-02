@@ -16,11 +16,12 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::bitmap::{self, Bitmap};
+use crate::brush::Tip;
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
-use crate::editor::{Button, Change, Editor, Gesture, PEN_WIDTH, SCROLL_LINE_PX, Tool};
+use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Tool};
 use crate::geom::Corner;
 use crate::gestures;
 use crate::gfx::Gfx;
@@ -28,7 +29,7 @@ use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::project::{self, Origin, Project};
-use crate::scene::{self, ImageSlots, Prim, View, Viewport};
+use crate::scene::{self, Frame, ImageSlots, View, Viewport};
 use crate::select::{self, Handle};
 use crate::store::{self, Store};
 use crate::tabs::{TabHit, Tabs};
@@ -534,28 +535,30 @@ impl App {
     }
 
     /// Everything on screen, back to front: grid, document, the stroke in
-    /// progress, the selection frame and marquee, the dock.
-    fn frame(&self, view: &View) -> Vec<Prim> {
+    /// progress, the selection frame and marquee, the dock, the strip.
+    fn frame(&self, view: &View) -> Frame {
         // Before the window exists there are no textures, so every image
         // is a placeholder — which is what an empty map says.
         let none = ImageSlots::new();
         let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
-        let mut prims = grid::prims(view, self.theme.dot);
-        prims.extend(scene::document_prims(self.doc(), view, images));
+        let mut frame = Frame::new();
+        frame.extend(grid::prims(view, self.theme.dot));
+        frame.append(scene::document_prims(self.doc(), view, images));
         if let Some(points) = self.editor().stroke() {
-            prims.extend(scene::stroke_prims(points, PEN_WIDTH, self.theme.ink, view));
+            let tip = Tip::PENCIL;
+            frame.stroke(scene::stroke_prims(points, tip, self.theme.ink, view), tip);
         }
-        if let Some(frame) = self.editor().selection_frame(self.doc()) {
-            prims.extend(select::prims(&frame, view, &self.theme));
+        if let Some(selection) = self.editor().selection_frame(self.doc()) {
+            frame.extend(select::prims(&selection, view, &self.theme));
         }
         if let Some((a, b)) = self.editor().marquee() {
-            prims.extend(select::marquee_prims(a, b, &self.theme));
+            frame.extend(select::marquee_prims(a, b, &self.theme));
         }
-        prims.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
+        frame.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
-            prims.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
+            frame.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
         }
-        prims
+        frame
     }
 
     /// Stores what an editor input changed and redraws if anything did.
@@ -895,9 +898,9 @@ impl App {
             } => self.key(&logical_key, state),
             WindowEvent::RedrawRequested => {
                 let Some(view) = self.view() else { return };
-                let prims = self.frame(&view);
+                let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
-                match gfx.render(self.theme.bg, &prims) {
+                match gfx.render(self.theme.bg, &frame.prims) {
                     Ok(presented) => {
                         if let Some(n) = &mut self.smoke_frames_left {
                             if presented {
