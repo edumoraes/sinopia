@@ -4,6 +4,8 @@
 //! a handle beside it that opens and closes it. Pure — `app` asks where a
 //! click landed and what to draw.
 
+use std::collections::HashMap;
+
 use crate::doc::Layer;
 use crate::scene::{Prim, ScreenRect, Viewport, icon_prims, mix};
 use crate::text::Atlas;
@@ -91,6 +93,95 @@ pub struct Lift {
 pub fn ease(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// A card that changed rows and has not arrived: how far it has to
+/// come, and how much of that is left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Slide {
+    /// Where the card was, less where it now belongs, in physical px.
+    from: f32,
+    /// 1 the moment the stack moved, 0 once the card has arrived.
+    t: f32,
+}
+
+/// The cards on their way between two orders of the stack. A layer that
+/// changed rows travels from where it was at the lift's pace, so the
+/// stack opens and closes around a carried card instead of jumping.
+/// Pure — `app` owns one and tells it what the stack looks like and how
+/// much time has passed.
+#[derive(Debug, Default, Clone)]
+pub struct Slides {
+    on_the_way: HashMap<String, Slide>,
+    /// The order the stack was in when it was last looked at, bottom to
+    /// top. A stack it has never seen starts every card still, so a tab
+    /// switch does not slide a whole panel.
+    seen: Vec<String>,
+}
+
+impl Slides {
+    /// Takes in the stack's order; anything that changed rows starts
+    /// over from where it was. `row` is one row in physical px.
+    pub fn restack(&mut self, layers: &[Layer], row: f32) {
+        if self.seen.len() == layers.len()
+            && self.seen.iter().zip(layers).all(|(id, l)| *id == l.id)
+        {
+            return;
+        }
+        let order: Vec<String> = layers.iter().map(|l| l.id.clone()).collect();
+        let seen = std::mem::replace(&mut self.seen, order);
+        // Row positions run the other way: the top layer is row 0.
+        let was: HashMap<&str, usize> = seen
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), seen.len() - 1 - i))
+            .collect();
+        for (i, layer) in layers.iter().enumerate() {
+            let Some(&then) = was.get(layer.id.as_str()) else {
+                continue;
+            };
+            let now = layers.len() - 1 - i;
+            // Where it is on screen this instant, measured from the row
+            // it is about to belong to: a card that moves again while
+            // it is still travelling does not jump to start over.
+            let from = (then as f32 - now as f32) * row + self.offset(&layer.id);
+            if from == 0.0 {
+                self.on_the_way.remove(&layer.id);
+            } else {
+                self.on_the_way
+                    .insert(layer.id.clone(), Slide { from, t: 1.0 });
+            }
+        }
+    }
+
+    /// Ages every slide by `dt` seconds; the arrived are forgotten.
+    pub fn tick(&mut self, dt: f32) {
+        let step = dt / LIFT_SECONDS;
+        self.on_the_way.retain(|_, slide| {
+            slide.t -= step;
+            slide.t > 0.0
+        });
+    }
+
+    /// How far from its row a card still is, in physical px.
+    pub fn offset(&self, id: &str) -> f32 {
+        self.on_the_way
+            .get(id)
+            .map_or(0.0, |slide| slide.from * ease(slide.t))
+    }
+
+    /// Something is still travelling, so the next frame will differ.
+    pub fn moving(&self) -> bool {
+        !self.on_the_way.is_empty()
+    }
+}
+
+/// What the panel shows beyond the layers themselves: which one is
+/// active, which is in the pointer's hand, and what is still moving.
+pub struct Showing<'a> {
+    pub active: usize,
+    pub lift: Option<Lift>,
+    pub slides: &'a Slides,
 }
 
 /// One layer's row, with everything already measured.
@@ -268,13 +359,11 @@ impl Panel {
 
     /// Paint order: shadow, border, panel, the title and the buttons,
     /// then a card per row — and last, over the cards it is passing, the
-    /// one `lift` names.
-    #[allow(clippy::too_many_arguments)]
+    /// one `showing.lift` names.
     pub fn prims(
         &self,
         layers: &[Layer],
-        active: usize,
-        lift: Option<Lift>,
+        showing: &Showing,
         atlas: &Atlas,
         slot: u32,
         theme: &Theme,
@@ -302,14 +391,20 @@ impl Panel {
         ] {
             out.extend(icon_prims(icon, rect, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
         }
-        let carried = lift.map(|l| l.index);
+        let carried = showing.lift.map(|l| l.index);
         for row in self.rows.iter().filter(|r| Some(r.index) != carried) {
-            self.card_prims(row, layers, active, None, atlas, slot, theme, &mut out);
+            let dy = layers
+                .get(row.index)
+                .map_or(0.0, |l| showing.slides.offset(&l.id));
+            self.card_prims(row, layers, showing.active, None, dy, atlas, slot, theme, &mut out);
         }
-        if let Some(l) = lift
+        // A card in the hand is where the pointer put it, not where the
+        // stack says: it takes no slide.
+        if let Some(l) = showing.lift
             && let Some(row) = self.rows.iter().find(|r| r.index == l.index)
         {
-            self.card_prims(row, layers, active, Some(l), atlas, slot, theme, &mut out);
+            let a = showing.active;
+            self.card_prims(row, layers, a, Some(l), 0.0, atlas, slot, theme, &mut out);
         }
         out
     }
@@ -326,6 +421,7 @@ impl Panel {
         layers: &[Layer],
         active: usize,
         lift: Option<Lift>,
+        dy: f32,
         atlas: &Atlas,
         slot: u32,
         theme: &Theme,
@@ -379,14 +475,21 @@ impl Panel {
                 out.push(Prim::glyph(g.rect, g.uv, slot, ink));
             }
         }
-        // The whole card, contents and all, taken out of the stack.
-        if let Some(l) = lift
-            && e > 0.0
-        {
+        // Out of the stack in the pointer's hand, or still on its way to
+        // the row it now belongs to. Either way the whole card moves,
+        // contents and all.
+        let (k, angle, by) = match lift {
+            Some(l) if e > 0.0 => (
+                1.0 + LIFT_SCALE * e,
+                LIFT_TILT.to_radians() * e,
+                (-LIFT_LEFT * s * e, (self.free_y(l.y) - row.card.y) * e),
+            ),
+            _ => (1.0, 0.0, (0.0, dy)),
+        };
+        if k != 1.0 || angle != 0.0 || by.1 != 0.0 {
             let pivot = row.card.center();
-            let by = (-LIFT_LEFT * s * e, (self.free_y(l.y) - row.card.y) * e);
             for prim in &mut out[start..] {
-                *prim = prim.transformed(pivot, 1.0 + LIFT_SCALE * e, LIFT_TILT.to_radians() * e, by);
+                *prim = prim.transformed(pivot, k, angle, by);
             }
         }
     }
@@ -756,7 +859,7 @@ mod tests {
 
         // At rest: a card inside every row, on a hairline of the border
         // color, over a shadow of its own.
-        let prims = p.prims(&ls, 1, None, &a, 7, &theme);
+        let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
         for row in &p.rows {
             assert!(row.rect.contains_rect(&row.card), "the card sits in its row");
             assert!(body(&prims, row.card).is_some(), "row {} has a body", row.index);
@@ -789,7 +892,7 @@ mod tests {
         // Carried: the middle card takes the blue, a shadow with further
         // to fall, and goes last — over the cards it is passing.
         let card = p.rows[1].card;
-        let prims = p.prims(&ls, 1, Some(lift(1, card.y, 1.0)), &a, 7, &theme);
+        let prims = p.prims(&ls, &showing(1, Some(lift(1, card.y, 1.0))), &a, 7, &theme);
         let blue: Vec<&Prim> = prims.iter().filter(|q| q.color == theme.lifted).collect();
         assert_eq!(blue.len(), 1, "one card is in flight");
         // The panel's own shadow is the first prim; the rest are cards'.
@@ -806,6 +909,16 @@ mod tests {
 
     fn lift(index: usize, y: f32, t: f32) -> Lift {
         Lift { index, y, t }
+    }
+
+    /// Nothing on the move: what the panel shows at rest.
+    fn showing(active: usize, lift: Option<Lift>) -> Showing<'static> {
+        static STILL: std::sync::LazyLock<Slides> = std::sync::LazyLock::new(Slides::default);
+        Showing {
+            active,
+            lift,
+            slides: &STILL,
+        }
     }
 
     /// Where the carried card's body sits in the paint order. It is the
@@ -844,7 +957,7 @@ mod tests {
         let body_of = |prims: &[Prim]| prims[carried_body(prims, &theme)];
 
         // Fully lifted, asked to stay on its row's line.
-        let full = body_of(&p.prims(&ls, 1, Some(lift(1, card.y, 1.0)), &a, 7, &theme));
+        let full = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y, 1.0))), &a, 7, &theme));
         assert_eq!(full.geom[2], card.w * (1.0 + LIFT_SCALE), "grown");
         assert_eq!(full.geom[3], card.h * (1.0 + LIFT_SCALE));
         assert_eq!(full.angle, LIFT_TILT.to_radians(), "turned clockwise");
@@ -856,19 +969,88 @@ mod tests {
         assert_eq!(cy, was_y, "and nowhere in y that the pointer did not ask");
 
         // Half of it is half of everything: the transition has no step.
-        let half = body_of(&p.prims(&ls, 1, Some(lift(1, card.y, 0.5)), &a, 7, &theme));
+        let half = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y, 0.5))), &a, 7, &theme));
         assert_eq!(half.angle, LIFT_TILT.to_radians() * 0.5);
         assert_eq!(half.geom[2], card.w * (1.0 + LIFT_SCALE * 0.5));
         assert_eq!(half.geom[0] + half.geom[2] / 2.0, was_x - LIFT_LEFT * 0.5);
 
         // The card is where the pointer put it, not on any row's line.
-        let moved = body_of(&p.prims(&ls, 1, Some(lift(1, card.y + 11.0, 1.0)), &a, 7, &theme));
+        let moved = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y + 11.0, 1.0))), &a, 7, &theme));
         assert_eq!(moved.geom[1] + moved.geom[3] / 2.0, was_y + 11.0);
 
         // Nothing of the lift is drawn at rest.
-        let none = body_of(&p.prims(&ls, 1, Some(lift(1, card.y + 11.0, 0.0)), &a, 7, &theme));
+        let none = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y + 11.0, 0.0))), &a, 7, &theme));
         assert_eq!(none.bounds(), card);
         assert_eq!(none.angle, 0.0);
+    }
+
+    #[test]
+    fn the_cards_that_make_room_slide_from_where_they_were() {
+        let mut ls = layers(3);
+        let mut s = Slides::default();
+
+        // A stack it has never seen is already where it belongs.
+        s.restack(&ls, ROW);
+        assert!(!s.moving());
+        assert_eq!(s.offset("L1"), 0.0);
+
+        // The bottom layer goes to the top: it climbs two rows, and the
+        // two it passed each drop one. Every card starts from where it
+        // was, so the first frame after the move looks like the last
+        // frame before it.
+        ls.swap(0, 1);
+        ls.swap(1, 2);
+        s.restack(&ls, ROW);
+        assert!(s.moving());
+        assert_eq!(s.offset("L1"), 2.0 * ROW, "down two rows from the top");
+        assert_eq!(s.offset("L2"), -ROW);
+        assert_eq!(s.offset("L3"), -ROW);
+
+        // Halfway there is halfway back.
+        s.tick(LIFT_SECONDS / 2.0);
+        assert_eq!(s.offset("L1"), 2.0 * ROW * ease(0.5));
+        // A card that moves again while travelling carries what is left
+        // of the old trip into the new one, instead of jumping: L2 was
+        // 17px short of the bottom row and is now asked for the middle
+        // one, a row higher — so it starts a row below it, less what it
+        // had already come.
+        let carried = s.offset("L2");
+        assert_eq!(carried, -ROW * ease(0.5));
+        ls.swap(0, 1);
+        s.restack(&ls, ROW);
+        assert_eq!(s.offset("L2"), ROW + carried);
+
+        // And they all arrive.
+        s.tick(LIFT_SECONDS);
+        assert!(!s.moving());
+        assert_eq!(s.offset("L2"), 0.0);
+    }
+
+    #[test]
+    fn a_sliding_card_is_drawn_off_its_row() {
+        let theme = Theme::light();
+        let a = atlas();
+        let mut ls = layers(3);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let mut s = Slides::default();
+        s.restack(&ls, ROW);
+        ls.swap(1, 2);
+        s.restack(&ls, ROW);
+
+        let showing = Showing {
+            active: 0,
+            lift: None,
+            slides: &s,
+        };
+        let prims = p.prims(&ls, &showing, &a, 7, &theme);
+        for row in &p.rows {
+            let card = row.card.offset(0.0, s.offset(&ls[row.index].id));
+            assert!(
+                prims.iter().any(|q| q.bounds() == card && q.feather == 0.0),
+                "row {} is drawn where it is coming from",
+                row.index
+            );
+        }
     }
 
     #[test]
@@ -878,7 +1060,7 @@ mod tests {
         let ls = layers(3);
         let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
         let body_of = |y: f32| {
-            let prims = p.prims(&ls, 2, Some(lift(2, y, 1.0)), &a, 7, &theme);
+            let prims = p.prims(&ls, &showing(2, Some(lift(2, y, 1.0))), &a, 7, &theme);
             prims[carried_body(&prims, &theme)].bounds()
         };
         let top = p.rows[0].card;
@@ -898,7 +1080,7 @@ mod tests {
         let mut ls = layers(3);
         ls[0].visible = false;
         let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
-        let prims = p.prims(&ls, 1, None, &a, 7, &theme);
+        let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
         assert!(

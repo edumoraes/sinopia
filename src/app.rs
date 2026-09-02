@@ -38,6 +38,11 @@ use crate::tabs::{self, TabHit, Tabs};
 use crate::text::{Atlas, Font};
 use crate::theme::Theme;
 
+/// The longest step the panel's easing takes in one frame. A window
+/// that has been idle wakes with a huge gap since the last frame;
+/// without this, whatever just started would be over before it drew.
+const MAX_STEP: f32 = 0.05;
+
 /// How much of the ink the brush's ring is drawn with.
 const RING_ALPHA: f32 = 0.6;
 
@@ -109,6 +114,10 @@ struct App {
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
+    /// The cards making room around a carried one.
+    slides: layers::Slides,
+    /// When the panel was last eased, for everything on it that moves.
+    clock: Instant,
     /// Built once the scale factor is known, rebuilt when it changes.
     atlas: Option<Atlas>,
     atlas_slot: u32,
@@ -144,7 +153,6 @@ struct Carry {
     held: bool,
     /// The lift, 0 to 1, walked toward `held` by the clock.
     t: f32,
-    last: Instant,
 }
 
 impl Carry {
@@ -355,24 +363,36 @@ impl App {
         }
     }
 
-    /// Walks the lift toward where the button says it should be, and
-    /// forgets a card that has settled all the way back into its row.
-    fn tick_carry(&mut self) {
-        let Some(carry) = &mut self.carry else { return };
+    /// Moves the panel on by the time since the last frame: the lift
+    /// toward where the button says it should be, and the cards toward
+    /// the rows the stack now gives them. A card that has settled all
+    /// the way back into its row is forgotten.
+    ///
+    /// The step is capped, so a frame arriving after a long idle does
+    /// not finish an animation before its first frame is seen.
+    fn tick(&mut self) {
         let now = Instant::now();
-        let step = (now - carry.last).as_secs_f32() / layers::LIFT_SECONDS;
-        carry.last = now;
-        let target = if carry.held { 1.0 } else { 0.0 };
-        carry.t += (target - carry.t).clamp(-step, step);
-        if !carry.held && carry.t <= 0.0 {
-            self.carry = None;
+        let dt = (now - self.clock).as_secs_f32().min(MAX_STEP);
+        self.clock = now;
+        if let Some(carry) = &mut self.carry {
+            let target = if carry.held { 1.0 } else { 0.0 };
+            let step = dt / layers::LIFT_SECONDS;
+            carry.t += (target - carry.t).clamp(-step, step);
+            if !carry.held && carry.t <= 0.0 {
+                self.carry = None;
+            }
         }
+        let scale = self.view().map_or(1.0, |v| v.scale as f32);
+        let row = layers::ROW * scale;
+        let Open { project, .. } = &self.open[self.active];
+        self.slides.restack(&project.doc.layers, row);
+        self.slides.tick(dt);
     }
 
-    /// The lift is still moving, so the next frame will not match this
-    /// one and has to be asked for.
-    fn lifting(&self) -> bool {
-        self.carry.as_ref().is_some_and(|c| !c.held || c.t < 1.0)
+    /// Something on the panel is still moving, so the next frame will
+    /// not match this one and has to be asked for.
+    fn animating(&self) -> bool {
+        self.carry.as_ref().is_some_and(|c| !c.held || c.t < 1.0) || self.slides.moving()
     }
 
     fn redraw(&self) {
@@ -712,10 +732,14 @@ impl App {
         }
         if let (Some(panel), Some(atlas)) = (self.panel(view), self.atlas.as_ref()) {
             let active = self.editor().active_layer(self.doc());
+            let showing = layers::Showing {
+                active,
+                lift: self.carry.as_ref().map(Carry::lift),
+                slides: &self.slides,
+            };
             frame.extend(panel.prims(
                 &self.doc().layers,
-                active,
-                self.carry.as_ref().map(Carry::lift),
+                &showing,
                 atlas,
                 self.atlas_slot,
                 &self.theme,
@@ -792,7 +816,6 @@ impl App {
                         // A card caught while it was still settling
                         // carries on from where it had got to.
                         t: self.carry.as_ref().map_or(0.0, |c| c.t),
-                        last: Instant::now(),
                     });
                 }
                 self.redraw();
@@ -826,7 +849,6 @@ impl App {
             && let Some(carry) = self.carry.as_mut().filter(|c| c.held)
         {
             carry.held = false;
-            carry.last = Instant::now();
             self.redraw();
             return self.update_cursor_icon();
         }
@@ -980,7 +1002,6 @@ impl App {
         let carrying = match self.carry.as_mut().filter(|c| c.held) {
             Some(carry) => {
                 carry.held = false;
-                carry.last = Instant::now();
                 true
             }
             None => false,
@@ -1163,8 +1184,8 @@ impl App {
                 ..
             } => self.key(&logical_key, state),
             WindowEvent::RedrawRequested => {
-                self.tick_carry();
-                if self.lifting() {
+                self.tick();
+                if self.animating() {
                     self.redraw();
                 }
                 let Some(view) = self.view() else { return };
@@ -1301,6 +1322,8 @@ pub fn run(
         brush: Brush::default(),
         layers_shown: false,
         carry: None,
+        slides: layers::Slides::default(),
+        clock: Instant::now(),
         atlas: None,
         atlas_slot: 0,
         clipboard: None,
