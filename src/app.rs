@@ -34,6 +34,7 @@ use crate::project::{self, Origin, Project};
 use crate::scene::{self, Frame, ImageSlots, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
 use crate::store::{self, Store};
+use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
 use crate::text::{Atlas, Font};
 use crate::theme::Theme;
@@ -55,6 +56,8 @@ struct SharedState {
 enum UserEvent {
     Request(Request),
     Gesture(Gesture),
+    /// One step of the tablet's pen, straight off the protocol.
+    Pen(Pen),
     /// A clipboard image, already decoded off the loop. The original
     /// bytes go to the blob store; the texels go to the GPU.
     Pasted {
@@ -1052,6 +1055,22 @@ impl App {
         self.update_cursor_icon();
     }
 
+    /// The pen, as the pointer it is: it goes down the same funnel as
+    /// the mouse — strip, handle, panel, dock, canvas — so it picks tools
+    /// and drags cards as well as it draws. `zwp_tablet_tool_v2` speaks
+    /// surface-local logical px and the loop speaks physical, so the
+    /// window's scale factor is the whole of the conversion.
+    fn pen(&mut self, pen: Pen) {
+        let Some(scale) = self.window.as_ref().map(|w| w.scale_factor()) else {
+            return;
+        };
+        match pen {
+            Pen::Motion { x, y } => self.pointer_moved(x * scale, y * scale),
+            Pen::Down => self.pointer_pressed(Button::Left),
+            Pen::Up => self.pointer_released(Button::Left),
+        }
+    }
+
     fn gestured(&mut self, gesture: Gesture) {
         let Some(view) = self.view() else { return };
         let cursor = self.cursor.unwrap_or((
@@ -1149,6 +1168,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let sink = move |g| proxy.send_event(UserEvent::Gesture(g)).is_ok();
                 if let Err(e) = gestures::spawn(&window, Box::new(sink)) {
                     log::warn!("trackpad gestures unavailable: {e:#}");
+                }
+                let proxy = self.proxy.clone();
+                let sink = move |p| proxy.send_event(UserEvent::Pen(p)).is_ok();
+                if let Err(e) = tablet::spawn(&window, Box::new(sink)) {
+                    log::warn!("tablet unavailable: {e:#}");
                 }
                 let proxy = self.proxy.clone();
                 let sink: clipboard::Sink = std::sync::Arc::new(move |p: Paste| {
@@ -1286,6 +1310,7 @@ impl App {
         let req = match ev {
             UserEvent::Request(req) => req,
             UserEvent::Gesture(g) => return self.gestured(g),
+            UserEvent::Pen(p) => return self.pen(p),
             UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
         };

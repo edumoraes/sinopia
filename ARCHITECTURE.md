@@ -398,7 +398,12 @@ three-finger swipe come from `zwp_pointer_gestures_v1` — winit has no
 gesture events on Wayland, so `gestures` joins the window's connection as
 a guest client on a thread and forwards steps to the event loop (the same
 bridge shape as the IPC server). The camera persists in the document and
-is saved when a gesture ends.
+is saved when a gesture ends. The tablet's pen comes the same way:
+`tablet` binds `zwp_tablet_v2` as a guest on the window's connection and
+hands the loop the tool's movement and the touch of its tip, which enter
+the same funnel as the mouse's. Binding the protocol is what stops the
+compositor emulating a pointer for the pen, so the bridge has to carry
+the movement too, not only the parts a mouse has no words for.
 
 Select (`V`) landed: click, Shift+click and a marquee pick elements (the
 marquee takes whatever it overlaps). The selection frame — a lone
@@ -419,7 +424,8 @@ stroke saved as the same `path` the pencil writes. Layers landed with it:
 first, an eye each, the active one highlighted, up/down/add/remove in the
 header. New ink lands on the active layer; picking an element makes its
 layer active. Renaming waits for text input, layer opacity for the nested
-compositing pass, pressure for a `zwp_tablet_v2` bridge like `gestures`.
+compositing pass. The `zwp_tablet_v2` bridge landed and the pen draws;
+pressure waits on a stroke that can hold more than one width.
 
 Omaboard-style snap and connectors: phase 1.1. In the MVP an arrow is geometry, not a live binding.
 

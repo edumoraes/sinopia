@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 360 tests.
+- `cargo build` clean, `cargo test` with 386 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -115,6 +115,16 @@ selection, navigation, pasted images, and projects in tabs:
   for one unit (25%) in, right-click for one out;
   the wheel zooms at the cursor while Zoom is active; pinch on the
   trackpad. Range 10%–1000%. The camera is saved with the board.
+- Tablet: the pen draws. winit has no tablet events on Wayland, so a
+  bridge of its own binds `zwp_tablet_v2` on the window's connection —
+  the shape `gestures` uses — and hands the loop the tool's movement and
+  the touch of its tip. They go down the same funnel as the mouse, so the
+  pen picks a tool in the dock and drags a layer card as well as it
+  draws. The protocol sends the axes and the tip of one hardware event
+  one at a time, closed by a `frame`; the bridge holds them and sends the
+  movement before the touch, because a press has to land where its own
+  frame put the tool. Pressure arrives and is dropped: a stroke carries
+  one width, and nowhere yet to keep more.
 - Projects and tabs: several boards open at once, one tab each, with
   the board's name, a dot while it has unsaved changes, a close cross
   and a `+` for a new one. Every tab keeps its own tool, selection and
@@ -217,6 +227,7 @@ src/project.rs   a document's origin (file, board, untitled) and dirty flag (pur
 src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch a group is composited in
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
+src/tablet.rs    the tablet's pen (zwp_tablet_v2) → event loop bridge; its frame is tested
 src/clipboard.rs selection reads (wl_data_device) → event loop bridge
 src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
 assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
