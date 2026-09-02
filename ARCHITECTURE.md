@@ -426,9 +426,14 @@ what the canvas paints with (size, opacity, hardness), and the rest —
 flow, spacing, roundness, rotation and its dynamics, texture depth,
 randomness, pressure — describe a brush truthfully while the stamp
 engine that honours them is written. Picking the tool brings up the
-palette on the left: a row per brush showing a dab drawn with that
+palette on the left — a row per brush showing a dab drawn with that
 brush's own settings, and the size/opacity rail Sketchbook stands down
-its right edge. `Shift+B` shuts it without putting the brush down. A
+its right edge — and the properties bar under the strip: the name and
+the basic pair, with a chevron dropping the whole Advanced layout
+(Pressure, Stamp, Nib, Randomness) in two columns. A slider the canvas
+does not answer to is drawn muted rather than hidden: the brush keeps
+the value, and the bar does not promise ink it cannot lay. `Shift+B`
+shuts the palette without putting the brush down. A
 ring the size of the brush follows the pointer, and the stroke is saved
 as the same `path` the pencil writes. Layers landed with it:
 `Shift+L` shows and hides a panel on the right — one row per layer, top

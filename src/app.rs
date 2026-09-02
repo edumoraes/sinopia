@@ -31,6 +31,7 @@ use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::palette::{self, Palette};
+use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
 use crate::scene::{self, Frame, ImageSlots, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
@@ -67,6 +68,18 @@ enum UserEvent {
     },
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
+}
+
+/// A slider the pointer has taken, on whichever of the brush's two
+/// panels it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grab {
+    /// The palette's rail, standing on end: it is addressed by the
+    /// property, since the rail carries one each.
+    Rail(Property),
+    /// A field of the properties bar, by its place in the layout — the
+    /// same property sits somewhere else when the bar is folded.
+    Field(usize),
 }
 
 /// What happens to a project once the dialog it is waiting on answers.
@@ -120,10 +133,12 @@ struct App {
     palette_shown: bool,
     /// How far down the shelf the palette is looking, in physical px.
     palette_scroll: f32,
-    /// The rail slider the pointer took, if any. A slider keeps the
-    /// pointer until the button comes up, so a drag off the track still
-    /// moves it — as every slider does.
-    rail: Option<Property>,
+    /// Brush Properties' Advanced layout is dropped under the bar.
+    props_open: bool,
+    /// The slider the pointer took, if any. A slider keeps the pointer
+    /// until the button comes up, so a drag off the track still moves
+    /// it — as every slider does.
+    grab: Option<Grab>,
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
@@ -705,6 +720,22 @@ impl App {
         ))
     }
 
+    /// Brush Properties, when the brush is in hand. The bar is the
+    /// brush's own chrome like the palette; the chevron and the
+    /// palette's sliders button drop the Advanced layout under it.
+    fn props(&self, view: &View) -> Option<Props> {
+        if self.editor().tool() != Tool::Brush {
+            return None;
+        }
+        let top = (tabs::HEIGHT * view.scale as f32).round();
+        Some(Props::layout(
+            view.viewport,
+            view.scale,
+            top,
+            self.props_open,
+        ))
+    }
+
     /// The brush palette, when the brush is in hand and the panel is up.
     /// It is the tool's own chrome: no other tool has a use for it, so it
     /// comes and goes with the tool rather than being toggled on top of
@@ -713,7 +744,12 @@ impl App {
         if !self.palette_shown || self.editor().tool() != Tool::Brush {
             return None;
         }
-        let top = (tabs::HEIGHT * view.scale as f32).round();
+        // The panel hangs off whatever stands above it: the properties
+        // bar when the brush is in hand, the strip otherwise.
+        let top = self.props(view).map_or_else(
+            || (tabs::HEIGHT * view.scale as f32).round(),
+            |b| b.rect.y + b.rect.h,
+        );
         Some(Palette::layout(
             view.viewport,
             view.scale,
@@ -730,6 +766,7 @@ impl App {
         self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
             || self.handle(view).is_some_and(|h| h.hit(x, y))
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
+            || self.props(view).and_then(|b| b.hit(x, y)).is_some()
             || self.palette(view).and_then(|p| p.hit(x, y)).is_some()
             || self.dock(view).hit(x, y).is_some()
     }
@@ -747,17 +784,43 @@ impl App {
                 self.brushes.pin(next);
                 self.palette_scroll = 0.0;
             }
+            palette::Hit::Properties => self.props_open = !self.props_open,
             palette::Hit::Reset => self.brushes.reset(),
             palette::Hit::Rail(property) => {
-                self.rail = Some(property);
+                self.grab = Some(Grab::Rail(property));
                 self.drag_rail(pal, property, y);
             }
             palette::Hit::Panel => {}
         }
     }
 
+    /// A click on the properties bar.
+    fn props_hit(&mut self, bar: &Props, hit: props::Hit, x: f64) {
+        match hit {
+            props::Hit::Toggle => self.props_open = !self.props_open,
+            props::Hit::Slider(i) => {
+                self.grab = Some(Grab::Field(i));
+                self.drag_field(bar, i, x);
+            }
+            props::Hit::Bar => {}
+        }
+    }
+
+    /// The palette's rails run down the panel, so a drag on one reads
+    /// the pointer's y.
     fn drag_rail(&mut self, pal: &Palette, property: Property, y: f64) {
         let f = pal.fraction(property, y);
+        property.set_fraction(self.brushes.brush_mut(), f);
+    }
+
+    /// The bar's fields lie flat, so a drag on one reads the x. The
+    /// field is named by its place, and the bar may have been folded
+    /// since the press: a place that is no longer there writes nothing.
+    fn drag_field(&mut self, bar: &Props, field: usize, x: f64) {
+        let Some(property) = bar.fields.get(field).map(|f| f.property) else {
+            return;
+        };
+        let f = bar.fraction(field, x);
         property.set_fraction(self.brushes.brush_mut(), f);
     }
 
@@ -866,6 +929,16 @@ impl App {
                 &self.theme,
             ));
         }
+        if let (Some(bar), Some(atlas)) = (self.props(view), self.atlas.as_ref()) {
+            frame.extend(bar.prims(
+                self.brushes.name(),
+                self.brushes.edited(),
+                self.brushes.brush(),
+                atlas,
+                self.atlas_slot,
+                &self.theme,
+            ));
+        }
         if let (Some(handle), Some(atlas)) = (self.handle(view), self.atlas.as_ref()) {
             frame.extend(handle.prims(atlas, self.atlas_slot, &self.theme));
         }
@@ -961,6 +1034,15 @@ impl App {
             }
             return self.update_cursor_icon();
         }
+        if let Some(bar) = self.props(&view)
+            && let Some(hit) = bar.hit(x, y)
+        {
+            if button == Button::Left {
+                self.props_hit(&bar, hit, x);
+                self.redraw();
+            }
+            return self.update_cursor_icon();
+        }
         if let Some(pal) = self.palette(&view)
             && let Some(hit) = pal.hit(x, y)
         {
@@ -992,7 +1074,7 @@ impl App {
     fn pointer_released(&mut self, button: Button) {
         // A slider let go of is just let go of: the canvas never saw the
         // press, so there is nothing under it to end.
-        if button == Button::Left && self.rail.take().is_some() {
+        if button == Button::Left && self.grab.take().is_some() {
             self.redraw();
             return self.update_cursor_icon();
         }
@@ -1038,12 +1120,21 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
-        // A rail has the pointer to itself, wherever it wanders to.
-        if let Some(property) = self.rail {
-            if let Some(view) = self.view()
-                && let Some(pal) = self.palette(&view)
-            {
-                self.drag_rail(&pal, property, y);
+        // A slider has the pointer to itself, wherever it wanders to.
+        if let Some(grab) = self.grab {
+            if let Some(view) = self.view() {
+                match grab {
+                    Grab::Rail(property) => {
+                        if let Some(pal) = self.palette(&view) {
+                            self.drag_rail(&pal, property, y);
+                        }
+                    }
+                    Grab::Field(field) => {
+                        if let Some(bar) = self.props(&view) {
+                            self.drag_field(&bar, field, x);
+                        }
+                    }
+                }
             }
             self.redraw();
             return self.update_cursor_icon();
@@ -1532,7 +1623,8 @@ pub fn run(
         layers_shown: false,
         palette_shown: true,
         palette_scroll: 0.0,
-        rail: None,
+        props_open: false,
+        grab: None,
         carry: None,
         slides: layers::Slides::default(),
         scroll: 0.0,

@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 416 tests.
+- `cargo build` clean, `cargo test` with 428 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -65,6 +65,21 @@ selection, navigation, pasted images, and projects in tabs:
   and goes with the brush, and `Shift+B` shuts it without putting the
   brush down. A window too short for the shelf cuts it and the wheel
   walks the list.
+- Brush properties: a bar floats under the tab strip while the brush is
+  in hand — the brush's name, a dot after it while it is off the
+  settings it shipped with, and the pair a brush is judged by, Size and
+  Opacity, each a slider lying flat with its number beside it. The
+  chevron at its end drops Sketchbook's Advanced layout underneath, in
+  two columns: Pressure (Size, Opacity, Flow), Stamp (Spacing,
+  Roundness, Rotation), Nib (Edge, Depth) and Randomness (Size,
+  Opacity, Flow, Rotation, Spacing), each section under its own
+  heading. Closed and open never show the same slider twice, and the
+  line above does not move or change width when the panel drops. The
+  three the canvas actually paints with — Size, Opacity and Edge — are
+  drawn in ink; every other slider is muted. It still moves, and it
+  still writes the brush's own value, but the muting is the bar saying
+  it does not promise paint yet: the stamp engine those belong to is
+  still ahead. The palette's sliders button opens the same panel.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it
@@ -171,7 +186,8 @@ selection, navigation, pasted images, and projects in tabs:
   `--socket <path>`.
 
 Not yet: eraser, the text tool, shapes, undo, export, Omarchy plugin,
-thumbnails, layer opacity and renaming, brush colour and pressure.
+thumbnails, layer opacity and renaming, brush colour and pressure, and
+the stamp engine every muted slider in the properties bar waits on.
 
 ## Controls
 
@@ -181,9 +197,11 @@ thumbnails, layer opacity and renaming, brush colour and pressure.
 | `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
 | Left drag (Brush) | Paint with the brush; the stroke is fitted to Béziers on release |
 | `Shift` + `B` | Show / hide the brush palette |
+| Palette `≡` (sliders) / bar chevron | Open / fold Brush Properties |
+| Drag a slider in the bar | That property of the brush in hand |
 | Click a row in the palette | Take up that brush |
 | Drag the palette's rails | Brush size (top) / opacity (bottom) |
-| Palette `≡` / `↺` | The library's next shelf / the brush as it shipped |
+| Palette `▤` / `↺` | The library's next shelf / the brush as it shipped |
 | `[` / `]` (Brush selected) | Brush smaller / larger |
 | `{` / `}` (Brush selected) | Brush softer / harder |
 | `1`–`9`, `0` (Brush selected) | Brush opacity 10%–90%, 100% |
@@ -250,6 +268,7 @@ src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, s
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
 src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)
 src/palette.rs   brush palette on the left: layout, hit-test, rows and their dabs, the size/opacity rail (pure, tested)
+src/props.rs     brush properties bar under the strip: the basic pair, and the Advanced layout it drops (pure, tested)
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
@@ -263,9 +282,9 @@ assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay +
-brush ring + dock + brush palette + layers panel + tab strip →
-`scene`/`select`/`brush`/`palette`/`layers`/`tabs` prims, gathered in a
-`scene::Frame` whose groups mark
+brush ring + dock + brush palette + properties bar + layers panel + tab
+strip → `scene`/`select`/`brush`/`palette`/`props`/`layers`/`tabs`
+prims, gathered in a `scene::Frame` whose groups mark
 the strokes composited as one shape → `scene::passes` plans the render
 passes → `gfx` executes them.
 

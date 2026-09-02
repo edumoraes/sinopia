@@ -125,7 +125,6 @@ impl Default for Brush {
 
 /// Where a property sits in Brush Properties' Advanced tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // the properties bar heads its sections with these
 pub enum Section {
     Pressure,
     Stamp,
@@ -133,7 +132,6 @@ pub enum Section {
     Randomness,
 }
 
-#[allow(dead_code)] // the properties bar heads its sections with these
 impl Section {
     pub const ALL: [Section; 4] = [
         Section::Pressure,
@@ -155,7 +153,6 @@ impl Section {
 /// One slider on the brush's body: everything the panels need to draw it
 /// and to move it, so neither of them has to know a field's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // the properties bar draws the ones the palette leaves out
 pub enum Property {
     Size,
     Opacity,
@@ -174,7 +171,6 @@ pub enum Property {
 
 /// How a value is written out under its slider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // the properties bar writes the value under each one
 enum Unit {
     /// World units, whole numbers: the size.
     Px,
@@ -184,7 +180,6 @@ enum Unit {
     Degrees,
 }
 
-#[allow(dead_code)] // the properties bar reads all of it
 impl Property {
     pub const ALL: [Property; 13] = [
         Property::Size,
@@ -456,7 +451,6 @@ impl Preset {
 
     /// Whether it has been moved off what it shipped as. The properties
     /// bar says so, and offers to take it back.
-    #[allow(dead_code)] // the properties bar marks an edited brush
     pub fn edited(&self) -> bool {
         self.brush != self.factory
     }
@@ -529,7 +523,6 @@ impl Library {
         &mut self.sets[s].presets[i]
     }
 
-    #[allow(dead_code)] // the properties bar heads itself with the name
     pub fn name(&self) -> &str {
         &self.preset().name
     }
@@ -545,7 +538,6 @@ impl Library {
         &mut self.preset_mut().brush
     }
 
-    #[allow(dead_code)] // the properties bar marks an edited brush
     pub fn edited(&self) -> bool {
         self.preset().edited()
     }

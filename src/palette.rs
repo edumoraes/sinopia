@@ -62,6 +62,8 @@ pub enum Hit {
     Brush(usize),
     /// The header's set button: the next shelf of the library.
     Set,
+    /// The header's sliders: Brush Properties opens or folds away.
+    Properties,
     /// The header's undo arrow: the brush goes back to what it shipped as.
     Reset,
     /// One of the rail's sliders, grabbed anywhere along it.
@@ -94,6 +96,7 @@ pub struct Palette {
     pub rect: ScreenRect,
     pub header: ScreenRect,
     pub set: ScreenRect,
+    pub properties: ScreenRect,
     pub reset: ScreenRect,
     /// As much of the set as the window has room for.
     pub band: ScreenRect,
@@ -130,8 +133,12 @@ impl Palette {
             w: side,
             h: side,
         };
-        let set_button = ScreenRect {
+        let properties = ScreenRect {
             x: reset.x - side - BUTTON_GAP * s,
+            ..reset
+        };
+        let set_button = ScreenRect {
+            x: properties.x - side - BUTTON_GAP * s,
             ..reset
         };
 
@@ -216,6 +223,7 @@ impl Palette {
             },
             header,
             set: set_button,
+            properties,
             reset,
             band,
             rows,
@@ -247,6 +255,9 @@ impl Palette {
         }
         if self.set.contains(x, y) {
             return Some(Hit::Set);
+        }
+        if self.properties.contains(x, y) {
+            return Some(Hit::Properties);
         }
         if self.reset.contains(x, y) {
             return Some(Hit::Reset);
@@ -314,6 +325,7 @@ impl Palette {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink).clipped(self.header));
         }
         out.extend(icon_prims(SETS, self.set, s, theme.icon));
+        out.extend(icon_prims(SLIDERS, self.properties, s, theme.icon));
         out.extend(icon_prims(RESET, self.reset, s, theme.icon));
 
         for row in &self.rows {
@@ -396,6 +408,13 @@ const SETS: &[&[(f32, f32)]] = &[
     &[(3.0, 12.0), (12.0, 16.0), (21.0, 12.0)],
     &[(3.0, 17.0), (12.0, 21.0), (21.0, 17.0)],
 ];
+/// Sliders: what Brush Properties is.
+const SLIDERS: &[&[(f32, f32)]] = &[
+    &[(4.0, 8.0), (20.0, 8.0)],
+    &[(4.0, 16.0), (20.0, 16.0)],
+    &[(9.0, 5.5), (9.0, 10.5)],
+    &[(15.0, 13.5), (15.0, 18.5)],
+];
 /// An arrow curling back on itself: the brush as it shipped.
 const RESET: &[&[(f32, f32)]] = &[
     &[
@@ -423,6 +442,7 @@ mod tests {
     use super::*;
     use crate::brush::Library;
     use crate::scene::{KIND_SEGMENT, Viewport};
+    use crate::tabs::Tabs;
     use crate::text::{Atlas, Font};
 
     const VP: Viewport = Viewport { w: 900, h: 700 };
@@ -430,7 +450,7 @@ mod tests {
     const TOP: f32 = 34.0;
 
     fn atlas() -> Atlas {
-        Atlas::build(&Font::bundled(), 13)
+        Atlas::build(&Font::bundled(), Tabs::label_px(1.0))
     }
 
     fn set() -> Set {
@@ -504,6 +524,12 @@ mod tests {
         assert_eq!(p.hit(x, y), Some(Hit::Set));
         let (x, y) = mid(p.reset);
         assert_eq!(p.hit(x, y), Some(Hit::Reset));
+        let (x, y) = mid(p.properties);
+        assert_eq!(p.hit(x, y), Some(Hit::Properties));
+        for (a, b) in [(p.set, p.properties), (p.properties, p.reset)] {
+            assert!(a.x + a.w <= b.x, "the header's buttons overlap");
+            assert!(p.header.contains_rect(&a) && p.header.contains_rect(&b));
+        }
         let (x, y) = mid(p.sliders[0].track);
         assert_eq!(p.hit(x, y), Some(Hit::Rail(Property::Size)));
         let (x, y) = mid(p.sliders[1].track);

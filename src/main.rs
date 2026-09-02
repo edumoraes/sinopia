@@ -21,6 +21,7 @@ mod ipc;
 mod layers;
 mod palette;
 mod project;
+mod props;
 mod scene;
 mod select;
 mod store;
