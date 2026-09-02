@@ -20,6 +20,7 @@ mod project;
 mod scene;
 mod select;
 mod store;
+mod tabs;
 mod text;
 mod theme;
 
