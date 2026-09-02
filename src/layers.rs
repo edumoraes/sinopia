@@ -1,7 +1,8 @@
 //! Layers panel: the dock's chrome in a column on the right, one row per
 //! layer, top layer first. Sized in logical px, positioned in physical
-//! px, floating over the canvas and swallowing whatever it catches.
-//! Pure — `app` asks where a click landed and what to draw.
+//! px, floating over the canvas and swallowing whatever it catches, with
+//! a handle beside it that opens and closes it. Pure — `app` asks where a
+//! click landed and what to draw.
 
 use crate::doc::Layer;
 use crate::scene::{Prim, ScreenRect, Viewport, icon_prims};
@@ -20,8 +21,9 @@ pub const BUTTON: f32 = 24.0;
 pub const RADIUS: f32 = 12.0;
 const ROW_RADIUS: f32 = 6.0;
 const BUTTON_GAP: f32 = 2.0;
-/// Between the eye and the name.
-const EYE_GAP: f32 = 6.0;
+/// Between an icon and the label beside it: a row's eye and its name,
+/// the handle's chevron and its word.
+const LABEL_GAP: f32 = 6.0;
 /// The clickable area around the eye, past the box itself.
 const EYE_SLOP: f32 = 2.0;
 /// The 24-unit icon grid maps onto a box this big, centered in its button.
@@ -30,6 +32,12 @@ const ICON_STROKE: f32 = 1.5;
 const PUPIL: f32 = 2.5;
 const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
+/// The handle: a pill on the header's line.
+const HANDLE_H: f32 = 28.0;
+/// Inside the handle, left and right of what it carries.
+const HANDLE_PAD: f32 = 8.0;
+/// Between the handle and the panel it opens.
+const HANDLE_GAP: f32 = 8.0;
 const TITLE: &str = "Layers";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +142,7 @@ impl Panel {
                 w: side,
                 h: side,
             };
-            let label_x = (eye.x + eye.w + EYE_GAP * s).round();
+            let label_x = (eye.x + eye.w + LABEL_GAP * s).round();
             let room = rect.x + rect.w - PADDING * s - label_x;
             let label = if room > 0.0 {
                 atlas.truncate(&layer.name, room)
@@ -270,8 +278,104 @@ impl Panel {
     }
 }
 
+/// The panel's handle: a pill on the header's line that pulls the panel
+/// out and puts it back. Closed it hangs off the window's right edge and
+/// carries the panel's word, so the panel is findable without knowing
+/// `Shift+L`; open it steps aside to the panel's left, a chevron alone —
+/// the header behind it already says "Layers".
+#[derive(Debug, Clone, PartialEq)]
+pub struct Handle {
+    pub rect: ScreenRect,
+    /// True while the panel is up: the chevron points back.
+    pub open: bool,
+    chevron: ScreenRect,
+    /// Where the word's pen starts. Only drawn while closed.
+    label_x: f32,
+    scale: f32,
+}
+
+impl Handle {
+    /// `top` is where the strip ends, in physical px — the line the panel
+    /// measures from, so the two stay level.
+    pub fn layout(viewport: Viewport, scale: f64, top: f32, atlas: &Atlas, open: bool) -> Handle {
+        let s = scale as f32;
+        let icon = ICON_BOX * s;
+        let w = 2.0 * HANDLE_PAD * s
+            + icon
+            + if open {
+                0.0
+            } else {
+                LABEL_GAP * s + atlas.measure(TITLE)
+            };
+        let right = if open {
+            (viewport.w as f32 - (MARGIN + WIDTH) * s).round() - HANDLE_GAP * s
+        } else {
+            (viewport.w as f32 - MARGIN * s).round()
+        };
+        let x = right - w;
+        let h = HANDLE_H * s;
+        // On the header's line, so a click that toggles the panel does
+        // not slide the handle out from under the pointer that made it.
+        let y = (top + (MARGIN + PADDING + (HEADER - HANDLE_H) / 2.0) * s).round();
+        let chevron = ScreenRect {
+            x: x + HANDLE_PAD * s,
+            y: y + (h - icon) / 2.0,
+            w: icon,
+            h: icon,
+        };
+        Handle {
+            rect: ScreenRect { x, y, w, h },
+            open,
+            chevron,
+            label_x: (chevron.x + chevron.w + LABEL_GAP * s).round(),
+            scale: s,
+        }
+    }
+
+    pub fn hit(&self, x: f64, y: f64) -> bool {
+        self.rect.contains(x, y)
+    }
+
+    /// Paint order: shadow, border, body, the chevron, and — closed — the
+    /// word it opens.
+    pub fn prims(&self, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
+        let s = self.scale;
+        let radius = self.rect.h / 2.0;
+        let mut out = vec![
+            Prim::soft(
+                self.rect.offset(0.0, SHADOW_OFFSET * s),
+                radius,
+                SHADOW_FEATHER * s,
+                theme.shadow,
+            ),
+            Prim::rounded(self.rect.inset(-s), radius + s, theme.border),
+            Prim::rounded(self.rect, radius, theme.panel),
+        ];
+        let chevron = if self.open { CHEVRON_RIGHT } else { CHEVRON_LEFT };
+        out.extend(icon_prims(
+            chevron,
+            self.chevron,
+            24.0,
+            ICON_BOX,
+            ICON_STROKE,
+            s,
+            theme.icon,
+        ));
+        if !self.open {
+            let baseline = atlas.baseline_in(self.rect);
+            for g in atlas.layout(TITLE, self.label_x, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
+            }
+        }
+        out
+    }
+}
+
 // Icons as polylines on a 24×24 grid, like the dock's.
 const UP: &[&[(f32, f32)]] = &[&[(6.0, 15.0), (12.0, 9.0), (18.0, 15.0)]];
+/// The handle's arrow: out the way the panel comes, and back.
+const CHEVRON_LEFT: &[&[(f32, f32)]] = &[&[(15.0, 6.0), (9.0, 12.0), (15.0, 18.0)]];
+const CHEVRON_RIGHT: &[&[(f32, f32)]] = &[&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)]];
 const DOWN: &[&[(f32, f32)]] = &[&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]];
 const PLUS: &[&[(f32, f32)]] = &[&[(12.0, 5.0), (12.0, 19.0)], &[(5.0, 12.0), (19.0, 12.0)]];
 /// A bin: lid, handle, tapered body.
@@ -430,6 +534,100 @@ mod tests {
         let p = panel(Viewport { w: 1200, h }, 1.0, 3);
         assert!(p.rows.is_empty());
         assert_eq!(p.drop_index(100.0), None);
+    }
+
+    fn handle(viewport: Viewport, scale: f64, open: bool) -> Handle {
+        Handle::layout(viewport, scale, 34.0 * scale as f32, &atlas(), open)
+    }
+
+    #[test]
+    fn the_handle_hangs_off_the_panel_open_and_off_the_edge_closed() {
+        let closed = handle(VP, 1.0, false);
+        let open = handle(VP, 1.0, true);
+        let p = panel(VP, 1.0, 2);
+
+        // Both sit on the header's line, so the toggle does not make the
+        // handle jump up or down under the pointer that just clicked it.
+        assert_eq!(closed.rect.y, open.rect.y);
+        assert_eq!(closed.rect.h, HANDLE_H);
+        assert_eq!(open.rect.h, HANDLE_H);
+        let (_, hy) = closed.rect.center();
+        let (_, header_y) = p.header.center();
+        assert!((hy - header_y).abs() < 1.0, "centered on the header's line");
+
+        // Closed there is no panel, so it takes the panel's own margin
+        // from the right edge; open it steps aside and leaves it clear.
+        assert_eq!(closed.rect.x + closed.rect.w, 1200.0 - MARGIN);
+        assert_eq!(open.rect.x + open.rect.w, p.rect.x - HANDLE_GAP);
+        assert!(
+            open.rect.w < closed.rect.w,
+            "the closed one is wider by the word it carries"
+        );
+        assert!(closed.rect.w > 2.0 * HANDLE_PAD + ICON_BOX + atlas().measure(TITLE));
+    }
+
+    #[test]
+    fn handle_layout_scales_with_the_display() {
+        let h = handle(VP, 2.0, false);
+        assert_eq!(h.rect.h, 2.0 * HANDLE_H);
+        assert_eq!(h.rect.x + h.rect.w, 1200.0 - 2.0 * MARGIN);
+    }
+
+    #[test]
+    fn the_handle_takes_a_click_and_nothing_beside_it() {
+        let h = handle(VP, 1.0, false);
+        let (cx, cy) = h.rect.center();
+        assert!(h.hit(f64::from(cx), f64::from(cy)));
+        assert!(!h.hit(f64::from(h.rect.x) - 2.0, f64::from(cy)));
+        assert!(!h.hit(f64::from(cx), f64::from(h.rect.y) - 2.0));
+    }
+
+    /// The x both strokes of a chevron touch — its tip.
+    fn chevron_tip(prims: &[Prim]) -> f32 {
+        let segs: Vec<&Prim> = prims.iter().filter(|q| q.kind == KIND_SEGMENT).collect();
+        assert_eq!(segs.len(), 2, "two strokes make a chevron");
+        assert_eq!(
+            (segs[0].geom[2], segs[0].geom[3]),
+            (segs[1].geom[0], segs[1].geom[1]),
+            "they meet at the tip"
+        );
+        segs[0].geom[2]
+    }
+
+    #[test]
+    fn the_handle_points_out_when_closed_and_back_when_open() {
+        let theme = Theme::light();
+        let a = atlas();
+
+        let closed = handle(VP, 1.0, false);
+        let prims = closed.prims(&a, 7, &theme);
+        assert!(prims[0].feather > 0.0, "soft shadow goes first");
+        assert!(
+            prims
+                .iter()
+                .any(|q| q.color == theme.panel && q.bounds() == closed.rect),
+            "handle body"
+        );
+        let glyphs = prims
+            .iter()
+            .filter(|q| q.kind == KIND_IMAGE && q.slot == 7)
+            .count();
+        assert_eq!(glyphs, TITLE.chars().count(), "it says what it opens");
+        assert!(
+            chevron_tip(&prims) < closed.chevron.center().0,
+            "the arrow points left, the way the panel comes out"
+        );
+
+        let open = handle(VP, 1.0, true);
+        let prims = open.prims(&a, 7, &theme);
+        assert!(
+            !prims.iter().any(|q| q.kind == KIND_IMAGE),
+            "the panel's header already says 'Layers'"
+        );
+        assert!(
+            chevron_tip(&prims) > open.chevron.center().0,
+            "the arrow points back, the way the panel goes"
+        );
     }
 
     #[test]

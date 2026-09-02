@@ -28,7 +28,7 @@ use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
-use crate::layers::{Panel, PanelHit};
+use crate::layers::{self, Panel, PanelHit};
 use crate::project::{self, Origin, Project};
 use crate::scene::{self, Frame, ImageSlots, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
@@ -103,7 +103,7 @@ struct App {
     /// What `B` paints with. One brush for the window, whichever tab is
     /// in front, as in Photoshop.
     brush: Brush,
-    /// `Shift+L`: the layers panel is up.
+    /// `Shift+L`, or the handle beside it: the layers panel is up.
     layers_shown: bool,
     /// A layer row was picked up in the panel and follows the pointer
     /// through the stack until the button comes back up.
@@ -542,11 +542,27 @@ impl App {
         ))
     }
 
-    /// Whether `screen` is over the strip, the panel or the dock rather
-    /// than the canvas.
+    /// The panel's handle, once there is an atlas to letter it with. It
+    /// is on screen whether the panel is up or not — closed, it is the
+    /// only thing that says the panel is there.
+    fn handle(&self, view: &View) -> Option<layers::Handle> {
+        let atlas = self.atlas.as_ref()?;
+        let top = (tabs::HEIGHT * view.scale as f32).round();
+        Some(layers::Handle::layout(
+            view.viewport,
+            view.scale,
+            top,
+            atlas,
+            self.layers_shown,
+        ))
+    }
+
+    /// Whether `screen` is over the strip, the handle, the panel or the
+    /// dock rather than the canvas.
     fn over_chrome(&self, view: &View, screen: (f64, f64)) -> bool {
         let (x, y) = screen;
         self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
+            || self.handle(view).is_some_and(|h| h.hit(x, y))
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
             || self.dock(view).hit(x, y).is_some()
     }
@@ -607,7 +623,7 @@ impl App {
 
     /// Everything on screen, back to front: grid, document, the stroke in
     /// progress, the selection frame and marquee, the brush's ring, the
-    /// dock, the layers panel, the strip.
+    /// dock, the layers handle and panel, the strip.
     fn frame(&self, view: &View) -> Frame {
         // Before the window exists there are no textures, so every image
         // is a placeholder — which is what an empty map says.
@@ -642,6 +658,9 @@ impl App {
             ));
         }
         frame.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
+        if let (Some(handle), Some(atlas)) = (self.handle(view), self.atlas.as_ref()) {
+            frame.extend(handle.prims(atlas, self.atlas_slot, &self.theme));
+        }
         if let (Some(panel), Some(atlas)) = (self.panel(view), self.atlas.as_ref()) {
             let active = self.editor().active_layer(self.doc());
             frame.extend(panel.prims(
@@ -683,7 +702,8 @@ impl App {
         let (Some(view), Some((x, y))) = (self.view(), self.cursor) else {
             return;
         };
-        // The strip is over the panel is over the dock is over the canvas.
+        // The strip is over the handle is over the panel is over the
+        // dock is over the canvas.
         if let Some(hit) = self.tabs(&view).and_then(|t| t.hit(x, y)) {
             if button == Button::Left {
                 match hit {
@@ -692,6 +712,15 @@ impl App {
                     TabHit::New => self.open_project(Project::untitled()),
                     TabHit::Strip => {}
                 }
+            }
+            return self.update_cursor_icon();
+        }
+        if let Some(handle) = self.handle(&view)
+            && handle.hit(x, y)
+        {
+            if button == Button::Left {
+                self.layers_shown = !handle.open;
+                self.redraw();
             }
             return self.update_cursor_icon();
         }
