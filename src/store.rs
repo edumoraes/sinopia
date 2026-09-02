@@ -113,6 +113,26 @@ impl Store {
         Ok(index.boards)
     }
 
+    /// Writes `bytes` under `blobs/<sha256>` and returns that hash.
+    /// Content addressed: the same bytes are the same file, so pasting a
+    /// screenshot twice costs one blob.
+    pub fn write_blob(&self, bytes: &[u8]) -> anyhow::Result<String> {
+        let hash = sha256_hex(bytes);
+        let path = self.root.join("blobs").join(&hash);
+        if !path.exists() {
+            write_private_atomic(&path, bytes)?;
+        }
+        Ok(hash)
+    }
+
+    /// Reads the blob `hash` names. The name arrives from a board on disk,
+    /// so it is checked before it becomes a path (§9.3).
+    pub fn read_blob(&self, hash: &str) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(crate::doc::is_blob_hash(hash), "not a blob name: {hash:?}");
+        let path = self.root.join("blobs").join(hash);
+        std::fs::read(&path).with_context(|| format!("reading blob {hash}"))
+    }
+
     fn board_path(&self, id: &str) -> PathBuf {
         self.root.join("boards").join(format!("{id}.json"))
     }
@@ -186,6 +206,18 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     }
     std::fs::rename(&tmp, path).with_context(|| format!("renaming to {path:?}"))?;
     Ok(())
+}
+
+/// sha256 of `bytes`, in lowercase hex — a blob's name.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 fn unix_now() -> u64 {
@@ -332,5 +364,56 @@ mod tests {
             data_root(Some(""), "/home/edu"),
             PathBuf::from("/home/edu/.local/share/omawhite")
         );
+    }
+
+    #[test]
+    fn writing_a_blob_names_it_by_its_sha256() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let hash = store.write_blob(b"omawhite").unwrap();
+        assert_eq!(
+            hash,
+            "6d72b889920b8d63704bf588d33b5a9d09ac16f33f7a8a201dcd618136cd94bf"
+        );
+        let path = store.root().join("blobs").join(&hash);
+        assert_eq!(std::fs::read(&path).unwrap(), b"omawhite");
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn writing_the_same_bytes_twice_keeps_one_blob() {
+        // Content addressing is the point: pasting the same screenshot
+        // twice costs one file.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let a = store.write_blob(b"same").unwrap();
+        let b = store.write_blob(b"same").unwrap();
+        assert_eq!(a, b);
+        let blobs: Vec<_> = std::fs::read_dir(store.root().join("blobs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(blobs.len(), 1, "{blobs:?}");
+    }
+
+    #[test]
+    fn blobs_roundtrip_through_read_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let bytes = vec![0u8, 1, 2, 250, 251, 255];
+        let hash = store.write_blob(&bytes).unwrap();
+        assert_eq!(store.read_blob(&hash).unwrap(), bytes);
+    }
+
+    #[test]
+    fn reading_a_blob_whose_name_is_not_a_hash_is_an_error() {
+        // The name reaches here from a board on disk; it never becomes a
+        // path without being checked (§9.3).
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        for name in ["../index.json", "..", "", "boards/x"] {
+            let err = store.read_blob(name).unwrap_err().to_string();
+            assert!(err.contains("blob"), "{name:?}: {err}");
+        }
     }
 }

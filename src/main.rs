@@ -4,6 +4,7 @@
 //! process exits; otherwise this process becomes the main instance.
 
 mod app;
+mod bitmap;
 mod cli;
 mod curve;
 mod doc;
