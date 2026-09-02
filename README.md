@@ -47,10 +47,14 @@ selection, navigation, pasted images, and projects in tabs:
   does the same from the keyboard. The panel is one card per layer, top
   first — a hairline border and a light shadow each, the active one
   filled — with an eye to show or hide it; the header has up, down, add
-  and remove. A card dragged by its name carries its layer through the
-  stack, live: it takes a blue outline and a shadow with further to
-  fall, draws over the cards it passes, the rest reorder under the
-  pointer, and the layer is left where the button comes up. New ink and
+  and remove. A card dragged by its name leaves the stack and follows
+  the pointer instead of stepping from row to row: it grows a little,
+  turns a couple of degrees clockwise, leans toward the canvas, takes a
+  blue outline and a shadow with further to fall, and draws over the
+  cards it passes. The lift eases in over about a seventh of a second
+  and runs backwards when the card is let go, so nothing snaps. The
+  stack reorders live under the pointer, and the layer is left where
+  the button comes up. New ink and
   pastes land on the active layer; picking an
   element with the select tool makes its layer active. A hidden layer
   paints nothing and cannot be hit or marqueed; hiding one deselects

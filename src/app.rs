@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
@@ -105,9 +106,9 @@ struct App {
     brush: Brush,
     /// `Shift+L`, or the handle beside it: the layers panel is up.
     layers_shown: bool,
-    /// A layer row was picked up in the panel and follows the pointer
-    /// through the stack until the button comes back up.
-    layer_drag: bool,
+    /// The layer card the pointer picked up, if any. It outlives the
+    /// release, easing back into the stack.
+    carry: Option<Carry>,
     /// Built once the scale factor is known, rebuilt when it changes.
     atlas: Option<Atlas>,
     atlas_slot: u32,
@@ -126,6 +127,34 @@ struct App {
     /// Smoke-test mode: exit cleanly after N presented frames.
     smoke_frames_left: Option<u32>,
     exit_error: Option<anyhow::Error>,
+}
+
+/// A layer card in the pointer's hand: which row it came from, where it
+/// is being carried, and how far into the lift it is. It stays after the
+/// button comes up, running the lift backwards until the card is a row
+/// again.
+struct Carry {
+    /// Into the document's layers, kept level with the active layer.
+    index: usize,
+    /// Between the press and the card's top edge: what it is held by.
+    grab_dy: f32,
+    /// Where the card's top edge is asked to be, in physical px.
+    y: f32,
+    /// The button is still down.
+    held: bool,
+    /// The lift, 0 to 1, walked toward `held` by the clock.
+    t: f32,
+    last: Instant,
+}
+
+impl Carry {
+    fn lift(&self) -> layers::Lift {
+        layers::Lift {
+            index: self.index,
+            y: self.y,
+            t: self.t,
+        }
+    }
 }
 
 impl App {
@@ -324,6 +353,26 @@ impl App {
         if was_clean {
             self.retitle();
         }
+    }
+
+    /// Walks the lift toward where the button says it should be, and
+    /// forgets a card that has settled all the way back into its row.
+    fn tick_carry(&mut self) {
+        let Some(carry) = &mut self.carry else { return };
+        let now = Instant::now();
+        let step = (now - carry.last).as_secs_f32() / layers::LIFT_SECONDS;
+        carry.last = now;
+        let target = if carry.held { 1.0 } else { 0.0 };
+        carry.t += (target - carry.t).clamp(-step, step);
+        if !carry.held && carry.t <= 0.0 {
+            self.carry = None;
+        }
+    }
+
+    /// The lift is still moving, so the next frame will not match this
+    /// one and has to be asked for.
+    fn lifting(&self) -> bool {
+        self.carry.as_ref().is_some_and(|c| !c.held || c.t < 1.0)
     }
 
     fn redraw(&self) {
@@ -666,7 +715,7 @@ impl App {
             frame.extend(panel.prims(
                 &self.doc().layers,
                 active,
-                self.layer_drag,
+                self.carry.as_ref().map(Carry::lift),
                 atlas,
                 self.atlas_slot,
                 &self.theme,
@@ -725,12 +774,28 @@ impl App {
             }
             return self.update_cursor_icon();
         }
-        if let Some(hit) = self.panel(&view).and_then(|p| p.hit(x, y)) {
+        if let Some(panel) = self.panel(&view)
+            && let Some(hit) = panel.hit(x, y)
+        {
             if button == Button::Left {
                 self.panel_hit(hit);
-                // A row taken by its name is picked up: the layer it
-                // names follows the pointer through the stack.
-                self.layer_drag = matches!(hit, PanelHit::Select(_));
+                // A card taken by its name is picked up by the grip the
+                // press made, and follows the pointer from there.
+                if let PanelHit::Select(i) = hit
+                    && let Some(row) = panel.rows.iter().find(|r| r.index == i)
+                {
+                    self.carry = Some(Carry {
+                        index: i,
+                        grab_dy: y as f32 - row.card.y,
+                        y: row.card.y,
+                        held: true,
+                        // A card caught while it was still settling
+                        // carries on from where it had got to.
+                        t: self.carry.as_ref().map_or(0.0, |c| c.t),
+                        last: Instant::now(),
+                    });
+                }
+                self.redraw();
             }
             return self.update_cursor_icon();
         }
@@ -754,11 +819,14 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
-        // A dragged layer is left where the pointer put it; the canvas
-        // never saw the press, so it has nothing to end. The card does
-        // settle back onto the panel, and that is a frame.
-        if self.layer_drag && button == Button::Left {
-            self.layer_drag = false;
+        // A carried layer is left where the pointer put it; the canvas
+        // never saw the press, so it has nothing to end. The card runs
+        // the lift backwards into its row from here.
+        if button == Button::Left
+            && let Some(carry) = self.carry.as_mut().filter(|c| c.held)
+        {
+            carry.held = false;
+            carry.last = Instant::now();
             self.redraw();
             return self.update_cursor_icon();
         }
@@ -773,16 +841,25 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
-        // A layer being dragged has the pointer to itself: it moves to
-        // whichever row is under it, and the canvas sees nothing.
-        if self.layer_drag {
+        // A carried layer has the pointer to itself: the card follows
+        // it, the stack opens at whichever row is under it, and the
+        // canvas sees nothing.
+        if self.carry.as_ref().is_some_and(|c| c.held) {
+            if let Some(carry) = &mut self.carry {
+                carry.y = y as f32 - carry.grab_dy;
+            }
             if let Some(view) = self.view()
                 && let Some(index) = self.panel(&view).and_then(|p| p.drop_index(y))
             {
                 let (editor, doc) = self.active();
                 let change = editor.move_layer_to(doc, index);
                 self.apply(change);
+                let index = self.editor().active_layer(self.doc());
+                if let Some(carry) = &mut self.carry {
+                    carry.index = index;
+                }
             }
+            self.redraw();
             return self.update_cursor_icon();
         }
         if let Some(view) = self.view() {
@@ -898,9 +975,16 @@ impl App {
     /// overrides and whatever gesture they were driving.
     fn focus_lost(&mut self) {
         // A layer the pointer was carrying stays where the window last
-        // saw it: the drag was applied as it went, so there is nothing
-        // half-done to put back. Its card still has to settle.
-        let carrying = std::mem::take(&mut self.layer_drag);
+        // saw it: the reorder was applied as it went, so there is
+        // nothing half-done to put back. The card still has to settle.
+        let carrying = match self.carry.as_mut().filter(|c| c.held) {
+            Some(carry) => {
+                carry.held = false;
+                carry.last = Instant::now();
+                true
+            }
+            None => false,
+        };
         let (editor, doc) = self.active();
         editor.hold_space(false);
         editor.hold_ctrl(false);
@@ -923,8 +1007,9 @@ impl App {
             ),
             _ => (false, None, self.editor().active_tool()),
         };
-        // A layer row and the canvas are both held in a closed hand.
-        let icon = if self.layer_drag || self.editor().is_panning() {
+        // A layer card and the canvas are both held in a closed hand.
+        let held = self.carry.as_ref().is_some_and(|c| c.held);
+        let icon = if held || self.editor().is_panning() {
             CursorIcon::Grabbing
         } else if self.editor().is_drawing() {
             CursorIcon::Crosshair
@@ -1078,6 +1163,10 @@ impl App {
                 ..
             } => self.key(&logical_key, state),
             WindowEvent::RedrawRequested => {
+                self.tick_carry();
+                if self.lifting() {
+                    self.redraw();
+                }
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
@@ -1211,7 +1300,7 @@ pub fn run(
         font: Font::bundled(),
         brush: Brush::default(),
         layers_shown: false,
-        layer_drag: false,
+        carry: None,
         atlas: None,
         atlas_slot: 0,
         clipboard: None,

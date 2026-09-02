@@ -5,7 +5,7 @@
 //! click landed and what to draw.
 
 use crate::doc::Layer;
-use crate::scene::{Prim, ScreenRect, Viewport, icon_prims};
+use crate::scene::{Prim, ScreenRect, Viewport, icon_prims, mix};
 use crate::text::Atlas;
 use crate::theme::Theme;
 
@@ -30,6 +30,13 @@ const CARD_SHADOW_FEATHER: f32 = 4.0;
 const LIFT_SHADOW_OFFSET: f32 = 4.0;
 const LIFT_SHADOW_FEATHER: f32 = 12.0;
 const LIFT_BORDER: f32 = 2.0;
+/// And it is out of the stack: this much bigger, this many degrees
+/// clockwise, and this many logical px toward the canvas.
+const LIFT_SCALE: f32 = 0.05;
+const LIFT_TILT: f32 = 2.0;
+const LIFT_LEFT: f32 = 12.0;
+/// How long the lift takes to come on, and to go off again.
+pub const LIFT_SECONDS: f32 = 0.14;
 const BUTTON_GAP: f32 = 2.0;
 /// Between an icon and the label beside it: a row's eye and its name,
 /// the handle's chevron and its word.
@@ -63,6 +70,27 @@ pub enum PanelHit {
     Down,
     /// Panel chrome between controls: swallowed, never reaches the canvas.
     Panel,
+}
+
+/// The card the pointer is carrying, and how far into the lift it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lift {
+    /// Into the document's layers.
+    pub index: usize,
+    /// Where the card's top edge is asked to be, in physical px: the
+    /// pointer, less the grip the card was taken by. It follows the
+    /// pointer rather than the row, so the card does not jump.
+    pub y: f32,
+    /// The lift, 0 (sitting in its row) to 1 (fully off the panel),
+    /// before easing. It runs back down to 0 when the card is let go.
+    pub t: f32,
+}
+
+/// Smoothstep: the lift comes on and goes off without a corner, and
+/// reverses mid-flight the same way.
+pub fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// One layer's row, with everything already measured.
@@ -229,16 +257,24 @@ impl Panel {
         Some(row.unwrap_or(last).index)
     }
 
+    /// Where a carried card's top edge actually goes: what the pointer
+    /// asks for, kept inside the rows on show.
+    fn free_y(&self, y: f32) -> f32 {
+        match (self.rows.first(), self.rows.last()) {
+            (Some(first), Some(last)) => y.clamp(first.card.y, last.card.y),
+            _ => y,
+        }
+    }
+
     /// Paint order: shadow, border, panel, the title and the buttons,
     /// then a card per row — and last, over the cards it is passing, the
-    /// one the pointer is carrying. `lifted` says the active row is that
-    /// one: only the active layer is ever dragged.
+    /// one `lift` names.
     #[allow(clippy::too_many_arguments)]
     pub fn prims(
         &self,
         layers: &[Layer],
         active: usize,
-        lifted: bool,
+        lift: Option<Lift>,
         atlas: &Atlas,
         slot: u32,
         theme: &Theme,
@@ -266,25 +302,30 @@ impl Panel {
         ] {
             out.extend(icon_prims(icon, rect, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
         }
-        let in_flight = |row: &Row| lifted && row.index == active;
-        for row in self.rows.iter().filter(|r| !in_flight(r)) {
-            self.card_prims(row, layers, active, false, atlas, slot, theme, &mut out);
+        let carried = lift.map(|l| l.index);
+        for row in self.rows.iter().filter(|r| Some(r.index) != carried) {
+            self.card_prims(row, layers, active, None, atlas, slot, theme, &mut out);
         }
-        if let Some(row) = self.rows.iter().find(|r| in_flight(r)) {
-            self.card_prims(row, layers, active, true, atlas, slot, theme, &mut out);
+        if let Some(l) = lift
+            && let Some(row) = self.rows.iter().find(|r| r.index == l.index)
+        {
+            self.card_prims(row, layers, active, Some(l), atlas, slot, theme, &mut out);
         }
         out
     }
 
     /// One row's card: its shadow, its outline, its body, then the eye
-    /// and the name.
+    /// and the name. A card in flight is the same card, every property
+    /// carried `lift` of the way: further off the panel, bluer at the
+    /// edge, and — once it is drawn — bigger, turned and leaning at the
+    /// pointer, contents and all.
     #[allow(clippy::too_many_arguments)]
     fn card_prims(
         &self,
         row: &Row,
         layers: &[Layer],
         active: usize,
-        lifted: bool,
+        lift: Option<Lift>,
         atlas: &Atlas,
         slot: u32,
         theme: &Theme,
@@ -292,22 +333,16 @@ impl Panel {
     ) {
         let s = self.scale;
         let radius = ROW_RADIUS * s;
-        let (drop, feather, edge, outline) = if lifted {
-            (
-                LIFT_SHADOW_OFFSET,
-                LIFT_SHADOW_FEATHER,
-                LIFT_BORDER,
-                theme.lifted,
-            )
-        } else {
-            (
-                CARD_SHADOW_OFFSET,
-                CARD_SHADOW_FEATHER,
-                1.0,
-                theme.border,
-            )
-        };
+        let e = lift.map_or(0.0, |l| ease(l.t));
+        let at = |rest: f32, flight: f32| rest + (flight - rest) * e;
+        let (drop, feather, edge) = (
+            at(CARD_SHADOW_OFFSET, LIFT_SHADOW_OFFSET),
+            at(CARD_SHADOW_FEATHER, LIFT_SHADOW_FEATHER),
+            at(1.0, LIFT_BORDER),
+        );
+        let outline = mix(theme.border, theme.lifted, e);
         let is_active = row.index == active;
+        let start = out.len();
         out.push(Prim::soft(
             row.card.offset(0.0, drop * s),
             radius,
@@ -342,6 +377,16 @@ impl Panel {
             let baseline = atlas.baseline_in(row.rect);
             for g in atlas.layout(&row.label, row.label_x, baseline) {
                 out.push(Prim::glyph(g.rect, g.uv, slot, ink));
+            }
+        }
+        // The whole card, contents and all, taken out of the stack.
+        if let Some(l) = lift
+            && e > 0.0
+        {
+            let pivot = row.card.center();
+            let by = (-LIFT_LEFT * s * e, (self.free_y(l.y) - row.card.y) * e);
+            for prim in &mut out[start..] {
+                *prim = prim.transformed(pivot, 1.0 + LIFT_SCALE * e, LIFT_TILT.to_radians() * e, by);
             }
         }
     }
@@ -711,7 +756,7 @@ mod tests {
 
         // At rest: a card inside every row, on a hairline of the border
         // color, over a shadow of its own.
-        let prims = p.prims(&ls, 1, false, &a, 7, &theme);
+        let prims = p.prims(&ls, 1, None, &a, 7, &theme);
         for row in &p.rows {
             assert!(row.rect.contains_rect(&row.card), "the card sits in its row");
             assert!(body(&prims, row.card).is_some(), "row {} has a body", row.index);
@@ -741,21 +786,109 @@ mod tests {
             2.0 * CARD_INSET
         );
 
-        // Carried: the active card takes the blue, a shadow with further
+        // Carried: the middle card takes the blue, a shadow with further
         // to fall, and goes last — over the cards it is passing.
-        let prims = p.prims(&ls, 1, true, &a, 7, &theme);
+        let card = p.rows[1].card;
+        let prims = p.prims(&ls, 1, Some(lift(1, card.y, 1.0)), &a, 7, &theme);
         let blue: Vec<&Prim> = prims.iter().filter(|q| q.color == theme.lifted).collect();
         assert_eq!(blue.len(), 1, "one card is in flight");
-        assert_eq!(blue[0].bounds(), p.rows[1].card.inset(-LIFT_BORDER));
-        let lift: Vec<&Prim> = prims
+        // The panel's own shadow is the first prim; the rest are cards'.
+        assert!(prims[0].feather > 0.0 && prims[0].color == theme.shadow);
+        let long: Vec<&Prim> = prims[1..]
             .iter()
-            .filter(|q| q.color == theme.shadow && q.feather == LIFT_SHADOW_FEATHER)
+            .filter(|q| q.color == theme.shadow && q.feather > CARD_SHADOW_FEATHER)
             .collect();
-        assert_eq!(lift.len(), 1, "one longer shadow");
-        assert_eq!(lift[0].bounds(), p.rows[1].card.offset(0.0, LIFT_SHADOW_OFFSET));
-        let carried = body(&prims, p.rows[1].card).unwrap();
+        assert_eq!(long.len(), 1, "one card's shadow has further to fall");
+        let carried = carried_body(&prims, &theme);
         assert!(carried > body(&prims, p.rows[0].card).unwrap());
         assert!(carried > body(&prims, p.rows[2].card).unwrap());
+    }
+
+    fn lift(index: usize, y: f32, t: f32) -> Lift {
+        Lift { index, y, t }
+    }
+
+    /// Where the carried card's body sits in the paint order. It is the
+    /// only one filled with the active color, and it is no longer at its
+    /// row's rect, so it cannot be found by bounds.
+    fn carried_body(prims: &[Prim], theme: &Theme) -> usize {
+        let at: Vec<usize> = prims
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| q.color == theme.active_bg)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at.len(), 1, "one card is filled");
+        at[0]
+    }
+
+    #[test]
+    fn the_lift_eases_in_and_out() {
+        assert_eq!(ease(0.0), 0.0);
+        assert_eq!(ease(1.0), 1.0);
+        assert_eq!(ease(0.5), 0.5);
+        assert!(ease(0.25) < 0.25, "slow off the mark");
+        assert!(ease(0.75) > 0.75, "and slow into the stop");
+        assert_eq!(ease(-1.0), 0.0, "clamped, so a lift cannot overshoot");
+        assert_eq!(ease(2.0), 1.0);
+    }
+
+    #[test]
+    fn a_carried_card_grows_turns_and_leans_toward_the_canvas() {
+        let theme = Theme::light();
+        let a = atlas();
+        let ls = layers(3);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let card = p.rows[1].card;
+        let (was_x, was_y) = card.center();
+        let body_of = |prims: &[Prim]| prims[carried_body(prims, &theme)];
+
+        // Fully lifted, asked to stay on its row's line.
+        let full = body_of(&p.prims(&ls, 1, Some(lift(1, card.y, 1.0)), &a, 7, &theme));
+        assert_eq!(full.geom[2], card.w * (1.0 + LIFT_SCALE), "grown");
+        assert_eq!(full.geom[3], card.h * (1.0 + LIFT_SCALE));
+        assert_eq!(full.angle, LIFT_TILT.to_radians(), "turned clockwise");
+        let (cx, cy) = (
+            full.geom[0] + full.geom[2] / 2.0,
+            full.geom[1] + full.geom[3] / 2.0,
+        );
+        assert_eq!(cx, was_x - LIFT_LEFT, "leaning toward the canvas");
+        assert_eq!(cy, was_y, "and nowhere in y that the pointer did not ask");
+
+        // Half of it is half of everything: the transition has no step.
+        let half = body_of(&p.prims(&ls, 1, Some(lift(1, card.y, 0.5)), &a, 7, &theme));
+        assert_eq!(half.angle, LIFT_TILT.to_radians() * 0.5);
+        assert_eq!(half.geom[2], card.w * (1.0 + LIFT_SCALE * 0.5));
+        assert_eq!(half.geom[0] + half.geom[2] / 2.0, was_x - LIFT_LEFT * 0.5);
+
+        // The card is where the pointer put it, not on any row's line.
+        let moved = body_of(&p.prims(&ls, 1, Some(lift(1, card.y + 11.0, 1.0)), &a, 7, &theme));
+        assert_eq!(moved.geom[1] + moved.geom[3] / 2.0, was_y + 11.0);
+
+        // Nothing of the lift is drawn at rest.
+        let none = body_of(&p.prims(&ls, 1, Some(lift(1, card.y + 11.0, 0.0)), &a, 7, &theme));
+        assert_eq!(none.bounds(), card);
+        assert_eq!(none.angle, 0.0);
+    }
+
+    #[test]
+    fn a_carried_card_stays_within_the_rows_on_show() {
+        let theme = Theme::light();
+        let a = atlas();
+        let ls = layers(3);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let body_of = |y: f32| {
+            let prims = p.prims(&ls, 2, Some(lift(2, y, 1.0)), &a, 7, &theme);
+            prims[carried_body(&prims, &theme)].bounds()
+        };
+        let top = p.rows[0].card;
+        assert_eq!(body_of(-500.0).center().1, top.center().1, "no higher than the first row");
+        let bottom = p.rows[2].card;
+        assert_eq!(
+            body_of(10_000.0).center().1,
+            top.center().1 + (bottom.y - top.y),
+            "no lower than the last"
+        );
     }
 
     #[test]
@@ -765,7 +898,7 @@ mod tests {
         let mut ls = layers(3);
         ls[0].visible = false;
         let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
-        let prims = p.prims(&ls, 1, false, &a, 7, &theme);
+        let prims = p.prims(&ls, 1, None, &a, 7, &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
         assert!(

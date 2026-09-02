@@ -342,6 +342,42 @@ impl Prim {
         }
     }
 
+    /// The same prim scaled by `k` and turned by `angle` radians
+    /// (clockwise) about `pivot`, then moved by `by`. A box orbits the
+    /// pivot and spins with it; a segment's endpoints simply travel.
+    /// What a card in flight is drawn through, contents and all.
+    pub fn transformed(self, pivot: (f32, f32), k: f32, angle: f32, by: (f32, f32)) -> Prim {
+        let (sin, cos) = angle.sin_cos();
+        let map = |x: f32, y: f32| {
+            let (dx, dy) = (k * (x - pivot.0), k * (y - pivot.1));
+            (
+                pivot.0 + cos * dx - sin * dy + by.0,
+                pivot.1 + sin * dx + cos * dy + by.1,
+            )
+        };
+        if self.kind == KIND_SEGMENT {
+            let [ax, ay, bx, by] = self.geom;
+            let (ax, ay) = map(ax, ay);
+            let (bx, by) = map(bx, by);
+            return Prim {
+                geom: [ax, ay, bx, by],
+                radius: self.radius * k,
+                feather: self.feather * k,
+                ..self
+            };
+        }
+        let [x, y, w, h] = self.geom;
+        let (cx, cy) = map(x + w / 2.0, y + h / 2.0);
+        let (w, h) = (w * k, h * k);
+        Prim {
+            geom: [cx - w / 2.0, cy - h / 2.0, w, h],
+            radius: self.radius * k,
+            feather: self.feather * k,
+            angle: self.angle + angle,
+            ..self
+        }
+    }
+
     pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
         let r = ScreenRect {
             x: cx - radius,
@@ -805,6 +841,55 @@ mod tests {
     use crate::doc::{Camera, Layer, Path, Rect};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
+
+    #[test]
+    fn transformed_grows_turns_and_moves_a_box_and_a_segment() {
+        let r = ScreenRect {
+            x: 10.0,
+            y: 20.0,
+            w: 40.0,
+            h: 10.0,
+        };
+        let pivot = r.center();
+
+        // Grown about its own center: the center holds, the size does not.
+        let box_ = Prim::rounded(r, 4.0, [1.0; 4]).transformed(pivot, 2.0, 0.0, (0.0, 0.0));
+        assert_eq!(box_.geom[2], 2.0 * r.w);
+        assert_eq!(box_.geom[3], 2.0 * r.h);
+        assert_eq!(box_.bounds().center(), pivot, "it grows where it stands");
+        assert_eq!(box_.radius, 8.0, "the corner grows with the box");
+
+        // A quarter turn clockwise about the pivot, then a shift. The
+        // box keeps its geometry and carries the angle to the shader.
+        let turned = Prim::rounded(r, 4.0, [1.0; 4]).transformed(
+            pivot,
+            1.0,
+            std::f32::consts::FRAC_PI_2,
+            (5.0, -5.0),
+        );
+        let (cx, cy) = (
+            turned.geom[0] + turned.geom[2] / 2.0,
+            turned.geom[1] + turned.geom[3] / 2.0,
+        );
+        assert!((cx - (pivot.0 + 5.0)).abs() < 1e-4, "the pivot only shifts");
+        assert!((cy - (pivot.1 - 5.0)).abs() < 1e-4);
+        assert_eq!(turned.angle, std::f32::consts::FRAC_PI_2);
+        assert_eq!(turned.geom[2], 40.0, "the box is turned, not reshaped");
+
+        // A segment has no angle to carry: its endpoints travel instead.
+        let seg = Prim::segment((0.0, 0.0), (10.0, 0.0), 2.0, [1.0; 4]).transformed(
+            (0.0, 0.0),
+            3.0,
+            std::f32::consts::FRAC_PI_2,
+            (1.0, 1.0),
+        );
+        assert_eq!(seg.angle, 0.0);
+        assert_eq!(seg.radius, 6.0);
+        assert!((seg.geom[0] - 1.0).abs() < 1e-4);
+        assert!((seg.geom[1] - 1.0).abs() < 1e-4);
+        assert!((seg.geom[2] - 1.0).abs() < 1e-4, "right became down");
+        assert!((seg.geom[3] - 31.0).abs() < 1e-4);
+    }
 
     fn tip(width: f64, opacity: f64, hardness: f64) -> Tip {
         Tip {
