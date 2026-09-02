@@ -230,11 +230,17 @@ Tipos do MVP: `path` (caneta), `rect`, `ellipse`, `arrow`, `line`, `text`, `stic
 Landed — `path` (pencil strokes):
 
 ```json
-{ "id": "el_02", "type": "path", "points": [[40, 80], [52, 91]], "stroke": "#1f1f1f", "width": 2 }
+{ "id": "el_02", "type": "path",
+  "curves": [[[40, 80], [44, 84], [48, 90], [52, 91]]],
+  "stroke": "#1f1f1f", "width": 2 }
 ```
 
-Points are `[x, y]` pairs in world units; `width` is in world units too, so
-ink scales with zoom. A world unit is one logical pixel at zoom 1.
+`curves` is a chain of cubic Béziers, each self-contained as
+`[a, c1, c2, b]` (SVG's `M a C c1 c2 b`) and starting where the previous
+ended; a tap is one degenerate cubic. Coordinates are world units; `width`
+is in world units too, so ink scales with zoom. A world unit is one logical
+pixel at zoom 1. The stroke is simplified and fitted on release
+(`src/curve.rs`), so the document never holds raw pointer samples.
 
 Por que JSON plano agora, e não Automerge já:
 

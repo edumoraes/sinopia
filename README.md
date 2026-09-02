@@ -14,7 +14,10 @@ Scaffold (§15 items 1–2) plus the first tool (item 4, pencil only):
   on screen.
 - Dotted background fixed in world space; light theme matching the
   reference look, re-derived from `op: theme`.
-- Pencil: freehand strokes become `path` elements, saved on release.
+- Pencil: on release the stroke is simplified (Ramer–Douglas–Peucker) and
+  fitted with cubic Béziers (Schneider), then saved as a `path` of
+  self-contained `[a, c1, c2, b]` curves; rendering flattens them per
+  frame at the current zoom.
 - Tool dock centered at the bottom — Select `V`, Pencil `P`; `Esc` cancels
   the stroke in progress.
 - Versioned JSON document (schema 1) + XDG persistence (0700/0600, atomic
@@ -49,6 +52,7 @@ src/cli.rs       flags (clap), mutually exclusive actions
 src/doc.rs       document §6.1 (pure data, serde): rect, path
 src/store.rs     ~/.local/share/omawhite: boards/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
+src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
 src/scene.rs     View (camera + viewport + scale) and document → SDF prims (pure, tested)
 src/grid.rs      dotted background (pure, tested)
 src/theme.rs     palette: light default, derived from op: theme (pure, tested)
