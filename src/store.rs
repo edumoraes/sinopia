@@ -219,6 +219,7 @@ mod tests {
             y: 2.0,
             w: 3.0,
             h: 4.0,
+            rotation: 0.0,
             stroke: Some("#222".into()),
             fill: None,
             text: None,

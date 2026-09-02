@@ -35,6 +35,9 @@ pub enum Element {
     Path(Path),
 }
 
+/// `x, y, w, h` is the box before rotation; `rotation` turns it about its
+/// center, in degrees, clockwise on screen (y down, as in SVG). Absent on
+/// disk when zero, so unrotated boards keep the §6.1 shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub id: String,
@@ -42,9 +45,15 @@ pub struct Rect {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
     pub stroke: Option<String>,
     pub fill: Option<String>,
     pub text: Option<String>,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// Freehand pen stroke: a chain of cubic Béziers in world units, each one
@@ -165,6 +174,7 @@ mod tests {
                     y: 80.0,
                     w: 220.0,
                     h: 80.0,
+                    rotation: 0.0,
                     stroke: Some("#222".into()),
                     fill: None,
                     text: Some("API Gateway".into()),
@@ -324,6 +334,39 @@ mod tests {
         }"##;
         let err = Document::from_json(json).unwrap_err().to_string();
         assert!(err.contains("curves"), "{err}");
+    }
+
+    #[test]
+    fn rect_rotation_defaults_to_zero_and_stays_off_disk() {
+        // The §6.1 example has no `rotation`: unrotated, and written back
+        // without the field so unrotated boards keep their shape on disk.
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [ { "id": "el_01", "type": "rect",
+                "x": 40, "y": 80, "w": 220, "h": 80,
+                "stroke": "#222", "fill": null, "text": null } ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Rect(r) = &doc.elements[0] else {
+            panic!("expected a rect");
+        };
+        assert_eq!(r.rotation, 0.0);
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        assert!(v["elements"][0].get("rotation").is_none(), "{v}");
+    }
+
+    #[test]
+    fn rect_rotation_roundtrips_in_degrees() {
+        let mut doc = sample_doc();
+        let Element::Rect(r) = &mut doc.elements[0] else {
+            panic!("expected a rect");
+        };
+        r.rotation = 30.0;
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][0]["rotation"].as_f64(), Some(30.0));
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
     }
 
     #[test]

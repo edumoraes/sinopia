@@ -424,6 +424,7 @@ mod tests {
             y,
             w,
             h,
+            rotation: 0.0,
             stroke: stroke.map(Into::into),
             fill: fill.map(Into::into),
             text: None,
