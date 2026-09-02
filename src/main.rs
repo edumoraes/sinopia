@@ -20,6 +20,7 @@ mod scene;
 mod select;
 mod store;
 mod theme;
+mod text;
 
 use anyhow::Context as _;
 use clap::Parser as _;

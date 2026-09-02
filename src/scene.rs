@@ -221,10 +221,17 @@ pub struct Prim {
     pub kind: u32,
     /// Box only: turned by this many radians (clockwise) about its center.
     pub angle: f32,
+    /// [`KIND_IMAGE`] only: `u0, v0, u1, v1` — the slice of the texture
+    /// the box maps onto. An image takes the whole sheet; a glyph takes
+    /// its own cell of the atlas.
+    pub uv: [f32; 4],
     /// [`KIND_IMAGE`] only: which texture to sample. Read on the CPU, to
     /// pick the bind group — the shader never sees it.
     pub slot: u32,
 }
+
+/// The whole texture: what anything that is not a glyph samples.
+const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 impl Prim {
     pub fn rect(r: ScreenRect, color: Rgba) -> Prim {
@@ -243,6 +250,7 @@ impl Prim {
             feather,
             kind: KIND_BOX,
             angle: 0.0,
+            uv: WHOLE,
             slot: 0,
         }
     }
@@ -282,6 +290,17 @@ impl Prim {
         }
     }
 
+    /// One glyph: the box `r` filled with the cell `uv` names in the atlas
+    /// living in `slot`. The atlas is white, so `color` is the ink.
+    pub fn glyph(r: ScreenRect, uv: [f32; 4], slot: u32, color: Rgba) -> Prim {
+        Prim {
+            kind: KIND_IMAGE,
+            uv,
+            slot,
+            ..Prim::rect(r, color)
+        }
+    }
+
     pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
         let r = ScreenRect {
             x: cx - radius,
@@ -300,6 +319,7 @@ impl Prim {
             feather: 0.0,
             kind: KIND_SEGMENT,
             angle: 0.0,
+            uv: WHOLE,
             slot: 0,
         }
     }
@@ -965,6 +985,31 @@ mod tests {
         assert_eq!(got[0].angle, std::f32::consts::FRAC_PI_2);
         // Nothing tints it: the texel passes through as it is.
         assert_eq!(got[0].color, WHITE);
+        // And it maps onto the whole sheet, not a slice of one.
+        assert_eq!(got[0].uv, WHOLE);
+    }
+
+    #[test]
+    fn a_glyph_samples_its_own_cell_and_takes_the_ink() {
+        let cell = [0.25, 0.5, 0.3, 0.6];
+        let ink = [0.1, 0.2, 0.3, 1.0];
+        let g = Prim::glyph(sr(4.0, 8.0, 6.0, 12.0), cell, 3, ink);
+        assert_eq!(g.kind, KIND_IMAGE);
+        assert_eq!(g.uv, cell);
+        assert_eq!(g.slot, 3);
+        // The atlas is white, so the prim's color is what reaches the eye.
+        assert_eq!(g.color, ink);
+        // Glyphs are upright and square-cornered: the box is only a window.
+        assert_eq!(g.angle, 0.0);
+        assert_eq!(g.radius, 0.0);
+    }
+
+    #[test]
+    fn flat_prims_map_onto_the_whole_texture() {
+        // Slot 0 is the 1x1 white stand-in: a partial map would sample
+        // outside it and the clamp would hide the mistake.
+        assert_eq!(Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE).uv, WHOLE);
+        assert_eq!(Prim::segment((0.0, 0.0), (1.0, 1.0), 1.0, WHITE).uv, WHOLE);
     }
 
     #[test]

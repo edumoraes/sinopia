@@ -33,6 +33,7 @@ struct Inst {
     @location(3) feather: f32,
     @location(4) kind: u32,
     @location(5) angle: f32,
+    @location(6) uv: vec4<f32>,
 };
 
 struct VsOut {
@@ -43,6 +44,7 @@ struct VsOut {
     @location(3) @interpolate(flat) params: vec2<f32>,
     @location(4) @interpolate(flat) kind: u32,
     @location(5) @interpolate(flat) angle: f32,
+    @location(6) @interpolate(flat) uv: vec4<f32>,
 };
 
 const KIND_SEGMENT: u32 = 1u;
@@ -88,6 +90,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.params = vec2<f32>(inst.radius, inst.feather);
     out.kind = inst.kind;
     out.angle = inst.angle;
+    out.uv = inst.uv;
     return out;
 }
 
@@ -121,10 +124,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         d = sd_box(local, half, r);
         if (in.kind == KIND_IMAGE) {
             // The box's own axes are already the texture's: the corner at
-            // -half is (0, 0). There is no mip chain to pick from, and
-            // asking for level 0 keeps the sample out of the derivative
-            // rules that a branch like this one would otherwise break.
-            let uv = (local + half) / max(in.geom.zw, vec2<f32>(1e-6));
+            // -half is (0, 0). An image maps onto the whole sheet, a
+            // glyph onto its cell of the atlas. There is no mip chain to
+            // pick from, and asking for level 0 keeps the sample out of
+            // the derivative rules that a branch like this one would
+            // otherwise break.
+            let t = (local + half) / max(in.geom.zw, vec2<f32>(1e-6));
+            let uv = mix(in.uv.xy, in.uv.zw, t);
             rgba = textureSampleLevel(tex, samp, uv, 0.0) * in.color;
         }
     }
@@ -149,6 +155,10 @@ pub struct Gfx {
     /// the runs that draw no image, so every draw has group 1.
     textures: Vec<wgpu::BindGroup>,
     slots: ImageSlots,
+    /// The glyph atlas, once it has been uploaded. It is not a blob, so it
+    /// stays out of `slots`: that map is sha256 to texture (§9.3), and a
+    /// name that is not a bare hash has no business in it.
+    atlas: Option<u32>,
 }
 
 impl Gfx {
@@ -265,6 +275,7 @@ impl Gfx {
                         3 => Float32,   // feather
                         4 => Uint32,    // kind
                         5 => Float32,   // angle
+                        6 => Float32x4, // uv
                         // `slot` stays on the CPU: it picks the bind group.
                     ],
                 })],
@@ -313,6 +324,7 @@ impl Gfx {
             sampler,
             textures: vec![blank],
             slots: ImageSlots::new(),
+            atlas: None,
         })
     }
 
@@ -346,6 +358,33 @@ impl Gfx {
         let slot = self.textures.len() as u32;
         self.textures.push(group);
         self.slots.insert(blob.to_owned(), slot);
+        Ok(slot)
+    }
+
+    /// Uploads the glyph atlas and answers its slot. Called again when
+    /// the scale factor changes the size the chrome asks for: the new
+    /// sheet replaces the old one in place, so moving a window between
+    /// displays does not leak a texture per move.
+    pub fn upload_atlas(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        let group = upload(
+            &self.device,
+            &self.queue,
+            &self.tex_bgl,
+            &self.sampler,
+            texture_format(self.config.format),
+            bmp,
+        )?;
+        let slot = match self.atlas {
+            Some(slot) => {
+                self.textures[slot as usize] = group;
+                slot
+            }
+            None => {
+                self.textures.push(group);
+                (self.textures.len() - 1) as u32
+            }
+        };
+        self.atlas = Some(slot);
         Ok(slot)
     }
 
