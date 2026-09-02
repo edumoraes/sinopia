@@ -51,7 +51,45 @@ impl View {
             (sy - f64::from(self.viewport.h) / 2.0) / k + self.camera.y,
         )
     }
+
+    /// The camera that shows `world` at `screen` (physical px) at `zoom`.
+    /// Every pan and zoom is a case of this. Zoom is clamped to
+    /// [`ZOOM_MIN`]..=[`ZOOM_MAX`]; a non-finite zoom leaves the camera as is.
+    pub fn showing(&self, world: (f64, f64), screen: (f64, f64), zoom: f64) -> Camera {
+        if !zoom.is_finite() {
+            return self.camera;
+        }
+        let zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        let k = zoom * self.scale;
+        Camera {
+            x: world.0 - (screen.0 - f64::from(self.viewport.w) / 2.0) / k,
+            y: world.1 - (screen.1 - f64::from(self.viewport.h) / 2.0) / k,
+            zoom,
+        }
+    }
+
+    /// Multiplies the zoom by `factor`, keeping the world point under
+    /// `screen` where it is.
+    pub fn zoomed_at(&self, factor: f64, screen: (f64, f64)) -> Camera {
+        let world = self.screen_to_world(screen.0, screen.1);
+        self.showing(world, screen, self.camera.zoom * factor)
+    }
+
+    /// Moves the content by `(dx, dy)` physical px (the camera goes the
+    /// other way).
+    pub fn panned_by(&self, dx: f64, dy: f64) -> Camera {
+        let k = self.px_per_world();
+        Camera {
+            x: self.camera.x - dx / k,
+            y: self.camera.y - dy / k,
+            zoom: self.camera.zoom,
+        }
+    }
 }
+
+/// Zoom range: 10% to 1000%.
+pub const ZOOM_MIN: f64 = 0.1;
+pub const ZOOM_MAX: f64 = 10.0;
 
 /// Linear RGBA, straight (non-premultiplied) alpha.
 pub type Rgba = [f32; 4];
@@ -436,6 +474,66 @@ mod tests {
                 "({wx},{wy})"
             );
         }
+    }
+
+    #[test]
+    fn showing_puts_a_world_point_under_a_screen_point_at_a_zoom() {
+        let v = view(0.0, 0.0, 1.0);
+        let cam = v.showing((10.0, 20.0), (80.0, 30.0), 2.0);
+        let moved = View { camera: cam, ..v };
+        assert_eq!(cam.zoom, 2.0);
+        assert_eq!(moved.world_to_screen(10.0, 20.0), (80.0, 30.0));
+    }
+
+    #[test]
+    fn showing_clamps_the_zoom_and_ignores_junk() {
+        let v = view(0.0, 0.0, 1.0);
+        assert_eq!(v.showing((0.0, 0.0), (50.0, 50.0), 1e9).zoom, ZOOM_MAX);
+        assert_eq!(v.showing((0.0, 0.0), (50.0, 50.0), 1e-9).zoom, ZOOM_MIN);
+        assert_eq!(v.showing((0.0, 0.0), (50.0, 50.0), f64::NAN), v.camera);
+        assert_eq!(v.showing((0.0, 0.0), (50.0, 50.0), 0.0).zoom, ZOOM_MIN);
+    }
+
+    #[test]
+    fn zoomed_at_keeps_the_point_under_the_cursor_fixed() {
+        let v = View {
+            scale: 2.0,
+            ..view(5.0, -5.0, 1.0)
+        };
+        let (wx, wy) = v.screen_to_world(20.0, 70.0);
+        let zoomed = View {
+            camera: v.zoomed_at(1.25, (20.0, 70.0)),
+            ..v
+        };
+        assert_eq!(zoomed.camera.zoom, 1.25);
+        let (sx, sy) = zoomed.world_to_screen(wx, wy);
+        assert!(
+            (sx - 20.0).abs() < 1e-9 && (sy - 70.0).abs() < 1e-9,
+            "{sx},{sy}"
+        );
+    }
+
+    #[test]
+    fn panned_by_moves_the_content_with_the_delta() {
+        // Dragging 10px right and 4px down on a 2x display at zoom 2 moves the
+        // camera 2.5 / 1 world units the other way.
+        let v = View {
+            scale: 2.0,
+            ..view(1.0, 1.0, 2.0)
+        };
+        let cam = v.panned_by(10.0, 4.0);
+        assert_eq!(
+            cam,
+            Camera {
+                x: -1.5,
+                y: 0.0,
+                zoom: 2.0
+            }
+        );
+        let moved = View { camera: cam, ..v };
+        let before = v.world_to_screen(0.0, 0.0);
+        let after = moved.world_to_screen(0.0, 0.0);
+        assert_eq!((after.0 - before.0, after.1 - before.1), (10.0, 4.0));
     }
 
     #[test]
