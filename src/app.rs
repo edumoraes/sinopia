@@ -666,6 +666,7 @@ impl App {
             frame.extend(panel.prims(
                 &self.doc().layers,
                 active,
+                self.layer_drag,
                 atlas,
                 self.atlas_slot,
                 &self.theme,
@@ -754,9 +755,11 @@ impl App {
 
     fn pointer_released(&mut self, button: Button) {
         // A dragged layer is left where the pointer put it; the canvas
-        // never saw the press, so it has nothing to end.
+        // never saw the press, so it has nothing to end. The card does
+        // settle back onto the panel, and that is a frame.
         if self.layer_drag && button == Button::Left {
             self.layer_drag = false;
+            self.redraw();
             return self.update_cursor_icon();
         }
         let Some(view) = self.view() else { return };
@@ -896,13 +899,13 @@ impl App {
     fn focus_lost(&mut self) {
         // A layer the pointer was carrying stays where the window last
         // saw it: the drag was applied as it went, so there is nothing
-        // half-done to put back.
-        self.layer_drag = false;
+        // half-done to put back. Its card still has to settle.
+        let carrying = std::mem::take(&mut self.layer_drag);
         let (editor, doc) = self.active();
         editor.hold_space(false);
         editor.hold_ctrl(false);
         editor.hold_shift(false);
-        if editor.cancel(doc) {
+        if editor.cancel(doc) || carrying {
             self.redraw();
         }
         self.update_cursor_icon();

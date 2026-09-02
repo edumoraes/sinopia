@@ -44,12 +44,14 @@ selection, navigation, pasted images, and projects in tabs:
   a layer. A handle on the header's line pulls the panel out and puts
   it back — closed it hangs off the window's right edge as `◀ Layers`,
   open it steps aside to the panel's left, a chevron alone; `Shift+L`
-  does the same from the keyboard. The panel is one row per layer, top
-  first, with an eye to show or hide it and the active layer
-  highlighted; the header has up, down, add and remove. A row dragged
-  by its name carries its layer through the stack, live: the rows
-  reorder under the pointer and the layer is left where the button
-  comes up. New ink and pastes land on the active layer; picking an
+  does the same from the keyboard. The panel is one card per layer, top
+  first — a hairline border and a light shadow each, the active one
+  filled — with an eye to show or hide it; the header has up, down, add
+  and remove. A card dragged by its name carries its layer through the
+  stack, live: it takes a blue outline and a shadow with further to
+  fall, draws over the cards it passes, the rest reorder under the
+  pointer, and the layer is left where the button comes up. New ink and
+  pastes land on the active layer; picking an
   element with the select tool makes its layer active. A hidden layer
   paints nothing and cannot be hit or marqueed; hiding one deselects
   what was on it, removing one takes its elements along, and the last

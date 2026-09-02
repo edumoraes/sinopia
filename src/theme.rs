@@ -21,6 +21,10 @@ pub struct Theme {
     pub active_bg: Rgba,
     /// Selection outline, handles' border, marquee.
     pub selection: Rgba,
+    /// The outline of a card the pointer is carrying. A fixed blue, not
+    /// derived: it says "in flight", and it has to mean that against
+    /// whatever three colors the plugin sent.
+    pub lifted: Rgba,
     /// Handle body.
     pub handle: Rgba,
 }
@@ -29,6 +33,8 @@ const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
 const BLACK: Rgba = [0.0, 0.0, 0.0, 1.0];
 /// Hex written to the document when the requested ink does not parse.
 const FALLBACK_INK: &str = "#808080";
+/// What a card being dragged is outlined in, on any theme.
+const LIFTED: &str = "#3b82f6";
 
 impl Theme {
     pub fn light() -> Theme {
@@ -64,6 +70,7 @@ impl Theme {
             muted: mix(panel, ink, 0.35),
             active_bg: mix(panel, ink, 0.09),
             selection: parse_color(accent),
+            lifted: parse_color(LIFTED),
             handle: panel,
         }
     }
@@ -104,6 +111,14 @@ mod tests {
         }
         assert!(t.shadow[3] < 1.0, "shadow is translucent");
         assert_eq!(t.bg[3], 1.0, "canvas is opaque");
+    }
+
+    #[test]
+    fn a_card_in_flight_is_the_same_blue_on_any_theme() {
+        let dark = Theme::from_hex("#1a1a1a", "#eee", "#7aa");
+        assert_eq!(Theme::light().lifted, parse_color("#3b82f6"));
+        assert_eq!(dark.lifted, Theme::light().lifted);
+        assert_ne!(dark.lifted, dark.selection, "not the plugin's accent");
     }
 
     #[test]

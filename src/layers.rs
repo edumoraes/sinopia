@@ -1,4 +1,4 @@
-//! Layers panel: the dock's chrome in a column on the right, one row per
+//! Layers panel: the dock's chrome in a column on the right, one card per
 //! layer, top layer first. Sized in logical px, positioned in physical
 //! px, floating over the canvas and swallowing whatever it catches, with
 //! a handle beside it that opens and closes it. Pure — `app` asks where a
@@ -14,12 +14,22 @@ pub const WIDTH: f32 = 200.0;
 /// From the strip above and the window's right edge.
 pub const MARGIN: f32 = 12.0;
 pub const HEADER: f32 = 34.0;
-pub const ROW: f32 = 30.0;
+pub const ROW: f32 = 34.0;
 pub const PADDING: f32 = 6.0;
 /// The header buttons and the eye are this square.
 pub const BUTTON: f32 = 24.0;
 pub const RADIUS: f32 = 12.0;
 const ROW_RADIUS: f32 = 6.0;
+/// A row's card sits this far inside it, so the gap between two cards is
+/// twice this and a click in the gap still lands on a row.
+const CARD_INSET: f32 = 2.0;
+const CARD_SHADOW_OFFSET: f32 = 1.0;
+const CARD_SHADOW_FEATHER: f32 = 4.0;
+/// A card the pointer is carrying is further off the panel: its shadow
+/// has further to fall, and its outline is thick enough to read.
+const LIFT_SHADOW_OFFSET: f32 = 4.0;
+const LIFT_SHADOW_FEATHER: f32 = 12.0;
+const LIFT_BORDER: f32 = 2.0;
 const BUTTON_GAP: f32 = 2.0;
 /// Between an icon and the label beside it: a row's eye and its name,
 /// the handle's chevron and its word.
@@ -60,7 +70,10 @@ pub enum PanelHit {
 pub struct Row {
     /// Into the document's layers.
     pub index: usize,
+    /// What the pointer hits: the card and the gap under it.
     pub rect: ScreenRect,
+    /// What is drawn: the rect less the gap that separates two cards.
+    pub card: ScreenRect,
     pub eye: ScreenRect,
     /// The name, cut down to what fits.
     pub label: String,
@@ -152,6 +165,7 @@ impl Panel {
             rows.push(Row {
                 index,
                 rect,
+                card: rect.inset(CARD_INSET * s),
                 eye,
                 label,
                 label_x,
@@ -216,11 +230,15 @@ impl Panel {
     }
 
     /// Paint order: shadow, border, panel, the title and the buttons,
-    /// then per row the active highlight, the eye and the name.
+    /// then a card per row — and last, over the cards it is passing, the
+    /// one the pointer is carrying. `lifted` says the active row is that
+    /// one: only the active layer is ever dragged.
+    #[allow(clippy::too_many_arguments)]
     pub fn prims(
         &self,
         layers: &[Layer],
         active: usize,
+        lifted: bool,
         atlas: &Atlas,
         slot: u32,
         theme: &Theme,
@@ -248,33 +266,84 @@ impl Panel {
         ] {
             out.extend(icon_prims(icon, rect, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
         }
-        for row in &self.rows {
-            let is_active = row.index == active;
-            if is_active {
-                out.push(Prim::rounded(row.rect, ROW_RADIUS * s, theme.active_bg));
-            }
-            let Some(layer) = layers.get(row.index) else {
-                continue;
-            };
-            let (eye, color) = if layer.visible {
-                (EYE, theme.icon)
-            } else {
-                (EYE_HIDDEN, theme.muted)
-            };
-            out.extend(icon_prims(eye, row.eye, 24.0, ICON_BOX, ICON_STROKE, s, color));
-            if layer.visible {
-                let (cx, cy) = row.eye.center();
-                out.push(Prim::circle(cx, cy, PUPIL / 24.0 * ICON_BOX * s, color));
-            }
-            if !row.label.is_empty() {
-                let ink = if is_active { theme.ink } else { theme.icon };
-                let baseline = atlas.baseline_in(row.rect);
-                for g in atlas.layout(&row.label, row.label_x, baseline) {
-                    out.push(Prim::glyph(g.rect, g.uv, slot, ink));
-                }
-            }
+        let in_flight = |row: &Row| lifted && row.index == active;
+        for row in self.rows.iter().filter(|r| !in_flight(r)) {
+            self.card_prims(row, layers, active, false, atlas, slot, theme, &mut out);
+        }
+        if let Some(row) = self.rows.iter().find(|r| in_flight(r)) {
+            self.card_prims(row, layers, active, true, atlas, slot, theme, &mut out);
         }
         out
+    }
+
+    /// One row's card: its shadow, its outline, its body, then the eye
+    /// and the name.
+    #[allow(clippy::too_many_arguments)]
+    fn card_prims(
+        &self,
+        row: &Row,
+        layers: &[Layer],
+        active: usize,
+        lifted: bool,
+        atlas: &Atlas,
+        slot: u32,
+        theme: &Theme,
+        out: &mut Vec<Prim>,
+    ) {
+        let s = self.scale;
+        let radius = ROW_RADIUS * s;
+        let (drop, feather, edge, outline) = if lifted {
+            (
+                LIFT_SHADOW_OFFSET,
+                LIFT_SHADOW_FEATHER,
+                LIFT_BORDER,
+                theme.lifted,
+            )
+        } else {
+            (
+                CARD_SHADOW_OFFSET,
+                CARD_SHADOW_FEATHER,
+                1.0,
+                theme.border,
+            )
+        };
+        let is_active = row.index == active;
+        out.push(Prim::soft(
+            row.card.offset(0.0, drop * s),
+            radius,
+            feather * s,
+            theme.shadow,
+        ));
+        out.push(Prim::rounded(
+            row.card.inset(-edge * s),
+            radius + edge * s,
+            outline,
+        ));
+        out.push(Prim::rounded(
+            row.card,
+            radius,
+            if is_active { theme.active_bg } else { theme.panel },
+        ));
+        let Some(layer) = layers.get(row.index) else {
+            return;
+        };
+        let (eye, color) = if layer.visible {
+            (EYE, theme.icon)
+        } else {
+            (EYE_HIDDEN, theme.muted)
+        };
+        out.extend(icon_prims(eye, row.eye, 24.0, ICON_BOX, ICON_STROKE, s, color));
+        if layer.visible {
+            let (cx, cy) = row.eye.center();
+            out.push(Prim::circle(cx, cy, PUPIL / 24.0 * ICON_BOX * s, color));
+        }
+        if !row.label.is_empty() {
+            let ink = if is_active { theme.ink } else { theme.icon };
+            let baseline = atlas.baseline_in(row.rect);
+            for g in atlas.layout(&row.label, row.label_x, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, ink));
+            }
+        }
     }
 }
 
@@ -631,13 +700,72 @@ mod tests {
     }
 
     #[test]
+    fn every_row_is_a_card_and_the_carried_one_rises_off_the_panel() {
+        let theme = Theme::light();
+        let a = atlas();
+        let ls = layers(3);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let body = |prims: &[Prim], card: ScreenRect| {
+            prims.iter().position(|q| q.bounds() == card && q.feather == 0.0)
+        };
+
+        // At rest: a card inside every row, on a hairline of the border
+        // color, over a shadow of its own.
+        let prims = p.prims(&ls, 1, false, &a, 7, &theme);
+        for row in &p.rows {
+            assert!(row.rect.contains_rect(&row.card), "the card sits in its row");
+            assert!(body(&prims, row.card).is_some(), "row {} has a body", row.index);
+            assert!(
+                prims
+                    .iter()
+                    .any(|q| q.color == theme.border && q.bounds() == row.card.inset(-1.0)),
+                "row {} is outlined",
+                row.index
+            );
+            let shadow: Vec<&Prim> = prims
+                .iter()
+                .filter(|q| {
+                    q.color == theme.shadow && q.bounds() == row.card.offset(0.0, CARD_SHADOW_OFFSET)
+                })
+                .collect();
+            assert_eq!(shadow.len(), 1, "row {} casts one shadow", row.index);
+            assert_eq!(shadow[0].feather, CARD_SHADOW_FEATHER);
+        }
+        assert!(
+            !prims.iter().any(|q| q.color == theme.lifted),
+            "nothing is in flight"
+        );
+        // Two cards are a gap apart, and the gap belongs to a row.
+        assert_eq!(
+            p.rows[1].card.y - (p.rows[0].card.y + p.rows[0].card.h),
+            2.0 * CARD_INSET
+        );
+
+        // Carried: the active card takes the blue, a shadow with further
+        // to fall, and goes last — over the cards it is passing.
+        let prims = p.prims(&ls, 1, true, &a, 7, &theme);
+        let blue: Vec<&Prim> = prims.iter().filter(|q| q.color == theme.lifted).collect();
+        assert_eq!(blue.len(), 1, "one card is in flight");
+        assert_eq!(blue[0].bounds(), p.rows[1].card.inset(-LIFT_BORDER));
+        let lift: Vec<&Prim> = prims
+            .iter()
+            .filter(|q| q.color == theme.shadow && q.feather == LIFT_SHADOW_FEATHER)
+            .collect();
+        assert_eq!(lift.len(), 1, "one longer shadow");
+        assert_eq!(lift[0].bounds(), p.rows[1].card.offset(0.0, LIFT_SHADOW_OFFSET));
+        let carried = body(&prims, p.rows[1].card).unwrap();
+        assert!(carried > body(&prims, p.rows[0].card).unwrap());
+        assert!(carried > body(&prims, p.rows[2].card).unwrap());
+    }
+
+    #[test]
     fn prims_highlight_the_active_row_and_dim_a_hidden_layer() {
         let theme = Theme::light();
         let a = atlas();
         let mut ls = layers(3);
         ls[0].visible = false;
         let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
-        let prims = p.prims(&ls, 1, &a, 7, &theme);
+        let prims = p.prims(&ls, 1, false, &a, 7, &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
         assert!(
