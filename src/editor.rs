@@ -380,6 +380,16 @@ impl Editor {
         }
     }
 
+    /// Drops the active layer at `index`, however far that is — what a
+    /// row dragged in the panel does. It keeps its id, so it stays
+    /// active wherever it lands.
+    pub fn move_layer_to(&mut self, doc: &mut Document, index: usize) -> Change {
+        match doc.reorder_layer(self.active_layer(doc), index) {
+            true => Change::Scene,
+            false => Change::None,
+        }
+    }
+
     pub fn is_drawing(&self) -> bool {
         self.stroke.is_some()
     }
@@ -1049,6 +1059,22 @@ mod tests {
         assert_eq!(e.move_layer(&mut doc, false), Change::Scene);
         assert_eq!(e.active_layer(&doc), 0);
         assert_eq!(e.move_layer(&mut doc, false), Change::None);
+    }
+
+    #[test]
+    fn move_layer_to_drops_the_active_layer_at_an_index() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        doc.add_layer(1);
+        let top = doc.layers[2].id.clone();
+        let _ = e.select_layer(&doc, 2);
+        assert_eq!(e.move_layer_to(&mut doc, 0), Change::Scene);
+        assert_eq!(e.active_layer(&doc), 0, "it stays active where it landed");
+        assert_eq!(doc.layers[0].id, top);
+        assert_eq!(doc.layers[1].id, "L1", "the others keep their order");
+        assert_eq!(doc.layers[2].id, "L2");
+        assert_eq!(e.move_layer_to(&mut doc, 0), Change::None, "already there");
+        assert_eq!(e.move_layer_to(&mut doc, 9), Change::None, "no such place");
     }
 
     /// 100×100 viewport looking at (50, 50) at zoom 1: screen px == world.

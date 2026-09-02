@@ -196,6 +196,17 @@ impl Panel {
         Some(PanelHit::Panel)
     }
 
+    /// Where a row dragged to `y` would land: the layer whose row is
+    /// under the pointer, or the nearest one once the drag has left the
+    /// list at either end, so overshooting still drops it where it was
+    /// headed. `None` when no row is on show.
+    pub fn drop_index(&self, y: f64) -> Option<usize> {
+        let last = self.rows.last()?;
+        let y = y as f32;
+        let row = self.rows.iter().find(|r| y < r.rect.y + r.rect.h);
+        Some(row.unwrap_or(last).index)
+    }
+
     /// Paint order: shadow, border, panel, the title and the buttons,
     /// then per row the active highlight, the eye and the name.
     pub fn prims(
@@ -401,6 +412,24 @@ mod tests {
         assert_eq!(p.hit(f64::from(p.rect.x) + 1.0, f64::from(p.rect.y) + 1.0), Some(PanelHit::Panel));
         assert_eq!(p.hit(100.0, 100.0), None);
         assert_eq!(p.hit(f64::from(p.rect.x) - 1.0, f64::from(p.rect.y) + 50.0), None);
+    }
+
+    #[test]
+    fn drop_index_names_the_row_under_the_pointer() {
+        let p = panel(VP, 1.0, 3);
+        let mid = |r: ScreenRect| f64::from(r.center().1);
+        assert_eq!(p.drop_index(mid(p.rows[0].rect)), Some(2));
+        assert_eq!(p.drop_index(mid(p.rows[1].rect)), Some(1));
+        assert_eq!(p.drop_index(mid(p.rows[2].rect)), Some(0));
+        // Past either end it is the nearest row, so a drag that
+        // overshoots the list still lands where it was headed.
+        assert_eq!(p.drop_index(0.0), Some(2));
+        assert_eq!(p.drop_index(10_000.0), Some(0));
+        // Nothing on show, nowhere to drop.
+        let h = (34.0 + MARGIN + PADDING + HEADER + PADDING + MARGIN) as u32;
+        let p = panel(Viewport { w: 1200, h }, 1.0, 3);
+        assert!(p.rows.is_empty());
+        assert_eq!(p.drop_index(100.0), None);
     }
 
     #[test]

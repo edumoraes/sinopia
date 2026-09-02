@@ -413,19 +413,25 @@ impl Document {
     /// Swaps layer `index` with the one above it (`up`) or below, and
     /// answers where it went. Nothing moves past the edge.
     pub fn move_layer(&mut self, index: usize, up: bool) -> Option<usize> {
-        if index >= self.layers.len() {
-            return None;
-        }
         let to = if up {
-            index + 1
+            index.checked_add(1)?
         } else {
             index.checked_sub(1)?
         };
-        if to >= self.layers.len() {
-            return None;
+        self.reorder_layer(index, to).then_some(to)
+    }
+
+    /// Takes layer `from` out of the stack and puts it back at `to`,
+    /// shifting whatever lies between and leaving their order alone —
+    /// what a row dragged several places down does. False when either
+    /// index is past the end, or the layer is already there.
+    pub fn reorder_layer(&mut self, from: usize, to: usize) -> bool {
+        if from >= self.layers.len() || to >= self.layers.len() || from == to {
+            return false;
         }
-        self.layers.swap(index, to);
-        Some(to)
+        let layer = self.layers.remove(from);
+        self.layers.insert(to, layer);
+        true
     }
 }
 
@@ -720,6 +726,20 @@ mod tests {
         assert_eq!(doc.move_layer(9, true), None, "no such layer");
         assert_eq!(doc.move_layer(1, false), Some(0));
         assert_eq!(doc.layers[0].id, "bottom");
+    }
+
+    #[test]
+    fn reorder_layer_lifts_one_out_and_drops_it_in() {
+        let mut doc = three_layers();
+        assert!(doc.reorder_layer(2, 0), "the top one to the bottom");
+        let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, vec!["top", "bottom", "middle"], "the others keep their order");
+        assert!(doc.reorder_layer(0, 2));
+        let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, vec!["bottom", "middle", "top"]);
+        assert!(!doc.reorder_layer(1, 1), "nowhere to go");
+        assert!(!doc.reorder_layer(3, 0), "no such layer");
+        assert!(!doc.reorder_layer(0, 3), "no such place");
     }
 
     #[test]

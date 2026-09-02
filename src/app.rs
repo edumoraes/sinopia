@@ -105,6 +105,9 @@ struct App {
     brush: Brush,
     /// `Shift+L`: the layers panel is up.
     layers_shown: bool,
+    /// A layer row was picked up in the panel and follows the pointer
+    /// through the stack until the button comes back up.
+    layer_drag: bool,
     /// Built once the scale factor is known, rebuilt when it changes.
     atlas: Option<Atlas>,
     atlas_slot: u32,
@@ -695,6 +698,9 @@ impl App {
         if let Some(hit) = self.panel(&view).and_then(|p| p.hit(x, y)) {
             if button == Button::Left {
                 self.panel_hit(hit);
+                // A row taken by its name is picked up: the layer it
+                // names follows the pointer through the stack.
+                self.layer_drag = matches!(hit, PanelHit::Select(_));
             }
             return self.update_cursor_icon();
         }
@@ -718,6 +724,12 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        // A dragged layer is left where the pointer put it; the canvas
+        // never saw the press, so it has nothing to end.
+        if self.layer_drag && button == Button::Left {
+            self.layer_drag = false;
+            return self.update_cursor_icon();
+        }
         let Some(view) = self.view() else { return };
         let (x, y) = self.cursor.unwrap_or_default();
         let ink = self.theme.ink_hex.clone();
@@ -729,6 +741,18 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
+        // A layer being dragged has the pointer to itself: it moves to
+        // whichever row is under it, and the canvas sees nothing.
+        if self.layer_drag {
+            if let Some(view) = self.view()
+                && let Some(index) = self.panel(&view).and_then(|p| p.drop_index(y))
+            {
+                let (editor, doc) = self.active();
+                let change = editor.move_layer_to(doc, index);
+                self.apply(change);
+            }
+            return self.update_cursor_icon();
+        }
         if let Some(view) = self.view() {
             let (editor, doc) = self.active();
             let change = editor.moved(&view, (x, y), doc);
@@ -841,6 +865,10 @@ impl App {
     /// Keys can't be released into a window that lost focus: drop the held
     /// overrides and whatever gesture they were driving.
     fn focus_lost(&mut self) {
+        // A layer the pointer was carrying stays where the window last
+        // saw it: the drag was applied as it went, so there is nothing
+        // half-done to put back.
+        self.layer_drag = false;
         let (editor, doc) = self.active();
         editor.hold_space(false);
         editor.hold_ctrl(false);
@@ -863,7 +891,8 @@ impl App {
             ),
             _ => (false, None, self.editor().active_tool()),
         };
-        let icon = if self.editor().is_panning() {
+        // A layer row and the canvas are both held in a closed hand.
+        let icon = if self.layer_drag || self.editor().is_panning() {
             CursorIcon::Grabbing
         } else if self.editor().is_drawing() {
             CursorIcon::Crosshair
@@ -1150,6 +1179,7 @@ pub fn run(
         font: Font::bundled(),
         brush: Brush::default(),
         layers_shown: false,
+        layer_drag: false,
         atlas: None,
         atlas_slot: 0,
         clipboard: None,
