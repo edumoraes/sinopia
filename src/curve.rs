@@ -49,6 +49,54 @@ pub fn eval(c: &Cubic, t: f64) -> Point {
     p
 }
 
+/// Tight axis-aligned box around `curves` as `(min, max)`, or `None` when
+/// there are none. Exact: the extremes come from the derivative's roots,
+/// not from the control hull, which overshoots.
+pub fn bounds(curves: &[Cubic]) -> Option<(Point, Point)> {
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    let mut grow = |p: Point| {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    };
+    for c in curves {
+        grow(c[0]);
+        grow(c[3]);
+        for k in 0..2 {
+            let [p0, p1, p2, p3] = [c[0][k], c[1][k], c[2][k], c[3][k]];
+            // B'(t) / 3 = a·t² + b·t + c.
+            let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+            let b = 2.0 * (p0 - 2.0 * p1 + p2);
+            for t in quadratic_roots(a, b, p1 - p0) {
+                if t > 0.0 && t < 1.0 {
+                    grow(eval(c, t));
+                }
+            }
+        }
+    }
+    (!curves.is_empty()).then_some((lo, hi))
+}
+
+/// Real roots of `a·t² + b·t + c`, degrading to the linear case.
+fn quadratic_roots(a: f64, b: f64, c: f64) -> Vec<f64> {
+    const EPS: f64 = 1e-12;
+    if a.abs() < EPS {
+        return if b.abs() < EPS {
+            Vec::new()
+        } else {
+            vec![-c / b]
+        };
+    }
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return Vec::new();
+    }
+    let s = disc.sqrt();
+    vec![(-b + s) / (2.0 * a), (-b - s) / (2.0 * a)]
+}
+
 /// Schneider's least-squares fit (Graphics Gems, 1990): a chain of cubics
 /// through `points` whose deviation never exceeds `max_error`, splitting
 /// at the worst point when one cubic cannot do it.
@@ -317,6 +365,19 @@ fn point_segment_distance(p: Point, a: Point, b: Point) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounds_are_tight_not_the_control_hull() {
+        // The handles reach y = 10; the curve itself peaks at y = 7.5.
+        let arch = [[0.0, 0.0], [0.0, 10.0], [10.0, 10.0], [10.0, 0.0]];
+        assert_eq!(bounds(&[arch]), Some(([0.0, 0.0], [10.0, 7.5])));
+        // A chain: the box grows to hold every cubic.
+        let tail = [[10.0, 0.0], [12.0, -3.0], [14.0, -3.0], [16.0, 0.0]];
+        assert_eq!(bounds(&[arch, tail]), Some(([0.0, -2.25], [16.0, 7.5])));
+        // A dot is a zero-size box; nothing is nothing.
+        assert_eq!(bounds(&[[[3.0, 4.0]; 4]]), Some(([3.0, 4.0], [3.0, 4.0])));
+        assert_eq!(bounds(&[]), None);
+    }
 
     #[test]
     fn simplify_collapses_a_collinear_run_to_its_endpoints() {
