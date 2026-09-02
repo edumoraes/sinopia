@@ -109,6 +109,22 @@ impl Project {
     }
 }
 
+/// Which tab comes forward once `closed` is removed from a strip of
+/// `len` tabs that had `active` in front. `None` when nothing is left.
+///
+/// The case worth naming: closing a tab to the *left* of the active one
+/// shifts every index after it down, so keeping `active` would quietly
+/// bring the neighbour forward instead of the tab the user was working
+/// in.
+pub fn active_after_close(len: usize, active: usize, closed: usize) -> Option<usize> {
+    let left = len.checked_sub(1).filter(|n| *n > 0 && closed < len)?;
+    Some(if closed < active {
+        active - 1
+    } else {
+        active.min(left - 1)
+    })
+}
+
 /// A path's name without its extension — `~/notes.omawhite` is `notes`.
 /// A path that ends in `..` or `/` has no name to show, so it falls back
 /// rather than showing an empty tab.
@@ -228,6 +244,54 @@ mod tests {
             file("/home/edu/notes.omawhite").suggested_name(),
             "notes.omawhite"
         );
+    }
+
+    #[test]
+    fn closing_the_only_tab_leaves_nothing() {
+        assert_eq!(active_after_close(1, 0, 0), None);
+    }
+
+    #[test]
+    fn closing_a_tab_left_of_the_active_one_keeps_the_same_tab_in_front() {
+        // Tabs a b c with c in front; closing a leaves b c, and c is now
+        // at 1. Keeping 2 would be out of range; keeping the number would
+        // bring b forward instead.
+        assert_eq!(active_after_close(3, 2, 0), Some(1));
+        assert_eq!(active_after_close(3, 1, 0), Some(0));
+    }
+
+    #[test]
+    fn closing_a_tab_right_of_the_active_one_changes_nothing() {
+        assert_eq!(active_after_close(3, 0, 1), Some(0));
+        assert_eq!(active_after_close(3, 0, 2), Some(0));
+        assert_eq!(active_after_close(3, 1, 2), Some(1));
+    }
+
+    #[test]
+    fn closing_the_active_tab_hands_over_to_its_neighbour() {
+        // The one that slid into its place, or the new last one.
+        assert_eq!(active_after_close(3, 1, 1), Some(1));
+        assert_eq!(active_after_close(3, 2, 2), Some(1));
+        assert_eq!(active_after_close(3, 0, 0), Some(0));
+    }
+
+    #[test]
+    fn every_close_lands_on_a_tab_that_exists() {
+        for len in 1..8 {
+            for active in 0..len {
+                for closed in 0..len {
+                    match active_after_close(len, active, closed) {
+                        Some(next) => assert!(next < len - 1, "{len} {active} {closed} {next}"),
+                        None => assert_eq!(len, 1),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closing_a_tab_that_is_not_there_moves_nothing() {
+        assert_eq!(active_after_close(3, 1, 7), None);
     }
 
     #[test]

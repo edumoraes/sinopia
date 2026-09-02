@@ -6,7 +6,7 @@
 //! routed to the pure `editor` and `dock`; this file only maps events and
 //! assembles frames, so it stays thin and the logic stays testable.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use winit::application::ApplicationHandler;
@@ -17,6 +17,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::bitmap::{self, Bitmap};
 use crate::clipboard::{self, Clipboard, Paste};
+use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, PEN_WIDTH, SCROLL_LINE_PX, Tool};
@@ -26,7 +27,7 @@ use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
-use crate::project::{Origin, Project};
+use crate::project::{self, Origin, Project};
 use crate::scene::{self, ImageSlots, Prim, View, Viewport};
 use crate::select::{self, Handle};
 use crate::store::{self, Store};
@@ -49,6 +50,29 @@ enum UserEvent {
         bytes: Vec<u8>,
         bitmap: Bitmap,
     },
+    /// A portal dialog came back, however long the user took.
+    Dialog(Reply),
+}
+
+/// What happens to a project once the dialog it is waiting on answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// Save it, and leave the tab where it is.
+    Stay,
+    /// Save it if asked to, then close its tab.
+    Close,
+    /// Close its tab and carry on closing the window.
+    Quit,
+}
+
+/// The dialog on screen, and what it is for. Only one is ever up: two
+/// portal windows asking about the same board would collect two answers
+/// to one question.
+#[derive(Debug)]
+enum Pending {
+    Open,
+    SaveAs { then: Then },
+    Confirm { then: Then },
 }
 
 /// One tab: a project and the editor driving it. Tool, selection and any
@@ -75,6 +99,13 @@ struct App {
     atlas: Option<Atlas>,
     atlas_slot: u32,
     clipboard: Option<Clipboard>,
+    /// Where a portal dialog sends its answer. Absent before the window.
+    dialog_sink: Option<dialogs::Sink>,
+    pending: Option<Pending>,
+    /// The window is closing, one dirty tab at a time.
+    quitting: bool,
+    /// Nothing is left to show: the loop ends at the next event boundary.
+    closing: bool,
     /// Last pointer position in physical px, while inside the window.
     cursor: Option<(f64, f64)>,
     modifiers: Modifiers,
@@ -108,22 +139,26 @@ impl App {
     /// nowhere to go and is left alone — asking for a name is the caller's
     /// job.
     fn save_project(&mut self, index: usize) -> bool {
+        let Some(origin) = self.open.get(index).map(|o| o.project.origin.clone()) else {
+            return false;
+        };
+        self.save_project_at(index, origin)
+    }
+
+    /// Writes tab `index` to `origin`, and records it as the project's
+    /// home only if the write lands. A Save As that fails must not leave
+    /// a project claiming a file it never reached.
+    fn save_project_at(&mut self, index: usize, origin: Origin) -> bool {
         let Some(project) = self.open.get(index).map(|o| &o.project) else {
             return false;
         };
-        let saved = match &project.origin {
-            Origin::Board(id) => {
-                let origin = Origin::Board(id.clone());
-                self.store.save(&project.doc).map(|()| origin)
-            }
-            Origin::File(path) => {
-                let origin = Origin::File(path.clone());
-                store::save_document_to(path, &project.doc).map(|()| origin)
-            }
+        let written = match &origin {
+            Origin::Board(_) => self.store.save(&project.doc),
+            Origin::File(path) => store::save_document_to(path, &project.doc),
             Origin::Untitled => return false,
         };
-        match saved {
-            Ok(origin) => {
+        match written {
+            Ok(()) => {
                 self.open[index].project.saved(origin);
                 if index == self.active {
                     self.retitle();
@@ -135,6 +170,137 @@ impl App {
                 log::error!("saving {}: {e:#}", self.open[index].project.label());
                 false
             }
+        }
+    }
+
+    /// `Ctrl+S`: writes the active project, asking for a name the first
+    /// time.
+    fn save_active(&mut self) {
+        if self.project().needs_a_name() {
+            self.ask_name(self.active, Then::Stay);
+        } else {
+            self.save_project(self.active);
+        }
+    }
+
+    /// Puts up the Save As dialog for tab `index`.
+    fn ask_name(&mut self, index: usize, then: Then) {
+        if self.pending.is_some() || index >= self.open.len() {
+            return;
+        }
+        let (Some(window), Some(sink)) = (self.window.clone(), self.dialog_sink.clone()) else {
+            return;
+        };
+        let project = &self.open[index].project;
+        let key = project.key().to_owned();
+        let suggested = project.suggested_name();
+        let at = match &project.origin {
+            Origin::File(path) => Some(path.clone()),
+            _ => None,
+        };
+        dialogs::save_as(&window, sink, key.clone(), &suggested, at.as_deref());
+        self.pending = Some(Pending::SaveAs { then });
+    }
+
+    /// `Ctrl+O`: puts up the Open dialog.
+    fn ask_open(&mut self) {
+        if self.pending.is_some() {
+            return;
+        }
+        let (Some(window), Some(sink)) = (self.window.clone(), self.dialog_sink.clone()) else {
+            return;
+        };
+        dialogs::open(&window, sink);
+        self.pending = Some(Pending::Open);
+    }
+
+    /// Puts up the unsaved-work question for tab `index`.
+    fn ask_about(&mut self, index: usize, then: Then) {
+        if self.pending.is_some() || index >= self.open.len() {
+            return;
+        }
+        let (Some(window), Some(sink)) = (self.window.clone(), self.dialog_sink.clone()) else {
+            // With no window there is nothing to ask with, and refusing
+            // to close is the only answer that loses nothing.
+            return;
+        };
+        let project = &self.open[index].project;
+        let key = project.key().to_owned();
+        let label = project.label();
+        dialogs::confirm_close(&window, sink, key.clone(), &label);
+        self.pending = Some(Pending::Confirm { then });
+    }
+
+    /// A dialog answered. The project is found by key, never by index:
+    /// tabs may have opened or closed while the user was deciding.
+    fn dialog_replied(&mut self, reply: Reply) {
+        let then = match self.pending.take() {
+            Some(Pending::SaveAs { then } | Pending::Confirm { then }) => then,
+            _ => Then::Stay,
+        };
+        match reply {
+            Reply::Opened(paths) => self.opened(paths),
+            Reply::SaveTo { key, path } => self.named(&key, path, then),
+            Reply::Close { key, answer } => self.answered(&key, answer, then),
+        }
+    }
+
+    fn opened(&mut self, paths: Vec<PathBuf>) {
+        for path in paths {
+            if let Some(i) = self.tab_with_path(&path) {
+                // Already open: a second tab would give one file two
+                // documents, and the later save would win by accident.
+                self.activate(i);
+                continue;
+            }
+            match store::load_document_from(&path) {
+                Ok(doc) => self.open_project(Project::opened(doc, Origin::File(path))),
+                Err(e) => log::error!("opening {path:?}: {e:#}"),
+            }
+        }
+    }
+
+    /// A Save As came back.
+    fn named(&mut self, key: &str, path: Option<PathBuf>, then: Then) {
+        let Some(index) = self.tab_with_key(key) else {
+            return;
+        };
+        let Some(path) = path else {
+            // Naming cancelled: so is whatever the save was for.
+            self.quitting = false;
+            return;
+        };
+        if !self.save_project_at(index, Origin::File(path)) {
+            self.quitting = false;
+            return;
+        }
+        if then != Then::Stay {
+            self.close(index);
+            self.step_quit();
+        }
+    }
+
+    /// The unsaved-work question came back.
+    fn answered(&mut self, key: &str, answer: Answer, then: Then) {
+        let Some(index) = self.tab_with_key(key) else {
+            return;
+        };
+        match answer {
+            Answer::Cancel => self.quitting = false,
+            Answer::Discard => {
+                self.close(index);
+                self.step_quit();
+            }
+            Answer::Save if self.open[index].project.needs_a_name() => {
+                self.ask_name(index, then);
+            }
+            Answer::Save if self.save_project(index) => {
+                self.close(index);
+                self.step_quit();
+            }
+            // The save failed and said so; closing now would lose exactly
+            // what the question was about.
+            Answer::Save => self.quitting = false,
         }
     }
 
@@ -160,17 +326,13 @@ impl App {
         w.set_title(&format!("{mark}Omawhite — {}", project.label()));
     }
 
-    /// Closes tab `index` if nothing would be lost. A dirty tab needs an
-    /// answer first, which the confirmation dialog will bring.
+    /// Closes tab `index`, asking about unsaved work first.
     fn request_close(&mut self, index: usize) {
-        let Some(open) = self.open.get(index) else {
-            return;
-        };
-        if open.project.dirty {
-            log::info!("{} has unsaved changes", open.project.label());
-            return;
+        match self.open.get(index) {
+            Some(open) if open.project.dirty => self.ask_about(index, Then::Close),
+            Some(_) => self.close(index),
+            None => {}
         }
-        self.close(index);
     }
 
     /// Drops tab `index`, whatever state it is in. The caller has already
@@ -179,44 +341,48 @@ impl App {
         if index >= self.open.len() {
             return;
         }
-        self.open.remove(index);
-        if self.open.is_empty() {
+        match project::active_after_close(self.open.len(), self.active, index) {
+            Some(next) => {
+                self.open.remove(index);
+                self.activate(next);
+            }
+            // The last one: with no tab left there is nothing to show,
+            // so the window goes instead. It stays in `open` until the
+            // loop ends — every accessor here assumes a tab in front,
+            // and the rest of this event still has to run.
+            None => self.closing = true,
+        }
+    }
+
+    /// Which tab, if any, is the project `key` names. Opening the same
+    /// board twice would give it two documents and one file.
+    fn tab_with_key(&self, key: &str) -> Option<usize> {
+        self.open.iter().position(|o| o.project.key() == key)
+    }
+
+    fn tab_with_path(&self, path: &Path) -> Option<usize> {
+        self.open
+            .iter()
+            .position(|o| matches!(&o.project.origin, Origin::File(p) if p == path))
+    }
+
+    /// Starts closing the window: each dirty tab is asked about in turn.
+    fn quit(&mut self) {
+        self.quitting = true;
+        self.step_quit();
+    }
+
+    /// Asks about the next tab standing in the way, or lets the window
+    /// go when none is left. Emptying `open` is what ends the loop, the
+    /// same way closing the last tab does.
+    fn step_quit(&mut self) {
+        if !self.quitting || self.pending.is_some() {
             return;
         }
-        // Closing a tab before the active one would otherwise shift the
-        // one in front out from under the user.
-        let next = if index < self.active {
-            self.active - 1
-        } else {
-            self.active.min(self.open.len() - 1)
-        };
-        self.activate(next);
-    }
-
-    /// Whether every tab is gone — the window has nothing left to show.
-    fn is_empty(&self) -> bool {
-        self.open.is_empty()
-    }
-
-    /// Which tab, if any, already shows the board `id` names. Opening the
-    /// same board twice would give it two documents and one file.
-    fn tab_showing(&self, id: &str) -> Option<usize> {
-        self.open.iter().position(|o| o.project.doc.id == id)
-    }
-
-    /// Closes the window. Everything with a home on disk is written
-    /// first; an untitled board has nowhere to go.
-    fn quit(&mut self, event_loop: &ActiveEventLoop) {
-        for i in 0..self.open.len() {
-            if self.open[i].project.dirty {
-                if self.open[i].project.needs_a_name() {
-                    log::warn!("{} was never saved", self.open[i].project.label());
-                } else {
-                    self.save_project(i);
-                }
-            }
+        match self.open.iter().position(|o| o.project.dirty) {
+            Some(i) => self.ask_about(i, Then::Quit),
+            None => self.closing = true,
         }
-        event_loop.exit();
     }
 
     /// Adds a tab and makes it the one in front.
@@ -501,8 +667,16 @@ impl App {
                 self.apply(change);
             }
             Key::Character(text) if pressed && self.modifiers.state().control_key() => {
-                if text.eq_ignore_ascii_case("v") {
-                    self.paste();
+                // Shift turns the character upper case, so the letter is
+                // read case-insensitively and the modifier separately.
+                let shift = self.modifiers.state().shift_key();
+                match text.to_ascii_lowercase().as_str() {
+                    "v" => self.paste(),
+                    "s" if shift => self.ask_name(self.active, Then::Stay),
+                    "s" => self.save_active(),
+                    "o" => self.ask_open(),
+                    "w" => self.request_close(self.active),
+                    _ => {}
                 }
             }
             Key::Character(text) if pressed => {
@@ -641,6 +815,12 @@ impl ApplicationHandler<UserEvent> for App {
                     Ok(clipboard) => self.clipboard = Some(clipboard),
                     Err(e) => log::warn!("clipboard unavailable: {e:#}"),
                 }
+                let proxy = self.proxy.clone();
+                self.dialog_sink = Some(Arc::new(move |reply| {
+                    if proxy.send_event(UserEvent::Dialog(reply)).is_err() {
+                        log::warn!("event loop gone; dialog answer dropped");
+                    }
+                }));
                 self.window = Some(window);
                 self.ensure_atlas();
                 self.load_images();
@@ -652,15 +832,14 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         self.handle_window_event(event_loop, event);
-        // The last tab closing leaves nothing to show.
-        if self.is_empty() {
+        if self.closing {
             event_loop.exit();
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, ev: UserEvent) {
-        self.handle_user_event(event_loop, ev);
-        if self.is_empty() {
+        self.handle_user_event(ev);
+        if self.closing {
             event_loop.exit();
         }
     }
@@ -669,7 +848,7 @@ impl ApplicationHandler<UserEvent> for App {
 impl App {
     fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => self.quit(event_loop),
+            WindowEvent::CloseRequested => self.quit(),
             WindowEvent::Resized(size) => {
                 if let Some(gfx) = &mut self.gfx {
                     gfx.resize(size.width, size.height);
@@ -739,11 +918,12 @@ impl App {
         }
     }
 
-    fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, ev: UserEvent) {
+    fn handle_user_event(&mut self, ev: UserEvent) {
         let req = match ev {
             UserEvent::Request(req) => req,
             UserEvent::Gesture(g) => return self.gestured(g),
             UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
+            UserEvent::Dialog(reply) => return self.dialog_replied(reply),
         };
         match req {
             Request::Raise => {
@@ -764,7 +944,7 @@ impl App {
                 self.open_project(Project::opened(doc, origin));
             }
             Request::Open { id } => {
-                if let Some(i) = self.tab_showing(&id) {
+                if let Some(i) = self.tab_with_key(&id) {
                     return self.activate(i);
                 }
                 match self.store.load(&id) {
@@ -774,7 +954,7 @@ impl App {
                     Err(e) => log::error!("opening board {id:?}: {e:#}"),
                 }
             }
-            Request::Shutdown => self.quit(event_loop),
+            Request::Shutdown => self.quit(),
             Request::Theme { colors } => {
                 self.theme = Theme::from_hex(&colors.bg, &colors.fg, &colors.accent);
                 self.redraw();
@@ -848,6 +1028,10 @@ pub fn run(
         atlas: None,
         atlas_slot: 0,
         clipboard: None,
+        dialog_sink: None,
+        pending: None,
+        quitting: false,
+        closing: false,
         cursor: None,
         modifiers: Modifiers::default(),
         cursor_icon: CursorIcon::Default,

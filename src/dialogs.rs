@@ -88,6 +88,10 @@ pub fn save_as(window: &Window, sink: Sink, key: String, suggested: &str, at: Op
 }
 
 /// Asks what to do about a board with unsaved changes.
+///
+/// There is no portal for a question, so this one goes through `zenity`.
+/// When it is missing the answer comes back as a cancel, which is the
+/// failure that loses nothing: the tab stays, still unsaved.
 pub fn confirm_close(window: &Window, sink: Sink, key: String, label: &str) {
     let dialog = MessageDialog::new()
         .set_level(MessageLevel::Warning)
