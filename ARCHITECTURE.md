@@ -311,7 +311,18 @@ Borracha vetorial (hit-test + delete) é mais simples e mais útil para o agente
 
 Landed: tools live in a dock centered at the bottom of the canvas (rounded
 panel, one button per tool, active tool highlighted); the canvas has a
-dotted background fixed in world space. Select and Pencil so far.
+dotted background fixed in world space. Select, Hand, Pencil and Zoom so
+far (`Z` is not in the table above: a zoom tool that scrubs by dragging
+and steps by clicking, like Photoshop's, plus Ctrl held as its momentary
+form). Navigation: Hand / Space / middle button drag the grabbed world
+point under the pointer; wheel and two-finger scroll pan, Shift turns a
+vertical wheel horizontal; with Zoom active the wheel zooms at the cursor,
+one notch = one unit (×1.25), range 0.1–10. Trackpad pinch and
+three-finger swipe come from `zwp_pointer_gestures_v1` — winit has no
+gesture events on Wayland, so `gestures` joins the window's connection as
+a guest client on a thread and forwards steps to the event loop (the same
+bridge shape as the IPC server). The camera persists in the document and
+is saved when a gesture ends.
 
 Snap e conectores estilo Omaboard: fase 1.1. No MVP, seta é geometria, não binding vivo.
 
