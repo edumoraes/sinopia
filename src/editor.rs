@@ -9,17 +9,21 @@ use crate::doc::{Document, Element, Path, new_id};
 pub enum Tool {
     #[default]
     Select,
+    Hand,
     Pencil,
+    Zoom,
 }
 
 impl Tool {
     /// Dock order.
-    pub const ALL: [Tool; 2] = [Tool::Select, Tool::Pencil];
+    pub const ALL: [Tool; 4] = [Tool::Select, Tool::Hand, Tool::Pencil, Tool::Zoom];
 
     pub fn hotkey(self) -> char {
         match self {
             Tool::Select => 'v',
+            Tool::Hand => 'h',
             Tool::Pencil => 'p',
+            Tool::Zoom => 'z',
         }
     }
 
@@ -73,7 +77,7 @@ impl Editor {
                 self.stroke = Some(vec![world]);
                 true
             }
-            Tool::Select => false,
+            Tool::Select | Tool::Hand | Tool::Zoom => false,
         }
     }
 
@@ -139,10 +143,20 @@ mod tests {
         assert_eq!(Tool::from_hotkey('p'), Some(Tool::Pencil));
         assert_eq!(Tool::from_hotkey('P'), Some(Tool::Pencil));
         assert_eq!(Tool::from_hotkey('v'), Some(Tool::Select));
+        assert_eq!(Tool::from_hotkey('h'), Some(Tool::Hand));
+        assert_eq!(Tool::from_hotkey('z'), Some(Tool::Zoom));
         assert_eq!(Tool::from_hotkey('x'), None);
         for t in Tool::ALL {
             assert_eq!(Tool::from_hotkey(t.hotkey()), Some(t));
         }
+    }
+
+    #[test]
+    fn dock_order_is_select_hand_pencil_zoom() {
+        assert_eq!(
+            Tool::ALL,
+            [Tool::Select, Tool::Hand, Tool::Pencil, Tool::Zoom]
+        );
     }
 
     #[test]
