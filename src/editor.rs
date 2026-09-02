@@ -2,6 +2,7 @@
 //! and the stroke being drawn. Pure — `app` feeds it pointer events in
 //! world coordinates and renders whatever it holds.
 
+use crate::curve;
 use crate::doc::{Document, Element, Path, new_id};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,6 +31,10 @@ impl Tool {
 
 /// Pen width in world units (logical px at zoom 1).
 pub const PEN_WIDTH: f64 = 2.0;
+
+/// How far the committed path may stray from the pointer, in screen px.
+/// `app` converts it to world units for [`Editor::pointer_up`].
+pub const FIT_TOLERANCE_PX: f64 = 1.0;
 
 #[derive(Debug, Default)]
 pub struct Editor {
@@ -87,14 +92,17 @@ impl Editor {
         true
     }
 
-    /// Primary button released: the stroke becomes a `path` in `ink`.
-    pub fn pointer_up(&mut self, doc: &mut Document, ink: &str) -> bool {
+    /// Primary button released: the stroke is simplified and fitted with
+    /// cubics within `tolerance` (world units), then committed as a `path`
+    /// in `ink`.
+    pub fn pointer_up(&mut self, doc: &mut Document, ink: &str, tolerance: f64) -> bool {
         let Some(points) = self.stroke.take() else {
             return false;
         };
+        let curves = curve::fit(&curve::simplify(&points, tolerance), tolerance);
         doc.elements.push(Element::Path(Path {
             id: new_id(),
-            points,
+            curves,
             stroke: ink.to_owned(),
             width: PEN_WIDTH,
         }));
@@ -143,7 +151,7 @@ mod tests {
         let mut doc = Document::new("t");
         assert!(!e.pointer_down([1.0, 1.0]));
         assert!(!e.pointer_move([2.0, 2.0], 0.5));
-        assert!(!e.pointer_up(&mut doc, "#000"));
+        assert!(!e.pointer_up(&mut doc, "#000", 1.0));
         assert!(doc.elements.is_empty());
     }
 
@@ -153,16 +161,19 @@ mod tests {
         let mut doc = Document::new("t");
         assert!(e.pointer_down([1.0, 2.0]));
         assert!(e.is_drawing());
-        assert!(e.pointer_move([5.0, 2.0], 0.5));
-        assert_eq!(e.stroke(), Some(&[[1.0, 2.0], [5.0, 2.0]][..]));
-        assert!(e.pointer_up(&mut doc, "#1f1f1f"));
+        assert!(e.pointer_move([4.0, 2.0], 0.5));
+        assert_eq!(e.stroke(), Some(&[[1.0, 2.0], [4.0, 2.0]][..]));
+        assert!(e.pointer_up(&mut doc, "#1f1f1f", 0.5));
         assert!(!e.is_drawing());
         assert_eq!(doc.elements.len(), 1);
         let Element::Path(p) = &doc.elements[0] else {
             panic!("expected a path");
         };
         assert_eq!(p.id.len(), 26, "ULID id");
-        assert_eq!(p.points, vec![[1.0, 2.0], [5.0, 2.0]]);
+        assert_eq!(
+            p.curves,
+            vec![[[1.0, 2.0], [2.0, 2.0], [3.0, 2.0], [4.0, 2.0]]]
+        );
         assert_eq!(p.stroke, "#1f1f1f");
         assert_eq!(p.width, PEN_WIDTH);
     }
@@ -184,15 +195,38 @@ mod tests {
     }
 
     #[test]
-    fn a_click_without_motion_commits_a_single_point_path() {
+    fn a_click_without_motion_commits_a_dot() {
         let mut e = pencil();
         let mut doc = Document::new("t");
         e.pointer_down([3.0, 4.0]);
-        assert!(e.pointer_up(&mut doc, "#000"));
+        assert!(e.pointer_up(&mut doc, "#000", 1.0));
         let Element::Path(p) = &doc.elements[0] else {
             panic!("expected a path");
         };
-        assert_eq!(p.points, vec![[3.0, 4.0]]);
+        assert_eq!(p.curves, vec![[[3.0, 4.0]; 4]]);
+    }
+
+    #[test]
+    fn release_simplifies_jitter_away_before_fitting() {
+        let mut e = pencil();
+        let mut doc = Document::new("t");
+        e.pointer_down([0.0, 0.0]);
+        for i in 1..=10 {
+            let wobble = if i % 2 == 0 { 0.1 } else { -0.1 };
+            e.pointer_move([i as f64, if i == 10 { 0.0 } else { wobble }], 0.5);
+        }
+        assert_eq!(e.stroke().map(<[_]>::len), Some(11));
+        assert!(e.pointer_up(&mut doc, "#000", 0.5));
+        let Element::Path(p) = &doc.elements[0] else {
+            panic!("expected a path");
+        };
+        // Wobble under the tolerance is noise: one straight cubic remains.
+        assert_eq!(p.curves.len(), 1, "{:?}", p.curves);
+        let c = p.curves[0];
+        assert_eq!(c[0], [0.0, 0.0]);
+        assert_eq!(c[3], [10.0, 0.0]);
+        assert_eq!(c[1][1], 0.0);
+        assert_eq!(c[2][1], 0.0);
     }
 
     #[test]
@@ -204,7 +238,7 @@ mod tests {
         assert!(e.cancel());
         assert!(!e.is_drawing());
         assert!(!e.cancel(), "nothing left to cancel");
-        assert!(!e.pointer_up(&mut doc, "#000"));
+        assert!(!e.pointer_up(&mut doc, "#000", 1.0));
         assert!(doc.elements.is_empty());
     }
 

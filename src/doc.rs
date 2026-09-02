@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::curve::Cubic;
+
 /// Versão de schema que este binário escreve e aceita.
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -45,12 +47,13 @@ pub struct Rect {
     pub text: Option<String>,
 }
 
-/// Freehand pen stroke: a polyline in world units, `width` in world units
-/// too (ink scales with zoom). Points are stored as `[x, y]` pairs.
+/// Freehand pen stroke: a chain of cubic Béziers in world units, each one
+/// self-contained as `[a, c1, c2, b]` and starting where the previous
+/// ended. `width` is in world units too (ink scales with zoom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Path {
     pub id: String,
-    pub points: Vec<[f64; 2]>,
+    pub curves: Vec<Cubic>,
     pub stroke: String,
     pub width: f64,
 }
@@ -129,7 +132,7 @@ mod tests {
                 }),
                 Element::Path(Path {
                     id: "el_02".into(),
-                    points: vec![[1.0, 2.0], [3.5, 4.0], [6.0, 4.0]],
+                    curves: vec![[[1.0, 2.0], [2.0, 3.0], [3.5, 4.0], [6.0, 4.0]]],
                     stroke: "#1f1f1f".into(),
                     width: 2.0,
                 }),
@@ -205,18 +208,18 @@ mod tests {
     }
 
     #[test]
-    fn path_serializes_flat_with_point_pairs() {
+    fn path_serializes_curves_as_self_contained_cubics() {
         let doc = sample_doc();
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
         let el = &v["elements"][1];
-        // Pen strokes are `type: "path"` with points as [x, y] pairs: compact
-        // on disk and trivial for an exporter or agent to read.
+        // Pen strokes are `type: "path"` with one `[a, c1, c2, b]` per cubic
+        // — SVG's `M a C c1 c2 b`, with nothing to cross-check between arrays.
         assert_eq!(el["type"], "path");
         assert_eq!(el["id"], "el_02");
         assert_eq!(
-            el["points"],
-            serde_json::json!([[1.0, 2.0], [3.5, 4.0], [6.0, 4.0]])
+            el["curves"],
+            serde_json::json!([[[1.0, 2.0], [2.0, 3.0], [3.5, 4.0], [6.0, 4.0]]])
         );
         assert_eq!(el["stroke"], "#1f1f1f");
         assert_eq!(el["width"].as_f64(), Some(2.0));
@@ -230,7 +233,8 @@ mod tests {
             "title": "sketch",
             "camera": { "x": 0, "y": 0, "zoom": 1 },
             "elements": [
-                { "id": "p1", "type": "path", "points": [[0, 0], [10, 5]],
+                { "id": "p1", "type": "path",
+                  "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]],
                   "stroke": "#000", "width": 3 }
             ]
         }"##;
@@ -238,7 +242,10 @@ mod tests {
         let Element::Path(p) = &doc.elements[0] else {
             panic!("expected a path, got {:?}", doc.elements[0]);
         };
-        assert_eq!(p.points, vec![[0.0, 0.0], [10.0, 5.0]]);
+        assert_eq!(
+            p.curves,
+            vec![[[0.0, 0.0], [3.0, 0.0], [7.0, 5.0], [10.0, 5.0]]]
+        );
         assert_eq!(p.stroke, "#000");
         assert_eq!(p.width, 3.0);
     }

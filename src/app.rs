@@ -17,7 +17,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::doc::Document;
 use crate::dock::{Dock, Hit};
-use crate::editor::{Editor, PEN_WIDTH, Tool};
+use crate::editor::{Editor, FIT_TOLERANCE_PX, PEN_WIDTH, Tool};
 use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
@@ -129,7 +129,13 @@ impl App {
     }
 
     fn pointer_released(&mut self) {
-        if self.editor.pointer_up(&mut self.doc, &self.theme.ink_hex) {
+        let tolerance = self
+            .view()
+            .map_or(FIT_TOLERANCE_PX, |v| FIT_TOLERANCE_PX / v.px_per_world());
+        if self
+            .editor
+            .pointer_up(&mut self.doc, &self.theme.ink_hex, tolerance)
+        {
             self.save();
             self.redraw();
         }

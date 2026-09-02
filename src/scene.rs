@@ -12,6 +12,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::curve::{self, Cubic};
 use crate::doc::{Camera, Document, Element};
 
 /// Viewport in physical pixels.
@@ -260,10 +261,14 @@ pub fn polyline_prims(points: &[(f32, f32)], half_width: f32, color: Rgba) -> Ve
     out
 }
 
-/// Pen stroke in world units → screen prims. Width scales with zoom but
-/// never drops below one pixel, so zoomed-out ink stays visible.
+/// Half of a pen width in screen px. Ink scales with zoom but never drops
+/// below one pixel, so zoomed-out strokes stay visible.
+fn half_width_px(width: f64, view: &View) -> f32 {
+    ((width * view.px_per_world()) as f32 / 2.0).max(0.5)
+}
+
+/// Stroke in progress (a raw polyline in world units) → screen prims.
 pub fn stroke_prims(points: &[[f64; 2]], width: f64, color: Rgba, view: &View) -> Vec<Prim> {
-    let half_width = ((width * view.px_per_world()) as f32 / 2.0).max(0.5);
     let screen: Vec<(f32, f32)> = points
         .iter()
         .map(|[x, y]| {
@@ -271,7 +276,29 @@ pub fn stroke_prims(points: &[[f64; 2]], width: f64, color: Rgba, view: &View) -
             (sx as f32, sy as f32)
         })
         .collect();
-    polyline_prims(&screen, half_width, color)
+    polyline_prims(&screen, half_width_px(width, view), color)
+}
+
+/// How far the flattened polyline may stray from the curve, in px.
+const FLATTEN_TOLERANCE_PX: f64 = 0.25;
+
+/// Committed `path` (cubics in world units) → screen prims. The control
+/// points are projected first — Béziers are affine-invariant — so the
+/// flattening tolerance is in pixels whatever the zoom.
+pub fn path_prims(curves: &[Cubic], width: f64, color: Rgba, view: &View) -> Vec<Prim> {
+    let mut screen: Vec<(f32, f32)> = Vec::new();
+    for c in curves {
+        let projected = c.map(|[x, y]| {
+            let (sx, sy) = view.world_to_screen(x, y);
+            [sx, sy]
+        });
+        screen.extend(
+            curve::flatten(&projected, FLATTEN_TOLERANCE_PX)
+                .into_iter()
+                .map(|[x, y]| (x as f32, y as f32)),
+        );
+    }
+    polyline_prims(&screen, half_width_px(width, view), color)
 }
 
 /// Flattens the document into prims in paint order. Rects paint fill first,
@@ -322,12 +349,7 @@ pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
                 }
             }
             Element::Path(p) => {
-                out.extend(stroke_prims(
-                    &p.points,
-                    p.width,
-                    parse_color(&p.stroke),
-                    view,
-                ));
+                out.extend(path_prims(&p.curves, p.width, parse_color(&p.stroke), view));
             }
         }
     }
@@ -584,7 +606,7 @@ mod tests {
         let doc = doc_with(
             vec![Element::Path(Path {
                 id: "p".into(),
-                points: vec![[0.0, 0.0], [10.0, 0.0]],
+                curves: vec![[[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]],
                 stroke: "#000".into(),
                 width: 2.0,
             })],
@@ -595,11 +617,40 @@ mod tests {
             document_prims(&doc, &v),
             vec![Prim::segment(
                 (50.0, 50.0),
-                (70.0, 50.0),
+                (68.0, 50.0),
                 2.0,
                 [0.0, 0.0, 0.0, 1.0]
             )]
         );
+    }
+
+    #[test]
+    fn path_prims_flatten_curves_in_screen_pixels() {
+        let c = [[0.0, 0.0], [0.0, 55.0], [45.0, 100.0], [100.0, 100.0]];
+        let at_1x = path_prims(&[c], 2.0, WHITE, &view(0.0, 0.0, 1.0));
+        assert!(at_1x.len() > 1, "a curve is more than one segment");
+        let first = at_1x[0].geom;
+        let last = at_1x[at_1x.len() - 1].geom;
+        assert_eq!((first[0], first[1]), (50.0, 50.0));
+        assert_eq!((last[2], last[3]), (150.0, 150.0));
+        // Flattening tolerance is in pixels, so zooming in adds segments.
+        let at_4x = path_prims(&[c], 2.0, WHITE, &view(0.0, 0.0, 4.0));
+        assert!(
+            at_4x.len() > at_1x.len(),
+            "{} vs {}",
+            at_4x.len(),
+            at_1x.len()
+        );
+    }
+
+    #[test]
+    fn path_prims_join_consecutive_cubics_without_a_gap() {
+        let a = [[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]];
+        let b = [[9.0, 0.0], [12.0, 0.0], [15.0, 0.0], [18.0, 0.0]];
+        let got = path_prims(&[a, b], 2.0, WHITE, &view(0.0, 0.0, 1.0));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].geom, [50.0, 50.0, 59.0, 50.0]);
+        assert_eq!(got[1].geom, [59.0, 50.0, 68.0, 50.0]);
     }
 
     #[test]
