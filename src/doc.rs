@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::curve::Cubic;
+use crate::curve::{self, Cubic};
 
 /// Versão de schema que este binário escreve e aceita.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -51,11 +51,50 @@ pub struct Rect {
 /// self-contained as `[a, c1, c2, b]` and starting where the previous
 /// ended. `width` is in world units too (ink scales with zoom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "PathOnDisk")]
 pub struct Path {
     pub id: String,
     pub curves: Vec<Cubic>,
     pub stroke: String,
     pub width: f64,
+}
+
+/// What a `path` may look like on disk: `curves` today, or the raw
+/// `points` polyline boards held before the Bézier fit landed. Legacy
+/// polylines are fitted on load and written back as `curves` on the next
+/// save.
+#[derive(Deserialize)]
+struct PathOnDisk {
+    id: String,
+    curves: Option<Vec<Cubic>>,
+    points: Option<Vec<[f64; 2]>>,
+    stroke: String,
+    width: f64,
+}
+
+/// Fit tolerance for legacy polylines, in world units (one pixel at
+/// zoom 1, the pencil's own default).
+const LEGACY_FIT_TOLERANCE: f64 = 1.0;
+
+impl TryFrom<PathOnDisk> for Path {
+    type Error = String;
+
+    fn try_from(p: PathOnDisk) -> Result<Path, String> {
+        let curves = match (p.curves, p.points) {
+            (Some(curves), _) => curves,
+            (None, Some(points)) => curve::fit(
+                &curve::simplify(&points, LEGACY_FIT_TOLERANCE),
+                LEGACY_FIT_TOLERANCE,
+            ),
+            (None, None) => return Err("path needs `curves`".into()),
+        };
+        Ok(Path {
+            id: p.id,
+            curves,
+            stroke: p.stroke,
+            width: p.width,
+        })
+    }
 }
 
 impl Default for Camera {
@@ -248,6 +287,43 @@ mod tests {
         );
         assert_eq!(p.stroke, "#000");
         assert_eq!(p.width, 3.0);
+    }
+
+    #[test]
+    fn parses_legacy_path_points_by_fitting_them() {
+        // Boards written before the Bézier fit landed hold raw polylines.
+        let json = r##"{
+            "schema": 1,
+            "id": "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "title": "sketch",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [
+                { "id": "p1", "type": "path", "points": [[0, 0], [4.5, 0.2], [9, 0]],
+                  "stroke": "#000", "width": 2 }
+            ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Path(p) = &doc.elements[0] else {
+            panic!("expected a path, got {:?}", doc.elements[0]);
+        };
+        assert_eq!(
+            p.curves,
+            vec![[[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]]
+        );
+        assert_eq!(p.stroke, "#000");
+    }
+
+    #[test]
+    fn path_without_curves_or_points_is_an_error() {
+        let json = r##"{
+            "schema": 1,
+            "id": "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "title": "sketch",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [ { "id": "p1", "type": "path", "stroke": "#000", "width": 2 } ]
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("curves"), "{err}");
     }
 
     #[test]

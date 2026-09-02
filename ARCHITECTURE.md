@@ -240,7 +240,9 @@ Landed — `path` (pencil strokes):
 ended; a tap is one degenerate cubic. Coordinates are world units; `width`
 is in world units too, so ink scales with zoom. A world unit is one logical
 pixel at zoom 1. The stroke is simplified and fitted on release
-(`src/curve.rs`), so the document never holds raw pointer samples.
+(`src/curve.rs`), so the document never holds raw pointer samples. Boards
+written before the fit landed hold a raw `points` polyline instead; those
+are fitted on load and rewritten as `curves` on the next save.
 
 Por que JSON plano agora, e não Automerge já:
 
