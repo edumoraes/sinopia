@@ -5,6 +5,7 @@
 
 mod app;
 mod bitmap;
+mod brush;
 mod cli;
 mod clipboard;
 mod curve;
