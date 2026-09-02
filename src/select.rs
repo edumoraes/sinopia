@@ -193,26 +193,47 @@ fn degrees(angle: f64) -> f64 {
     (angle.to_degrees() * 1e9).round() / 1e9 + 0.0
 }
 
+/// What the held modifiers make of a resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resize {
+    /// Shift: one factor for both axes, so the box keeps its proportions.
+    pub uniform: bool,
+    /// Ctrl: the center stays put instead of the opposite corner.
+    pub from_center: bool,
+}
+
 /// The map that drags `corner` of `f` to `pointer` along the frame's own
-/// axes, the opposite corner pinned. An axis of zero extent is left alone.
-pub fn resize_map(f: &Frame, corner: Corner, pointer: Point) -> Affine {
+/// axes. What stays put is the opposite corner, or the center under
+/// [`Resize::from_center`]; [`Resize::uniform`] hands both axes the wider
+/// of the two factors, keeping their sign, so the proportions survive and
+/// a flip still flips. An axis of zero extent is left alone, and stays out
+/// of the shared factor: it has no ratio to keep.
+pub fn resize_map(f: &Frame, corner: Corner, pointer: Point, opts: Resize) -> Affine {
     let signs = corner.signs();
-    let pinned = corner.opposite().signs();
-    let fixed = [pinned[0] * f.half[0], pinned[1] * f.half[1]];
-    let local = f.to_local(pointer);
-    let factor = |axis: usize| {
-        let span = 2.0 * signs[axis] * f.half[axis];
-        if span.abs() < 1e-9 {
-            1.0
-        } else {
-            (local[axis] - fixed[axis]) / span
-        }
+    let fixed = if opts.from_center {
+        [0.0, 0.0]
+    } else {
+        let pinned = corner.opposite().signs();
+        [pinned[0] * f.half[0], pinned[1] * f.half[1]]
     };
+    let local = f.to_local(pointer);
+    // How far the dragged corner sits from what stays put: the whole side
+    // from the opposite corner, half of it from the center.
+    let factor = |axis: usize| {
+        let span = signs[axis] * f.half[axis] - fixed[axis];
+        (span.abs() >= 1e-9).then(|| (local[axis] - fixed[axis]) / span)
+    };
+    let mut factors = [factor(0), factor(1)];
+    if opts.uniform {
+        let wider = factors.iter().flatten().fold(0.0, |w: f64, s| w.max(s.abs()));
+        for s in factors.iter_mut().flatten() {
+            *s = wider * s.signum();
+        }
+    }
+    let scale = Affine::scale(factors[0].unwrap_or(1.0), factors[1].unwrap_or(1.0));
     let to_local = Affine::translate(-f.center[0], -f.center[1]).then(Affine::rotate(-f.angle));
     let to_world = Affine::rotate(f.angle).then(Affine::translate(f.center[0], f.center[1]));
-    to_local
-        .then(Affine::scale(factor(0), factor(1)).about(fixed))
-        .then(to_world)
+    to_local.then(scale.about(fixed)).then(to_world)
 }
 
 /// The angle (radians) the pointer swept about the center of `f` going
@@ -346,6 +367,24 @@ mod tests {
 
     const QUARTER: f64 = std::f64::consts::FRAC_PI_2;
 
+    /// Each axis follows the pointer on its own, the opposite corner pinned.
+    const FREE: Resize = Resize {
+        uniform: false,
+        from_center: false,
+    };
+    const UNIFORM: Resize = Resize {
+        uniform: true,
+        from_center: false,
+    };
+    const FROM_CENTER: Resize = Resize {
+        uniform: false,
+        from_center: true,
+    };
+    const BOTH: Resize = Resize {
+        uniform: true,
+        from_center: true,
+    };
+
     fn rect(id: &str, x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Element {
         Element::Rect(Rect {
             id: id.into(),
@@ -470,7 +509,7 @@ mod tests {
         let f = frame(&p).unwrap();
         transform(
             &mut p,
-            &resize_map(&f, Corner::BottomRight, f.corner(Corner::BottomRight)),
+            &resize_map(&f, Corner::BottomRight, f.corner(Corner::BottomRight), FREE),
         );
         assert_eq!(path_rotation(&p), 90.0);
         transform(&mut p, &Affine::rotate(-QUARTER).about([0.0, 0.0]));
@@ -607,7 +646,7 @@ mod tests {
             half: [5.0, 5.0],
             angle: 0.0,
         };
-        let m = resize_map(&f, Corner::BottomRight, [20.0, 15.0]);
+        let m = resize_map(&f, Corner::BottomRight, [20.0, 15.0], FREE);
         assert_close(m.apply([0.0, 0.0]), [0.0, 0.0]);
         assert_close(m.apply([10.0, 10.0]), [20.0, 15.0]);
         assert_close(m.apply([5.0, 5.0]), [10.0, 7.5]);
@@ -619,7 +658,7 @@ mod tests {
             angle: QUARTER,
         };
         let target = [3.0, 25.0];
-        let m = resize_map(&f, Corner::TopRight, target);
+        let m = resize_map(&f, Corner::TopRight, target, FREE);
         assert_close(
             m.apply(f.corner(Corner::BottomLeft)),
             f.corner(Corner::BottomLeft),
@@ -632,8 +671,76 @@ mod tests {
             half: [5.0, 0.0],
             angle: 0.0,
         };
-        let m = resize_map(&f, Corner::BottomRight, [12.0, 3.0]);
+        let m = resize_map(&f, Corner::BottomRight, [12.0, 3.0], FREE);
         assert_close(m.apply([10.0, 0.0]), [12.0, 0.0]);
+    }
+
+    #[test]
+    fn shift_scales_both_axes_by_one_factor() {
+        // 20 x 10: whatever the pointer asks for, the box stays 2:1.
+        let f = Frame {
+            center: [10.0, 5.0],
+            half: [10.0, 5.0],
+            angle: 0.0,
+        };
+        // 1.3x across, 3x down: the larger one takes both axes.
+        let m = resize_map(&f, Corner::BottomRight, [26.0, 30.0], UNIFORM);
+        assert_close(m.apply([0.0, 0.0]), [0.0, 0.0]);
+        assert_close(m.apply([20.0, 10.0]), [60.0, 30.0]);
+
+        // Past the pinned corner the box mirrors, still 2:1.
+        let m = resize_map(&f, Corner::BottomRight, [-16.0, 2.0], UNIFORM);
+        assert_close(m.apply([0.0, 0.0]), [0.0, 0.0]);
+        assert_close(m.apply([20.0, 10.0]), [-16.0, 8.0]);
+
+        // A flat frame has no ratio to keep: the live axis decides alone,
+        // and the axis that cannot stretch does not hold it back.
+        let f = Frame {
+            center: [5.0, 0.0],
+            half: [5.0, 0.0],
+            angle: 0.0,
+        };
+        let m = resize_map(&f, Corner::BottomRight, [8.0, 3.0], UNIFORM);
+        assert_close(m.apply([10.0, 0.0]), [8.0, 0.0]);
+    }
+
+    #[test]
+    fn ctrl_scales_about_the_center() {
+        let f = Frame {
+            center: [5.0, 5.0],
+            half: [5.0, 5.0],
+            angle: 0.0,
+        };
+        let m = resize_map(&f, Corner::BottomRight, [15.0, 7.5], FROM_CENTER);
+        assert_close(m.apply([5.0, 5.0]), [5.0, 5.0]);
+        assert_close(m.apply([10.0, 10.0]), [15.0, 7.5]);
+        // The corner that used to be pinned now moves the other way.
+        assert_close(m.apply([0.0, 0.0]), [-5.0, 2.5]);
+
+        // Turned frame: the center holds along its own axes too.
+        let f = Frame {
+            center: [0.0, 0.0],
+            half: [10.0, 5.0],
+            angle: QUARTER,
+        };
+        let m = resize_map(&f, Corner::TopRight, [10.0, 20.0], FROM_CENTER);
+        assert_close(m.apply(f.center), f.center);
+        assert_close(m.apply(f.corner(Corner::TopRight)), [10.0, 20.0]);
+        assert_close(m.apply(f.corner(Corner::BottomLeft)), [-10.0, -20.0]);
+    }
+
+    #[test]
+    fn shift_and_ctrl_scale_uniformly_about_the_center() {
+        let f = Frame {
+            center: [5.0, 5.0],
+            half: [5.0, 5.0],
+            angle: 0.0,
+        };
+        // 2x across, 0.5x down about the center; uniform takes the 2x.
+        let m = resize_map(&f, Corner::BottomRight, [15.0, 7.5], BOTH);
+        assert_close(m.apply([5.0, 5.0]), [5.0, 5.0]);
+        assert_close(m.apply([10.0, 10.0]), [15.0, 15.0]);
+        assert_close(m.apply([0.0, 0.0]), [-5.0, -5.0]);
     }
 
     #[test]
@@ -807,7 +914,7 @@ mod tests {
     fn resizing_an_image_stretches_its_box() {
         let mut el = image("i", 0.0, 0.0, 40.0, 20.0, 0.0);
         let f = frame(&el).unwrap();
-        transform(&mut el, &resize_map(&f, Corner::BottomRight, [80.0, 20.0]));
+        transform(&mut el, &resize_map(&f, Corner::BottomRight, [80.0, 20.0], FREE));
         let Element::Image(i) = &el else { panic!() };
         assert_eq!((i.x, i.y, i.w, i.h), (0.0, 0.0, 80.0, 20.0));
     }

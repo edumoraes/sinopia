@@ -381,15 +381,17 @@ impl App {
         self.update_cursor_icon();
     }
 
-    /// Cursor for the active tool over the canvas; arrow over the dock;
-    /// resize and rotate cursors over the selection handles.
+    /// Cursor for the tool the pointer would use over the canvas; arrow
+    /// over the dock; resize and rotate cursors over the selection
+    /// handles.
     fn update_cursor_icon(&mut self) {
-        let (over_dock, handle) = match (self.view(), self.cursor) {
+        let (over_dock, handle, tool) = match (self.view(), self.cursor) {
             (Some(view), Some((x, y))) => (
                 self.dock(&view).hit(x, y).is_some(),
                 self.editor.hover(&self.doc, &view, (x, y)),
+                self.editor.pointer_tool(&self.doc, &view, (x, y)),
             ),
-            _ => (false, None),
+            _ => (false, None, self.editor.active_tool()),
         };
         let icon = if self.editor.is_panning() {
             CursorIcon::Grabbing
@@ -400,7 +402,7 @@ impl App {
         } else if over_dock {
             CursorIcon::Default
         } else {
-            match (self.editor.active_tool(), handle) {
+            match (tool, handle) {
                 (Tool::Select, Some(Handle::Resize(Corner::TopLeft | Corner::BottomRight))) => {
                     CursorIcon::NwseResize
                 }

@@ -209,6 +209,20 @@ impl Editor {
         }
     }
 
+    /// The tool a press at `screen` (physical px) would use: the active
+    /// one, except that Ctrl — Zoom everywhere else — hands a resize
+    /// handle of the selection back to Select, where it means "resize from
+    /// the center". The rotation rings keep zooming: a turn has no use for
+    /// Ctrl.
+    pub fn pointer_tool(&self, doc: &Document, view: &View, screen: (f64, f64)) -> Tool {
+        let tool = self.active_tool();
+        let over_resize = matches!(self.hover(doc, view, screen), Some(Handle::Resize(_)));
+        if tool == Tool::Zoom && self.ctrl && over_resize {
+            return Tool::Select;
+        }
+        tool
+    }
+
     pub fn hold_space(&mut self, down: bool) {
         self.space = down;
     }
@@ -288,7 +302,8 @@ impl Editor {
             return Change::None;
         }
         let world = view.screen_to_world(screen.0, screen.1);
-        match (button, self.active_tool()) {
+        let tool = self.pointer_tool(doc, view, screen);
+        match (button, tool) {
             (Button::Left, Tool::Select) => self.select_press(view, screen, doc),
             (Button::Middle, _) | (Button::Left, Tool::Hand) => {
                 self.nav = Some(Nav::Pan {
@@ -432,6 +447,12 @@ impl Editor {
     fn drag_moved(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
         let shift = self.shift;
+        // Shift keeps the proportions, Ctrl holds the center; read before
+        // the drag borrows the editor.
+        let constraints = select::Resize {
+            uniform: self.shift,
+            from_center: self.ctrl,
+        };
         match &mut self.drag {
             Some(Drag::Move {
                 origin,
@@ -461,7 +482,7 @@ impl Editor {
                 map,
                 snapshot,
             }) => {
-                *map = select::resize_map(frame, *corner, world);
+                *map = select::resize_map(frame, *corner, world, constraints);
                 apply(doc, snapshot, map);
                 Change::Scene
             }
@@ -957,6 +978,87 @@ mod tests {
             Change::Scene
         );
         assert_eq!(e.selection(), ids(&["a"]));
+    }
+
+    #[test]
+    fn shift_resizes_proportionally() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        e.hold_shift(true);
+        // `a` is 20 x 10 at (10, 10); dragging its bottom-right corner
+        // (30, 20) to (50, 25) asks 2x across and 1.5x down. The wider
+        // one takes both, so 20 x 10 becomes 40 x 20.
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc);
+        assert_eq!(e.moved(&v, (50.0, 25.0), &mut doc), Change::Scene);
+        let r = rect_of(&doc, "a");
+        assert_eq!((r.x, r.y, r.w, r.h), (10.0, 10.0, 40.0, 20.0));
+    }
+
+    #[test]
+    fn ctrl_resizes_from_the_center() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        // `a` is centered on (20, 15). Dragging its bottom-right corner
+        // (30, 20) to (40, 22.5) grows it both ways out of that center.
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc);
+        e.hold_ctrl(true);
+        assert_eq!(e.moved(&v, (40.0, 22.5), &mut doc), Change::Scene);
+        let r = rect_of(&doc, "a");
+        assert_eq!((r.x, r.y, r.w, r.h), (0.0, 7.5, 40.0, 15.0));
+    }
+
+    #[test]
+    fn shift_and_ctrl_resize_proportionally_from_the_center() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        e.hold_shift(true);
+        e.hold_ctrl(true);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc);
+        // 2x across, 1.5x down about (20, 15): the 2x takes both axes.
+        assert_eq!(e.moved(&v, (40.0, 22.5), &mut doc), Change::Scene);
+        let r = rect_of(&doc, "a");
+        assert_eq!((r.x, r.y, r.w, r.h), (0.0, 5.0, 40.0, 20.0));
+    }
+
+    #[test]
+    fn ctrl_is_zoom_except_over_a_resize_handle() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        e.hold_ctrl(true);
+        assert_eq!(e.pointer_tool(&doc, &v, (30.0, 20.0)), Tool::Select);
+        assert_eq!(e.pointer_tool(&doc, &v, (50.0, 50.0)), Tool::Zoom);
+        // Ctrl means nothing to a turn, so the rings still zoom.
+        let d = f64::from(crate::select::ROTATE_OFFSET_PX) / std::f64::consts::SQRT_2;
+        assert_eq!(e.pointer_tool(&doc, &v, (30.0 + d, 20.0 + d)), Tool::Zoom);
+        // The Z tool is not the Ctrl override: it zooms anywhere.
+        set_tool(&mut e, Tool::Zoom);
+        e.hold_ctrl(false);
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        assert_eq!(e.pointer_tool(&doc, &v, (30.0, 20.0)), Tool::Zoom);
+    }
+
+    #[test]
+    fn ctrl_on_a_resize_handle_resizes_instead_of_zooming() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        e.hold_ctrl(true);
+        assert_eq!(
+            e.press(Button::Left, &v, (30.0, 20.0), &mut doc),
+            Change::None
+        );
+        // A zoom would answer with a camera; the handle reshapes instead.
+        assert_eq!(e.moved(&v, (40.0, 22.5), &mut doc), Change::Scene);
+        assert_eq!(rect_of(&doc, "a").w, 40.0);
     }
 
     #[test]
