@@ -244,6 +244,13 @@ pixel at zoom 1. The stroke is simplified and fitted on release
 written before the fit landed hold a raw `points` polyline instead; those
 are fitted on load and rewritten as `curves` on the next save.
 
+Landed — `rotation` on `rect`: degrees, clockwise on screen, about the
+rect's center; `x, y, w, h` describe the box before the turn. Absent when
+zero, so unrotated boards keep the shape above. Paths have no rotation
+field: the select tool bakes moves, turns and stretches into their control
+points (Béziers are affine-invariant), so the export never composes
+transforms.
+
 Why plain JSON now, and not Automerge already:
 
 - Fewer dependencies, debugging with `$EDITOR`, git diff if the user commits the export.
@@ -323,6 +330,15 @@ gesture events on Wayland, so `gestures` joins the window's connection as
 a guest client on a thread and forwards steps to the event loop (the same
 bridge shape as the IPC server). The camera persists in the document and
 is saved when a gesture ends.
+
+Select (`V`) landed: click, Shift+click and a marquee pick elements (the
+marquee takes whatever it overlaps). The selection frame — a lone rect's
+own turned box, or the axis-aligned box around several elements — carries
+square resize handles on its corners and rings past them for rotation
+about the frame center; dragging the selection itself moves it. Drags
+transform the document live from a snapshot taken at the press, so `Esc`
+puts it back; `Delete`/`Backspace` removes. The selection is session
+state (§6.2) and is dropped on a tool switch.
 
 Omaboard-style snap and connectors: phase 1.1. In the MVP an arrow is geometry, not a live binding.
 

@@ -6,10 +6,9 @@ the real architecture emerges from development.
 
 ## Status
 
-Scaffold (§15 items 1–2), the first tool (item 4, pencil only) and
-navigation:
+Scaffold (§15 items 1–2), the pencil (item 4), selection and navigation:
 
-- `cargo build` clean, `cargo test` with 123 tests.
+- `cargo build` clean, `cargo test` with 167 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -19,8 +18,18 @@ navigation:
   fitted with cubic Béziers (Schneider), then saved as a `path` of
   self-contained `[a, c1, c2, b]` curves; rendering flattens them per
   frame at the current zoom.
+- Select: click picks the topmost element, `Shift`+click toggles one in
+  or out, dragging on empty canvas draws a marquee that selects whatever
+  it overlaps (`Shift` adds to the selection). The selection shows its
+  frame — a lone rect keeps its own turn, anything else is the axis-aligned
+  box around every corner — with square handles on the corners and rings
+  just past them. Dragging the selection moves it; a corner handle resizes
+  with the opposite corner pinned; a ring rotates about the frame center.
+  `Delete`/`Backspace` removes the selection; `Esc` cancels the drag in
+  progress (putting things back), then clears the selection. Rects carry a
+  `rotation` in degrees; paths bake every transform into their curves.
 - Tool dock centered at the bottom — Select `V`, Hand `H`, Pencil `P`,
-  Zoom `Z`; `Esc` cancels the stroke or gesture in progress.
+  Zoom `Z`; `Esc` cancels the stroke, gesture or drag in progress.
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
   wheel and two-finger scroll pan (Shift: horizontally); a three-finger
   swipe pans on the trackpad.
@@ -34,15 +43,21 @@ navigation:
 - CLI: `--new`, `--open <id>`, `--export <dir>`, `--shutdown`,
   `--socket <path>`.
 
-Not yet: selection, eraser, text, shapes, undo, export, Omarchy plugin,
-thumbnails.
+Not yet: eraser, text, shapes, undo, export, Omarchy plugin, thumbnails.
 
 ## Controls
 
 | Input | Effect |
 |---|---|
 | `V` / `H` / `P` / `Z` | Select / Hand / Pencil / Zoom tool (also clickable in the dock) |
-| `Esc` | Cancel the stroke or gesture in progress |
+| `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
+| Click (Select) | Select the topmost element under the pointer; empty canvas clears |
+| `Shift` + click (Select) | Add the element to the selection, or remove it |
+| Left drag on empty canvas (Select) | Marquee: selects what it overlaps (`Shift` adds) |
+| Left drag on the selection | Move |
+| Drag a corner handle | Resize, opposite corner pinned |
+| Drag a ring past a corner | Rotate about the selection's center |
+| `Delete` / `Backspace` | Delete the selection |
 | Left drag (Pencil) | Draw; the stroke is fitted to Béziers on release |
 | Left drag (Hand), `Space` + drag, middle drag | Pan |
 | Wheel, two-finger scroll | Pan (`Shift`: horizontally) |
@@ -78,17 +93,19 @@ src/store.rs     ~/.local/share/omawhite: boards/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
 src/scene.rs     View (camera + viewport + scale) and document → SDF prims (pure, tested)
+src/geom.rs      affine maps, corners and oriented frames (pure, tested)
+src/select.rs    selection: element frames, hit-testing, handles, transforms, overlay prims (pure, tested)
 src/grid.rs      dotted background (pure, tested)
 src/theme.rs     palette: light default, derived from op: theme (pure, tested)
-src/editor.rs    active tool, held keys, stroke and pan/zoom gesture in progress (pure, tested)
+src/editor.rs    active tool, held keys, stroke, pan/zoom gesture, selection and its drag (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
 src/gfx.rs       wgpu 30: the instanced SDF pipeline
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
 ```
 
-Frame data flow: grid + document + live stroke + dock → `scene` prims →
-`gfx`.
+Frame data flow: grid + document + live stroke + selection overlay + dock
+→ `scene`/`select` prims → `gfx`.
 
 User data: `~/.local/share/omawhite/`. Socket:
 `$XDG_RUNTIME_DIR/omawhite.sock`.

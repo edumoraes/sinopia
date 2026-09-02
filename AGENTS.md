@@ -31,10 +31,10 @@ XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- --socket /tmp/omawhite-smoke.sock
 Module layout is in the README. The shape that matters:
 
 - **Single instance.** `main.rs` maps CLI flags to an IPC request; if the socket answers, the intent is forwarded and the process exits — only otherwise does it become the main instance and start the winit loop. `--export` and `--shutdown` never spawn a window.
-- **Pure core, thin shell.** `doc` (serde data, versioned schema), `scene` (view + document → SDF prims), `grid`, `theme`, `editor` (tool, held keys, stroke and pan/zoom gesture in progress), `dock`, `store` (XDG persistence), `cli`, and `ipc` are pure and carry the whole test suite. `app` (winit event loop, input routing, socket → event-loop bridge), `gestures` (Wayland `zwp_pointer_gestures_v1` → event-loop bridge) and `gfx` (one instanced SDF pipeline) are the untested shell — keep logic out of them so it stays testable.
-- **Frame data flow:** grid + document + live stroke + dock → `scene` prims → `gfx` pipeline.
-- **Input flow:** `app` maps winit and gesture events to `editor` calls in screen px plus the current `View`; the editor answers with a `Change` (scene or camera) that `app` stores. Pan/zoom math is `View::showing` in `scene`.
-- **Units:** world unit = logical pixel at zoom 1; `View` folds the window scale factor in. Dock and grid are sized in logical px.
+- **Pure core, thin shell.** `doc` (serde data, versioned schema), `scene` (view + document → SDF prims), `geom` (affine maps, oriented frames), `select` (element frames, hit-testing, handles and the transforms they drive), `grid`, `theme`, `editor` (tool, held keys, stroke, pan/zoom gesture, selection and the drag reshaping it), `dock`, `store` (XDG persistence), `cli`, and `ipc` are pure and carry the whole test suite. `app` (winit event loop, input routing, socket → event-loop bridge), `gestures` (Wayland `zwp_pointer_gestures_v1` → event-loop bridge) and `gfx` (one instanced SDF pipeline) are the untested shell — keep logic out of them so it stays testable.
+- **Frame data flow:** grid + document + live stroke + selection overlay + dock → `scene`/`select` prims → `gfx` pipeline.
+- **Input flow:** `app` maps winit and gesture events to `editor` calls in screen px plus the current `View` and the document; the editor answers with a `Change` (scene, camera or selection) that `app` stores. Pan/zoom math is `View::showing` in `scene`. Selection drags transform the document live from a snapshot taken at the press; `Esc` restores it, so `cancel`/`set_tool` need the document too.
+- **Units:** world unit = logical pixel at zoom 1; `View` folds the window scale factor in. Dock, grid and selection handles are sized in logical px.
 
 # Security Invariants
 
