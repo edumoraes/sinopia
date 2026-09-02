@@ -19,6 +19,7 @@ mod gfx;
 mod grid;
 mod ipc;
 mod layers;
+mod palette;
 mod project;
 mod scene;
 mod select;

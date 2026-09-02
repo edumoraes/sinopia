@@ -17,7 +17,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::bitmap::{self, Bitmap};
-use crate::brush::{self, Library};
+use crate::brush::{self, Library, Property};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
@@ -30,6 +30,7 @@ use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
+use crate::palette::{self, Palette};
 use crate::project::{self, Origin, Project};
 use crate::scene::{self, Frame, ImageSlots, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
@@ -114,6 +115,15 @@ struct App {
     brushes: Library,
     /// `Shift+L`, or the handle beside it: the layers panel is up.
     layers_shown: bool,
+    /// `Shift+B`: the brush palette is up. It only shows with the brush
+    /// in hand, so this is what shuts it without putting the brush down.
+    palette_shown: bool,
+    /// How far down the shelf the palette is looking, in physical px.
+    palette_scroll: f32,
+    /// The rail slider the pointer took, if any. A slider keeps the
+    /// pointer until the button comes up, so a drag off the track still
+    /// moves it — as every slider does.
+    rail: Option<Property>,
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
@@ -410,6 +420,11 @@ impl App {
         {
             self.scroll = panel.scroll();
         }
+        if let Some(view) = self.view()
+            && let Some(pal) = self.palette(&view)
+        {
+            self.palette_scroll = pal.scroll();
+        }
         self.follow_active();
     }
 
@@ -690,14 +705,60 @@ impl App {
         ))
     }
 
-    /// Whether `screen` is over the strip, the handle, the panel or the
-    /// dock rather than the canvas.
+    /// The brush palette, when the brush is in hand and the panel is up.
+    /// It is the tool's own chrome: no other tool has a use for it, so it
+    /// comes and goes with the tool rather than being toggled on top of
+    /// one that ignores it.
+    fn palette(&self, view: &View) -> Option<Palette> {
+        if !self.palette_shown || self.editor().tool() != Tool::Brush {
+            return None;
+        }
+        let top = (tabs::HEIGHT * view.scale as f32).round();
+        Some(Palette::layout(
+            view.viewport,
+            view.scale,
+            top,
+            self.brushes.pinned(),
+            self.palette_scroll,
+        ))
+    }
+
+    /// Whether `screen` is over the strip, the handle, either panel or
+    /// the dock rather than the canvas.
     fn over_chrome(&self, view: &View, screen: (f64, f64)) -> bool {
         let (x, y) = screen;
         self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
             || self.handle(view).is_some_and(|h| h.hit(x, y))
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
+            || self.palette(view).and_then(|p| p.hit(x, y)).is_some()
             || self.dock(view).hit(x, y).is_some()
+    }
+
+    /// A click on the brush palette. A rail keeps the pointer: the press
+    /// writes where it landed and the drag carries on from there.
+    fn palette_hit(&mut self, pal: &Palette, hit: palette::Hit, y: f64) {
+        match hit {
+            palette::Hit::Brush(i) => {
+                let shelf = self.brushes.pinned_index();
+                self.brushes.select(shelf, i);
+            }
+            palette::Hit::Set => {
+                let next = (self.brushes.pinned_index() + 1) % self.brushes.sets().len();
+                self.brushes.pin(next);
+                self.palette_scroll = 0.0;
+            }
+            palette::Hit::Reset => self.brushes.reset(),
+            palette::Hit::Rail(property) => {
+                self.rail = Some(property);
+                self.drag_rail(pal, property, y);
+            }
+            palette::Hit::Panel => {}
+        }
+    }
+
+    fn drag_rail(&mut self, pal: &Palette, property: Property, y: f64) {
+        let f = pal.fraction(property, y);
+        property.set_fraction(self.brushes.brush_mut(), f);
     }
 
     /// A click on the layers panel, handed to the editor.
@@ -791,6 +852,20 @@ impl App {
             ));
         }
         frame.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
+        if let (Some(pal), Some(atlas)) = (self.palette(view), self.atlas.as_ref()) {
+            // The shelf on show is not always the one the brush came
+            // off: only then does a row read as the one in hand.
+            let (shelf, index) = self.brushes.selected();
+            let selected = (shelf == self.brushes.pinned_index()).then_some(index);
+            frame.extend(pal.prims(
+                self.brushes.pinned(),
+                selected,
+                self.brushes.brush(),
+                atlas,
+                self.atlas_slot,
+                &self.theme,
+            ));
+        }
         if let (Some(handle), Some(atlas)) = (self.handle(view), self.atlas.as_ref()) {
             frame.extend(handle.prims(atlas, self.atlas_slot, &self.theme));
         }
@@ -886,6 +961,15 @@ impl App {
             }
             return self.update_cursor_icon();
         }
+        if let Some(pal) = self.palette(&view)
+            && let Some(hit) = pal.hit(x, y)
+        {
+            if button == Button::Left {
+                self.palette_hit(&pal, hit, y);
+                self.redraw();
+            }
+            return self.update_cursor_icon();
+        }
         match self.dock(&view).hit(x, y) {
             Some(Hit::Tool(tool)) => {
                 if button == Button::Left {
@@ -906,6 +990,12 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        // A slider let go of is just let go of: the canvas never saw the
+        // press, so there is nothing under it to end.
+        if button == Button::Left && self.rail.take().is_some() {
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A carried layer is left where the pointer put it; the canvas
         // never saw the press, so it has nothing to end. The card runs
         // the lift backwards into its row from here.
@@ -948,6 +1038,16 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
+        // A rail has the pointer to itself, wherever it wanders to.
+        if let Some(property) = self.rail {
+            if let Some(view) = self.view()
+                && let Some(pal) = self.palette(&view)
+            {
+                self.drag_rail(&pal, property, y);
+            }
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         if let Some(view) = self.view() {
             let (editor, doc) = self.active();
             let change = editor.moved(&view, (x, y), doc);
@@ -981,6 +1081,17 @@ impl App {
             .is_some()
         {
             return self.scroll_panel(-delta.1);
+        }
+        // So does the palette, over its own shelf.
+        if let Some(pal) = self.palette(&view)
+            && pal.hit(cursor.0, cursor.1).is_some()
+        {
+            let next = (self.palette_scroll - delta.1 as f32).clamp(0.0, pal.max_scroll());
+            if next != self.palette_scroll {
+                self.palette_scroll = next;
+                self.redraw();
+            }
+            return;
         }
         let shift = self.modifiers.state().shift_key();
         let camera = self.active().0.scroll(&view, cursor, delta, shift);
@@ -1036,6 +1147,9 @@ impl App {
     fn plain_key(&mut self, c: char, shift: bool) {
         if shift && c.eq_ignore_ascii_case(&'l') {
             self.layers_shown = !self.layers_shown;
+            self.redraw();
+        } else if shift && c.eq_ignore_ascii_case(&'b') {
+            self.palette_shown = !self.palette_shown;
             self.redraw();
         } else if let Some(tool) = Tool::from_hotkey(c) {
             let (editor, doc) = self.active();
@@ -1416,6 +1530,9 @@ pub fn run(
         font: Font::bundled(),
         brushes: Library::default(),
         layers_shown: false,
+        palette_shown: true,
+        palette_scroll: 0.0,
+        rail: None,
         carry: None,
         slides: layers::Slides::default(),
         scroll: 0.0,

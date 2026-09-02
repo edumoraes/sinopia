@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 386 tests.
+- `cargo build` clean, `cargo test` with 416 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -27,10 +27,19 @@ selection, navigation, pasted images, and projects in tabs:
   self-contained `[a, c1, c2, b]` curves; rendering flattens them per
   frame at the current zoom.
 - Brush (`B`): the same stroke with a body — a size, an opacity and a
-  hardness, adjusted from the keyboard while the brush is selected:
-  `[` `]` step the size (Photoshop's steps, 1–500 world units), `{` `}`
-  the hardness by a quarter, `1`–`9` and `0` set the opacity to
-  10%–90% and 100%. A ring the size of the brush follows the pointer.
+  hardness — and, as in Sketchbook, a name and a shelf to live on. The
+  binary ships two brush sets: Essentials (Pencil, Ink Pen, Marker,
+  Highlighter, Hard Round, Soft Round, Airbrush) and Paint (Dry Edge,
+  Glaze, Blot, Wash). One brush is in the hand at a time and an edit
+  belongs to it: `[` `]` step the size (Photoshop's steps, 1–500 world
+  units), `{` `}` the hardness by a quarter, `1`–`9` and `0` set the
+  opacity to 10%–90% and 100% — all of them writing into the brush that
+  is painting, which keeps the change when another is picked up and
+  put down again. The brush also carries what the stamp engine will
+  need — flow, spacing, roundness, rotation and its dynamics, texture
+  depth, randomness per property, and what the pen's pressure drives —
+  described truthfully now and painted with when that engine lands.
+  A ring the size of the brush follows the pointer.
   The stroke joins the `paint` on the layer it lands on — one object
   per raster layer, however many strokes went into it — each stroke
   keeping the ink it was laid with: `stroke`, `width`, and `opacity`
@@ -41,6 +50,21 @@ selection, navigation, pasted images, and projects in tabs:
   opacity — so a stroke crossing itself does not darken, and a soft
   edge has no beads at the joints. Hardness spends `1 − hardness` of
   the radius on the edge ramp, inside the nominal width.
+- Brush palette: picking the brush brings up Sketchbook's panel on the
+  left, one shelf of the library at a time. A row per brush — a dab
+  drawn with that brush's own size, opacity and edge, so the row looks
+  like what it paints, and its name beside it — with the one in the
+  hand filled. Down the panel's right edge stands the rail Sketchbook
+  puts there: size on top, opacity under it, each a slider standing on
+  end, full at the top, grabbed anywhere across the rail and dragged
+  from there. The size slider moves over the cube of its travel, so the
+  widths people draw with get the first third of it instead of being
+  crushed against the bottom of 1–500. The header names the shelf and
+  offers the next one, and an arrow curling back on itself puts the
+  brush back the way it shipped. It is the tool's own chrome: it comes
+  and goes with the brush, and `Shift+B` shuts it without putting the
+  brush down. A window too short for the shelf cuts it and the wheel
+  walks the list.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it
@@ -156,6 +180,10 @@ thumbnails, layer opacity and renaming, brush colour and pressure.
 | `V` / `H` / `P` / `B` / `Z` | Select / Hand / Pencil / Brush / Zoom tool (also clickable in the dock) |
 | `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
 | Left drag (Brush) | Paint with the brush; the stroke is fitted to Béziers on release |
+| `Shift` + `B` | Show / hide the brush palette |
+| Click a row in the palette | Take up that brush |
+| Drag the palette's rails | Brush size (top) / opacity (bottom) |
+| Palette `≡` / `↺` | The library's next shelf / the brush as it shipped |
 | `[` / `]` (Brush selected) | Brush smaller / larger |
 | `{` / `}` (Brush selected) | Brush softer / harder |
 | `1`–`9`, `0` (Brush selected) | Brush opacity 10%–90%, 100% |
@@ -212,7 +240,7 @@ src/store.rs     ~/.local/share/omawhite: boards/, blobs/, index.json, perms §9
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
 src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
-src/brush.rs     brush settings, the tip a stroke carries, the pointer's ring (pure, tested)
+src/brush.rs     the brush library: sets, presets, a brush's body, its properties, the tip a stroke carries, the pointer's ring (pure, tested)
 src/scene.rs     View (camera + viewport + scale), document → SDF prims, frames, groups and passes (pure, tested)
 src/geom.rs      affine maps, corners and oriented frames (pure, tested)
 src/select.rs    selection: element frames, hit-testing, handles, transforms, overlay prims (pure, tested)
@@ -221,6 +249,7 @@ src/theme.rs     palette: light default, derived from op: theme (pure, tested)
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
 src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)
+src/palette.rs   brush palette on the left: layout, hit-test, rows and their dabs, the size/opacity rail (pure, tested)
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
@@ -234,8 +263,9 @@ assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay +
-brush ring + dock + layers panel + tab strip → `scene`/`select`/`brush`/
-`layers`/`tabs` prims, gathered in a `scene::Frame` whose groups mark
+brush ring + dock + brush palette + layers panel + tab strip →
+`scene`/`select`/`brush`/`palette`/`layers`/`tabs` prims, gathered in a
+`scene::Frame` whose groups mark
 the strokes composited as one shape → `scene::passes` plans the render
 passes → `gfx` executes them.
 

@@ -155,7 +155,7 @@ impl Section {
 /// One slider on the brush's body: everything the panels need to draw it
 /// and to move it, so neither of them has to know a field's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // the palette and the properties bar draw these
+#[allow(dead_code)] // the properties bar draws the ones the palette leaves out
 pub enum Property {
     Size,
     Opacity,
@@ -174,7 +174,7 @@ pub enum Property {
 
 /// How a value is written out under its slider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // the palette and the properties bar draw these
+#[allow(dead_code)] // the properties bar writes the value under each one
 enum Unit {
     /// World units, whole numbers: the size.
     Px,
@@ -184,7 +184,7 @@ enum Unit {
     Degrees,
 }
 
-#[allow(dead_code)] // the palette and the properties bar draw these
+#[allow(dead_code)] // the properties bar reads all of it
 impl Property {
     pub const ALL: [Property; 13] = [
         Property::Size,
@@ -291,17 +291,31 @@ impl Property {
         }
     }
 
+    /// How a slider's travel maps onto the value. Size runs from 1 to
+    /// 500, and a handle moving straight through that would spend nine
+    /// tenths of its travel on widths nobody draws with — so it moves
+    /// over the cube of its travel, and the sizes people reach for get
+    /// the first third of the rail.
+    fn curve(self) -> f64 {
+        match self {
+            Property::Size => 3.0,
+            _ => 1.0,
+        }
+    }
+
     /// Where the value sits in its own range, 0–1: how far along its
     /// slider the handle is.
     pub fn fraction(self, b: &Brush) -> f64 {
         let (lo, hi) = self.range();
-        ((self.get(b) - lo) / (hi - lo)).clamp(0.0, 1.0)
+        ((self.get(b) - lo) / (hi - lo))
+            .clamp(0.0, 1.0)
+            .powf(1.0 / self.curve())
     }
 
     /// The other way round: a handle dropped `f` of the way along.
     pub fn set_fraction(self, b: &mut Brush, f: f64) {
         let (lo, hi) = self.range();
-        self.set(b, lo + f * (hi - lo));
+        self.set(b, lo + f.clamp(0.0, 1.0).powf(self.curve()) * (hi - lo));
     }
 
     /// What is written under the slider.
@@ -431,7 +445,6 @@ pub struct Preset {
     factory: Brush,
 }
 
-#[allow(dead_code)] // the palette's reset reaches them
 impl Preset {
     fn new(name: &str, brush: Brush) -> Preset {
         Preset {
@@ -441,6 +454,9 @@ impl Preset {
         }
     }
 
+    /// Whether it has been moved off what it shipped as. The properties
+    /// bar says so, and offers to take it back.
+    #[allow(dead_code)] // the properties bar marks an edited brush
     pub fn edited(&self) -> bool {
         self.brush != self.factory
     }
@@ -473,7 +489,6 @@ pub struct Library {
     selected: (usize, usize),
 }
 
-#[allow(dead_code)] // the palette's rows and sets reach them
 impl Library {
     pub fn sets(&self) -> &[Set] {
         &self.sets
@@ -514,6 +529,7 @@ impl Library {
         &mut self.sets[s].presets[i]
     }
 
+    #[allow(dead_code)] // the properties bar heads itself with the name
     pub fn name(&self) -> &str {
         &self.preset().name
     }
@@ -529,6 +545,7 @@ impl Library {
         &mut self.preset_mut().brush
     }
 
+    #[allow(dead_code)] // the properties bar marks an edited brush
     pub fn edited(&self) -> bool {
         self.preset().edited()
     }
@@ -977,6 +994,23 @@ mod tests {
         assert_eq!(lib.selected(), held);
         lib.pin(99);
         assert_eq!(lib.pinned_index(), 0);
+    }
+
+    #[test]
+    fn the_size_slider_spends_its_travel_on_the_sizes_people_draw_with() {
+        let mut b = Brush::default();
+        Property::Size.set_fraction(&mut b, 0.5);
+        assert!(
+            (10.0..100.0).contains(&b.size),
+            "half the travel must not be half of 500: {}",
+            b.size
+        );
+        let f = Property::Size.fraction(&b);
+        assert!((f - 0.5).abs() < 1e-9, "and it is still its own inverse: {f}");
+
+        let mut c = Brush::default();
+        Property::Opacity.set_fraction(&mut c, 0.5);
+        assert_eq!(c.opacity, 0.5, "a fraction is a fraction everywhere else");
     }
 
     #[test]

@@ -416,10 +416,21 @@ transform the document live from a snapshot taken at the press, so `Esc`
 puts it back; `Delete`/`Backspace` removes. The selection is session
 state (§6.2) and is dropped on a tool switch.
 
-Brush (`B`) landed, in the Photoshop/Procreate mould: size, opacity and
-hardness, adjusted from the keyboard while it is selected (`[` `]`, `{`
-`}`, the digits), a ring the size of the brush at the pointer, and the
-stroke saved as the same `path` the pencil writes. Layers landed with it:
+Brush (`B`) landed, and then took Sketchbook's shape rather than
+Photoshop's: a `Library` of named brushes on shelves, one in the hand,
+and an edit that belongs to the brush — the keyboard (`[` `]`, `{` `}`,
+the digits) and the palette's rails write into the brush that is
+painting, and `reset` takes it back to what it shipped as. `Brush` is
+the whole of Brush Properties; `Property::honored` is the one list of
+what the canvas paints with (size, opacity, hardness), and the rest —
+flow, spacing, roundness, rotation and its dynamics, texture depth,
+randomness, pressure — describe a brush truthfully while the stamp
+engine that honours them is written. Picking the tool brings up the
+palette on the left: a row per brush showing a dab drawn with that
+brush's own settings, and the size/opacity rail Sketchbook stands down
+its right edge. `Shift+B` shuts it without putting the brush down. A
+ring the size of the brush follows the pointer, and the stroke is saved
+as the same `path` the pencil writes. Layers landed with it:
 `Shift+L` shows and hides a panel on the right — one row per layer, top
 first, an eye each, the active one highlighted, up/down/add/remove in the
 header. New ink lands on the active layer; picking an element makes its
