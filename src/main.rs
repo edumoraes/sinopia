@@ -16,11 +16,12 @@ mod gestures;
 mod gfx;
 mod grid;
 mod ipc;
+mod project;
 mod scene;
 mod select;
 mod store;
-mod theme;
 mod text;
+mod theme;
 
 use anyhow::Context as _;
 use clap::Parser as _;

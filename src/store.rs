@@ -156,6 +156,31 @@ impl Store {
     }
 }
 
+/// Writes `doc` as a project file at a path the user chose.
+///
+/// Atomic like everything else, but it keeps the process umask instead of
+/// forcing 0600: that mode belongs to `~/.local/share/omawhite` (§9.3),
+/// and a project saved into a shared directory is the user's to share.
+///
+/// The path is not measured against the export allowlist (§8.2). That
+/// list guards destinations arriving over the socket or the CLI; this one
+/// came back from a portal dialog the user drove, which is the one place
+/// the distinction carries weight.
+pub fn save_document_to(path: &Path, doc: &Document) -> anyhow::Result<()> {
+    write_atomic(path, doc.to_json()?.as_bytes(), None).with_context(|| format!("saving {path:?}"))
+}
+
+/// Reads a project file from a path the user chose.
+///
+/// Nothing about the parse is loosened for coming from outside the store:
+/// the schema is closed, and every `blob` is checked as a bare sha256
+/// before it can ever become a path, so a file from elsewhere cannot name
+/// one outside `blobs/`.
+pub fn load_document_from(path: &Path) -> anyhow::Result<Document> {
+    let s = std::fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
+    Document::from_json(&s).with_context(|| format!("parsing {path:?}"))
+}
+
 /// Ids become file names: alphanumeric, `-` and `_` only, bounded length.
 fn validate_id(id: &str) -> anyhow::Result<()> {
     let ok = !id.is_empty()
@@ -181,12 +206,20 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Atomic write at 0600: hidden tmp in the same directory + rename.
+/// Atomic write at 0600: what everything under the root gets (§9.3).
 fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    write_atomic(path, bytes, Some(0o600))
+}
+
+/// Hidden tmp in the same directory, then rename — so a reader never sees
+/// half a file, and a crash never leaves one. `mode` is the permission to
+/// create the tmp with, or `None` to leave it to the umask.
+fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let dir = path
         .parent()
+        .filter(|d| !d.as_os_str().is_empty())
         .context("destination has no parent directory")?;
     let name = path
         .file_name()
@@ -194,17 +227,23 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .to_string_lossy();
     let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
     {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        if let Some(mode) = mode {
+            opts.mode(mode);
+        }
+        let mut f = opts
             .open(&tmp)
             .with_context(|| format!("creating temp file {tmp:?}"))?;
         f.write_all(bytes)?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, path).with_context(|| format!("renaming to {path:?}"))?;
+    // A failed rename would otherwise leave the tmp lying beside the
+    // destination, in a directory the user chose and looks at.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(e)).with_context(|| format!("renaming to {path:?}"));
+    }
     Ok(())
 }
 
@@ -415,5 +454,104 @@ mod tests {
             let err = store.read_blob(name).unwrap_err().to_string();
             assert!(err.contains("blob"), "{name:?}: {err}");
         }
+    }
+
+    #[test]
+    fn a_project_file_roundtrips_through_a_path_of_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("notes.omawhite");
+        let doc = doc_with_title("auth flow");
+        save_document_to(&path, &doc).unwrap();
+        assert_eq!(load_document_from(&path).unwrap(), doc);
+    }
+
+    #[test]
+    fn saving_a_project_leaves_no_temp_file_behind() {
+        let tmp = tempfile::tempdir().unwrap();
+        save_document_to(&tmp.path().join("notes.omawhite"), &doc_with_title("t")).unwrap();
+        let left: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["notes.omawhite"]);
+    }
+
+    #[test]
+    fn a_project_file_keeps_the_umask_not_the_stores_0600() {
+        // 0600 is what `~/.local/share/omawhite` is for (§9.3). Forcing it
+        // on a file the user placed in a shared directory would quietly
+        // undo the sharing they asked for.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("notes.omawhite");
+        save_document_to(&path, &doc_with_title("t")).unwrap();
+        assert_ne!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn saving_a_project_replaces_what_was_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("notes.omawhite");
+        save_document_to(&path, &doc_with_title("first")).unwrap();
+        save_document_to(&path, &doc_with_title("second")).unwrap();
+        assert_eq!(load_document_from(&path).unwrap().title, "second");
+    }
+
+    #[test]
+    fn a_project_file_that_is_not_a_board_is_an_error_not_a_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("notes.omawhite");
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert!(
+            load_document_from(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("notes.omawhite")
+        );
+    }
+
+    #[test]
+    fn a_project_file_from_a_newer_schema_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("notes.omawhite");
+        let json = doc_with_title("t")
+            .to_json()
+            .unwrap()
+            .replace("\"schema\": 1", "\"schema\": 999");
+        std::fs::write(&path, json).unwrap();
+        let err = load_document_from(&path).unwrap_err().to_string();
+        assert!(err.contains("notes.omawhite"), "{err}");
+    }
+
+    #[test]
+    fn a_project_file_cannot_smuggle_a_blob_name_that_is_a_path() {
+        // The parse is the guard, and it does not loosen for a file that
+        // came from outside the store.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hostile.omawhite");
+        std::fs::write(
+            &path,
+            r#"{"schema":1,"id":"01","title":"t",
+                "camera":{"x":0,"y":0,"zoom":1},
+                "elements":[{"type":"image","id":"i","x":0,"y":0,"w":1,"h":1,
+                             "blob":"../../../etc/passwd"}]}"#,
+        )
+        .unwrap();
+        assert!(load_document_from(&path).is_err());
+    }
+
+    #[test]
+    fn a_missing_project_file_is_an_error_that_names_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gone.omawhite");
+        let err = load_document_from(&path).unwrap_err().to_string();
+        assert!(err.contains("gone.omawhite"), "{err}");
+    }
+
+    #[test]
+    fn saving_into_a_directory_that_is_not_there_fails_without_a_stray_temp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nope").join("notes.omawhite");
+        assert!(save_document_to(&path, &doc_with_title("t")).is_err());
+        assert!(!tmp.path().join("nope").exists());
     }
 }
