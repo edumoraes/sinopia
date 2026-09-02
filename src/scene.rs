@@ -660,7 +660,15 @@ pub fn stamp_prims(
         (radius * stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX),
     );
     let angle = (stamp.rotation as f32).to_radians();
-    let dab = |at: (f32, f32)| Prim::dab(at, half, feather, angle, color);
+    // Flow is what one dab lays; the stroke's opacity is the ceiling
+    // the composite puts on the pile.
+    let ink = [
+        color[0],
+        color[1],
+        color[2],
+        color[3] * stamp.flow.clamp(0.0, 1.0) as f32,
+    ];
+    let dab = |at: (f32, f32)| Prim::dab(at, half, feather, angle, ink);
 
     let mut out = vec![dab(first)];
     // How far the walk has come since the last dab, carried across the
@@ -730,15 +738,29 @@ pub fn path_prims(curves: &[Cubic], tip: Tip, color: Rgba, view: &View) -> Vec<P
     tip_prims(&screen, tip, color, view)
 }
 
+/// How a group's prims meet each other in the scratch texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blend {
+    /// Every channel a max: the union of their coverage, and no more.
+    /// What a swept stroke needs — its spans overlap at every joint,
+    /// and a soft edge would bead there if they added up.
+    Union,
+    /// One over the next: coverage builds where they cross. What a
+    /// stamped stroke needs — flow is what one dab lays, and a stroke
+    /// crossing itself is darker for it, as paint is.
+    Build,
+}
+
 /// A stretch of a frame's prims that is composited as one shape: drawn
-/// into the scratch texture as the union of their coverage, then laid on
-/// the frame once at `opacity`. `bounds` is what the shader rasterizes
-/// for them, ramp included.
+/// into the scratch texture, meeting each other as `blend` says, then
+/// laid on the frame once at `opacity`. `bounds` is what the shader
+/// rasterizes for them, ramp included.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Group {
     pub start: u32,
     pub end: u32,
     pub opacity: f32,
+    pub blend: Blend,
     pub bounds: ScreenRect,
 }
 
@@ -761,9 +783,9 @@ impl Frame {
         self.prims.extend(prims);
     }
 
-    /// Prims composited as one shape at `opacity`. Nothing to draw makes
-    /// no group.
-    pub fn group(&mut self, prims: Vec<Prim>, opacity: f32) {
+    /// Prims composited as one shape at `opacity`, meeting each other
+    /// as `blend` says. Nothing to draw makes no group.
+    pub fn group(&mut self, prims: Vec<Prim>, opacity: f32, blend: Blend) {
         let Some(bounds) = prims
             .iter()
             .map(Prim::painted_bounds)
@@ -777,16 +799,22 @@ impl Frame {
             start,
             end: self.prims.len() as u32,
             opacity,
+            blend,
             bounds,
         });
     }
 
-    /// A stroke's prims, direct or grouped as its tip demands.
+    /// A stroke's prims, direct or grouped as its tip demands. A
+    /// stamped stroke builds; a swept one unions.
     pub fn stroke(&mut self, prims: Vec<Prim>, tip: Tip) {
         if tip.is_direct() {
             self.extend(prims);
         } else {
-            self.group(prims, tip.opacity as f32);
+            let blend = match tip.stamp {
+                Some(_) => Blend::Build,
+                None => Blend::Union,
+            };
+            self.group(prims, tip.opacity as f32, blend);
         }
     }
 
@@ -814,8 +842,14 @@ pub enum Pass {
         end: u32,
     },
     /// Onto the scratch texture: the `wipe` box first, which clears the
-    /// group's bounds, then `start..end` with the union blend.
-    Offscreen { wipe: u32, start: u32, end: u32 },
+    /// group's bounds, then `start..end` meeting each other as `blend`
+    /// says.
+    Offscreen {
+        wipe: u32,
+        start: u32,
+        end: u32,
+        blend: Blend,
+    },
 }
 
 /// The compositing plan for `frame`: its prims with one wipe and one
@@ -853,6 +887,7 @@ pub fn passes(frame: &Frame, viewport: Viewport, scratch: u32) -> (Vec<Prim>, Ve
                 wipe,
                 start: g.start,
                 end: g.end,
+                blend: g.blend,
             });
             pending = Some(prims.len() as u32);
             prims.push(Prim::composite(bounds, viewport, scratch, g.opacity));
@@ -1091,6 +1126,7 @@ mod tests {
         spacing: 0.5,
         roundness: 1.0,
         rotation: 0.0,
+        flow: 1.0,
     };
 
     fn stamped(width: f64, stamp: Stamp) -> Tip {
@@ -1132,6 +1168,7 @@ mod tests {
             spacing: 0.5,
             roundness: 0.25,
             rotation: 90.0,
+            flow: 1.0,
         };
         let got = stroke_prims(&[[0.0, 0.0]], stamped(8.0, flat), WHITE, &v);
         assert_eq!(got.len(), 1, "a tap is one dab");
@@ -1232,6 +1269,7 @@ mod tests {
                 Prim::soft_segment((10.0, 0.0), (10.0, 5.0), 2.0, 4.0, WHITE),
             ],
             0.5,
+            Blend::Union,
         );
         assert_eq!(f.prims.len(), 3);
         assert_eq!(f.groups.len(), 1);
@@ -1239,7 +1277,7 @@ mod tests {
         assert_eq!((g.start, g.end, g.opacity), (1, 3, 0.5));
         assert_eq!(g.bounds, sr(-5.0, -5.0, 20.0, 15.0));
         // Nothing to draw makes no group.
-        f.group(vec![], 0.5);
+        f.group(vec![], 0.5, Blend::Union);
         assert_eq!(f.groups.len(), 1);
     }
 
@@ -1256,11 +1294,38 @@ mod tests {
     }
 
     #[test]
+    fn a_flowing_nib_lays_each_dab_at_its_flow_and_the_dabs_pile_up() {
+        let v = view(0.0, 0.0, 1.0);
+        let nib = stamped(8.0, Stamp { flow: 0.25, ..ROUND });
+        let got = stroke_prims(&[[-8.0, 0.0], [8.0, 0.0]], nib, WHITE, &v);
+        assert!(got.len() > 1);
+        for d in &got {
+            assert_eq!(d.color[3], 0.25, "a dab lays its flow; opacity is the ceiling");
+        }
+
+        // Dabs have to build toward the stroke's opacity where they
+        // cross: a union would cap every crossing at one dab's worth,
+        // and flow would be a second opacity.
+        let mut f = Frame::new();
+        f.stroke(got, nib);
+        assert_eq!(f.groups[0].blend, Blend::Build);
+
+        // A swept stroke still unions — its spans overlap at every
+        // joint, and building there would bead.
+        let mut f = Frame::new();
+        f.stroke(
+            vec![Prim::segment((0.0, 0.0), (1.0, 0.0), 1.0, WHITE)],
+            tip(2.0, 0.25, 1.0),
+        );
+        assert_eq!(f.groups[0].blend, Blend::Union);
+    }
+
+    #[test]
     fn frame_append_offsets_the_groups() {
         let mut a = Frame::new();
         a.extend([Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE); 3]);
         let mut b = Frame::new();
-        b.group(vec![Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)], 0.5);
+        b.group(vec![Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)], 0.5, Blend::Union);
         b.extend([Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)]);
         a.append(b);
         assert_eq!(a.prims.len(), 5);
@@ -1291,6 +1356,7 @@ mod tests {
                 Prim::segment((group_at_x + 10.0, 20.0), (group_at_x + 10.0, 30.5), 2.0, WHITE),
             ],
             opacity,
+            Blend::Union,
         );
         f.extend([flat()]);
         f
@@ -1311,7 +1377,8 @@ mod tests {
                 Pass::Offscreen {
                     wipe: 5,
                     start: 2,
-                    end: 4
+                    end: 4,
+                    blend: Blend::Union,
                 },
                 Pass::Direct {
                     composite: Some(6),
@@ -1398,7 +1465,11 @@ mod tests {
     #[test]
     fn a_group_that_opens_the_frame_still_gets_a_clearing_pass_first() {
         let mut f = Frame::new();
-        f.group(vec![Prim::segment((10.0, 10.0), (20.0, 10.0), 2.0, WHITE)], 0.5);
+        f.group(
+            vec![Prim::segment((10.0, 10.0), (20.0, 10.0), 2.0, WHITE)],
+            0.5,
+            Blend::Union,
+        );
         let (_, plan) = passes(&f, VP, 9);
         assert_eq!(
             plan,
@@ -1411,7 +1482,8 @@ mod tests {
                 Pass::Offscreen {
                     wipe: 1,
                     start: 0,
-                    end: 1
+                    end: 1,
+                    blend: Blend::Union,
                 },
                 Pass::Direct {
                     composite: Some(2),

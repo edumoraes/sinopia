@@ -291,6 +291,7 @@ impl Property {
             Property::Size
                 | Property::Opacity
                 | Property::Hardness
+                | Property::Flow
                 | Property::Spacing
                 | Property::Roundness
                 | Property::Rotation
@@ -444,6 +445,7 @@ impl Brush {
                 spacing: self.spacing,
                 roundness: self.roundness,
                 rotation: self.rotation,
+                flow: self.flow,
             }),
         }
     }
@@ -490,11 +492,15 @@ impl Tip {
         }
     }
 
-    /// A crisp, opaque stroke draws straight onto the frame; anything
-    /// else has to be composited as one shape, or its segments would
-    /// darken wherever they overlap.
+    /// A crisp, opaque stroke that covers with one dab draws straight
+    /// onto the frame; anything else has to be composited as one shape.
+    /// A swept stroke would otherwise darken wherever its spans
+    /// overlap, and a stamped one would build onto the board itself
+    /// instead of into its own pile.
     pub fn is_direct(&self) -> bool {
-        self.opacity >= 1.0 && self.hardness >= 1.0
+        self.opacity >= 1.0
+            && self.hardness >= 1.0
+            && self.stamp.is_none_or(|s| s.flow >= 1.0)
     }
 }
 
@@ -839,6 +845,15 @@ mod tests {
             ..Brush::default()
         };
         assert!(!faint.tip().is_direct(), "so does translucency");
+        let dry = Brush {
+            hardness: 1.0,
+            flow: 0.5,
+            ..Brush::default()
+        };
+        assert!(
+            !dry.tip().is_direct(),
+            "a nib that does not cover on its own has to build up offscreen"
+        );
     }
 
     #[test]
@@ -856,6 +871,7 @@ mod tests {
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,
+                flow: 1.0,
             }),
             "every brush is a nib stamped at a spacing"
         );
@@ -995,6 +1011,7 @@ mod tests {
                 Property::Size
                     | Property::Opacity
                     | Property::Hardness
+                    | Property::Flow
                     | Property::Spacing
                     | Property::Roundness
                     | Property::Rotation

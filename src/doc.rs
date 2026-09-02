@@ -184,6 +184,10 @@ pub struct Stamp {
     pub roundness: f64,
     /// The nib's own angle, in degrees, clockwise.
     pub rotation: f64,
+    /// What one dab lays, 0–1. The stroke builds toward its opacity
+    /// where the dabs cross; 1 is a dab that covers on its own.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub flow: f64,
 }
 
 impl Stamp {
@@ -199,6 +203,9 @@ impl Stamp {
         }
         if !(self.rotation.is_finite() && (0.0..=360.0).contains(&self.rotation)) {
             return Err(format!("rotation {} is not a turn of a nib", self.rotation));
+        }
+        if !is_unit(self.flow) {
+            return Err(format!("flow {} is not between 0 and 1", self.flow));
         }
         Ok(self)
     }
@@ -860,6 +867,7 @@ mod tests {
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,
+                flow: 1.0,
             }),
             "a brush stroke says which nib laid it"
         );
@@ -881,6 +889,7 @@ mod tests {
             (r#"{ "spacing": 0.4, "roundness": 2, "rotation": 0 }"#, "roundness"),
             (r#"{ "spacing": 0, "roundness": 1, "rotation": 0 }"#, "spacing"),
             (r#"{ "spacing": 0.4, "roundness": 1, "rotation": 400 }"#, "rotation"),
+            (r#"{ "spacing": 0.4, "roundness": 1, "rotation": 0, "flow": -1 }"#, "flow"),
         ] {
             let json = format!(
                 r##"{{

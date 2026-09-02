@@ -17,7 +17,7 @@ use anyhow::Context as _;
 use wgpu::util::DeviceExt as _;
 
 use crate::bitmap::Bitmap;
-use crate::scene::{self, Frame, ImageSlots, Pass, Prim, Rgba, Viewport};
+use crate::scene::{self, Blend, Frame, ImageSlots, Pass, Prim, Rgba, Viewport};
 
 const SHADER: &str = r#"
 struct Globals {
@@ -176,15 +176,18 @@ pub struct Gfx {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    /// The four ways a prim reaches a target, all from the one shader:
+    /// The five ways a prim reaches a target, all from the one shader:
     /// `direct` onto the window (straight alpha over); `composite` onto
     /// the window from the scratch's premultiplied pixels; `union` onto
-    /// the scratch, every channel a max, so a group's segments cover
-    /// without adding up; `wipe` onto the scratch with no blending at
-    /// all, which is how a box clears it.
+    /// the scratch, every channel a max, so a swept stroke's spans
+    /// cover without adding up; `build` onto the scratch one over the
+    /// next, so a stamped stroke's dabs pile up toward its opacity;
+    /// `wipe` onto the scratch with no blending at all, which is how a
+    /// box clears it.
     direct: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     union: wgpu::RenderPipeline,
+    build: wgpu::RenderPipeline,
     wipe: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -334,6 +337,13 @@ impl Gfx {
                 alpha: max,
             }),
         );
+        // The scratch holds premultiplied color, so a dab lands on the
+        // one under it the way the composite lands on the window.
+        let build = pipeline(
+            "build",
+            "fs_premul",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
         let wipe = pipeline("wipe", "fs_premul", None);
 
         // Slot 0: what the runs with no image bind. White and opaque, so
@@ -359,6 +369,7 @@ impl Gfx {
             direct,
             composite,
             union,
+            build,
             wipe,
             globals_buf,
             bind_group,
@@ -571,14 +582,22 @@ impl Gfx {
                     first = false;
                     ("window", &view, load, None, composite, start..end, &self.direct)
                 }
-                Pass::Offscreen { wipe, start, end } => (
+                Pass::Offscreen {
+                    wipe,
+                    start,
+                    end,
+                    blend,
+                } => (
                     "scratch",
                     scratch_view,
                     wgpu::LoadOp::Load,
                     Some(wipe),
                     None,
                     start..end,
-                    &self.union,
+                    match blend {
+                        Blend::Union => &self.union,
+                        Blend::Build => &self.build,
+                    },
                 ),
             };
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
