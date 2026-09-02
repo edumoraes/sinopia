@@ -144,17 +144,6 @@ impl Atlas {
         self.px
     }
 
-    /// Distance from the baseline to the top of the tallest glyph.
-    pub fn ascent(&self) -> f32 {
-        self.ascent
-    }
-
-    /// Distance from the baseline to the bottom of the lowest — negative,
-    /// as the face reports it.
-    pub fn descent(&self) -> f32 {
-        self.descent
-    }
-
     /// Where the baseline goes for `s` to sit centered in `r`.
     pub fn baseline_in(&self, r: ScreenRect) -> f32 {
         (r.y + (r.h - (self.ascent - self.descent)) / 2.0 + self.ascent).round()
@@ -387,8 +376,8 @@ mod tests {
         let baseline = a.baseline_in(r);
         assert!(baseline > r.y && baseline < r.y + r.h);
         // The gap above the ascent matches the one below the descent.
-        let above = baseline - a.ascent() - r.y;
-        let below = r.y + r.h - (baseline - a.descent());
+        let above = baseline - a.ascent - r.y;
+        let below = r.y + r.h - (baseline - a.descent);
         assert!((above - below).abs() <= 1.0, "{above} vs {below}");
     }
 }

@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use winit::application::ApplicationHandler;
-use winit::event::{
-    ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
-};
+use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -28,9 +26,12 @@ use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
+use crate::project::{Origin, Project};
 use crate::scene::{self, ImageSlots, Prim, View, Viewport};
 use crate::select::{self, Handle};
-use crate::store::Store;
+use crate::store::{self, Store};
+use crate::tabs::{TabHit, Tabs};
+use crate::text::{Atlas, Font};
 use crate::theme::Theme;
 
 /// State the server thread reads (replies to `ping`).
@@ -50,39 +51,99 @@ enum UserEvent {
     },
 }
 
+/// One tab: a project and the editor driving it. Tool, selection and any
+/// drag in progress belong to a document, not to the window, so switching
+/// tabs must not hand them to the next one.
+struct Open {
+    project: Project,
+    editor: Editor,
+}
+
 struct App {
     store: Store,
-    doc: Document,
+    /// Every open project, in tab order. Never empty: closing the last
+    /// tab exits.
+    open: Vec<Open>,
+    active: usize,
     shared: Arc<Mutex<SharedState>>,
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     theme: Theme,
-    editor: Editor,
+    font: Font,
+    /// Built once the scale factor is known, rebuilt when it changes.
+    atlas: Option<Atlas>,
+    atlas_slot: u32,
     clipboard: Option<Clipboard>,
     /// Last pointer position in physical px, while inside the window.
     cursor: Option<(f64, f64)>,
     modifiers: Modifiers,
     cursor_icon: CursorIcon,
-    /// The camera moved since the last save (pans and zooms are saved when
-    /// the gesture ends, not per frame).
-    camera_dirty: bool,
     /// Smoke-test mode: exit cleanly after N presented frames.
     smoke_frames_left: Option<u32>,
     exit_error: Option<anyhow::Error>,
 }
 
 impl App {
-    fn save(&mut self) {
-        if let Err(e) = self.store.save(&self.doc) {
-            log::error!("saving board {}: {e:#}", self.doc.id);
-        }
-        self.camera_dirty = false;
+    fn project(&self) -> &Project {
+        &self.open[self.active].project
     }
 
-    fn flush_camera(&mut self) {
-        if self.camera_dirty {
-            self.save();
+    fn doc(&self) -> &Document {
+        &self.open[self.active].project.doc
+    }
+
+    fn editor(&self) -> &Editor {
+        &self.open[self.active].editor
+    }
+
+    /// The active tab's editor and its document, borrowed apart: the
+    /// editor reshapes the document it is driving, so it cannot hold it.
+    fn active(&mut self) -> (&mut Editor, &mut Document) {
+        let open = &mut self.open[self.active];
+        (&mut open.editor, &mut open.project.doc)
+    }
+
+    /// Writes tab `index` where its origin says. An untitled project has
+    /// nowhere to go and is left alone — asking for a name is the caller's
+    /// job.
+    fn save_project(&mut self, index: usize) -> bool {
+        let Some(project) = self.open.get(index).map(|o| &o.project) else {
+            return false;
+        };
+        let saved = match &project.origin {
+            Origin::Board(id) => {
+                let origin = Origin::Board(id.clone());
+                self.store.save(&project.doc).map(|()| origin)
+            }
+            Origin::File(path) => {
+                let origin = Origin::File(path.clone());
+                store::save_document_to(path, &project.doc).map(|()| origin)
+            }
+            Origin::Untitled => return false,
+        };
+        match saved {
+            Ok(origin) => {
+                self.open[index].project.saved(origin);
+                if index == self.active {
+                    self.retitle();
+                }
+                self.redraw();
+                true
+            }
+            Err(e) => {
+                log::error!("saving {}: {e:#}", self.open[index].project.label());
+                false
+            }
+        }
+    }
+
+    /// The document changed. Nothing reaches disk until the user asks.
+    fn touch(&mut self) {
+        let was_clean = !self.open[self.active].project.dirty;
+        self.open[self.active].project.touch();
+        if was_clean {
+            self.retitle();
         }
     }
 
@@ -92,17 +153,99 @@ impl App {
         }
     }
 
-    fn switch_to(&mut self, doc: Document) {
-        self.flush_camera();
-        // Drop the drag, then the selection: neither belongs to the new board.
-        while self.editor.escape(&mut self.doc) {}
-        self.doc = doc;
-        self.shared.lock().expect("lock shared").board_id = self.doc.id.clone();
-        if let Some(w) = &self.window {
-            w.set_title(&format!("Omawhite — {}", self.doc.title));
+    fn retitle(&self) {
+        let Some(w) = &self.window else { return };
+        let project = self.project();
+        let mark = if project.dirty { "• " } else { "" };
+        w.set_title(&format!("{mark}Omawhite — {}", project.label()));
+    }
+
+    /// Closes tab `index` if nothing would be lost. A dirty tab needs an
+    /// answer first, which the confirmation dialog will bring.
+    fn request_close(&mut self, index: usize) {
+        let Some(open) = self.open.get(index) else {
+            return;
+        };
+        if open.project.dirty {
+            log::info!("{} has unsaved changes", open.project.label());
+            return;
         }
+        self.close(index);
+    }
+
+    /// Drops tab `index`, whatever state it is in. The caller has already
+    /// settled what happens to unsaved work.
+    fn close(&mut self, index: usize) {
+        if index >= self.open.len() {
+            return;
+        }
+        self.open.remove(index);
+        if self.open.is_empty() {
+            return;
+        }
+        // Closing a tab before the active one would otherwise shift the
+        // one in front out from under the user.
+        let next = if index < self.active {
+            self.active - 1
+        } else {
+            self.active.min(self.open.len() - 1)
+        };
+        self.activate(next);
+    }
+
+    /// Whether every tab is gone — the window has nothing left to show.
+    fn is_empty(&self) -> bool {
+        self.open.is_empty()
+    }
+
+    /// Which tab, if any, already shows the board `id` names. Opening the
+    /// same board twice would give it two documents and one file.
+    fn tab_showing(&self, id: &str) -> Option<usize> {
+        self.open.iter().position(|o| o.project.doc.id == id)
+    }
+
+    /// Closes the window. Everything with a home on disk is written
+    /// first; an untitled board has nowhere to go.
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        for i in 0..self.open.len() {
+            if self.open[i].project.dirty {
+                if self.open[i].project.needs_a_name() {
+                    log::warn!("{} was never saved", self.open[i].project.label());
+                } else {
+                    self.save_project(i);
+                }
+            }
+        }
+        event_loop.exit();
+    }
+
+    /// Adds a tab and makes it the one in front.
+    fn open_project(&mut self, project: Project) {
+        self.open.push(Open {
+            project,
+            editor: Editor::new(),
+        });
+        self.activate(self.open.len() - 1);
+    }
+
+    /// Brings tab `index` forward. The outgoing editor keeps its own tool
+    /// and selection; the incoming one is told what is being held, since
+    /// modifiers are physical and would otherwise be stale.
+    fn activate(&mut self, index: usize) {
+        if index >= self.open.len() {
+            return;
+        }
+        self.active = index;
+        let mods = self.modifiers.state();
+        let (editor, _) = self.active();
+        editor.hold_ctrl(mods.control_key());
+        editor.hold_shift(mods.shift_key());
+        editor.hold_space(false);
+        self.shared.lock().expect("lock shared").board_id = self.doc().id.clone();
+        self.retitle();
         self.load_images();
         self.redraw();
+        self.update_cursor_icon();
     }
 
     /// Uploads the texture for every image in the current document that
@@ -110,7 +253,7 @@ impl App {
     /// its images instead of placeholders.
     fn load_images(&mut self) {
         let blobs: Vec<String> = self
-            .doc
+            .doc()
             .elements
             .iter()
             .filter_map(|el| match el {
@@ -159,16 +302,9 @@ impl App {
         {
             log::error!("uploading the pasted image: {e:#}");
         }
-        let change = self.editor.paste_image(
-            &mut self.doc,
-            &view,
-            self.cursor,
-            blob,
-            (bitmap.w, bitmap.h),
-        );
-        if change == Change::Scene {
-            self.save();
-        }
+        let cursor = self.cursor;
+        let (editor, doc) = self.active();
+        let change = editor.paste_image(doc, &view, cursor, blob, (bitmap.w, bitmap.h));
         self.apply(change);
     }
 
@@ -182,7 +318,7 @@ impl App {
         let (w, h) = self.gfx.as_ref()?.size();
         let scale = self.window.as_ref().map_or(1.0, |w| w.scale_factor());
         Some(View {
-            camera: self.doc.camera,
+            camera: self.doc().camera,
             viewport: Viewport { w, h },
             scale,
         })
@@ -190,6 +326,45 @@ impl App {
 
     fn dock(&self, view: &View) -> Dock {
         Dock::layout(view.viewport, view.scale, &Tool::ALL)
+    }
+
+    /// The strip, or `None` before the atlas exists — there is nothing to
+    /// measure a label with until then.
+    fn tabs(&self, view: &View) -> Option<Tabs> {
+        let atlas = self.atlas.as_ref()?;
+        let labels: Vec<(String, bool)> = self
+            .open
+            .iter()
+            .map(|o| (o.project.label(), o.project.dirty))
+            .collect();
+        Some(Tabs::layout(
+            view.viewport,
+            view.scale,
+            atlas,
+            &labels,
+            self.active,
+        ))
+    }
+
+    /// Builds and uploads the glyph atlas for the current scale factor,
+    /// unless the one in hand already matches.
+    fn ensure_atlas(&mut self) {
+        let Some(window) = &self.window else { return };
+        let px = Tabs::label_px(window.scale_factor());
+        if self.atlas.as_ref().is_some_and(|a| a.px() == px) {
+            return;
+        }
+        let atlas = Atlas::build(&self.font, px);
+        let Some(gfx) = &mut self.gfx else { return };
+        match gfx.upload_atlas(&atlas.bitmap) {
+            Ok(slot) => {
+                self.atlas_slot = slot;
+                self.atlas = Some(atlas);
+            }
+            // Without the atlas the strip draws no labels; the tabs are
+            // still there, and so is everything else.
+            Err(e) => log::error!("uploading the glyph atlas: {e:#}"),
+        }
     }
 
     /// Everything on screen, back to front: grid, document, the stroke in
@@ -200,28 +375,39 @@ impl App {
         let none = ImageSlots::new();
         let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
         let mut prims = grid::prims(view, self.theme.dot);
-        prims.extend(scene::document_prims(&self.doc, view, images));
-        if let Some(points) = self.editor.stroke() {
+        prims.extend(scene::document_prims(self.doc(), view, images));
+        if let Some(points) = self.editor().stroke() {
             prims.extend(scene::stroke_prims(points, PEN_WIDTH, self.theme.ink, view));
         }
-        if let Some(frame) = self.editor.selection_frame(&self.doc) {
+        if let Some(frame) = self.editor().selection_frame(self.doc()) {
             prims.extend(select::prims(&frame, view, &self.theme));
         }
-        if let Some((a, b)) = self.editor.marquee() {
+        if let Some((a, b)) = self.editor().marquee() {
             prims.extend(select::marquee_prims(a, b, &self.theme));
         }
-        prims.extend(self.dock(view).prims(self.editor.tool(), &self.theme));
+        prims.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
+        if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
+            prims.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
+        }
         prims
     }
 
     /// Stores what an editor input changed and redraws if anything did.
+    ///
+    /// A scene change dirties the tab; a camera change does not. Panning
+    /// to look at the far corner of a board is not work to lose, and
+    /// being asked to save after merely looking around would teach the
+    /// dot to mean nothing.
     fn apply(&mut self, change: Change) {
         match change {
             Change::None => {}
-            Change::Scene | Change::Selection => self.redraw(),
+            Change::Selection => self.redraw(),
+            Change::Scene => {
+                self.touch();
+                self.redraw();
+            }
             Change::Camera(camera) => {
-                self.doc.camera = camera;
-                self.camera_dirty = true;
+                self.active().1.camera = camera;
                 self.redraw();
             }
         }
@@ -231,17 +417,30 @@ impl App {
         let (Some(view), Some((x, y))) = (self.view(), self.cursor) else {
             return;
         };
-        self.flush_camera();
+        // The strip is over the dock is over the canvas.
+        if let Some(hit) = self.tabs(&view).and_then(|t| t.hit(x, y)) {
+            if button == Button::Left {
+                match hit {
+                    TabHit::Select(i) => self.activate(i),
+                    TabHit::Close(i) => self.request_close(i),
+                    TabHit::New => self.open_project(Project::untitled()),
+                    TabHit::Strip => {}
+                }
+            }
+            return self.update_cursor_icon();
+        }
         match self.dock(&view).hit(x, y) {
             Some(Hit::Tool(tool)) => {
                 if button == Button::Left {
-                    self.editor.set_tool(tool, &mut self.doc);
+                    let (editor, doc) = self.active();
+                    editor.set_tool(tool, doc);
                     self.redraw();
                 }
             }
             Some(Hit::Panel) => {}
             None => {
-                let change = self.editor.press(button, &view, (x, y), &mut self.doc);
+                let (editor, doc) = self.active();
+                let change = editor.press(button, &view, (x, y), doc);
                 self.apply(change);
             }
         }
@@ -252,34 +451,23 @@ impl App {
         let Some(view) = self.view() else { return };
         let (x, y) = self.cursor.unwrap_or_default();
         let ink = self.theme.ink_hex.clone();
-        match self
-            .editor
-            .release(button, &view, (x, y), &mut self.doc, &ink)
-        {
-            Change::None => self.flush_camera(),
-            Change::Scene => {
-                self.save();
-                self.redraw();
-            }
-            Change::Selection => self.redraw(),
-            change @ Change::Camera(_) => {
-                self.apply(change);
-                self.flush_camera();
-            }
-        }
+        let (editor, doc) = self.active();
+        let change = editor.release(button, &view, (x, y), doc, &ink);
+        self.apply(change);
         self.update_cursor_icon();
     }
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
         if let Some(view) = self.view() {
-            let change = self.editor.moved(&view, (x, y), &mut self.doc);
+            let (editor, doc) = self.active();
+            let change = editor.moved(&view, (x, y), doc);
             self.apply(change);
         }
         self.update_cursor_icon();
     }
 
-    fn scrolled(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
+    fn scrolled(&mut self, delta: MouseScrollDelta) {
         let Some(view) = self.view() else { return };
         let delta = match delta {
             MouseScrollDelta::LineDelta(x, y) => (
@@ -293,32 +481,24 @@ impl App {
             f64::from(view.viewport.h) / 2.0,
         ));
         let shift = self.modifiers.state().shift_key();
-        let camera = self.editor.scroll(&view, cursor, delta, shift);
+        let camera = self.active().0.scroll(&view, cursor, delta, shift);
         self.apply(Change::Camera(camera));
-        if phase == TouchPhase::Ended {
-            self.flush_camera();
-        }
     }
 
     fn key(&mut self, key: &Key, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
-            Key::Named(NamedKey::Space) => {
-                self.editor.hold_space(pressed);
-                if !pressed {
-                    self.flush_camera();
-                }
-            }
+            Key::Named(NamedKey::Space) => self.active().0.hold_space(pressed),
             Key::Named(NamedKey::Escape) if pressed => {
-                if self.editor.escape(&mut self.doc) {
+                let (editor, doc) = self.active();
+                if editor.escape(doc) {
                     self.redraw();
                 }
             }
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
-                if self.editor.delete_selection(&mut self.doc) == Change::Scene {
-                    self.save();
-                    self.redraw();
-                }
+                let (editor, doc) = self.active();
+                let change = editor.delete_selection(doc);
+                self.apply(change);
             }
             Key::Character(text) if pressed && self.modifiers.state().control_key() => {
                 if text.eq_ignore_ascii_case("v") {
@@ -334,7 +514,8 @@ impl App {
                 if let (Some(c), None) = (chars.next(), chars.next())
                     && let Some(tool) = Tool::from_hotkey(c)
                 {
-                    self.editor.set_tool(tool, &mut self.doc);
+                    let (editor, doc) = self.active();
+                    editor.set_tool(tool, doc);
                     self.redraw();
                 }
             }
@@ -345,12 +526,10 @@ impl App {
 
     fn modifiers_changed(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
-        let ctrl = modifiers.state().control_key();
-        self.editor.hold_ctrl(ctrl);
-        self.editor.hold_shift(modifiers.state().shift_key());
-        if !ctrl {
-            self.flush_camera();
-        }
+        let state = modifiers.state();
+        let (editor, _) = self.active();
+        editor.hold_ctrl(state.control_key());
+        editor.hold_shift(state.shift_key());
         self.update_cursor_icon();
     }
 
@@ -360,24 +539,21 @@ impl App {
             f64::from(view.viewport.w) / 2.0,
             f64::from(view.viewport.h) / 2.0,
         ));
-        if let Some(camera) = self.editor.gesture(&view, cursor, gesture) {
+        if let Some(camera) = self.active().0.gesture(&view, cursor, gesture) {
             self.apply(Change::Camera(camera));
-        }
-        if gesture == Gesture::End {
-            self.flush_camera();
         }
     }
 
     /// Keys can't be released into a window that lost focus: drop the held
     /// overrides and whatever gesture they were driving.
     fn focus_lost(&mut self) {
-        self.editor.hold_space(false);
-        self.editor.hold_ctrl(false);
-        self.editor.hold_shift(false);
-        if self.editor.cancel(&mut self.doc) {
+        let (editor, doc) = self.active();
+        editor.hold_space(false);
+        editor.hold_ctrl(false);
+        editor.hold_shift(false);
+        if editor.cancel(doc) {
             self.redraw();
         }
-        self.flush_camera();
         self.update_cursor_icon();
     }
 
@@ -385,21 +561,22 @@ impl App {
     /// over the dock; resize and rotate cursors over the selection
     /// handles.
     fn update_cursor_icon(&mut self) {
-        let (over_dock, handle, tool) = match (self.view(), self.cursor) {
+        let (over_chrome, handle, tool) = match (self.view(), self.cursor) {
             (Some(view), Some((x, y))) => (
-                self.dock(&view).hit(x, y).is_some(),
-                self.editor.hover(&self.doc, &view, (x, y)),
-                self.editor.pointer_tool(&self.doc, &view, (x, y)),
+                self.dock(&view).hit(x, y).is_some()
+                    || self.tabs(&view).and_then(|t| t.hit(x, y)).is_some(),
+                self.editor().hover(self.doc(), &view, (x, y)),
+                self.editor().pointer_tool(self.doc(), &view, (x, y)),
             ),
-            _ => (false, None, self.editor.active_tool()),
+            _ => (false, None, self.editor().active_tool()),
         };
-        let icon = if self.editor.is_panning() {
+        let icon = if self.editor().is_panning() {
             CursorIcon::Grabbing
-        } else if self.editor.is_drawing() {
+        } else if self.editor().is_drawing() {
             CursorIcon::Crosshair
-        } else if self.editor.is_moving() {
+        } else if self.editor().is_moving() {
             CursorIcon::Move
-        } else if over_dock {
+        } else if over_chrome {
             CursorIcon::Default
         } else {
             match (tool, handle) {
@@ -429,8 +606,8 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs =
-            Window::default_attributes().with_title(format!("Omawhite — {}", self.doc.title));
+        let attrs = Window::default_attributes()
+            .with_title(format!("Omawhite — {}", self.project().label()));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => return self.fail(event_loop, anyhow::anyhow!("creating window: {e}")),
@@ -465,6 +642,7 @@ impl ApplicationHandler<UserEvent> for App {
                     Err(e) => log::warn!("clipboard unavailable: {e:#}"),
                 }
                 self.window = Some(window);
+                self.ensure_atlas();
                 self.load_images();
                 self.redraw();
             }
@@ -473,24 +651,42 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        self.handle_window_event(event_loop, event);
+        // The last tab closing leaves nothing to show.
+        if self.is_empty() {
+            event_loop.exit();
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, ev: UserEvent) {
+        self.handle_user_event(event_loop, ev);
+        if self.is_empty() {
+            event_loop.exit();
+        }
+    }
+}
+
+impl App {
+    fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                self.save();
-                event_loop.exit();
-            }
+            WindowEvent::CloseRequested => self.quit(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(gfx) = &mut self.gfx {
                     gfx.resize(size.width, size.height);
                 }
                 self.redraw();
             }
-            WindowEvent::ScaleFactorChanged { .. } => self.redraw(),
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // The chrome is sized in logical px: a new scale factor
+                // asks for glyphs at a new size.
+                self.ensure_atlas();
+                self.redraw();
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_moved(position.x, position.y);
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
-                self.flush_camera();
                 self.update_cursor_icon();
             }
             WindowEvent::Focused(false) => self.focus_lost(),
@@ -506,7 +702,7 @@ impl ApplicationHandler<UserEvent> for App {
                     ElementState::Released => self.pointer_released(button),
                 }
             }
-            WindowEvent::MouseWheel { delta, phase, .. } => self.scrolled(delta, phase),
+            WindowEvent::MouseWheel { delta, .. } => self.scrolled(delta),
             WindowEvent::ModifiersChanged(m) => self.modifiers_changed(m),
             WindowEvent::KeyboardInput {
                 event:
@@ -543,7 +739,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, ev: UserEvent) {
+    fn handle_user_event(&mut self, event_loop: &ActiveEventLoop, ev: UserEvent) {
         let req = match ev {
             UserEvent::Request(req) => req,
             UserEvent::Gesture(g) => return self.gestured(g),
@@ -557,23 +753,28 @@ impl ApplicationHandler<UserEvent> for App {
             }
             Request::New => {
                 let doc = Document::new("untitled");
+                // Written before the window sees it: index.json is the
+                // only file the plugin reads (§5), so a board made for
+                // the gallery has to be in it.
                 if let Err(e) = self.store.save(&doc) {
                     log::error!("creating a new board: {e:#}");
                     return;
                 }
-                self.switch_to(doc);
+                let origin = Origin::Board(doc.id.clone());
+                self.open_project(Project::opened(doc, origin));
             }
-            Request::Open { id } => match self.store.load(&id) {
-                Ok(doc) => {
-                    self.save(); // never lose the current board
-                    self.switch_to(doc);
+            Request::Open { id } => {
+                if let Some(i) = self.tab_showing(&id) {
+                    return self.activate(i);
                 }
-                Err(e) => log::error!("opening board {id:?}: {e:#}"),
-            },
-            Request::Shutdown => {
-                self.save();
-                event_loop.exit();
+                match self.store.load(&id) {
+                    Ok(doc) => {
+                        self.open_project(Project::opened(doc, Origin::Board(id)));
+                    }
+                    Err(e) => log::error!("opening board {id:?}: {e:#}"),
+                }
             }
+            Request::Shutdown => self.quit(event_loop),
             Request::Theme { colors } => {
                 self.theme = Theme::from_hex(&colors.bg, &colors.fg, &colors.accent);
                 self.redraw();
@@ -626,20 +827,30 @@ pub fn run(
         reply
     });
 
+    // Whatever `main` resolved — `--new`, `--open <id>`, or the most
+    // recent — came out of the store and was written there first, so the
+    // first tab is a board, never an untitled one.
+    let id = doc.id.clone();
+    let first = Project::opened(doc, Origin::Board(id));
     let mut app = App {
         store,
-        doc,
+        open: vec![Open {
+            project: first,
+            editor: Editor::new(),
+        }],
+        active: 0,
         shared,
         proxy: event_loop.create_proxy(),
         window: None,
         gfx: None,
         theme: Theme::light(),
-        editor: Editor::new(),
+        font: Font::bundled(),
+        atlas: None,
+        atlas_slot: 0,
         clipboard: None,
         cursor: None,
         modifiers: Modifiers::default(),
         cursor_icon: CursorIcon::Default,
-        camera_dirty: false,
         smoke_frames_left: smoke_frames,
         exit_error: None,
     };
