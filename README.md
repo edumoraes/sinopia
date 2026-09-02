@@ -53,8 +53,13 @@ selection, navigation, pasted images, and projects in tabs:
   blue outline and a shadow with further to fall, and draws over the
   cards it passes. The lift eases in over about a seventh of a second
   and runs backwards when the card is let go, so nothing snaps. The
-  stack reorders live under the pointer, and the layer is left where
-  the button comes up. New ink and
+  stack reorders live under the pointer — the cards it passes slide out
+  of its way rather than jumping — and the layer is left where the
+  button comes up. The panel is a scroll area: it grows to the room the
+  window has, cuts the card at its edge, and shows a thumb for how much
+  of the stack is in view; the wheel over it walks the list. Picking an
+  element on the canvas makes its layer active, and the panel glides to
+  bring that card into sight. New ink and
   pastes land on the active layer; picking an
   element with the select tool makes its layer active. A hidden layer
   paints nothing and cannot be hit or marqueed; hiding one deselects

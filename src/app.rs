@@ -116,6 +116,14 @@ struct App {
     carry: Option<Carry>,
     /// The cards making room around a carried one.
     slides: layers::Slides,
+    /// How far down the stack the panel is looking, in physical px, and
+    /// the glide still bringing it there.
+    scroll: f32,
+    scrolling: layers::Coming,
+    /// The active layer the panel last brought into sight. A change of
+    /// active layer glides to show it; scrolling away from it does not
+    /// snap back, because it has not changed.
+    focused: Option<String>,
     /// When the panel was last eased, for everything on it that moves.
     clock: Instant,
     /// Built once the scale factor is known, rebuilt when it changes.
@@ -384,15 +392,67 @@ impl App {
         }
         let scale = self.view().map_or(1.0, |v| v.scale as f32);
         let row = layers::ROW * scale;
+        // Age what is already travelling before noticing what has just
+        // set off, or a slide born this frame is a third over before its
+        // first frame is drawn.
+        self.slides.tick(dt);
         let Open { project, .. } = &self.open[self.active];
         self.slides.restack(&project.doc.layers, row);
-        self.slides.tick(dt);
+        self.scrolling.tick(dt);
+        // The window may have grown or shrunk under it: the panel is the
+        // authority on how far the stack can be scrolled.
+        if !self.scrolling.moving()
+            && let Some(view) = self.view()
+            && let Some(panel) = self.panel(&view)
+        {
+            self.scroll = panel.scroll();
+        }
+        self.follow_active();
+    }
+
+    /// Brings the active layer's card into the band when it has just
+    /// become active — a click on the canvas picks an element, and the
+    /// panel goes to where that element lives. Only on the change: the
+    /// list stays where the wheel left it otherwise.
+    fn follow_active(&mut self) {
+        let Some(view) = self.view() else { return };
+        let index = self.editor().active_layer(self.doc());
+        let id = self.doc().layers.get(index).map(|l| l.id.clone());
+        if self.focused == id {
+            return;
+        }
+        self.focused = id;
+        // A card in the hand takes the panel where the pointer says.
+        let Some(panel) = self.panel(&view).filter(|_| self.carry.is_none()) else {
+            return;
+        };
+        let want = panel.scroll_showing(index, self.doc().layers.len());
+        if want != self.scroll {
+            self.scrolling.send(self.scroll - want);
+            self.scroll = want;
+            self.redraw();
+        }
+    }
+
+    /// Moves the panel's list by `d` physical px, at once — the wheel
+    /// answers under the hand, it does not glide.
+    fn scroll_panel(&mut self, d: f64) {
+        let Some(view) = self.view() else { return };
+        let Some(panel) = self.panel(&view) else { return };
+        let next = (self.scroll + d as f32).clamp(0.0, panel.max_scroll());
+        if next != self.scroll || self.scrolling.moving() {
+            self.scroll = next;
+            self.scrolling = layers::Coming::default();
+            self.redraw();
+        }
     }
 
     /// Something on the panel is still moving, so the next frame will
     /// not match this one and has to be asked for.
     fn animating(&self) -> bool {
-        self.carry.as_ref().is_some_and(|c| !c.held || c.t < 1.0) || self.slides.moving()
+        self.carry.as_ref().is_some_and(|c| !c.held || c.t < 1.0)
+            || self.slides.moving()
+            || self.scrolling.moving()
     }
 
     fn redraw(&self) {
@@ -608,6 +668,7 @@ impl App {
             top,
             atlas,
             &self.doc().layers,
+            self.scroll + self.scrolling.offset(),
         ))
     }
 
@@ -909,6 +970,15 @@ impl App {
             f64::from(view.viewport.w) / 2.0,
             f64::from(view.viewport.h) / 2.0,
         ));
+        // The panel takes the wheel when the pointer is over it: the
+        // wheel away from the user shows what is further up the stack.
+        if self
+            .panel(&view)
+            .and_then(|p| p.hit(cursor.0, cursor.1))
+            .is_some()
+        {
+            return self.scroll_panel(-delta.1);
+        }
         let shift = self.modifiers.state().shift_key();
         let camera = self.active().0.scroll(&view, cursor, delta, shift);
         self.apply(Change::Camera(camera));
@@ -1323,6 +1393,9 @@ pub fn run(
         layers_shown: false,
         carry: None,
         slides: layers::Slides::default(),
+        scroll: 0.0,
+        scrolling: layers::Coming::default(),
+        focused: None,
         clock: Instant::now(),
         atlas: None,
         atlas_slot: 0,

@@ -37,6 +37,10 @@ const LIFT_BORDER: f32 = 2.0;
 const LIFT_SCALE: f32 = 0.05;
 const LIFT_TILT: f32 = 2.0;
 const LIFT_LEFT: f32 = 12.0;
+/// The scrollbar's thumb, and the room it keeps from the cards.
+const BAR_W: f32 = 4.0;
+const BAR_GAP: f32 = 3.0;
+const BAR_MIN: f32 = 24.0;
 /// How long the lift takes to come on, and to go off again.
 pub const LIFT_SECONDS: f32 = 0.14;
 const BUTTON_GAP: f32 = 2.0;
@@ -95,14 +99,41 @@ pub fn ease(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// A card that changed rows and has not arrived: how far it has to
-/// come, and how much of that is left.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Slide {
-    /// Where the card was, less where it now belongs, in physical px.
+/// A value on its way to where it belongs: how far it still has to
+/// come, and how much of that is left. Everything the panel eases — a
+/// card making room, the list gliding to show a row — is one of these,
+/// so it all moves at the one pace.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Coming {
+    /// Where it was, less where it now belongs, in physical px.
     from: f32,
-    /// 1 the moment the stack moved, 0 once the card has arrived.
+    /// 1 the moment it was sent, 0 once it has arrived.
     t: f32,
+}
+
+impl Coming {
+    /// Sends it `distance` further than it has already come, so
+    /// something that moves again mid-flight carries what is left of
+    /// the old trip into the new one instead of jumping to a new start.
+    pub fn send(&mut self, distance: f32) {
+        *self = Coming {
+            from: distance + self.offset(),
+            t: 1.0,
+        };
+    }
+
+    pub fn tick(&mut self, dt: f32) {
+        self.t = (self.t - dt / LIFT_SECONDS).max(0.0);
+    }
+
+    /// How far from home it still is, in physical px.
+    pub fn offset(&self) -> f32 {
+        self.from * ease(self.t)
+    }
+
+    pub fn moving(&self) -> bool {
+        self.t > 0.0
+    }
 }
 
 /// The cards on their way between two orders of the stack. A layer that
@@ -112,7 +143,7 @@ struct Slide {
 /// much time has passed.
 #[derive(Debug, Default, Clone)]
 pub struct Slides {
-    on_the_way: HashMap<String, Slide>,
+    on_the_way: HashMap<String, Coming>,
     /// The order the stack was in when it was last looked at, bottom to
     /// top. A stack it has never seen starts every card still, so a tab
     /// switch does not slide a whole panel.
@@ -144,30 +175,26 @@ impl Slides {
             // Where it is on screen this instant, measured from the row
             // it is about to belong to: a card that moves again while
             // it is still travelling does not jump to start over.
-            let from = (then as f32 - now as f32) * row + self.offset(&layer.id);
-            if from == 0.0 {
-                self.on_the_way.remove(&layer.id);
-            } else {
-                self.on_the_way
-                    .insert(layer.id.clone(), Slide { from, t: 1.0 });
+            let step = (then as f32 - now as f32) * row;
+            let mut coming = self.on_the_way.remove(&layer.id).unwrap_or_default();
+            coming.send(step);
+            if coming.offset() != 0.0 {
+                self.on_the_way.insert(layer.id.clone(), coming);
             }
         }
     }
 
     /// Ages every slide by `dt` seconds; the arrived are forgotten.
     pub fn tick(&mut self, dt: f32) {
-        let step = dt / LIFT_SECONDS;
-        self.on_the_way.retain(|_, slide| {
-            slide.t -= step;
-            slide.t > 0.0
+        self.on_the_way.retain(|_, coming| {
+            coming.tick(dt);
+            coming.moving()
         });
     }
 
     /// How far from its row a card still is, in physical px.
     pub fn offset(&self, id: &str) -> f32 {
-        self.on_the_way
-            .get(id)
-            .map_or(0.0, |slide| slide.from * ease(slide.t))
+        self.on_the_way.get(id).map_or(0.0, Coming::offset)
     }
 
     /// Something is still travelling, so the next frame will differ.
@@ -204,25 +231,38 @@ pub struct Row {
 pub struct Panel {
     pub rect: ScreenRect,
     pub header: ScreenRect,
-    /// Top layer first.
+    /// Where the cards are shown and cut off: as much of the stack as
+    /// the window has room for.
+    pub band: ScreenRect,
+    /// Top layer first, and only those the band reaches.
     pub rows: Vec<Row>,
     pub up: ScreenRect,
     pub down: ScreenRect,
     pub add: ScreenRect,
     pub remove: ScreenRect,
+    /// The scrollbar's thumb, when there is more stack than band.
+    pub bar: Option<ScreenRect>,
+    /// The scroll actually used, in physical px — what was asked for,
+    /// kept inside what there is to scroll.
+    scroll: f32,
+    /// Every row's height together, in physical px.
+    content: f32,
     scale: f32,
 }
 
 impl Panel {
     /// `top` is where the strip ends, in physical px. Rows are laid out
-    /// top layer first, as many as fit above the bottom margin; the rest
-    /// are not shown.
+    /// top layer first from `scroll` px above the band, which is as much
+    /// of the stack as there is room for above the bottom margin. Only
+    /// the rows the band reaches are laid out; a row it reaches part of
+    /// is laid out whole and cut by [`Panel::band`] when it is drawn.
     pub fn layout(
         viewport: Viewport,
         scale: f64,
         top: f32,
         atlas: &Atlas,
         layers: &[Layer],
+        scroll: f32,
     ) -> Panel {
         let s = scale as f32;
         let x = (viewport.w as f32 - (MARGIN + WIDTH) * s).round();
@@ -255,11 +295,24 @@ impl Panel {
         let down = button();
         let up = button();
 
-        let limit = viewport.h as f32 - (MARGIN + PADDING) * s;
+        let band_y = header.y + header.h;
+        let room = (viewport.h as f32 - (MARGIN + PADDING) * s - band_y).max(0.0);
+        let content = layers.len() as f32 * ROW * s;
+        let band = ScreenRect {
+            x: inner_x,
+            y: band_y,
+            w: inner_w,
+            h: content.min(room),
+        };
+        let scroll = scroll.clamp(0.0, (content - band.h).max(0.0));
+
         let mut rows = Vec::new();
-        let mut ry = header.y + header.h;
-        for (index, layer) in layers.iter().enumerate().rev() {
-            if ry + ROW * s > limit {
+        for (pos, (index, layer)) in layers.iter().enumerate().rev().enumerate() {
+            let ry = band.y + pos as f32 * ROW * s - scroll;
+            if ry + ROW * s <= band.y {
+                continue;
+            }
+            if ry >= band.y + band.h {
                 break;
             }
             let rect = ScreenRect {
@@ -275,7 +328,12 @@ impl Panel {
                 h: side,
             };
             let label_x = (eye.x + eye.w + LABEL_GAP * s).round();
-            let room = rect.x + rect.w - PADDING * s - label_x;
+            let gutter = if content > band.h {
+                (BAR_W + BAR_GAP) * s
+            } else {
+                0.0
+            };
+            let room = rect.x + rect.w - PADDING * s - gutter - label_x;
             let label = if room > 0.0 {
                 atlas.truncate(&layer.name, room)
             } else {
@@ -289,25 +347,71 @@ impl Panel {
                 label,
                 label_x,
             });
-            ry += ROW * s;
         }
+
+        // A thumb as tall a share of the band as the band is of the
+        // stack, and only when there is stack it does not reach.
+        let bar = (content > band.h).then(|| {
+            let h = (band.h * band.h / content).max(BAR_MIN * s).min(band.h);
+            let travel = (band.h - h) * scroll / (content - band.h);
+            ScreenRect {
+                x: band.x + band.w - BAR_W * s,
+                y: band.y + travel,
+                w: BAR_W * s,
+                h,
+            }
+        });
 
         let rect = ScreenRect {
             x,
             y,
             w: WIDTH * s,
-            h: (2.0 * PADDING + HEADER) * s + rows.len() as f32 * ROW * s,
+            h: (2.0 * PADDING + HEADER) * s + band.h,
         };
         Panel {
             rect,
             header,
+            band,
             rows,
             up,
             down,
             add,
             remove,
+            bar,
+            scroll,
+            content,
             scale: s,
         }
+    }
+
+    /// The scroll in use, in physical px.
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// How far the stack can be scrolled: nothing when it all fits.
+    pub fn max_scroll(&self) -> f32 {
+        (self.content - self.band.h).max(0.0)
+    }
+
+    /// The scroll that brings layer `index` into the band, moving as
+    /// little as it can — what the panel does when a click on the canvas
+    /// makes a layer active that is out of sight. Where it already is,
+    /// the answer is the scroll it already has.
+    pub fn scroll_showing(&self, index: usize, layers: usize) -> f32 {
+        if index >= layers {
+            return self.scroll;
+        }
+        let row = ROW * self.scale;
+        let top = (layers - 1 - index) as f32 * row;
+        let want = if top < self.scroll {
+            top
+        } else if top + row > self.scroll + self.band.h {
+            top + row - self.band.h
+        } else {
+            self.scroll
+        };
+        want.clamp(0.0, self.max_scroll())
     }
 
     pub fn hit(&self, x: f64, y: f64) -> Option<PanelHit> {
@@ -323,16 +427,20 @@ impl Panel {
         if let Some((_, hit)) = buttons.iter().find(|(r, _)| r.contains(x, y)) {
             return Some(*hit);
         }
-        for row in &self.rows {
-            if !row.rect.contains(x, y) {
-                continue;
+        // A row reaches past the band when it is only part shown; the
+        // pointer never does.
+        if self.band.contains(x, y) {
+            for row in &self.rows {
+                if !row.rect.contains(x, y) {
+                    continue;
+                }
+                let on_eye = row.eye.inset(-EYE_SLOP * self.scale).contains(x, y);
+                return Some(if on_eye {
+                    PanelHit::Toggle(row.index)
+                } else {
+                    PanelHit::Select(row.index)
+                });
             }
-            let on_eye = row.eye.inset(-EYE_SLOP * self.scale).contains(x, y);
-            return Some(if on_eye {
-                PanelHit::Toggle(row.index)
-            } else {
-                PanelHit::Select(row.index)
-            });
         }
         Some(PanelHit::Panel)
     }
@@ -405,6 +513,11 @@ impl Panel {
         {
             let a = showing.active;
             self.card_prims(row, layers, a, Some(l), 0.0, atlas, slot, theme, &mut out);
+        }
+        // The thumb sits over the cards, at the band's right edge: it
+        // says how much of the stack is on show and where.
+        if let Some(bar) = self.bar {
+            out.push(Prim::rounded(bar, bar.w / 2.0, theme.muted));
         }
         out
     }
@@ -486,11 +599,15 @@ impl Panel {
             ),
             _ => (1.0, 0.0, (0.0, dy)),
         };
-        if k != 1.0 || angle != 0.0 || by.1 != 0.0 {
-            let pivot = row.card.center();
-            for prim in &mut out[start..] {
+        let pivot = row.card.center();
+        let moved = k != 1.0 || angle != 0.0 || by.0 != 0.0 || by.1 != 0.0;
+        for prim in &mut out[start..] {
+            if moved {
                 *prim = prim.transformed(pivot, k, angle, by);
             }
+            // The band is where the stack is shown; the rest of a row
+            // that reaches past it is not drawn.
+            *prim = prim.clipped(self.band);
         }
     }
 }
@@ -643,7 +760,7 @@ mod tests {
     }
 
     fn panel(viewport: Viewport, scale: f64, n: usize) -> Panel {
-        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &layers(n))
+        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &layers(n), 0.0)
     }
 
     const VP: Viewport = Viewport { w: 1200, h: 800 };
@@ -684,17 +801,100 @@ mod tests {
     }
 
     #[test]
-    fn rows_that_do_not_fit_are_dropped() {
+    fn the_band_is_as_much_of_the_stack_as_there_is_room_for() {
         // Room for the header and one row above the bottom margin.
         let h = (34.0 + MARGIN + PADDING + HEADER + ROW + PADDING + MARGIN) as u32;
         let p = panel(Viewport { w: 1200, h }, 1.0, 3);
+        assert_eq!(p.band.h, ROW);
         assert_eq!(p.rows.len(), 1, "{:?}", p.rows);
-        assert_eq!(p.rows[0].index, 2, "the top layer is what survives");
+        assert_eq!(p.rows[0].index, 2, "the top layer is what the band starts on");
         assert_eq!(p.rect.h, 2.0 * PADDING + HEADER + ROW);
-        // One pixel short, and the row goes too; the header stays.
+        assert_eq!(p.max_scroll(), 2.0 * ROW, "two rows below the band");
+        assert!(p.bar.is_some(), "and a thumb to say so");
+
+        // A pixel short, and the band keeps the row, cut off. A scroll
+        // area ends mid-card; it does not drop one.
         let p = panel(Viewport { w: 1200, h: h - 1 }, 1.0, 3);
-        assert!(p.rows.is_empty());
-        assert_eq!(p.rect.h, 2.0 * PADDING + HEADER);
+        assert_eq!(p.band.h, ROW - 1.0);
+        assert_eq!(p.rows.len(), 1);
+        assert!(
+            p.rows[0].rect.h > p.band.h,
+            "the row reaches past the band and is cut when it is drawn"
+        );
+
+        // Everything fits: no scroll, no thumb, and the band is the
+        // stack.
+        let p = panel(VP, 1.0, 3);
+        assert_eq!(p.band.h, 3.0 * ROW);
+        assert_eq!(p.max_scroll(), 0.0);
+        assert!(p.bar.is_none());
+    }
+
+    #[test]
+    fn scrolling_slides_the_stack_under_the_band() {
+        let h = (34.0 + MARGIN + PADDING + HEADER + 2.0 * ROW + PADDING + MARGIN) as u32;
+        let vp = Viewport { w: 1200, h };
+        let a = atlas();
+        let ls = layers(4);
+        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, scroll);
+
+        let top = at(0.0);
+        assert_eq!(top.scroll(), 0.0);
+        assert_eq!(indices(&top), vec![3, 2], "the top of the stack");
+
+        // Half a row down: three rows are part shown.
+        let half = at(ROW / 2.0);
+        assert_eq!(indices(&half), vec![3, 2, 1]);
+        assert_eq!(half.rows[0].rect.y, half.band.y - ROW / 2.0, "cut at the top");
+
+        // Past the end, and it stops with the last row against the
+        // band's bottom.
+        let end = at(10_000.0);
+        assert_eq!(end.scroll(), 2.0 * ROW, "two rows of stack below a two-row band");
+        assert_eq!(indices(&end), vec![1, 0]);
+        let last = end.rows.last().unwrap();
+        assert_eq!(last.rect.y + last.rect.h, end.band.y + end.band.h);
+
+        // The thumb is the band's share of the stack, and travels the
+        // whole way.
+        let thumb = top.bar.unwrap();
+        assert_eq!(thumb.h, top.band.h * top.band.h / (4.0 * ROW));
+        assert_eq!(thumb.y, top.band.y);
+        assert_eq!(thumb.x + thumb.w, top.band.x + top.band.w);
+        let thumb = end.bar.unwrap();
+        assert_eq!(thumb.y + thumb.h, end.band.y + end.band.h);
+    }
+
+    #[test]
+    fn scroll_showing_moves_as_little_as_it_can() {
+        let h = (34.0 + MARGIN + PADDING + HEADER + 2.0 * ROW + PADDING + MARGIN) as u32;
+        let vp = Viewport { w: 1200, h };
+        let a = atlas();
+        let ls = layers(4);
+        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, scroll);
+
+        // Looking at the top two rows (layers 3 and 2, top first).
+        let p = at(0.0);
+        assert_eq!(p.scroll_showing(3, 4), 0.0, "already in the band");
+        assert_eq!(p.scroll_showing(2, 4), 0.0);
+        assert_eq!(p.scroll_showing(1, 4), ROW, "just far enough down");
+        assert_eq!(p.scroll_showing(0, 4), 2.0 * ROW);
+
+        // Looking at the bottom two: coming back up stops as soon as the
+        // row is in.
+        let p = at(2.0 * ROW);
+        assert_eq!(p.scroll_showing(0, 4), 2.0 * ROW);
+        assert_eq!(p.scroll_showing(2, 4), ROW);
+        assert_eq!(p.scroll_showing(3, 4), 0.0);
+        assert_eq!(p.scroll_showing(9, 4), p.scroll(), "no such layer");
+
+        // Nothing to scroll: the answer is always where it already is.
+        let p = panel(VP, 1.0, 4);
+        assert_eq!(p.scroll_showing(0, 4), 0.0);
+    }
+
+    fn indices(p: &Panel) -> Vec<usize> {
+        p.rows.iter().map(|r| r.index).collect()
     }
 
     #[test]
@@ -852,7 +1052,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
         let body = |prims: &[Prim], card: ScreenRect| {
             prims.iter().position(|q| q.bounds() == card && q.feather == 0.0)
         };
@@ -862,7 +1062,14 @@ mod tests {
         let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
         for row in &p.rows {
             assert!(row.rect.contains_rect(&row.card), "the card sits in its row");
-            assert!(body(&prims, row.card).is_some(), "row {} has a body", row.index);
+            let at = body(&prims, row.card);
+            assert!(at.is_some(), "row {} has a body", row.index);
+            assert_eq!(
+                prims[at.unwrap()].clip,
+                [p.band.x, p.band.y, p.band.w, p.band.h],
+                "row {} is cut to the band",
+                row.index
+            );
             assert!(
                 prims
                     .iter()
@@ -883,6 +1090,7 @@ mod tests {
             !prims.iter().any(|q| q.color == theme.lifted),
             "nothing is in flight"
         );
+
         // Two cards are a gap apart, and the gap belongs to a row.
         assert_eq!(
             p.rows[1].card.y - (p.rows[0].card.y + p.rows[0].card.h),
@@ -951,7 +1159,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
         let card = p.rows[1].card;
         let (was_x, was_y) = card.center();
         let body_of = |prims: &[Prim]| prims[carried_body(prims, &theme)];
@@ -1031,7 +1239,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let mut ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
         let mut s = Slides::default();
         s.restack(&ls, ROW);
         ls.swap(1, 2);
@@ -1058,7 +1266,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
         let body_of = |y: f32| {
             let prims = p.prims(&ls, &showing(2, Some(lift(2, y, 1.0))), &a, 7, &theme);
             prims[carried_body(&prims, &theme)].bounds()
@@ -1079,7 +1287,7 @@ mod tests {
         let a = atlas();
         let mut ls = layers(3);
         ls[0].visible = false;
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
         let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
