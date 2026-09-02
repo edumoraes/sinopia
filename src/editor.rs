@@ -99,6 +99,9 @@ pub const CLICK_SLOP_PX: f64 = 3.0;
 /// Logical px past an element's edge that still hit it.
 pub const HIT_SLOP_PX: f64 = 4.0;
 
+/// Rotation step, in degrees, while Shift is held.
+pub const ROTATE_SNAP_DEG: f64 = 15.0;
+
 /// Pan or zoom gesture in progress.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Nav {
@@ -118,9 +121,10 @@ enum Nav {
 /// positions in the document.
 type Snapshot = Vec<(usize, Element)>;
 
-/// Selection drag in progress. Each step recomputes the transform from the
-/// press and applies it to the snapshot, so steps never accumulate error
-/// and cancelling just puts the snapshot back.
+/// Selection drag in progress. Each step recomputes the transform (`map`)
+/// from the press and applies it to the snapshot, so steps never
+/// accumulate error and cancelling just puts the snapshot back; `frame` is
+/// the selection frame at the press, shown through `map` while it lasts.
 #[derive(Debug, Clone, PartialEq)]
 enum Drag {
     /// The pointer went down on a selected element; the selection follows
@@ -128,17 +132,21 @@ enum Drag {
     Move {
         origin: Point,
         screen: (f64, f64),
+        frame: Frame,
+        map: Affine,
         snapshot: Snapshot,
         moved: bool,
     },
     Resize {
         corner: Corner,
         frame: Frame,
+        map: Affine,
         snapshot: Snapshot,
     },
     Rotate {
         origin: Point,
         frame: Frame,
+        map: Affine,
         snapshot: Snapshot,
     },
     /// Rubber band between two screen points; `base` is what Shift keeps
@@ -215,9 +223,18 @@ impl Editor {
         &self.selection
     }
 
-    /// The frame around the selection, if anything is selected.
+    /// The frame around the selection, if anything is selected. While a
+    /// drag reshapes it, the frame from the press follows the drag's map,
+    /// so a group's box turns with it instead of being re-wrapped.
     pub fn selection_frame(&self, doc: &Document) -> Option<Frame> {
-        select::frame_of(doc, &self.selection)
+        match &self.drag {
+            Some(
+                Drag::Move { frame, map, .. }
+                | Drag::Resize { frame, map, .. }
+                | Drag::Rotate { frame, map, .. },
+            ) => Some(frame.transformed(map)),
+            _ => select::frame_of(doc, &self.selection),
+        }
     }
 
     /// The marquee's two screen corners while one is being dragged.
@@ -303,15 +320,18 @@ impl Editor {
             && let Some(handle) = select::handle_at(&frame, view, screen)
         {
             let snapshot = self.snapshot(doc);
+            let map = Affine::IDENTITY;
             self.drag = Some(match handle {
                 Handle::Resize(corner) => Drag::Resize {
                     corner,
                     frame,
+                    map,
                     snapshot,
                 },
                 Handle::Rotate(_) => Drag::Rotate {
                     origin: world,
                     frame,
+                    map,
                     snapshot,
                 },
             });
@@ -341,9 +361,14 @@ impl Editor {
         } else if !self.selection.contains(&id) {
             self.selection = vec![id];
         }
+        let Some(frame) = select::frame_of(doc, &self.selection) else {
+            return Change::Selection;
+        };
         self.drag = Some(Drag::Move {
             origin: world,
             screen,
+            frame,
+            map: Affine::IDENTITY,
             snapshot: self.snapshot(doc),
             moved: false,
         });
@@ -401,12 +426,15 @@ impl Editor {
 
     fn drag_moved(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
+        let shift = self.shift;
         match &mut self.drag {
             Some(Drag::Move {
                 origin,
                 screen: start,
+                map,
                 snapshot,
                 moved,
+                ..
             }) => {
                 if !*moved {
                     let (dx, dy) = (
@@ -418,25 +446,32 @@ impl Editor {
                     }
                     *moved = true;
                 }
-                let m = Affine::translate(world[0] - origin[0], world[1] - origin[1]);
-                apply(doc, snapshot, &m);
+                *map = Affine::translate(world[0] - origin[0], world[1] - origin[1]);
+                apply(doc, snapshot, map);
                 Change::Scene
             }
             Some(Drag::Resize {
                 corner,
                 frame,
+                map,
                 snapshot,
             }) => {
-                apply(doc, snapshot, &select::resize_map(frame, *corner, world));
+                *map = select::resize_map(frame, *corner, world);
+                apply(doc, snapshot, map);
                 Change::Scene
             }
             Some(Drag::Rotate {
                 origin,
                 frame,
+                map,
                 snapshot,
             }) => {
-                let delta = select::sweep(frame, *origin, world);
-                apply(doc, snapshot, &select::rotate_map(frame, delta));
+                let mut delta = select::sweep(frame, *origin, world);
+                if shift {
+                    delta = select::snap_turn(frame.angle, delta, ROTATE_SNAP_DEG.to_radians());
+                }
+                *map = select::rotate_map(frame, delta);
+                apply(doc, snapshot, map);
                 Change::Scene
             }
             Some(Drag::Marquee {
@@ -900,6 +935,68 @@ mod tests {
             e.release(Button::Left, &v, (80.0 + d, 80.0 + d), &mut doc, "#000"),
             Change::Scene
         );
+    }
+
+    /// Screen point past `b`'s top-right corner at `angle` degrees from its
+    /// center (70, 70), on the rotation handle's radius.
+    fn around_b(angle: f64) -> (f64, f64) {
+        let d = f64::from(crate::select::ROTATE_OFFSET_PX) / std::f64::consts::SQRT_2;
+        let radius = (10.0 + d) * std::f64::consts::SQRT_2;
+        let (s, c) = angle.to_radians().sin_cos();
+        (70.0 + radius * c, 70.0 + radius * s)
+    }
+
+    #[test]
+    fn shift_snaps_the_turn_to_15_degrees_from_the_creation_state() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        // The top-right rotation handle sits at -45°; sweep to -8° (37°).
+        let _ = e.press(Button::Left, &v, around_b(-45.0), &mut doc);
+        e.hold_shift(true);
+        let _ = e.moved(&v, around_b(-8.0), &mut doc);
+        assert_eq!(rect_of(&doc, "b").rotation, 30.0);
+        // Without Shift the pointer is followed exactly.
+        e.hold_shift(false);
+        let _ = e.moved(&v, around_b(-8.0), &mut doc);
+        assert!((rect_of(&doc, "b").rotation - 37.0).abs() < 1e-9);
+        let _ = e.release(Button::Left, &v, around_b(-8.0), &mut doc, "#000");
+        // Already at 37°, a 5° sweep with Shift lands on 45°, not on 42°:
+        // the grid is anchored on the creation state.
+        let _ = e.press(Button::Left, &v, around_b(-8.0), &mut doc);
+        e.hold_shift(true);
+        let _ = e.moved(&v, around_b(-3.0), &mut doc);
+        assert_eq!(rect_of(&doc, "b").rotation, 45.0);
+    }
+
+    #[test]
+    fn selection_frame_follows_the_drag_live() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        e.hold_shift(true);
+        let _ = click(&mut e, &v, &mut doc, (25.0, 15.0));
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        e.hold_shift(false);
+        // The group frame spans (10, 10)–(80, 80): its bottom-right rotation
+        // handle sits past (80, 80) on the diagonal.
+        let d = f64::from(crate::select::ROTATE_OFFSET_PX) / std::f64::consts::SQRT_2;
+        let _ = e.press(Button::Left, &v, (80.0 + d, 80.0 + d), &mut doc);
+        // A quarter turn: the handle goes from 45° to 135° around (45, 45).
+        let r = (35.0 + d) * std::f64::consts::SQRT_2;
+        let to = (45.0 - r * 0.5f64.sqrt(), 45.0 + r * 0.5f64.sqrt());
+        let _ = e.moved(&v, to, &mut doc);
+        let live = e.selection_frame(&doc).unwrap();
+        assert!(
+            (live.angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+            "{live:?}"
+        );
+        assert!((live.center[0] - 45.0).abs() < 1e-9 && (live.center[1] - 45.0).abs() < 1e-9);
+        assert!((live.half[0] - 35.0).abs() < 1e-9 && (live.half[1] - 35.0).abs() < 1e-9);
+        // Once released, a group is wrapped by the unturned box again.
+        let _ = e.release(Button::Left, &v, to, &mut doc, "#000");
+        assert_eq!(e.selection_frame(&doc).unwrap().angle, 0.0);
     }
 
     #[test]
