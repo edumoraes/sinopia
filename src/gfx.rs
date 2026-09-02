@@ -34,6 +34,7 @@ struct Inst {
     @location(4) kind: u32,
     @location(5) angle: f32,
     @location(6) uv: vec4<f32>,
+    @location(7) clip: vec4<f32>,
 };
 
 struct VsOut {
@@ -45,6 +46,7 @@ struct VsOut {
     @location(4) @interpolate(flat) kind: u32,
     @location(5) @interpolate(flat) angle: f32,
     @location(6) @interpolate(flat) uv: vec4<f32>,
+    @location(7) @interpolate(flat) cut: vec4<f32>,
 };
 
 const KIND_SEGMENT: u32 = 1u;
@@ -76,6 +78,12 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
         lo = center - extent - vec2<f32>(margin);
         hi = center + extent + vec2<f32>(margin);
     }
+    // Nothing outside the clip is ever drawn, so do not rasterize it.
+    if (inst.clip.z > 0.0 && inst.clip.w > 0.0) {
+        lo = max(lo, inst.clip.xy - vec2<f32>(1.0));
+        hi = min(hi, inst.clip.xy + inst.clip.zw + vec2<f32>(1.0));
+        hi = max(hi, lo);
+    }
     let px = mix(lo, hi, corners[vi]);
     // Screen px (y down) -> NDC (y up).
     let ndc = vec2<f32>(
@@ -91,6 +99,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.kind = inst.kind;
     out.angle = inst.angle;
     out.uv = inst.uv;
+    out.cut = inst.clip;
     return out;
 }
 
@@ -123,6 +132,13 @@ fn fs_premul(in: VsOut) -> @location(0) vec4<f32> {
 fn shade(in: VsOut) -> vec4<f32> {
     var d: f32;
     var rgba = in.color;
+    // The cut is one more box in the same field: the far side of it is
+    // outside the prim, and the edge ramps like any other.
+    var cut = -1e9;
+    if (in.cut.z > 0.0 && in.cut.w > 0.0) {
+        let half = in.cut.zw * 0.5;
+        cut = sd_box(in.px - (in.cut.xy + half), half, 0.0);
+    }
     if (in.kind == KIND_SEGMENT) {
         d = sd_segment(in.px, in.geom.xy, in.geom.zw) - in.params.x;
     } else {
@@ -148,7 +164,9 @@ fn shade(in: VsOut) -> vec4<f32> {
         }
     }
     let ramp = max(in.params.y, 1.0);
-    let coverage = clamp(0.5 - d / ramp, 0.0, 1.0);
+    // The prim ramps over its own feather; the cut always over one
+    // pixel, so a soft shadow is still cut by a hard edge.
+    let coverage = clamp(0.5 - d / ramp, 0.0, 1.0) * clamp(0.5 - cut, 0.0, 1.0);
     return vec4<f32>(rgba.rgb, rgba.a * coverage);
 }
 "#;
@@ -617,6 +635,7 @@ fn pipeline(
                     4 => Uint32,    // kind
                     5 => Float32,   // angle
                     6 => Float32x4, // uv
+                    7 => Float32x4, // clip
                     // `slot` stays on the CPU: it picks the bind group.
                 ],
             })],

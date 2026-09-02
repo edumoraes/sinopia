@@ -266,10 +266,17 @@ pub struct Prim {
     /// the box maps onto. An image takes the whole sheet; a glyph takes
     /// its own cell of the atlas.
     pub uv: [f32; 4],
+    /// What the prim is cut to: `x, y, w, h` in screen px. A zero width
+    /// or height is no cut at all, which is what [`NO_CLIP`] says.
+    pub clip: [f32; 4],
     /// [`KIND_IMAGE`] only: which texture to sample. Read on the CPU, to
     /// pick the bind group — the shader never sees it.
     pub slot: u32,
 }
+
+/// A clip that cuts nothing: what every prim carries until it is put
+/// inside something with an edge.
+pub const NO_CLIP: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 /// The whole texture: what anything that is not a glyph samples.
 const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
@@ -292,6 +299,7 @@ impl Prim {
             kind: KIND_BOX,
             angle: 0.0,
             uv: WHOLE,
+            clip: NO_CLIP,
             slot: 0,
         }
     }
@@ -378,6 +386,16 @@ impl Prim {
         }
     }
 
+    /// The same prim, cut to `to`. What falls outside is not drawn, and
+    /// the cut is antialiased like every other edge — the clip is one
+    /// more box in the same distance field.
+    pub fn clipped(self, to: ScreenRect) -> Prim {
+        Prim {
+            clip: [to.x, to.y, to.w, to.h],
+            ..self
+        }
+    }
+
     pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
         let r = ScreenRect {
             x: cx - radius,
@@ -408,6 +426,7 @@ impl Prim {
             kind: KIND_SEGMENT,
             angle: 0.0,
             uv: WHOLE,
+            clip: NO_CLIP,
             slot: 0,
         }
     }
@@ -841,6 +860,32 @@ mod tests {
     use crate::doc::{Camera, Layer, Path, Rect};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
+
+    #[test]
+    fn a_prim_carries_its_clip_and_nothing_else_changes() {
+        let r = ScreenRect {
+            x: 10.0,
+            y: 20.0,
+            w: 40.0,
+            h: 10.0,
+        };
+        let band = ScreenRect {
+            x: 0.0,
+            y: 22.0,
+            w: 100.0,
+            h: 4.0,
+        };
+        let plain = Prim::rounded(r, 4.0, [1.0; 4]);
+        assert_eq!(plain.clip, NO_CLIP, "nothing is cut until it is put somewhere");
+        let cut = plain.clipped(band);
+        assert_eq!(cut.clip, [band.x, band.y, band.w, band.h]);
+        assert_eq!(Prim { clip: NO_CLIP, ..cut }, plain, "only the clip differs");
+        // The cut travels with the prim's own geometry untouched, so a
+        // clipped prim still measures as the whole thing.
+        assert_eq!(cut.bounds(), plain.bounds());
+        // The instance layout the shader is fed mirrors the struct.
+        assert_eq!(std::mem::size_of::<Prim>(), 84);
+    }
 
     #[test]
     fn transformed_grows_turns_and_moves_a_box_and_a_segment() {
