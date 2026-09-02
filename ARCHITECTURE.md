@@ -259,6 +259,29 @@ else: it is checked as a bare lowercase-hex sha256 on the way in, so a
 hand-edited board cannot walk out of the store. A board therefore carries
 no path, and says nothing about the machine that wrote it.
 
+Landed — layers, and the layer every element is on:
+
+```json
+{ "schema": 1,
+  "layers": [ { "id": "01J…", "name": "Layer 1" },
+              { "id": "01J…", "name": "Layer 2", "visible": false } ],
+  "elements": [ { "id": "el_04", "type": "path", "layer": "01J…", "…": "…" } ] }
+```
+
+`layers` is bottom to top; `visible` is absent when true. Paint order is
+the layers' order, then document order within a layer; a hidden layer
+paints nothing and is not hit. Both fields default, so a board written
+before this loads unchanged: it gets `Layer 1` on the way in and its
+elements join it. A `layer` no layer carries, or a duplicate layer id, is
+an error — the parse stays closed. The active layer is session state
+(§6.2), not a field.
+
+Landed — `opacity` and `hardness` on `path` (the brush): fractions,
+absent when 1. `opacity` is the stroke's as one shape — where it crosses
+itself it does not darken — and `hardness` is how much of the radius is
+crisp, the ramp spending the rest inside the nominal width. The pencil
+writes neither.
+
 Landed — `rotation` on `rect` and `path`: degrees, clockwise on screen,
 counted from the element's creation; absent when zero, so older boards
 keep the shape above. A rect turns about its center; `x, y, w, h` describe
@@ -306,6 +329,16 @@ antialiasing — draws everything: grid dots, pen strokes (one segment per
 span, overlapping caps make the joins), rect edges, the dock and its icons.
 No tessellation, no MSAA. Per-element caching and dirty rects wait for real
 profiling.
+
+Landed: a stroke that is soft or translucent cannot be drawn segment by
+segment — overlapping caps add up — so it is composited as one shape. Its
+prims form a group in the frame; `scene::passes` plans a wipe and a union
+draw (every channel a max, premultiplied: the union of their coverage)
+into a window-sized scratch texture, then one composite box back onto the
+window at the stroke's opacity, and drops groups off the viewport. `gfx`
+executes the plan with four pipelines from the one shader. Nested groups
+— a translucent stroke inside a translucent layer — are what layer
+opacity would need, and wait for it.
 
 Text: a minimal inline editor (cosmic-text / parley), not a webview. IME via winit/smithay-client on Wayland; test on Hyprland early, it's the classic trap.
 
@@ -377,6 +410,16 @@ the creation state); dragging the selection itself moves it. Drags
 transform the document live from a snapshot taken at the press, so `Esc`
 puts it back; `Delete`/`Backspace` removes. The selection is session
 state (§6.2) and is dropped on a tool switch.
+
+Brush (`B`) landed, in the Photoshop/Procreate mould: size, opacity and
+hardness, adjusted from the keyboard while it is selected (`[` `]`, `{`
+`}`, the digits), a ring the size of the brush at the pointer, and the
+stroke saved as the same `path` the pencil writes. Layers landed with it:
+`Shift+L` shows and hides a panel on the right — one row per layer, top
+first, an eye each, the active one highlighted, up/down/add/remove in the
+header. New ink lands on the active layer; picking an element makes its
+layer active. Renaming waits for text input, layer opacity for the nested
+compositing pass, pressure for a `zwp_tablet_v2` bridge like `gestures`.
 
 Omaboard-style snap and connectors: phase 1.1. In the MVP an arrow is geometry, not a live binding.
 

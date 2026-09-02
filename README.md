@@ -6,10 +6,10 @@ the real architecture emerges from development.
 
 ## Status
 
-Scaffold (§15 items 1–2), the pencil (item 4), selection, navigation,
-pasted images, and projects in tabs:
+Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
+selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 286 tests.
+- `cargo build` clean, `cargo test` with 339 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -26,6 +26,30 @@ pasted images, and projects in tabs:
   fitted with cubic Béziers (Schneider), then saved as a `path` of
   self-contained `[a, c1, c2, b]` curves; rendering flattens them per
   frame at the current zoom.
+- Brush (`B`): the same stroke with a body — a size, an opacity and a
+  hardness, adjusted from the keyboard while the brush is selected:
+  `[` `]` step the size (Photoshop's steps, 1–500 world units), `{` `}`
+  the hardness by a quarter, `1`–`9` and `0` set the opacity to
+  10%–90% and 100%. A ring the size of the brush follows the pointer.
+  The stroke is saved as the same `path`, with `opacity` and `hardness`
+  beside `width` (absent when 1), so it selects, moves and turns like a
+  pencil stroke. A soft or translucent stroke is composited as one
+  shape: its segments are drawn into an offscreen texture as the union
+  of their coverage, then laid on the frame once at the stroke's
+  opacity — so a stroke crossing itself does not darken, and a soft
+  edge has no beads at the joints. Hardness spends `1 − hardness` of
+  the radius on the edge ramp, inside the nominal width.
+- Layers: every element is on one; the document lists them bottom to
+  top, and paint order is the layers' order, then document order within
+  a layer. `Shift+L` shows and hides the panel on the right: one row
+  per layer, top first, with an eye to show or hide it and the active
+  layer highlighted; the header has up, down, add and remove. New ink
+  and pastes land on the active layer; picking an element with the
+  select tool makes its layer active. A hidden layer paints nothing
+  and cannot be hit or marqueed; hiding one deselects what was on it,
+  removing one takes its elements along, and the last layer stays.
+  Boards from before have no `layers`: they get `Layer 1` on load, and
+  their elements join it.
 - Select: click picks the topmost element, `Shift`+click toggles one in
   or out, dragging on empty canvas draws a marquee that selects whatever
   it overlaps (`Shift` adds to the selection). The selection shows its
@@ -42,7 +66,8 @@ pasted images, and projects in tabs:
   degrees since it was created; paths still bake transforms into their
   curves, the field only turns their box and anchors the snap.
 - Tool dock centered at the bottom — Select `V`, Hand `H`, Pencil `P`,
-  Zoom `Z`; `Esc` cancels the stroke, gesture or drag in progress.
+  Brush `B`, Zoom `Z`; `Esc` cancels the stroke, gesture or drag in
+  progress.
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
   wheel and two-finger scroll pan (Shift: horizontally); a three-finger
   swipe pans on the trackpad.
@@ -65,8 +90,8 @@ pasted images, and projects in tabs:
   machine shows placeholders.
 - Text: a glyph atlas from a font shipped inside the binary, drawn by
   the same pipeline as the images — one white sheet, alpha for coverage,
-  a UV cell per glyph. It dresses the tabs; the text *tool* is still
-  ahead.
+  a UV cell per glyph. It dresses the tabs and the layers panel; the
+  text *tool* is still ahead.
 - Versioned JSON document (schema 1) + XDG persistence (0700/0600, atomic
   save). Project files chosen through the portal keep the umask instead.
 - IPC protocol §5 (closed schema) + single instance via socket.
@@ -74,14 +99,21 @@ pasted images, and projects in tabs:
   `--socket <path>`.
 
 Not yet: eraser, the text tool, shapes, undo, export, Omarchy plugin,
-thumbnails.
+thumbnails, layer opacity and renaming, brush colour and pressure.
 
 ## Controls
 
 | Input | Effect |
 |---|---|
-| `V` / `H` / `P` / `Z` | Select / Hand / Pencil / Zoom tool (also clickable in the dock) |
+| `V` / `H` / `P` / `B` / `Z` | Select / Hand / Pencil / Brush / Zoom tool (also clickable in the dock) |
 | `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
+| Left drag (Brush) | Paint with the brush; the stroke is fitted to Béziers on release |
+| `[` / `]` (Brush selected) | Brush smaller / larger |
+| `{` / `}` (Brush selected) | Brush softer / harder |
+| `1`–`9`, `0` (Brush selected) | Brush opacity 10%–90%, 100% |
+| `Shift` + `L` | Show / hide the layers panel |
+| Click a layer row / its eye | Make it the active layer / show or hide it |
+| Panel `▲` `▼` `+` `🗑` | Move the active layer up / down, add a layer above it, remove it |
 | Click (Select) | Select the topmost element under the pointer; empty canvas clears |
 | `Shift` + click (Select) | Add the element to the selection, or remove it |
 | Left drag on empty canvas (Select) | Marquee: selects what it overlaps (`Shift` adds) |
@@ -127,22 +159,24 @@ XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- \
 ```
 src/main.rs      CLI dispatch → forward to the live instance, or become it
 src/cli.rs       flags (clap), mutually exclusive actions
-src/doc.rs       document §6.1 (pure data, serde): rect, path, image
+src/doc.rs       document §6.1 (pure data, serde): layers, rect, path, image
 src/store.rs     ~/.local/share/omawhite: boards/, blobs/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
 src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
-src/scene.rs     View (camera + viewport + scale) and document → SDF prims (pure, tested)
+src/brush.rs     brush settings, the tip a stroke carries, the pointer's ring (pure, tested)
+src/scene.rs     View (camera + viewport + scale), document → SDF prims, frames, groups and passes (pure, tested)
 src/geom.rs      affine maps, corners and oriented frames (pure, tested)
 src/select.rs    selection: element frames, hit-testing, handles, transforms, overlay prims (pure, tested)
 src/grid.rs      dotted background (pure, tested)
 src/theme.rs     palette: light default, derived from op: theme (pure, tested)
-src/editor.rs    active tool, held keys, stroke, pan/zoom gesture, selection and its drag (pure, tested)
+src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
+src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
-src/gfx.rs       wgpu 30: the instanced SDF pipeline, image textures
+src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch a group is composited in
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
 src/clipboard.rs selection reads (wl_data_device) → event loop bridge
@@ -150,8 +184,11 @@ src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bri
 assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
 ```
 
-Frame data flow: grid + document + live stroke + selection overlay + dock
-+ tab strip → `scene`/`select`/`tabs` prims → `gfx`.
+Frame data flow: grid + document + live stroke + selection overlay +
+brush ring + dock + layers panel + tab strip → `scene`/`select`/`brush`/
+`layers`/`tabs` prims, gathered in a `scene::Frame` whose groups mark
+the strokes composited as one shape → `scene::passes` plans the render
+passes → `gfx` executes them.
 
 User data: `~/.local/share/omawhite/`. Socket:
 `$XDG_RUNTIME_DIR/omawhite.sock`. Project files go wherever the user
