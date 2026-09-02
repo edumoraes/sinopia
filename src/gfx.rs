@@ -26,6 +26,7 @@ struct Inst {
     @location(2) radius: f32,
     @location(3) feather: f32,
     @location(4) kind: u32,
+    @location(5) angle: f32,
 };
 
 struct VsOut {
@@ -35,6 +36,7 @@ struct VsOut {
     @location(2) @interpolate(flat) color: vec4<f32>,
     @location(3) @interpolate(flat) params: vec2<f32>,
     @location(4) @interpolate(flat) kind: u32,
+    @location(5) @interpolate(flat) angle: f32,
 };
 
 const KIND_SEGMENT: u32 = 1u;
@@ -53,8 +55,14 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
         lo = min(inst.geom.xy, inst.geom.zw) - vec2<f32>(inst.radius + margin);
         hi = max(inst.geom.xy, inst.geom.zw) + vec2<f32>(inst.radius + margin);
     } else {
-        lo = inst.geom.xy - vec2<f32>(margin);
-        hi = inst.geom.xy + inst.geom.zw + vec2<f32>(margin);
+        // The turned box's extents, projected on the axes.
+        let half = inst.geom.zw * 0.5;
+        let c = abs(cos(inst.angle));
+        let s = abs(sin(inst.angle));
+        let extent = vec2<f32>(c * half.x + s * half.y, s * half.x + c * half.y);
+        let center = inst.geom.xy + half;
+        lo = center - extent - vec2<f32>(margin);
+        hi = center + extent + vec2<f32>(margin);
     }
     let px = mix(lo, hi, corners[vi]);
     // Screen px (y down) -> NDC (y up).
@@ -69,6 +77,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.color = inst.color;
     out.params = vec2<f32>(inst.radius, inst.feather);
     out.kind = inst.kind;
+    out.angle = inst.angle;
     return out;
 }
 
@@ -93,7 +102,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let half = in.geom.zw * 0.5;
         // A radius beyond the half extents would invert the field.
         let r = min(in.params.x, min(half.x, half.y));
-        d = sd_box(in.px - (in.geom.xy + half), half, r);
+        // Undo the turn: sample the field in the box's own axes.
+        let p = in.px - (in.geom.xy + half);
+        let c = cos(in.angle);
+        let s = sin(in.angle);
+        d = sd_box(vec2<f32>(c * p.x + s * p.y, c * p.y - s * p.x), half, r);
     }
     let ramp = max(in.params.y, 1.0);
     let coverage = clamp(0.5 - d / ramp, 0.0, 1.0);
@@ -193,6 +206,7 @@ impl Gfx {
                         2 => Float32,   // radius
                         3 => Float32,   // feather
                         4 => Uint32,    // kind
+                        5 => Float32,   // angle
                     ],
                 })],
             },

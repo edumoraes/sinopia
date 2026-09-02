@@ -207,7 +207,8 @@ pub struct Prim {
     /// (one pixel of antialiasing); larger values make soft shadows.
     pub feather: f32,
     pub kind: u32,
-    pub _pad: u32,
+    /// Box only: turned by this many radians (clockwise) about its center.
+    pub angle: f32,
 }
 
 impl Prim {
@@ -226,7 +227,31 @@ impl Prim {
             radius,
             feather,
             kind: KIND_BOX,
-            _pad: 0,
+            angle: 0.0,
+        }
+    }
+
+    /// Box `r` turned by `angle` radians about `pivot`: the box keeps its
+    /// size, its center orbits the pivot.
+    pub fn turned(r: ScreenRect, pivot: (f32, f32), angle: f32, color: Rgba) -> Prim {
+        if angle == 0.0 {
+            return Prim::rect(r, color);
+        }
+        let (cx, cy) = r.center();
+        let (dx, dy) = (cx - pivot.0, cy - pivot.1);
+        let (s, c) = angle.sin_cos();
+        let (cx, cy) = (pivot.0 + c * dx - s * dy, pivot.1 + s * dx + c * dy);
+        Prim {
+            angle,
+            ..Prim::rect(
+                ScreenRect {
+                    x: cx - r.w / 2.0,
+                    y: cy - r.h / 2.0,
+                    w: r.w,
+                    h: r.h,
+                },
+                color,
+            )
         }
     }
 
@@ -247,7 +272,7 @@ impl Prim {
             radius: half_width,
             feather: 0.0,
             kind: KIND_SEGMENT,
-            _pad: 0,
+            angle: 0.0,
         }
     }
 
@@ -267,11 +292,15 @@ impl Prim {
                 h: y1 - y0,
             }
         } else {
+            let (s, co) = self.angle.sin_cos();
+            // Half extents of the turned box, projected on the axes.
+            let (hw, hh) = (c / 2.0, d / 2.0);
+            let (ex, ey) = (co.abs() * hw + s.abs() * hh, s.abs() * hw + co.abs() * hh);
             ScreenRect {
-                x: a,
-                y: b,
-                w: c,
-                h: d,
+                x: a + hw - ex,
+                y: b + hh - ey,
+                w: 2.0 * ex,
+                h: 2.0 * ey,
             }
         }
     }
@@ -340,8 +369,8 @@ pub fn path_prims(curves: &[Cubic], width: f64, color: Rgba, view: &View) -> Vec
 }
 
 /// Flattens the document into prims in paint order. Rects paint fill first,
-/// then the four outline edges (constant px thickness, aligned inwards);
-/// paths become strokes.
+/// then the four outline edges (constant px thickness, aligned inwards),
+/// all turned about the rect center by its rotation; paths become strokes.
 pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
     let mut out = Vec::new();
     for element in &doc.elements {
@@ -351,6 +380,8 @@ pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
                 let (sx, sy) = (sx as f32, sy as f32);
                 let sw = (r.w * view.px_per_world()) as f32;
                 let sh = (r.h * view.px_per_world()) as f32;
+                let pivot = (sx + sw / 2.0, sy + sh / 2.0);
+                let angle = r.rotation.to_radians() as f32;
 
                 let fill = r.fill.as_deref().map(parse_color);
                 let stroke = r.stroke.as_deref().map(parse_color);
@@ -362,15 +393,13 @@ pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
                     None
                 });
                 if let Some(color) = fill {
-                    out.push(Prim::rect(
-                        ScreenRect {
-                            x: sx,
-                            y: sy,
-                            w: sw,
-                            h: sh,
-                        },
-                        color,
-                    ));
+                    let r = ScreenRect {
+                        x: sx,
+                        y: sy,
+                        w: sw,
+                        h: sh,
+                    };
+                    out.push(Prim::turned(r, pivot, angle, color));
                 }
                 if let Some(color) = stroke {
                     let t = STROKE_PX;
@@ -382,7 +411,7 @@ pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
                         (sx + sw - t, sy + t, t, inner_h),
                     ];
                     for (x, y, w, h) in edges {
-                        out.push(Prim::rect(ScreenRect { x, y, w, h }, color));
+                        out.push(Prim::turned(ScreenRect { x, y, w, h }, pivot, angle, color));
                     }
                 }
             }
@@ -594,6 +623,59 @@ mod tests {
         assert!(r.contains_rect(&sr(15.0, 25.0, 5.0, 5.0)));
         assert!(!r.contains_rect(&sr(5.0, 25.0, 10.0, 5.0)));
         assert!(!r.contains_rect(&sr(15.0, 25.0, 30.0, 5.0)));
+    }
+
+    #[track_caller]
+    fn assert_close4(a: [f32; 4], b: [f32; 4]) {
+        for k in 0..4 {
+            assert!((a[k] - b[k]).abs() < 1e-4, "{a:?} != {b:?}");
+        }
+    }
+
+    #[test]
+    fn turned_box_keeps_its_size_and_orbits_the_pivot() {
+        // A 10×2 box centered 10px right of the pivot, turned a quarter
+        // clockwise: its center lands 10px below the pivot.
+        let a = std::f32::consts::FRAC_PI_2;
+        let p = Prim::turned(sr(15.0, 9.0, 10.0, 2.0), (10.0, 10.0), a, WHITE);
+        assert_eq!(p.kind, KIND_BOX);
+        assert_close4(p.geom, [5.0, 19.0, 10.0, 2.0]);
+        assert_eq!(p.angle, a);
+        // No turn is a plain rect.
+        assert_eq!(
+            Prim::turned(sr(1.0, 2.0, 3.0, 4.0), (0.0, 0.0), 0.0, WHITE),
+            Prim::rect(sr(1.0, 2.0, 3.0, 4.0), WHITE)
+        );
+    }
+
+    #[test]
+    fn turned_box_bounds_wrap_the_turned_box() {
+        let a = std::f32::consts::FRAC_PI_2;
+        let p = Prim::turned(sr(0.0, 0.0, 10.0, 2.0), (5.0, 1.0), a, WHITE);
+        let b = p.bounds();
+        assert_close4([b.x, b.y, b.w, b.h], [4.0, -4.0, 2.0, 10.0]);
+    }
+
+    #[test]
+    fn rotated_rect_turns_fill_and_edges_about_its_center() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut el = rect(0.0, 0.0, 20.0, 10.0, Some("#000"), Some("#fff"));
+        if let Element::Rect(r) = &mut el {
+            r.rotation = 90.0;
+        }
+        let got = document_prims(&doc_with(vec![el], &v), &v);
+        assert_eq!(got.len(), 5);
+        let a = std::f32::consts::FRAC_PI_2;
+        // The fill is the unturned box, turned in place.
+        assert_eq!(got[0].geom, [50.0, 50.0, 20.0, 10.0]);
+        assert_eq!(got[0].angle, a);
+        // The top edge orbits the rect center (60, 55): its own center goes
+        // from (60, 50 + t/2) to (65 - t/2, 55).
+        let t = STROKE_PX;
+        assert_close4(got[1].geom, [55.0 - t / 2.0, 55.0 - t / 2.0, 20.0, t]);
+        for p in &got[1..] {
+            assert_eq!(p.angle, a, "{p:?}");
+        }
     }
 
     #[test]
