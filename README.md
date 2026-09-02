@@ -33,8 +33,10 @@ pasted images:
   the axis-aligned box around every corner, which turns with them while a
   rotation lasts — with square handles on the corners and rings just past
   them. Dragging the selection moves it; a corner handle resizes with the
-  opposite corner pinned; a ring rotates about the frame center, in 15°
-  steps from the creation state while `Shift` is held. `Delete`/`Backspace`
+  opposite corner pinned — `Shift` hands both axes the wider factor, so
+  the proportions hold, `Ctrl` pins the center instead of the corner, and
+  held together they do both; a ring rotates about the frame center, in
+  15° steps from the creation state while `Shift` is held. `Delete`/`Backspace`
   removes the selection; `Esc` cancels the drag in progress (putting things
   back), then clears the selection. Every element carries a `rotation` in
   degrees since it was created; paths still bake transforms into their
@@ -44,8 +46,10 @@ pasted images:
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
   wheel and two-finger scroll pan (Shift: horizontally); a three-finger
   swipe pans on the trackpad.
-- Zoom: Zoom tool or Ctrl held — drag right/left to zoom in/out around
-  the press point, click for one unit (25%) in, right-click for one out;
+- Zoom: Zoom tool or Ctrl held — everywhere but on a resize handle of
+  the selection, which keeps the press and reads Ctrl as "from the
+  center". Drag right/left to zoom in/out around the press point, click
+  for one unit (25%) in, right-click for one out;
   the wheel zooms at the cursor while Zoom is active; pinch on the
   trackpad. Range 10%–1000%. The camera is saved with the board.
 - Versioned JSON document (schema 1) + XDG persistence (0700/0600, atomic
@@ -67,6 +71,8 @@ Not yet: eraser, text, shapes, undo, export, Omarchy plugin, thumbnails.
 | Left drag on empty canvas (Select) | Marquee: selects what it overlaps (`Shift` adds) |
 | Left drag on the selection | Move |
 | Drag a corner handle | Resize, opposite corner pinned |
+| `Shift` + drag a corner handle | Resize keeping the proportions |
+| `Ctrl` + drag a corner handle | Resize about the center (`Shift` too: both) |
 | Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
 | `Ctrl` + `V` | Paste the clipboard image onto the board |
 | `Delete` / `Backspace` | Delete the selection |
