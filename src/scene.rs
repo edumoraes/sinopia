@@ -857,7 +857,7 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame
 mod tests {
     use super::*;
     use crate::brush::Tip;
-    use crate::doc::{Camera, Layer, Path, Rect};
+    use crate::doc::{Camera, Kind, Layer, Path, Rect};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
 
@@ -1233,6 +1233,7 @@ mod tests {
             id: "top".into(),
             name: "Layer 2".into(),
             visible: true,
+            kind: Kind::Raster,
         });
         // The white rect is first in `elements` but on the top layer.
         doc.elements[0].set_layer("top");

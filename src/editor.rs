@@ -7,7 +7,7 @@
 use crate::bitmap;
 use crate::brush::{Brush, Tip};
 use crate::curve;
-use crate::doc::{Camera, Document, Element, Image, Path, new_id};
+use crate::doc::{Camera, Document, Element, Image, Kind, Path, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
@@ -310,12 +310,29 @@ impl Editor {
             .unwrap_or(doc.layers.len().saturating_sub(1))
     }
 
-    /// The active layer's id — what a new element is stamped with.
-    fn layer_id(&self, doc: &Document) -> String {
-        doc.layers
-            .get(self.active_layer(doc))
-            .map(|l| l.id.clone())
-            .unwrap_or_default()
+    /// Opens a layer of `kind` above the active one, makes it active and
+    /// answers its id — what an element that comes with its own layer is
+    /// stamped with.
+    fn fresh_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
+        let at = doc.add_layer(self.active_layer(doc), kind);
+        let id = doc.layers[at].id.clone();
+        self.layer = Some(id.clone());
+        id
+    }
+
+    /// The layer a new element of `kind` lands on. Raster accumulates —
+    /// it joins the active layer when that one takes pixels, and opens
+    /// one above it when it does not, as Photoshop does when you paint on
+    /// a shape. Vector does not accumulate: every object gets a layer of
+    /// its own.
+    fn ink_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
+        if kind == Kind::Raster
+            && let Some(layer) = doc.layers.get(self.active_layer(doc))
+            && layer.kind == Kind::Raster
+        {
+            return layer.id.clone();
+        }
+        self.fresh_layer(doc, kind)
     }
 
     /// Makes layer `index` the one new ink lands on.
@@ -331,7 +348,7 @@ impl Editor {
 
     /// Adds a layer above the active one and makes it active.
     pub fn add_layer(&mut self, doc: &mut Document) -> Change {
-        let at = doc.add_layer(self.active_layer(doc));
+        let at = doc.add_layer(self.active_layer(doc), Kind::Raster);
         self.layer = Some(doc.layers[at].id.clone());
         Change::Scene
     }
@@ -669,9 +686,12 @@ impl Editor {
         let showing = |px: u32| f64::from(px) / view.px_per_world() * PASTE_ROOM;
         let (w, h) = bitmap::fit_size(px, (showing(view.viewport.w), showing(view.viewport.h)));
         let id = new_id();
+        // Pixels of its own: a paste never joins what is already on a
+        // layer, so a stroke after it paints over the image, not beside it.
+        let layer = self.fresh_layer(doc, Kind::Raster);
         doc.elements.push(Element::Image(Image {
             id: id.clone(),
-            layer: self.layer_id(doc),
+            layer,
             x: cx - w / 2.0,
             y: cy - h / 2.0,
             w,
@@ -713,9 +733,16 @@ impl Editor {
         {
             let tolerance = FIT_TOLERANCE_PX / view.px_per_world();
             let curves = curve::fit(&curve::simplify(&points, tolerance), tolerance);
+            // The tool that started the stroke: switching tools cancels
+            // whatever was in progress, so this is still that one.
+            let kind = match self.tool {
+                Tool::Pencil => Kind::Vector,
+                _ => Kind::Raster,
+            };
+            let layer = self.ink_layer(doc, kind);
             doc.elements.push(Element::Path(Path {
                 id: new_id(),
-                layer: self.layer_id(doc),
+                layer,
                 curves,
                 stroke: ink.to_owned(),
                 width: tip.width,
@@ -880,6 +907,7 @@ mod tests {
             id: "L2".into(),
             name: "Layer 2".into(),
             visible: true,
+            kind: Kind::Raster,
         });
         doc.elements[1].set_layer("L2");
         doc
@@ -927,8 +955,8 @@ mod tests {
     fn active_layer_defaults_to_the_top_and_follows_the_id() {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
-        doc.add_layer(0);
-        doc.add_layer(1);
+        doc.add_layer(0, Kind::Raster);
+        doc.add_layer(1, Kind::Raster);
         assert_eq!(e.active_layer(&doc), 2);
         assert_eq!(e.select_layer(&doc, 0), Change::Selection);
         assert_eq!(e.active_layer(&doc), 0);
@@ -940,8 +968,8 @@ mod tests {
     }
 
     #[test]
-    fn ink_lands_on_the_active_layer() {
-        let mut e = pencil();
+    fn brush_ink_lands_on_the_active_layer() {
+        let mut e = tool(Tool::Brush);
         let mut doc = Document::new("t");
         let v = view();
         assert_eq!(e.add_layer(&mut doc), Change::Scene);
@@ -952,9 +980,80 @@ mod tests {
         let _ = e.select_layer(&doc, 0);
         let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
         assert_eq!(path_of(&doc, 1).layer, doc.layers[0].id);
-        // A paste lands there too.
+    }
+
+    #[test]
+    fn brush_strokes_pile_up_on_the_raster_layer_they_find() {
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        let sheet = doc.layers[0].id.clone();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
+        assert_eq!(doc.layers.len(), 1, "pixels join what is already there");
+        assert_eq!(path_of(&doc, 0).layer, sheet);
+        assert_eq!(path_of(&doc, 1).layer, sheet);
+    }
+
+    #[test]
+    fn a_pencil_stroke_opens_a_vector_layer_of_its_own() {
+        let mut e = pencil();
+        let mut doc = Document::new("t");
+        let v = view();
+        let first = doc.layers[0].id.clone();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        assert_eq!(doc.layers.len(), 2, "the object brought its own layer");
+        assert_eq!(doc.layers[0].id, first, "which went in above the active one");
+        assert_eq!(doc.layers[1].kind, Kind::Vector);
+        assert_eq!(path_of(&doc, 0).layer, doc.layers[1].id);
+        assert_eq!(e.active_layer(&doc), 1, "and is now the active one");
+        // The next object gets one of its own too.
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
+        assert_eq!(doc.layers.len(), 3);
+        assert_eq!(path_of(&doc, 1).layer, doc.layers[2].id);
+    }
+
+    #[test]
+    fn a_brush_stroke_over_a_vector_layer_opens_a_raster_one() {
+        let mut e = pencil();
+        let mut doc = Document::new("t");
+        let v = view();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        assert_eq!(doc.layers[1].kind, Kind::Vector, "the pencil left one active");
+        e.set_tool(Tool::Brush, &mut doc);
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
+        assert_eq!(doc.layers.len(), 3, "pixels cannot go on a vector layer");
+        assert_eq!(doc.layers[2].kind, Kind::Raster);
+        assert_eq!(path_of(&doc, 1).layer, doc.layers[2].id);
+        assert_eq!(e.active_layer(&doc), 2);
+        // The one after it finds that raster layer and joins it.
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 8.0), (9.0, 8.0));
+        assert_eq!(doc.layers.len(), 3);
+        assert_eq!(path_of(&doc, 2).layer, doc.layers[2].id);
+    }
+
+    #[test]
+    fn a_pasted_image_always_opens_its_own_raster_layer() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let v = view();
         let _ = e.paste_image(&mut doc, &v, None, BLOB.into(), (10, 10));
-        assert_eq!(doc.elements[2].layer(), doc.layers[0].id);
+        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(doc.layers[1].kind, Kind::Raster);
+        assert_eq!(doc.elements[0].layer(), doc.layers[1].id);
+        assert_eq!(e.active_layer(&doc), 1, "so a brush stroke lands over it");
+        // A second one does not join the first.
+        let _ = e.paste_image(&mut doc, &v, None, BLOB.into(), (10, 10));
+        assert_eq!(doc.layers.len(), 3);
+        assert_eq!(doc.elements[1].layer(), doc.layers[2].id);
+    }
+
+    #[test]
+    fn the_layer_the_panel_adds_is_a_raster_one() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        assert_eq!(e.add_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.layers[1].kind, Kind::Raster, "a blank sheet to paint on");
     }
 
     #[test]
@@ -1065,7 +1164,7 @@ mod tests {
     fn move_layer_to_drops_the_active_layer_at_an_index() {
         let mut e = Editor::new();
         let mut doc = layered_board();
-        doc.add_layer(1);
+        doc.add_layer(1, Kind::Raster);
         let top = doc.layers[2].id.clone();
         let _ = e.select_layer(&doc, 2);
         assert_eq!(e.move_layer_to(&mut doc, 0), Change::Scene);

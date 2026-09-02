@@ -23,24 +23,58 @@ pub struct Document {
     pub elements: Vec<Element>,
 }
 
-/// A layer: a name, whether it shows, and a place in the order. Elements
-/// name it by id. `visible` is absent on disk when true, so boards that
-/// never hid anything keep their shape.
+/// What a layer holds. A raster layer accumulates — every brush stroke
+/// and every pasted bitmap joins the ones already on it, as pixels would;
+/// a vector layer holds the one object it was made for. It is what
+/// decides where new ink lands (see `editor::Editor::ink_layer`).
+///
+/// Raster is the default, and absent on disk: a board written before
+/// kinds existed is a stack that accumulates, so it opens meaning what it
+/// always meant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Raster,
+    Vector,
+}
+
+impl Kind {
+    fn is_raster(&self) -> bool {
+        *self == Kind::Raster
+    }
+}
+
+/// A layer: a name, what it holds, whether it shows, and a place in the
+/// order. Elements name it by id. `visible` is absent on disk when true
+/// and `kind` when raster, so boards that never hid anything — or never
+/// saw a vector layer — keep their shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: String,
     pub name: String,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub visible: bool,
+    #[serde(default, skip_serializing_if = "Kind::is_raster")]
+    pub kind: Kind,
 }
 
 impl Layer {
-    /// A visible layer with a fresh ULID.
+    /// A visible raster layer with a fresh ULID.
     pub fn new(name: &str) -> Layer {
         Layer {
             id: new_id(),
             name: name.to_owned(),
             visible: true,
+            kind: Kind::Raster,
+        }
+    }
+
+    /// The same, holding `kind`.
+    pub fn of(name: &str, kind: Kind) -> Layer {
+        Layer {
+            kind,
+            ..Layer::new(name)
         }
     }
 }
@@ -379,13 +413,13 @@ impl Document {
         self.layers.iter().position(|l| l.id == id)
     }
 
-    /// Adds a layer just above `above` (on top when that is past the end)
-    /// and answers its index. It is named `Layer N` with N past every
-    /// number in use, so a name is never handed out twice.
-    pub fn add_layer(&mut self, above: usize) -> usize {
+    /// Adds a layer of `kind` just above `above` (on top when that is
+    /// past the end) and answers its index. It is named `Layer N` with N
+    /// past every number in use, so a name is never handed out twice.
+    pub fn add_layer(&mut self, above: usize, kind: Kind) -> usize {
         let name = self.next_layer_name();
         let at = above.saturating_add(1).min(self.layers.len());
-        self.layers.insert(at, Layer::new(&name));
+        self.layers.insert(at, Layer::of(&name, kind));
         at
     }
 
@@ -455,6 +489,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             visible: true,
+            kind: Kind::Raster,
         }
     }
 
@@ -544,6 +579,54 @@ mod tests {
     }
 
     #[test]
+    fn layer_kind_defaults_to_raster_and_stays_off_disk() {
+        // Every board written before kinds existed is a stack that
+        // accumulates, which is what raster means: it opens unchanged.
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": []
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        assert_eq!(doc.layers[0].kind, Kind::Raster);
+        assert_eq!(Document::new("t").layers[0].kind, Kind::Raster);
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        assert!(v["layers"][0].get("kind").is_none(), "{v}");
+    }
+
+    #[test]
+    fn a_vector_layer_says_so_on_disk_and_comes_back() {
+        let mut doc = sample_doc();
+        doc.layers[0].kind = Kind::Vector;
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["layers"][0]["kind"], "vector");
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn an_unknown_layer_kind_is_an_error() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1", "kind": "bitmap" } ],
+            "elements": []
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("bitmap"), "{err}");
+    }
+
+    #[test]
+    fn add_layer_makes_the_kind_it_is_asked_for() {
+        let mut doc = Document::new("t");
+        assert_eq!(doc.add_layer(0, Kind::Vector), 1);
+        assert_eq!(doc.layers[1].kind, Kind::Vector);
+        assert_eq!(doc.add_layer(1, Kind::Raster), 2);
+        assert_eq!(doc.layers[2].kind, Kind::Raster);
+    }
+
+    #[test]
     fn a_board_without_layers_gets_one_and_its_elements_join_it() {
         // Every board written before layers existed looks like the §6.1
         // example: no `layers`, no `layer` on the elements.
@@ -573,6 +656,7 @@ mod tests {
             id: "L2".into(),
             name: "Layer 2".into(),
             visible: false,
+            kind: Kind::Raster,
         });
         doc.elements[1].set_layer("L2");
         let json = doc.to_json().unwrap();
@@ -684,21 +768,21 @@ mod tests {
     #[test]
     fn add_layer_inserts_above_and_names_past_the_highest_number() {
         let mut doc = Document::new("t");
-        assert_eq!(doc.add_layer(0), 1);
+        assert_eq!(doc.add_layer(0, Kind::Raster), 1);
         assert_eq!(doc.layers[1].name, "Layer 2");
         assert!(doc.remove_layer(1));
         // "Layer 2" is gone, but its number is not reused: numbering only
         // ever counts up, as in Photoshop.
-        assert_eq!(doc.add_layer(0), 1);
+        assert_eq!(doc.add_layer(0, Kind::Raster), 1);
         assert_eq!(doc.layers[1].name, "Layer 2");
         doc.layers[1].name = "Layer 7".into();
-        assert_eq!(doc.add_layer(0), 1);
+        assert_eq!(doc.add_layer(0, Kind::Raster), 1);
         assert_eq!(doc.layers[1].name, "Layer 8");
         assert_eq!(doc.layers[2].name, "Layer 7", "the new layer went in above index 0");
         assert!(doc.layers[1].visible);
         assert_eq!(doc.layers[1].id.len(), 26);
         // Past the end still lands on top.
-        assert_eq!(doc.add_layer(99), 3);
+        assert_eq!(doc.add_layer(99, Kind::Raster), 3);
     }
 
     #[test]

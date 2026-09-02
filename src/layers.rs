@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::doc::Layer;
+use crate::doc::{Kind, Layer};
 use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix};
 use crate::text::Atlas;
 use crate::theme::Theme;
@@ -843,6 +843,7 @@ mod tests {
                 id: format!("L{i}"),
                 name: format!("Layer {i}"),
                 visible: true,
+                kind: Kind::Raster,
             })
             .collect()
     }

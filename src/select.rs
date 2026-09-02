@@ -361,7 +361,7 @@ pub fn marquee_prims(a: (f64, f64), b: (f64, f64), theme: &Theme) -> Vec<Prim> {
 mod tests {
     use super::*;
     use crate::curve::Cubic;
-    use crate::doc::{Camera, Image, Layer, Path, Rect};
+    use crate::doc::{Camera, Image, Kind, Layer, Path, Rect};
     use crate::scene::{KIND_BOX, KIND_SEGMENT, Viewport};
     use crate::theme::Theme;
 
@@ -468,6 +468,7 @@ mod tests {
             id: "top".into(),
             name: "Layer 2".into(),
             visible: true,
+            kind: Kind::Raster,
         });
         d.elements[0].set_layer("top");
         // `lower` comes later in `elements`, but its layer is underneath.
@@ -489,6 +490,7 @@ mod tests {
             id: "top".into(),
             name: "Layer 2".into(),
             visible: false,
+            kind: Kind::Raster,
         });
         d.elements[0].set_layer("top");
         assert_eq!(element_at(&d, [5.0, 5.0], 0.0), Some("lower"));

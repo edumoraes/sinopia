@@ -65,12 +65,21 @@ selection, navigation, pasted images, and projects in tabs:
   at its edge, and shows a thumb for how much of the stack is in view;
   the wheel over it walks the list. Picking an element on the canvas
   makes its layer active, and the panel glides to bring that card into
-  sight. New ink and pastes land on the active layer; picking an element
-  with the select tool makes its layer active. A hidden layer paints
+  sight. A layer holds one of two things. A raster
+  layer accumulates: brush strokes pile up on the active one, and a
+  pasted image opens one of its own so the next stroke paints over the
+  picture instead of beside it. A vector layer holds the one object it
+  was made for: every pencil stroke opens its own, above the active
+  layer, and leaves it active. Painting on a vector layer is not
+  possible, so a brush stroke over one opens a raster layer above it —
+  Photoshop's answer to the same question. The panel's `+` makes a
+  raster layer: a blank sheet to paint on. A hidden layer paints
   nothing and cannot be hit or marqueed; hiding one deselects what was
   on it, removing one takes its elements along, and the last layer
   stays. Boards from before have no `layers`: they get `Layer 1` on
-  load, and their elements join it.
+  load, and their elements join it. A layer written before kinds
+  existed is a stack that accumulates, so it reads back as raster —
+  the kind is on disk only when it is `vector`.
 - Select: click picks the topmost element, `Shift`+click toggles one in
   or out, dragging on empty canvas draws a marquee that selects whatever
   it overlaps (`Shift` adds to the selection). The selection shows its
