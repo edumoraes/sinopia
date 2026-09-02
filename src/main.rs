@@ -5,6 +5,7 @@
 
 mod app;
 mod cli;
+mod curve;
 mod doc;
 mod dock;
 mod editor;
