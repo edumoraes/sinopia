@@ -358,14 +358,12 @@ impl Document {
     }
 }
 
-// Reached from the editor once it drives layers; until then only the
-// tests call these.
-#[allow(dead_code)]
 impl Document {
     /// The elements in paint order — bottom layer first, document order
     /// within a layer — each with its index in `elements`. Hidden layers
-    /// are skipped: what is not painted is not there.
-    pub fn painted(&self) -> impl Iterator<Item = (usize, &Element)> {
+    /// are skipped: what is not painted is not there. Double-ended, so
+    /// the pointer can walk it from the top.
+    pub fn painted(&self) -> impl DoubleEndedIterator<Item = (usize, &Element)> {
         self.layers
             .iter()
             .filter(|layer| layer.visible)

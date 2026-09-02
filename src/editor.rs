@@ -5,6 +5,7 @@
 //! current [`View`] and the document, and stores whatever comes back.
 
 use crate::bitmap;
+use crate::brush::{Brush, Tip};
 use crate::curve;
 use crate::doc::{Camera, Document, Element, Image, Path, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
@@ -17,18 +18,26 @@ pub enum Tool {
     Select,
     Hand,
     Pencil,
+    Brush,
     Zoom,
 }
 
 impl Tool {
     /// Dock order.
-    pub const ALL: [Tool; 4] = [Tool::Select, Tool::Hand, Tool::Pencil, Tool::Zoom];
+    pub const ALL: [Tool; 5] = [
+        Tool::Select,
+        Tool::Hand,
+        Tool::Pencil,
+        Tool::Brush,
+        Tool::Zoom,
+    ];
 
     pub fn hotkey(self) -> char {
         match self {
             Tool::Select => 'v',
             Tool::Hand => 'h',
             Tool::Pencil => 'p',
+            Tool::Brush => 'b',
             Tool::Zoom => 'z',
         }
     }
@@ -163,18 +172,29 @@ enum Drag {
     },
 }
 
+/// The stroke being drawn: raw pointer samples in world units, and the
+/// tip they were taken with — the pencil's, or the brush's settings at
+/// the press, so a setting changed mid-stroke does not change the ink.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stroke {
+    pub points: Vec<[f64; 2]>,
+    pub tip: Tip,
+}
+
 #[derive(Debug, Default)]
 pub struct Editor {
     tool: Tool,
     space: bool,
     ctrl: bool,
     shift: bool,
-    /// Stroke in progress, world coordinates.
-    stroke: Option<Vec<[f64; 2]>>,
+    stroke: Option<Stroke>,
     nav: Option<Nav>,
     /// Ids of the selected elements, in selection order.
     selection: Vec<String>,
     drag: Option<Drag>,
+    /// The layer new ink lands on, by id; `None` is the topmost. Kept as
+    /// an id, not an index, so it survives the layers being reordered.
+    layer: Option<String>,
 }
 
 impl Editor {
@@ -277,8 +297,87 @@ impl Editor {
         select::handle_at(&frame, view, screen)
     }
 
-    pub fn stroke(&self) -> Option<&[[f64; 2]]> {
-        self.stroke.as_deref()
+    pub fn stroke(&self) -> Option<&Stroke> {
+        self.stroke.as_ref()
+    }
+
+    /// Index of the layer new ink lands on: the one chosen, or the top
+    /// one when none was, or when the chosen one is gone.
+    pub fn active_layer(&self, doc: &Document) -> usize {
+        self.layer
+            .as_deref()
+            .and_then(|id| doc.layer_index(id))
+            .unwrap_or(doc.layers.len().saturating_sub(1))
+    }
+
+    /// The active layer's id — what a new element is stamped with.
+    fn layer_id(&self, doc: &Document) -> String {
+        doc.layers
+            .get(self.active_layer(doc))
+            .map(|l| l.id.clone())
+            .unwrap_or_default()
+    }
+
+    /// Makes layer `index` the one new ink lands on.
+    pub fn select_layer(&mut self, doc: &Document, index: usize) -> Change {
+        match doc.layers.get(index) {
+            Some(layer) => {
+                self.layer = Some(layer.id.clone());
+                Change::Selection
+            }
+            None => Change::None,
+        }
+    }
+
+    /// Adds a layer above the active one and makes it active.
+    pub fn add_layer(&mut self, doc: &mut Document) -> Change {
+        let at = doc.add_layer(self.active_layer(doc));
+        self.layer = Some(doc.layers[at].id.clone());
+        Change::Scene
+    }
+
+    /// Removes the active layer with everything on it — out of the
+    /// selection too — and activates the layer that was above it, or
+    /// the one below when it was on top. The last layer stays.
+    pub fn remove_layer(&mut self, doc: &mut Document) -> Change {
+        let index = self.active_layer(doc);
+        if !doc.remove_layer(index) {
+            return Change::None;
+        }
+        self.drag = None;
+        self.selection
+            .retain(|id| doc.elements.iter().any(|el| el.id() == id));
+        let next = index.min(doc.layers.len() - 1);
+        self.layer = Some(doc.layers[next].id.clone());
+        Change::Scene
+    }
+
+    /// Shows or hides layer `index`. What is hidden cannot be seen, so
+    /// it cannot stay selected either.
+    pub fn toggle_layer(&mut self, doc: &mut Document, index: usize) -> Change {
+        let Some(layer) = doc.layers.get_mut(index) else {
+            return Change::None;
+        };
+        layer.visible = !layer.visible;
+        if !layer.visible {
+            let hidden = layer.id.clone();
+            self.drag = None;
+            self.selection.retain(|id| {
+                doc.elements
+                    .iter()
+                    .any(|el| el.id() == id && el.layer() != hidden)
+            });
+        }
+        Change::Scene
+    }
+
+    /// Moves the active layer one step up or down. It keeps its id, so
+    /// it stays active.
+    pub fn move_layer(&mut self, doc: &mut Document, up: bool) -> Change {
+        match doc.move_layer(self.active_layer(doc), up) {
+            Some(_) => Change::Scene,
+            None => Change::None,
+        }
     }
 
     pub fn is_drawing(&self) -> bool {
@@ -290,13 +389,16 @@ impl Editor {
     }
 
     /// A button went down on the canvas at `screen` (physical px). Extra
-    /// buttons during a stroke, gesture or drag are ignored.
+    /// buttons during a stroke, gesture or drag are ignored. `brush` is
+    /// what the brush tool paints with, read now: the tip is the
+    /// stroke's from here on.
     pub fn press(
         &mut self,
         button: Button,
         view: &View,
         screen: (f64, f64),
         doc: &mut Document,
+        brush: &Brush,
     ) -> Change {
         if self.stroke.is_some() || self.nav.is_some() || self.drag.is_some() {
             return Change::None;
@@ -312,10 +414,8 @@ impl Editor {
                 });
                 Change::None
             }
-            (Button::Left, Tool::Pencil) => {
-                self.stroke = Some(vec![[world.0, world.1]]);
-                Change::Scene
-            }
+            (Button::Left, Tool::Pencil) => self.start_stroke(world, Tip::PENCIL),
+            (Button::Left, Tool::Brush) => self.start_stroke(world, brush.tip()),
             (Button::Left, Tool::Zoom) => {
                 self.nav = Some(Nav::Zoom {
                     origin: screen,
@@ -330,10 +430,19 @@ impl Editor {
         }
     }
 
+    fn start_stroke(&mut self, world: (f64, f64), tip: Tip) -> Change {
+        self.stroke = Some(Stroke {
+            points: vec![[world.0, world.1]],
+            tip,
+        });
+        Change::Scene
+    }
+
     /// Select tool, left button: a handle starts a resize or a rotation;
-    /// an element becomes the selection (Shift toggles it in and out) and
-    /// starts a move; empty canvas starts a marquee, clearing the selection
-    /// unless Shift keeps it as the base.
+    /// an element becomes the selection (Shift toggles it in and out),
+    /// makes its layer the active one, and starts a move; empty canvas
+    /// starts a marquee, clearing the selection unless Shift keeps it as
+    /// the base.
     fn select_press(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
         if let Some(frame) = self.selection_frame(doc)
@@ -372,6 +481,9 @@ impl Editor {
             });
             return Change::Selection;
         };
+        if let Some(el) = doc.elements.iter().find(|el| el.id() == id) {
+            self.layer = Some(el.layer().to_owned());
+        }
         if self.shift {
             if let Some(i) = self.selection.iter().position(|s| *s == id) {
                 self.selection.remove(i);
@@ -408,7 +520,7 @@ impl Editor {
     /// physical px to the last one are dropped so jitter does not bloat the
     /// path.
     pub fn moved(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
-        if let Some(points) = &mut self.stroke {
+        if let Some(Stroke { points, .. }) = &mut self.stroke {
             let world = view.screen_to_world(screen.0, screen.1);
             let last = points[points.len() - 1];
             let (dx, dy) = (world.0 - last[0], world.1 - last[1]);
@@ -549,7 +661,7 @@ impl Editor {
         let id = new_id();
         doc.elements.push(Element::Image(Image {
             id: id.clone(),
-            layer: first_layer(doc),
+            layer: self.layer_id(doc),
             x: cx - w / 2.0,
             y: cy - h / 2.0,
             w,
@@ -574,8 +686,9 @@ impl Editor {
 
     /// A button came up. The left button commits the stroke — simplified
     /// and fitted with cubics within [`FIT_TOLERANCE_PX`] — as a `path` in
-    /// `ink` — or ends the selection drag; the button that started a
-    /// gesture ends it, and a zoom click (no drag) zooms one unit in.
+    /// `ink` with the stroke's tip, on the active layer — or ends the
+    /// selection drag; the button that started a gesture ends it, and a
+    /// zoom click (no drag) zooms one unit in.
     pub fn release(
         &mut self,
         button: Button,
@@ -586,18 +699,18 @@ impl Editor {
     ) -> Change {
         let _ = screen;
         if button == Button::Left
-            && let Some(points) = self.stroke.take()
+            && let Some(Stroke { points, tip }) = self.stroke.take()
         {
             let tolerance = FIT_TOLERANCE_PX / view.px_per_world();
             let curves = curve::fit(&curve::simplify(&points, tolerance), tolerance);
             doc.elements.push(Element::Path(Path {
                 id: new_id(),
-                layer: first_layer(doc),
+                layer: self.layer_id(doc),
                 curves,
                 stroke: ink.to_owned(),
-                width: PEN_WIDTH,
-                opacity: 1.0,
-                hardness: 1.0,
+                width: tip.width,
+                opacity: tip.opacity,
+                hardness: tip.hardness,
                 rotation: 0.0,
             }));
             return Change::Scene;
@@ -713,11 +826,6 @@ fn point((x, y): (f64, f64)) -> Point {
     [x, y]
 }
 
-/// The layer new elements land on.
-fn first_layer(doc: &Document) -> String {
-    doc.layers.first().map(|l| l.id.clone()).unwrap_or_default()
-}
-
 /// Writes the snapshot back through `m`.
 fn apply(doc: &mut Document, snapshot: &Snapshot, m: &Affine) {
     for (i, el) in snapshot {
@@ -732,10 +840,216 @@ fn apply(doc: &mut Document, snapshot: &Snapshot, m: &Affine) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{Element, Rect};
+    use crate::brush::{Brush, Tip};
+    use crate::doc::{Element, Layer, Rect};
     use crate::geom::Corner;
     use crate::scene::Viewport;
     use crate::select::Handle;
+
+    const BRUSH: Brush = Brush {
+        size: 16.0,
+        opacity: 1.0,
+        hardness: 0.5,
+    };
+
+    fn points(e: &Editor) -> Option<&[[f64; 2]]> {
+        e.stroke().map(|s| s.points.as_slice())
+    }
+
+    fn path_of(doc: &Document, i: usize) -> &Path {
+        let Element::Path(p) = &doc.elements[i] else {
+            panic!("expected a path at {i}");
+        };
+        p
+    }
+
+    /// [`board`] with `b` moved onto a second layer, `L2`, above `L1`.
+    fn layered_board() -> Document {
+        let mut doc = board();
+        doc.layers.push(Layer {
+            id: "L2".into(),
+            name: "Layer 2".into(),
+            visible: true,
+        });
+        doc.elements[1].set_layer("L2");
+        doc
+    }
+
+    #[test]
+    fn brush_records_the_tip_at_the_press_and_writes_it_into_the_path() {
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        let brush = Brush {
+            size: 20.0,
+            opacity: 0.5,
+            hardness: 0.25,
+        };
+        assert_eq!(
+            e.press(Button::Left, &v, (1.0, 2.0), &mut doc, &brush),
+            Change::Scene
+        );
+        assert_eq!(e.stroke().map(|s| s.tip), Some(brush.tip()));
+        let _ = e.moved(&v, (9.0, 2.0), &mut doc);
+        assert_eq!(
+            e.release(Button::Left, &v, (9.0, 2.0), &mut doc, "#000"),
+            Change::Scene
+        );
+        let p = path_of(&doc, 0);
+        assert_eq!((p.width, p.opacity, p.hardness), (20.0, 0.5, 0.25));
+        assert_eq!(p.stroke, "#000");
+        assert_eq!(p.layer, doc.layers[0].id);
+    }
+
+    #[test]
+    fn pencil_strokes_carry_the_pencil_tip() {
+        let mut e = pencil();
+        let mut doc = Document::new("t");
+        let v = view();
+        let _ = e.press(Button::Left, &v, (1.0, 2.0), &mut doc, &BRUSH);
+        assert_eq!(e.stroke().map(|s| s.tip), Some(Tip::PENCIL));
+        let _ = e.release(Button::Left, &v, (1.0, 2.0), &mut doc, "#000");
+        let p = path_of(&doc, 0);
+        assert_eq!((p.width, p.opacity, p.hardness), (PEN_WIDTH, 1.0, 1.0));
+    }
+
+    #[test]
+    fn active_layer_defaults_to_the_top_and_follows_the_id() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        doc.add_layer(0);
+        doc.add_layer(1);
+        assert_eq!(e.active_layer(&doc), 2);
+        assert_eq!(e.select_layer(&doc, 0), Change::Selection);
+        assert_eq!(e.active_layer(&doc), 0);
+        assert_eq!(e.select_layer(&doc, 9), Change::None);
+        assert_eq!(e.active_layer(&doc), 0);
+        // The layer goes away under the editor: back to the top.
+        assert!(doc.remove_layer(0));
+        assert_eq!(e.active_layer(&doc), 1);
+    }
+
+    #[test]
+    fn ink_lands_on_the_active_layer() {
+        let mut e = pencil();
+        let mut doc = Document::new("t");
+        let v = view();
+        assert_eq!(e.add_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(e.active_layer(&doc), 1);
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        assert_eq!(path_of(&doc, 0).layer, doc.layers[1].id);
+        let _ = e.select_layer(&doc, 0);
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
+        assert_eq!(path_of(&doc, 1).layer, doc.layers[0].id);
+        // A paste lands there too.
+        let _ = e.paste_image(&mut doc, &v, None, BLOB.into(), (10, 10));
+        assert_eq!(doc.elements[2].layer(), doc.layers[0].id);
+    }
+
+    #[test]
+    fn picking_an_element_activates_its_layer() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        assert_eq!(e.active_layer(&doc), 1);
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        assert_eq!(e.active_layer(&doc), 0, "a is on L1");
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        assert_eq!(e.active_layer(&doc), 1, "b is on L2");
+        e.hold_shift(true);
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        assert_eq!(e.active_layer(&doc), 0, "adding to the selection too");
+        e.hold_shift(false);
+        // Empty canvas changes nothing.
+        let _ = click(&mut e, &v, &mut doc, (50.0, 5.0));
+        assert_eq!(e.active_layer(&doc), 0);
+    }
+
+    #[test]
+    fn add_layer_goes_in_above_the_active_one() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let _ = e.select_layer(&doc, 0);
+        assert_eq!(e.add_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.layers.len(), 3);
+        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(doc.layers[1].name, "Layer 3");
+        assert_eq!(doc.layers[2].id, "L2");
+    }
+
+    #[test]
+    fn remove_layer_drops_its_elements_from_the_selection_and_activates_the_neighbour() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        assert_eq!(e.selection(), ids(&["b"]));
+        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(e.remove_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.elements.len(), 1, "b went with L2");
+        assert!(e.selection().is_empty());
+        assert_eq!(e.active_layer(&doc), 0);
+        assert_eq!(e.remove_layer(&mut doc), Change::None, "the last layer stays");
+        assert_eq!(doc.layers.len(), 1);
+    }
+
+    #[test]
+    fn remove_layer_activates_the_one_that_was_above() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let _ = e.add_layer(&mut doc);
+        let _ = e.add_layer(&mut doc);
+        let top = doc.layers[2].id.clone();
+        let _ = e.select_layer(&doc, 1);
+        let _ = e.remove_layer(&mut doc);
+        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(doc.layers[1].id, top);
+    }
+
+    #[test]
+    fn toggle_layer_deselects_what_it_hides() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        e.hold_shift(true);
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        e.hold_shift(false);
+        assert_eq!(e.selection(), ids(&["a", "b"]));
+        assert_eq!(e.toggle_layer(&mut doc, 1), Change::Scene);
+        assert!(!doc.layers[1].visible);
+        assert_eq!(e.selection(), ids(&["a"]), "b is hidden with its layer");
+        assert_eq!(e.toggle_layer(&mut doc, 1), Change::Scene);
+        assert!(doc.layers[1].visible);
+        assert_eq!(e.selection(), ids(&["a"]));
+        assert_eq!(e.toggle_layer(&mut doc, 7), Change::None);
+    }
+
+    #[test]
+    fn a_hidden_layer_cannot_be_picked() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        let _ = e.toggle_layer(&mut doc, 1);
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        assert!(e.selection().is_empty());
+    }
+
+    #[test]
+    fn move_layer_swaps_and_keeps_the_active_id() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let _ = e.select_layer(&doc, 0);
+        assert_eq!(e.move_layer(&mut doc, true), Change::Scene);
+        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(doc.layers[1].id, "L1");
+        assert_eq!(e.move_layer(&mut doc, true), Change::None, "already on top");
+        assert_eq!(e.move_layer(&mut doc, false), Change::Scene);
+        assert_eq!(e.active_layer(&doc), 0);
+        assert_eq!(e.move_layer(&mut doc, false), Change::None);
+    }
 
     /// 100×100 viewport looking at (50, 50) at zoom 1: screen px == world.
     fn view() -> View {
@@ -769,7 +1083,7 @@ mod tests {
     }
 
     fn press(e: &mut Editor, button: Button, v: &View, at: (f64, f64)) -> Change {
-        e.press(button, v, at, &mut Document::new("t"))
+        e.press(button, v, at, &mut Document::new("t"), &BRUSH)
     }
 
     fn moved(e: &mut Editor, v: &View, at: (f64, f64)) -> Change {
@@ -829,7 +1143,7 @@ mod tests {
         from: (f64, f64),
         to: (f64, f64),
     ) -> Change {
-        let _ = e.press(Button::Left, v, from, doc);
+        let _ = e.press(Button::Left, v, from, doc, &BRUSH);
         let _ = e.moved(v, to, doc);
         e.release(Button::Left, v, to, doc, "#000")
     }
@@ -844,7 +1158,7 @@ mod tests {
         let mut doc = board();
         let v = view();
         assert_eq!(
-            e.press(Button::Left, &v, (70.0, 70.0), &mut doc),
+            e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH),
             Change::Selection
         );
         assert_eq!(
@@ -868,7 +1182,7 @@ mod tests {
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         assert_eq!(
-            e.press(Button::Left, &v, (50.0, 5.0), &mut doc),
+            e.press(Button::Left, &v, (50.0, 5.0), &mut doc, &BRUSH),
             Change::Selection
         );
         assert!(e.selection().is_empty(), "cleared on press");
@@ -905,7 +1219,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         e.hold_shift(false);
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
         assert_eq!(e.moved(&v, (80.0, 75.0), &mut doc), Change::Scene);
         assert_eq!((rect_of(&doc, "a").x, rect_of(&doc, "a").y), (20.0, 15.0));
         assert_eq!((rect_of(&doc, "b").x, rect_of(&doc, "b").y), (70.0, 65.0));
@@ -939,7 +1253,7 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = board();
         let v = view();
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
         assert_eq!(e.moved(&v, (71.0, 71.0), &mut doc), Change::None);
         assert_eq!(
             e.release(Button::Left, &v, (71.0, 71.0), &mut doc, "#000"),
@@ -954,7 +1268,7 @@ mod tests {
         let mut doc = board();
         let v = view();
         assert_eq!(
-            e.press(Button::Left, &v, (5.0, 5.0), &mut doc),
+            e.press(Button::Left, &v, (5.0, 5.0), &mut doc, &BRUSH),
             Change::Selection
         );
         assert_eq!(e.moved(&v, (12.0, 12.0), &mut doc), Change::Selection);
@@ -984,7 +1298,7 @@ mod tests {
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         // Bottom-right corner of `a` is (30, 20); drag it to (50, 30).
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
         assert_eq!(e.moved(&v, (50.0, 30.0), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
         assert_eq!((r.x, r.y, r.w, r.h), (10.0, 10.0, 40.0, 20.0));
@@ -1005,7 +1319,7 @@ mod tests {
         // `a` is 20 x 10 at (10, 10); dragging its bottom-right corner
         // (30, 20) to (50, 25) asks 2x across and 1.5x down. The wider
         // one takes both, so 20 x 10 becomes 40 x 20.
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
         assert_eq!(e.moved(&v, (50.0, 25.0), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
         assert_eq!((r.x, r.y, r.w, r.h), (10.0, 10.0, 40.0, 20.0));
@@ -1019,7 +1333,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         // `a` is centered on (20, 15). Dragging its bottom-right corner
         // (30, 20) to (40, 22.5) grows it both ways out of that center.
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
         e.hold_ctrl(true);
         assert_eq!(e.moved(&v, (40.0, 22.5), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
@@ -1034,7 +1348,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         e.hold_shift(true);
         e.hold_ctrl(true);
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
         // 2x across, 1.5x down about (20, 15): the 2x takes both axes.
         assert_eq!(e.moved(&v, (40.0, 22.5), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
@@ -1068,7 +1382,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         e.hold_ctrl(true);
         assert_eq!(
-            e.press(Button::Left, &v, (30.0, 20.0), &mut doc),
+            e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH),
             Change::None
         );
         // A zoom would answer with a camera; the handle reshapes instead.
@@ -1086,7 +1400,7 @@ mod tests {
         // past (80, 60) along the diagonal. Sweeping it a quarter turn
         // clockwise puts it past (80, 80).
         let d = f64::from(crate::select::ROTATE_OFFSET_PX) / std::f64::consts::SQRT_2;
-        let _ = e.press(Button::Left, &v, (80.0 + d, 60.0 - d), &mut doc);
+        let _ = e.press(Button::Left, &v, (80.0 + d, 60.0 - d), &mut doc, &BRUSH);
         assert_eq!(e.moved(&v, (80.0 + d, 80.0 + d), &mut doc), Change::Scene);
         let r = rect_of(&doc, "b");
         assert!((r.rotation - 90.0).abs() < 1e-9, "{}", r.rotation);
@@ -1113,7 +1427,7 @@ mod tests {
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         // The top-right rotation handle sits at -45°; sweep to -8° (37°).
-        let _ = e.press(Button::Left, &v, around_b(-45.0), &mut doc);
+        let _ = e.press(Button::Left, &v, around_b(-45.0), &mut doc, &BRUSH);
         e.hold_shift(true);
         let _ = e.moved(&v, around_b(-8.0), &mut doc);
         assert_eq!(rect_of(&doc, "b").rotation, 30.0);
@@ -1124,7 +1438,7 @@ mod tests {
         let _ = e.release(Button::Left, &v, around_b(-8.0), &mut doc, "#000");
         // Already at 37°, a 5° sweep with Shift lands on 45°, not on 42°:
         // the grid is anchored on the creation state.
-        let _ = e.press(Button::Left, &v, around_b(-8.0), &mut doc);
+        let _ = e.press(Button::Left, &v, around_b(-8.0), &mut doc, &BRUSH);
         e.hold_shift(true);
         let _ = e.moved(&v, around_b(-3.0), &mut doc);
         assert_eq!(rect_of(&doc, "b").rotation, 45.0);
@@ -1142,7 +1456,7 @@ mod tests {
         // The group frame spans (10, 10)–(80, 80): its bottom-right rotation
         // handle sits past (80, 80) on the diagonal.
         let d = f64::from(crate::select::ROTATE_OFFSET_PX) / std::f64::consts::SQRT_2;
-        let _ = e.press(Button::Left, &v, (80.0 + d, 80.0 + d), &mut doc);
+        let _ = e.press(Button::Left, &v, (80.0 + d, 80.0 + d), &mut doc, &BRUSH);
         // A quarter turn: the handle goes from 45° to 135° around (45, 45).
         let r = (35.0 + d) * std::f64::consts::SQRT_2;
         let to = (45.0 - r * 0.5f64.sqrt(), 45.0 + r * 0.5f64.sqrt());
@@ -1165,7 +1479,7 @@ mod tests {
         let mut doc = board();
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
         let _ = e.moved(&v, (90.0, 90.0), &mut doc);
         assert_ne!(doc.elements, board().elements);
         assert!(e.escape(&mut doc));
@@ -1216,7 +1530,7 @@ mod tests {
         let mut e = pencil();
         let mut doc = board();
         let v = view();
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
         assert!(e.is_drawing());
         assert!(e.selection().is_empty());
     }
@@ -1258,7 +1572,7 @@ mod tests {
         assert_eq!(e.active_tool(), Tool::Select);
         assert!(!e.is_drawing());
         assert!(!e.is_panning());
-        assert_eq!(e.stroke(), None);
+        assert!(e.stroke().is_none());
     }
 
     #[test]
@@ -1268,6 +1582,7 @@ mod tests {
         assert_eq!(Tool::from_hotkey('v'), Some(Tool::Select));
         assert_eq!(Tool::from_hotkey('h'), Some(Tool::Hand));
         assert_eq!(Tool::from_hotkey('z'), Some(Tool::Zoom));
+        assert_eq!(Tool::from_hotkey('b'), Some(Tool::Brush));
         assert_eq!(Tool::from_hotkey('x'), None);
         for t in Tool::ALL {
             assert_eq!(Tool::from_hotkey(t.hotkey()), Some(t));
@@ -1275,10 +1590,10 @@ mod tests {
     }
 
     #[test]
-    fn dock_order_is_select_hand_pencil_zoom() {
+    fn dock_order_is_select_hand_pencil_brush_zoom() {
         assert_eq!(
             Tool::ALL,
-            [Tool::Select, Tool::Hand, Tool::Pencil, Tool::Zoom]
+            [Tool::Select, Tool::Hand, Tool::Pencil, Tool::Brush, Tool::Zoom]
         );
     }
 
@@ -1304,7 +1619,7 @@ mod tests {
         assert_eq!(press(&mut e, Button::Left, &v, (1.0, 2.0)), Change::Scene);
         assert!(e.is_drawing());
         assert_eq!(moved(&mut e, &v, (4.0, 2.0)), Change::Scene);
-        assert_eq!(e.stroke(), Some(&[[1.0, 2.0], [4.0, 2.0]][..]));
+        assert_eq!(points(&e), Some(&[[1.0, 2.0], [4.0, 2.0]][..]));
         assert_eq!(
             e.release(Button::Left, &v, (4.0, 2.0), &mut doc, "#1f1f1f"),
             Change::Scene
@@ -1331,7 +1646,7 @@ mod tests {
         assert_eq!(press(&mut e, Button::Left, &v, (50.0, 50.0)), Change::Scene);
         assert_eq!(moved(&mut e, &v, (50.5, 50.0)), Change::None);
         assert_eq!(moved(&mut e, &v, (51.25, 50.0)), Change::Scene);
-        assert_eq!(e.stroke(), Some(&[[0.0, 0.0], [0.625, 0.0]][..]));
+        assert_eq!(points(&e), Some(&[[0.0, 0.0], [0.625, 0.0]][..]));
     }
 
     #[test]
@@ -1374,7 +1689,7 @@ mod tests {
                 ),
             );
         }
-        assert_eq!(e.stroke().map(<[_]>::len), Some(11));
+        assert_eq!(points(&e).map(<[_]>::len), Some(11));
         assert_eq!(
             e.release(Button::Left, &v, (20.0, 10.0), &mut doc, "#000"),
             Change::Scene
@@ -1724,7 +2039,7 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
         e.set_tool(Tool::Pencil, &mut doc);
-        let _ = e.press(Button::Left, &view(), (10.0, 10.0), &mut doc);
+        let _ = e.press(Button::Left, &view(), (10.0, 10.0), &mut doc, &BRUSH);
         let _ = e.moved(&view(), (20.0, 20.0), &mut doc);
         assert!(e.is_drawing());
         let _ = e.paste_image(&mut doc, &view(), None, BLOB.into(), (10, 10));

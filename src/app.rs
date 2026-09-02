@@ -16,7 +16,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::bitmap::{self, Bitmap};
-use crate::brush::Tip;
+use crate::brush::Brush;
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
@@ -96,6 +96,9 @@ struct App {
     gfx: Option<Gfx>,
     theme: Theme,
     font: Font,
+    /// What `B` paints with. One brush for the window, whichever tab is
+    /// in front, as in Photoshop.
+    brush: Brush,
     /// Built once the scale factor is known, rebuilt when it changes.
     atlas: Option<Atlas>,
     atlas_slot: u32,
@@ -544,9 +547,9 @@ impl App {
         let mut frame = Frame::new();
         frame.extend(grid::prims(view, self.theme.dot));
         frame.append(scene::document_prims(self.doc(), view, images));
-        if let Some(points) = self.editor().stroke() {
-            let tip = Tip::PENCIL;
-            frame.stroke(scene::stroke_prims(points, tip, self.theme.ink, view), tip);
+        if let Some(stroke) = self.editor().stroke() {
+            let prims = scene::stroke_prims(&stroke.points, stroke.tip, self.theme.ink, view);
+            frame.stroke(prims, stroke.tip);
         }
         if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
@@ -608,8 +611,9 @@ impl App {
             }
             Some(Hit::Panel) => {}
             None => {
+                let brush = self.brush;
                 let (editor, doc) = self.active();
-                let change = editor.press(button, &view, (x, y), doc);
+                let change = editor.press(button, &view, (x, y), doc, &brush);
                 self.apply(change);
             }
         }
@@ -764,7 +768,7 @@ impl App {
                 (Tool::Select, Some(Handle::Rotate(_))) => CursorIcon::Crosshair,
                 (Tool::Select, None) => CursorIcon::Default,
                 (Tool::Hand, _) => CursorIcon::Grab,
-                (Tool::Pencil, _) => CursorIcon::Crosshair,
+                (Tool::Pencil | Tool::Brush, _) => CursorIcon::Crosshair,
                 (Tool::Zoom, _) => CursorIcon::ZoomIn,
             }
         };
@@ -1028,6 +1032,7 @@ pub fn run(
         gfx: None,
         theme: Theme::light(),
         font: Font::bundled(),
+        brush: Brush::default(),
         atlas: None,
         atlas_slot: 0,
         clipboard: None,

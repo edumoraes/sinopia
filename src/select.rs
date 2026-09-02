@@ -102,13 +102,14 @@ pub fn frame_of(doc: &Document, ids: &[String]) -> Option<Frame> {
 }
 
 /// The topmost element under `p` (world units), reaching `slop` beyond its
-/// edges. Rects hit anywhere inside; paths only on their ink.
+/// edges — topmost as painted, so the layers' order counts before the
+/// document's and a hidden layer is never hit. Rects hit anywhere inside;
+/// paths only on their ink.
 pub fn element_at(doc: &Document, p: Point, slop: f64) -> Option<&str> {
-    doc.elements
-        .iter()
+    doc.painted()
         .rev()
-        .find(|el| hits(el, p, slop))
-        .map(Element::id)
+        .find(|(_, el)| hits(el, p, slop))
+        .map(|(_, el)| el.id())
 }
 
 fn hits(el: &Element, p: Point, slop: f64) -> bool {
@@ -135,20 +136,19 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
     }
 }
 
-/// Ids of the elements whose box overlaps the unturned box with `a` and
-/// `b` as opposite corners, in document order.
+/// Ids of the painted elements whose box overlaps the unturned box with
+/// `a` and `b` as opposite corners, in paint order.
 pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
     let lo = [a[0].min(b[0]), a[1].min(b[1])];
     let hi = [a[0].max(b[0]), a[1].max(b[1])];
-    doc.elements
-        .iter()
-        .filter(|el| {
+    doc.painted()
+        .filter(|(_, el)| {
             frame(el).is_some_and(|f| {
                 let (flo, fhi) = f.aabb();
                 flo[0] <= hi[0] && fhi[0] >= lo[0] && flo[1] <= hi[1] && fhi[1] >= lo[1]
             })
         })
-        .map(|el| el.id().to_owned())
+        .map(|(_, el)| el.id().to_owned())
         .collect()
 }
 
@@ -361,7 +361,7 @@ pub fn marquee_prims(a: (f64, f64), b: (f64, f64), theme: &Theme) -> Vec<Prim> {
 mod tests {
     use super::*;
     use crate::curve::Cubic;
-    use crate::doc::{Camera, Image, Path, Rect};
+    use crate::doc::{Camera, Image, Layer, Path, Rect};
     use crate::scene::{KIND_BOX, KIND_SEGMENT, Viewport};
     use crate::theme::Theme;
 
@@ -456,6 +456,46 @@ mod tests {
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_top_layer_wins_under_the_pointer() {
+        let mut d = doc(vec![
+            rect("upper", 0.0, 0.0, 10.0, 10.0, 0.0),
+            rect("lower", 0.0, 0.0, 10.0, 10.0, 0.0),
+        ]);
+        d.layers.push(Layer {
+            id: "top".into(),
+            name: "Layer 2".into(),
+            visible: true,
+        });
+        d.elements[0].set_layer("top");
+        // `lower` comes later in `elements`, but its layer is underneath.
+        assert_eq!(element_at(&d, [5.0, 5.0], 0.0), Some("upper"));
+        assert_eq!(
+            elements_in(&d, [-1.0, -1.0], [11.0, 11.0]),
+            ids(&["lower", "upper"]),
+            "the marquee lists in paint order"
+        );
+    }
+
+    #[test]
+    fn a_hidden_layer_is_neither_hit_nor_marqueed() {
+        let mut d = doc(vec![
+            rect("upper", 0.0, 0.0, 10.0, 10.0, 0.0),
+            rect("lower", 0.0, 0.0, 10.0, 10.0, 0.0),
+        ]);
+        d.layers.push(Layer {
+            id: "top".into(),
+            name: "Layer 2".into(),
+            visible: false,
+        });
+        d.elements[0].set_layer("top");
+        assert_eq!(element_at(&d, [5.0, 5.0], 0.0), Some("lower"));
+        assert_eq!(elements_in(&d, [-1.0, -1.0], [11.0, 11.0]), ids(&["lower"]));
+        d.layers[0].visible = false;
+        assert_eq!(element_at(&d, [5.0, 5.0], 0.0), None);
+        assert!(elements_in(&d, [-1.0, -1.0], [11.0, 11.0]).is_empty());
     }
 
     #[track_caller]
