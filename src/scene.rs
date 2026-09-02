@@ -101,6 +101,9 @@ pub const STROKE_PX: f32 = 2.0;
 /// it must not take the renderer down.
 pub const FALLBACK_COLOR: Rgba = [0.5, 0.5, 0.5, 1.0];
 
+/// Stands in for an image whose texture has not been uploaded yet.
+pub const PLACEHOLDER_COLOR: Rgba = [0.85, 0.85, 0.87, 1.0];
+
 /// CSS hex (`#rgb` or `#rrggbb`) → linear RGBA. Invalid → fallback.
 pub fn parse_color(hex: &str) -> Rgba {
     try_parse_color(hex).unwrap_or(FALLBACK_COLOR)
@@ -193,6 +196,15 @@ impl ScreenRect {
 
 pub const KIND_BOX: u32 = 0;
 pub const KIND_SEGMENT: u32 = 1;
+/// A box that samples the texture in its slot instead of a flat color.
+pub const KIND_IMAGE: u32 = 2;
+
+/// Which texture slot the renderer has uploaded for each blob hash. An
+/// image the renderer has not caught up with yet is missing from the map.
+pub type ImageSlots = std::collections::HashMap<String, u32>;
+
+/// Multiplies the sampled texel: an image passes through untouched.
+const NO_TINT: Rgba = [1.0, 1.0, 1.0, 1.0];
 
 /// GPU-ready primitive. Layout mirrors the shader's instance input.
 #[repr(C)]
@@ -209,6 +221,9 @@ pub struct Prim {
     pub kind: u32,
     /// Box only: turned by this many radians (clockwise) about its center.
     pub angle: f32,
+    /// [`KIND_IMAGE`] only: which texture to sample. Read on the CPU, to
+    /// pick the bind group — the shader never sees it.
+    pub slot: u32,
 }
 
 impl Prim {
@@ -228,6 +243,7 @@ impl Prim {
             feather,
             kind: KIND_BOX,
             angle: 0.0,
+            slot: 0,
         }
     }
 
@@ -255,6 +271,17 @@ impl Prim {
         }
     }
 
+    /// Box `r` filled with the texture in `slot`, turned by `angle` about
+    /// `pivot`. The distance field is the same as a plain box's, so the
+    /// turn, the corners and the antialiasing come along.
+    pub fn image(r: ScreenRect, pivot: (f32, f32), angle: f32, slot: u32) -> Prim {
+        Prim {
+            kind: KIND_IMAGE,
+            slot,
+            ..Prim::turned(r, pivot, angle, NO_TINT)
+        }
+    }
+
     pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
         let r = ScreenRect {
             x: cx - radius,
@@ -273,6 +300,7 @@ impl Prim {
             feather: 0.0,
             kind: KIND_SEGMENT,
             angle: 0.0,
+            slot: 0,
         }
     }
 
@@ -370,8 +398,9 @@ pub fn path_prims(curves: &[Cubic], width: f64, color: Rgba, view: &View) -> Vec
 
 /// Flattens the document into prims in paint order. Rects paint fill first,
 /// then the four outline edges (constant px thickness, aligned inwards),
-/// all turned about the rect center by its rotation; paths become strokes.
-pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
+/// all turned about the rect center by its rotation; paths become strokes;
+/// images become one textured box each, from `images`.
+pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Vec<Prim> {
     let mut out = Vec::new();
     for element in &doc.elements {
         match element {
@@ -418,6 +447,23 @@ pub fn document_prims(doc: &Document, view: &View) -> Vec<Prim> {
             Element::Path(p) => {
                 out.extend(path_prims(&p.curves, p.width, parse_color(&p.stroke), view));
             }
+            Element::Image(i) => {
+                let (sx, sy) = view.world_to_screen(i.x, i.y);
+                let r = ScreenRect {
+                    x: sx as f32,
+                    y: sy as f32,
+                    w: (i.w * view.px_per_world()) as f32,
+                    h: (i.h * view.px_per_world()) as f32,
+                };
+                let pivot = r.center();
+                let angle = i.rotation.to_radians() as f32;
+                out.push(match images.get(&i.blob) {
+                    Some(&slot) => Prim::image(r, pivot, angle, slot),
+                    // Decoding happens off the frame path; until the
+                    // texture lands, the element still occupies its box.
+                    None => Prim::turned(r, pivot, angle, PLACEHOLDER_COLOR),
+                });
+            }
         }
     }
     out
@@ -429,6 +475,7 @@ mod tests {
     use crate::doc::{Camera, Path, Rect};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
+    const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
 
     fn view(x: f64, y: f64, zoom: f64) -> View {
@@ -663,7 +710,7 @@ mod tests {
         if let Element::Rect(r) = &mut el {
             r.rotation = 90.0;
         }
-        let got = document_prims(&doc_with(vec![el], &v), &v);
+        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new());
         assert_eq!(got.len(), 5);
         let a = std::f32::consts::FRAC_PI_2;
         // The fill is the unturned box, turned in place.
@@ -683,7 +730,7 @@ mod tests {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))], &v);
         assert_eq!(
-            document_prims(&doc, &v),
+            document_prims(&doc, &v, &ImageSlots::new()),
             vec![Prim::rect(sr(50.0, 50.0, 10.0, 10.0), WHITE)]
         );
     }
@@ -694,7 +741,7 @@ mod tests {
         let doc = doc_with(vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)], &v);
         let t = STROKE_PX;
         assert_eq!(
-            document_prims(&doc, &v),
+            document_prims(&doc, &v, &ImageSlots::new()),
             vec![
                 // top, bottom, left, right — aligned inwards.
                 Prim::rect(sr(60.0, 60.0, 20.0, t), WHITE),
@@ -712,7 +759,7 @@ mod tests {
             vec![rect(0.0, 0.0, 10.0, 10.0, Some("#000"), Some("#fff"))],
             &v,
         );
-        let got = document_prims(&doc, &v);
+        let got = document_prims(&doc, &v, &ImageSlots::new());
         assert_eq!(got.len(), 5);
         assert_eq!(got[0].color, WHITE, "fill first");
         assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke after");
@@ -722,7 +769,7 @@ mod tests {
     fn zoom_scales_rect_position_and_size() {
         let v = view(0.0, 0.0, 2.0);
         let doc = doc_with(vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))], &v);
-        let got = document_prims(&doc, &v);
+        let got = document_prims(&doc, &v, &ImageSlots::new());
         assert_eq!(got[0].geom, [52.0, 50.0, 10.0, 10.0]);
     }
 
@@ -730,7 +777,7 @@ mod tests {
     fn rect_without_any_color_still_paints_with_fallback() {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 4.0, 4.0, None, None)], &v);
-        let got = document_prims(&doc, &v);
+        let got = document_prims(&doc, &v, &ImageSlots::new());
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].color, FALLBACK_COLOR);
     }
@@ -796,7 +843,7 @@ mod tests {
         );
         // Width is in world units: 2 * zoom 2 = 4px wide → half-width 2.
         assert_eq!(
-            document_prims(&doc, &v),
+            document_prims(&doc, &v, &ImageSlots::new()),
             vec![Prim::segment(
                 (50.0, 50.0),
                 (68.0, 50.0),
@@ -841,5 +888,48 @@ mod tests {
         let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], 2.0, WHITE, &v);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].radius, 0.5);
+    }
+
+    fn image(x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Element {
+        Element::Image(crate::doc::Image {
+            id: "i1".into(),
+            x,
+            y,
+            w,
+            h,
+            rotation,
+            blob: BLOB.into(),
+        })
+    }
+
+    #[test]
+    fn image_paints_one_textured_box_turned_about_its_center() {
+        let v = view(0.0, 0.0, 2.0);
+        let slots = ImageSlots::from([(BLOB.to_owned(), 7)]);
+        let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 90.0)], &v);
+        let got = document_prims(&doc, &v, &slots);
+        // One instance: the SDF box carries the texture, so the turn, the
+        // rounded corners and the antialiasing come from the same field.
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].kind, KIND_IMAGE);
+        assert_eq!(got[0].slot, 7);
+        // World 20x10 at zoom 2 is 40x20 px, drawn from the viewport center.
+        assert_close4(got[0].geom, [50.0, 50.0, 40.0, 20.0]);
+        assert_eq!(got[0].angle, std::f32::consts::FRAC_PI_2);
+        // Nothing tints it: the texel passes through as it is.
+        assert_eq!(got[0].color, WHITE);
+    }
+
+    #[test]
+    fn image_whose_texture_is_not_loaded_yet_paints_a_placeholder() {
+        // Decoding happens off the frame path; until the texture lands the
+        // element still has to occupy its box.
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 0.0)], &v);
+        let got = document_prims(&doc, &v, &ImageSlots::new());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].kind, KIND_BOX);
+        assert_eq!(got[0].color, PLACEHOLDER_COLOR);
+        assert_close4(got[0].geom, [50.0, 50.0, 20.0, 10.0]);
     }
 }

@@ -3,7 +3,7 @@
 //! handles drive. Pure — `editor` decides when, this decides what.
 
 use crate::curve::{self, Cubic};
-use crate::doc::{Document, Element, Rect};
+use crate::doc::{Document, Element};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::{Prim, ScreenRect, View, with_alpha};
 use crate::theme::Theme;
@@ -39,7 +39,8 @@ pub enum Handle {
 /// for a path with no curves.
 pub fn frame(el: &Element) -> Option<Frame> {
     match el {
-        Element::Rect(r) => Some(rect_frame(r)),
+        Element::Rect(r) => Some(box_frame(r.x, r.y, r.w, r.h, r.rotation)),
+        Element::Image(i) => Some(box_frame(i.x, i.y, i.w, i.h, i.rotation)),
         Element::Path(p) => {
             let angle = p.rotation.to_radians();
             let back = Affine::rotate(-angle);
@@ -60,12 +61,25 @@ pub fn frame(el: &Element) -> Option<Frame> {
     }
 }
 
-fn rect_frame(r: &Rect) -> Frame {
+/// The frame of an element that is a box on disk — a rect or an image:
+/// `x, y, w, h` before the turn, turned about its own center.
+fn box_frame(x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Frame {
     Frame {
-        center: [r.x + r.w / 2.0, r.y + r.h / 2.0],
-        half: [r.w / 2.0, r.h / 2.0],
-        angle: r.rotation.to_radians(),
+        center: [x + w / 2.0, y + h / 2.0],
+        half: [w / 2.0, h / 2.0],
+        angle: rotation.to_radians(),
     }
+}
+
+/// The `x, y, w, h, rotation` a frame describes — the way back in.
+fn box_fields(f: Frame) -> (f64, f64, f64, f64, f64) {
+    (
+        f.center[0] - f.half[0],
+        f.center[1] - f.half[1],
+        2.0 * f.half[0],
+        2.0 * f.half[1],
+        degrees(f.angle),
+    )
 }
 
 fn find<'a>(doc: &'a Document, id: &str) -> Option<&'a Element> {
@@ -105,7 +119,8 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
         return false;
     }
     match el {
-        Element::Rect(_) => true,
+        // A bitmap is opaque to the pointer: the box decides, not the pixels.
+        Element::Rect(_) | Element::Image(_) => true,
         Element::Path(path) => {
             let reach = path.width / 2.0 + slop;
             // Flatten far finer than the reach so the polyline's error
@@ -138,8 +153,8 @@ pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
 }
 
 /// Applies `m` to an element. Path control points map exactly and the
-/// path's rotation follows the map's turn; a rect maps its frame (see
-/// [`Frame::transformed`]).
+/// path's rotation follows the map's turn; a rect and an image map their
+/// frame (see [`Frame::transformed`]).
 pub fn transform(el: &mut Element, m: &Affine) {
     match el {
         Element::Path(p) => {
@@ -151,12 +166,12 @@ pub fn transform(el: &mut Element, m: &Affine) {
             p.rotation = turned(p.rotation, m);
         }
         Element::Rect(r) => {
-            let f = rect_frame(r).transformed(m);
-            r.x = f.center[0] - f.half[0];
-            r.y = f.center[1] - f.half[1];
-            r.w = 2.0 * f.half[0];
-            r.h = 2.0 * f.half[1];
-            r.rotation = degrees(f.angle);
+            (r.x, r.y, r.w, r.h, r.rotation) =
+                box_fields(box_frame(r.x, r.y, r.w, r.h, r.rotation).transformed(m));
+        }
+        Element::Image(i) => {
+            (i.x, i.y, i.w, i.h, i.rotation) =
+                box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
         }
     }
 }
@@ -325,7 +340,7 @@ pub fn marquee_prims(a: (f64, f64), b: (f64, f64), theme: &Theme) -> Vec<Prim> {
 mod tests {
     use super::*;
     use crate::curve::Cubic;
-    use crate::doc::{Camera, Path, Rect};
+    use crate::doc::{Camera, Image, Path, Rect};
     use crate::scene::{KIND_BOX, KIND_SEGMENT, Viewport};
     use crate::theme::Theme;
 
@@ -352,6 +367,18 @@ mod tests {
             stroke: "#000".into(),
             width,
             rotation: 0.0,
+        })
+    }
+
+    fn image(id: &str, x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Element {
+        Element::Image(Image {
+            id: id.into(),
+            x,
+            y,
+            w,
+            h,
+            rotation,
+            blob: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
         })
     }
 
@@ -741,5 +768,47 @@ mod tests {
             marquee_prims((40.0, 30.0), (10.0, 20.0), &theme)[0].geom,
             got[0].geom
         );
+    }
+
+    #[test]
+    fn image_frame_is_its_box_turned_about_its_center() {
+        let f = frame(&image("i", 10.0, 20.0, 60.0, 40.0, 90.0)).unwrap();
+        assert_eq!(f.center, [40.0, 40.0]);
+        assert_eq!(f.half, [30.0, 20.0]);
+        assert!((f.angle - QUARTER).abs() < 1e-12, "{}", f.angle);
+    }
+
+    #[test]
+    fn image_is_hit_anywhere_inside_its_box() {
+        // A bitmap is opaque to the pointer the way a rect is: the pixels
+        // do not decide, the box does.
+        let d = doc(vec![image("i", 0.0, 0.0, 40.0, 20.0, 0.0)]);
+        assert_eq!(element_at(&d, [20.0, 10.0], 0.0), Some("i"));
+        assert_eq!(element_at(&d, [39.0, 1.0], 0.0), Some("i"));
+        assert_eq!(element_at(&d, [45.0, 10.0], 0.0), None);
+        assert_eq!(element_at(&d, [45.0, 10.0], 6.0), Some("i"));
+    }
+
+    #[test]
+    fn transforming_an_image_maps_its_box_and_turn() {
+        let mut el = image("i", 0.0, 0.0, 40.0, 20.0, 0.0);
+        transform(&mut el, &Affine::rotate(QUARTER));
+        let Element::Image(i) = &el else { panic!() };
+        // The box keeps its size; the turn is recorded in degrees.
+        assert!((i.w - 40.0).abs() < 1e-9, "{}", i.w);
+        assert!((i.h - 20.0).abs() < 1e-9, "{}", i.h);
+        assert_eq!(i.rotation, 90.0);
+        let f = frame(&el).unwrap();
+        assert!((f.center[0] - -10.0).abs() < 1e-9, "{:?}", f.center);
+        assert!((f.center[1] - 20.0).abs() < 1e-9, "{:?}", f.center);
+    }
+
+    #[test]
+    fn resizing_an_image_stretches_its_box() {
+        let mut el = image("i", 0.0, 0.0, 40.0, 20.0, 0.0);
+        let f = frame(&el).unwrap();
+        transform(&mut el, &resize_map(&f, Corner::BottomRight, [80.0, 20.0]));
+        let Element::Image(i) = &el else { panic!() };
+        assert_eq!((i.x, i.y, i.w, i.h), (0.0, 0.0, 80.0, 20.0));
     }
 }

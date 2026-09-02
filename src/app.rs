@@ -26,7 +26,7 @@ use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
-use crate::scene::{self, Prim, View, Viewport};
+use crate::scene::{self, ImageSlots, Prim, View, Viewport};
 use crate::select::{self, Handle};
 use crate::store::Store;
 use crate::theme::Theme;
@@ -51,6 +51,9 @@ struct App {
     gfx: Option<Gfx>,
     theme: Theme,
     editor: Editor,
+    /// Texture slot per blob hash, mirroring what `gfx` holds. Images the
+    /// renderer has not caught up with paint as placeholders.
+    images: ImageSlots,
     /// Last pointer position in physical px, while inside the window.
     cursor: Option<(f64, f64)>,
     modifiers: Modifiers,
@@ -119,7 +122,7 @@ impl App {
     /// progress, the selection frame and marquee, the dock.
     fn frame(&self, view: &View) -> Vec<Prim> {
         let mut prims = grid::prims(view, self.theme.dot);
-        prims.extend(scene::document_prims(&self.doc, view));
+        prims.extend(scene::document_prims(&self.doc, view, &self.images));
         if let Some(points) = self.editor.stroke() {
             prims.extend(scene::stroke_prims(points, PEN_WIDTH, self.theme.ink, view));
         }
@@ -524,6 +527,7 @@ pub fn run(
         gfx: None,
         theme: Theme::light(),
         editor: Editor::new(),
+        images: ImageSlots::new(),
         cursor: None,
         modifiers: Modifiers::default(),
         cursor_icon: CursorIcon::Default,

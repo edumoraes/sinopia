@@ -27,12 +27,13 @@ pub struct Camera {
 }
 
 /// Scene elements (§6.1). Types enter as their tools exist: `rect` from the
-/// scaffold, `path` with the pencil.
+/// scaffold, `path` with the pencil, `image` with the clipboard.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Element {
     Rect(Rect),
     Path(Path),
+    Image(Image),
 }
 
 impl Element {
@@ -40,6 +41,7 @@ impl Element {
         match self {
             Element::Rect(r) => &r.id,
             Element::Path(p) => &p.id,
+            Element::Image(i) => &i.id,
         }
     }
 }
@@ -124,6 +126,66 @@ impl TryFrom<PathOnDisk> for Path {
     }
 }
 
+/// A bitmap on the board. `x, y, w, h` is the box before rotation, in
+/// world units, and `rotation` turns it about its center exactly as a
+/// rect's does. `blob` names the original bytes in the blob store by their
+/// sha256 — never a path, so a board says nothing about the machine that
+/// wrote it (§7.1, §9.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ImageOnDisk")]
+pub struct Image {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
+    pub blob: String,
+}
+
+/// What an `image` may look like on disk. The blob is checked on the way
+/// in: a hand-edited board must not be able to name a file outside the
+/// store.
+#[derive(Deserialize)]
+struct ImageOnDisk {
+    id: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    #[serde(default)]
+    rotation: f64,
+    blob: String,
+}
+
+impl TryFrom<ImageOnDisk> for Image {
+    type Error = String;
+
+    fn try_from(i: ImageOnDisk) -> Result<Image, String> {
+        if !is_blob_hash(&i.blob) {
+            return Err(format!("blob {:?} is not a sha256 hash", i.blob));
+        }
+        Ok(Image {
+            id: i.id,
+            x: i.x,
+            y: i.y,
+            w: i.w,
+            h: i.h,
+            rotation: i.rotation,
+            blob: i.blob,
+        })
+    }
+}
+
+/// Whether `s` is a blob name: a bare sha256 in lowercase hex. 64 such
+/// characters can only ever name a file directly inside `blobs/`.
+pub fn is_blob_hash(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 impl Default for Camera {
     fn default() -> Self {
         Camera {
@@ -175,6 +237,9 @@ pub fn new_id() -> String {
 mod tests {
     use super::*;
 
+    /// sha256 of the empty input — a valid hash, and easy to recognize.
+    const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
     fn sample_doc() -> Document {
         Document {
             schema: SCHEMA_VERSION,
@@ -203,6 +268,15 @@ mod tests {
                     stroke: "#1f1f1f".into(),
                     width: 2.0,
                     rotation: 0.0,
+                }),
+                Element::Image(Image {
+                    id: "el_03".into(),
+                    x: 10.0,
+                    y: 20.0,
+                    w: 64.0,
+                    h: 48.0,
+                    rotation: 0.0,
+                    blob: BLOB.into(),
                 }),
             ],
         }
@@ -442,5 +516,81 @@ mod tests {
         let doc = sample_doc();
         let back = Document::from_json(&doc.to_json().unwrap()).unwrap();
         assert_eq!(doc, back);
+    }
+
+    #[test]
+    fn image_serializes_with_its_blob_hash() {
+        let doc = sample_doc();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+        let el = &v["elements"][2];
+        // An image points at the blob store by hash — never at a path, so a
+        // board carries nothing about where it was written (§6.1, §9.3).
+        assert_eq!(el["type"], "image");
+        assert_eq!(el["id"], "el_03");
+        assert_eq!(el["blob"], BLOB);
+        assert_eq!(el["x"].as_f64(), Some(10.0));
+        assert_eq!(el["w"].as_f64(), Some(64.0));
+        assert!(el.get("rotation").is_none(), "{el}");
+    }
+
+    #[test]
+    fn parses_image_element_with_integer_coordinates() {
+        let json = format!(
+            r##"{{
+            "schema": 1,
+            "id": "01JXXXXXXXXXXXXXXXXXXXXXXX",
+            "title": "shot",
+            "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+            "elements": [
+                {{ "id": "i1", "type": "image", "x": 0, "y": 0, "w": 32, "h": 16,
+                   "blob": "{BLOB}" }}
+            ]
+        }}"##
+        );
+        let doc = Document::from_json(&json).unwrap();
+        let Element::Image(i) = &doc.elements[0] else {
+            panic!("expected an image, got {:?}", doc.elements[0]);
+        };
+        assert_eq!((i.x, i.y, i.w, i.h), (0.0, 0.0, 32.0, 16.0));
+        assert_eq!(i.blob, BLOB);
+        assert_eq!(i.rotation, 0.0);
+    }
+
+    #[test]
+    fn image_rotation_roundtrips_in_degrees() {
+        let mut doc = sample_doc();
+        let Element::Image(i) = &mut doc.elements[2] else {
+            panic!("expected an image");
+        };
+        i.rotation = 15.0;
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][2]["rotation"].as_f64(), Some(15.0));
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn image_blob_that_is_not_a_hash_is_an_error() {
+        // The blob names a file under blobs/; anything but a bare sha256
+        // could walk out of the store (§9.3), so it never parses.
+        for blob in [
+            "../../../etc/passwd",
+            "a/b",
+            "",
+            "ABCDEF",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+        ] {
+            let json = format!(
+                r##"{{
+                "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                "elements": [ {{ "id": "i1", "type": "image",
+                    "x": 0, "y": 0, "w": 1, "h": 1, "blob": "{blob}" }} ]
+            }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains("blob"), "{blob:?} should be rejected: {err}");
+        }
     }
 }
