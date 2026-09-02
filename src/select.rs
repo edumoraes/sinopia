@@ -155,7 +155,8 @@ pub fn transform(el: &mut Element, m: &Affine) {
 /// axes, the opposite corner pinned. An axis of zero extent is left alone.
 pub fn resize_map(f: &Frame, corner: Corner, pointer: Point) -> Affine {
     let signs = corner.signs();
-    let fixed = [-signs[0] * f.half[0], -signs[1] * f.half[1]];
+    let pinned = corner.opposite().signs();
+    let fixed = [pinned[0] * f.half[0], pinned[1] * f.half[1]];
     let local = f.to_local(pointer);
     let factor = |axis: usize| {
         let span = 2.0 * signs[axis] * f.half[axis];

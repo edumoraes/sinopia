@@ -20,12 +20,14 @@ use winit::window::{CursorIcon, Window, WindowId};
 use crate::doc::Document;
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, PEN_WIDTH, SCROLL_LINE_PX, Tool};
+use crate::geom::Corner;
 use crate::gestures;
 use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::scene::{self, Prim, View, Viewport};
+use crate::select::{self, Handle};
 use crate::store::Store;
 use crate::theme::Theme;
 
@@ -83,7 +85,8 @@ impl App {
 
     fn switch_to(&mut self, doc: Document) {
         self.flush_camera();
-        self.editor.cancel();
+        // Drop the drag, then the selection: neither belongs to the new board.
+        while self.editor.escape(&mut self.doc) {}
         self.doc = doc;
         self.shared.lock().expect("lock shared").board_id = self.doc.id.clone();
         if let Some(w) = &self.window {
@@ -113,12 +116,18 @@ impl App {
     }
 
     /// Everything on screen, back to front: grid, document, the stroke in
-    /// progress, the dock.
+    /// progress, the selection frame and marquee, the dock.
     fn frame(&self, view: &View) -> Vec<Prim> {
         let mut prims = grid::prims(view, self.theme.dot);
         prims.extend(scene::document_prims(&self.doc, view));
         if let Some(points) = self.editor.stroke() {
             prims.extend(scene::stroke_prims(points, PEN_WIDTH, self.theme.ink, view));
+        }
+        if let Some(frame) = self.editor.selection_frame(&self.doc) {
+            prims.extend(select::prims(&frame, view, &self.theme));
+        }
+        if let Some((a, b)) = self.editor.marquee() {
+            prims.extend(select::marquee_prims(a, b, &self.theme));
         }
         prims.extend(self.dock(view).prims(self.editor.tool(), &self.theme));
         prims
@@ -128,7 +137,7 @@ impl App {
     fn apply(&mut self, change: Change) {
         match change {
             Change::None => {}
-            Change::Scene => self.redraw(),
+            Change::Scene | Change::Selection => self.redraw(),
             Change::Camera(camera) => {
                 self.doc.camera = camera;
                 self.camera_dirty = true;
@@ -145,13 +154,13 @@ impl App {
         match self.dock(&view).hit(x, y) {
             Some(Hit::Tool(tool)) => {
                 if button == Button::Left {
-                    self.editor.set_tool(tool);
+                    self.editor.set_tool(tool, &mut self.doc);
                     self.redraw();
                 }
             }
             Some(Hit::Panel) => {}
             None => {
-                let change = self.editor.press(button, &view, (x, y));
+                let change = self.editor.press(button, &view, (x, y), &mut self.doc);
                 self.apply(change);
             }
         }
@@ -171,6 +180,7 @@ impl App {
                 self.save();
                 self.redraw();
             }
+            Change::Selection => self.redraw(),
             change @ Change::Camera(_) => {
                 self.apply(change);
                 self.flush_camera();
@@ -182,7 +192,7 @@ impl App {
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
         if let Some(view) = self.view() {
-            let change = self.editor.moved(&view, (x, y));
+            let change = self.editor.moved(&view, (x, y), &mut self.doc);
             self.apply(change);
         }
         self.update_cursor_icon();
@@ -219,7 +229,13 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Escape) if pressed => {
-                if self.editor.cancel() {
+                if self.editor.escape(&mut self.doc) {
+                    self.redraw();
+                }
+            }
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
+                if self.editor.delete_selection(&mut self.doc) == Change::Scene {
+                    self.save();
                     self.redraw();
                 }
             }
@@ -232,7 +248,7 @@ impl App {
                 if let (Some(c), None) = (chars.next(), chars.next())
                     && let Some(tool) = Tool::from_hotkey(c)
                 {
-                    self.editor.set_tool(tool);
+                    self.editor.set_tool(tool, &mut self.doc);
                     self.redraw();
                 }
             }
@@ -245,6 +261,7 @@ impl App {
         self.modifiers = modifiers;
         let ctrl = modifiers.state().control_key();
         self.editor.hold_ctrl(ctrl);
+        self.editor.hold_shift(modifiers.state().shift_key());
         if !ctrl {
             self.flush_camera();
         }
@@ -270,31 +287,43 @@ impl App {
     fn focus_lost(&mut self) {
         self.editor.hold_space(false);
         self.editor.hold_ctrl(false);
-        if self.editor.cancel() {
+        self.editor.hold_shift(false);
+        if self.editor.cancel(&mut self.doc) {
             self.redraw();
         }
         self.flush_camera();
         self.update_cursor_icon();
     }
 
-    /// Cursor for the active tool over the canvas; arrow over the dock.
+    /// Cursor for the active tool over the canvas; arrow over the dock;
+    /// resize and rotate cursors over the selection handles.
     fn update_cursor_icon(&mut self) {
-        let over_dock = match (self.view(), self.cursor) {
-            (Some(view), Some((x, y))) => self.dock(&view).hit(x, y).is_some(),
-            _ => false,
+        let (over_dock, handle) = match (self.view(), self.cursor) {
+            (Some(view), Some((x, y))) => (
+                self.dock(&view).hit(x, y).is_some(),
+                self.editor.hover(&self.doc, &view, (x, y)),
+            ),
+            _ => (false, None),
         };
         let icon = if self.editor.is_panning() {
             CursorIcon::Grabbing
         } else if self.editor.is_drawing() {
             CursorIcon::Crosshair
+        } else if self.editor.is_moving() {
+            CursorIcon::Move
         } else if over_dock {
             CursorIcon::Default
         } else {
-            match self.editor.active_tool() {
-                Tool::Select => CursorIcon::Default,
-                Tool::Hand => CursorIcon::Grab,
-                Tool::Pencil => CursorIcon::Crosshair,
-                Tool::Zoom => CursorIcon::ZoomIn,
+            match (self.editor.active_tool(), handle) {
+                (Tool::Select, Some(Handle::Resize(Corner::TopLeft | Corner::BottomRight))) => {
+                    CursorIcon::NwseResize
+                }
+                (Tool::Select, Some(Handle::Resize(_))) => CursorIcon::NeswResize,
+                (Tool::Select, Some(Handle::Rotate(_))) => CursorIcon::Crosshair,
+                (Tool::Select, None) => CursorIcon::Default,
+                (Tool::Hand, _) => CursorIcon::Grab,
+                (Tool::Pencil, _) => CursorIcon::Crosshair,
+                (Tool::Zoom, _) => CursorIcon::ZoomIn,
             }
         };
         if icon != self.cursor_icon {
