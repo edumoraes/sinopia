@@ -355,11 +355,24 @@ impl Editor {
 
     /// Removes the active layer with everything on it — out of the
     /// selection too — and activates the layer that was above it, or
-    /// the one below when it was on top. The last layer stays.
+    /// the one below when it was on top. The last layer stays, but what
+    /// it holds does not: a layer is its object, so the trash takes the
+    /// object either way.
     pub fn remove_layer(&mut self, doc: &mut Document) -> Change {
         let index = self.active_layer(doc);
         if !doc.remove_layer(index) {
-            return Change::None;
+            let Some(layer) = doc.layers.get(index) else {
+                return Change::None;
+            };
+            let last = layer.id.clone();
+            if !doc.elements.iter().any(|el| el.layer() == last) {
+                return Change::None;
+            }
+            doc.elements.retain(|el| el.layer() != last);
+            self.drag = None;
+            self.selection
+                .retain(|id| doc.elements.iter().any(|el| el.id() == id));
+            return Change::Scene;
         }
         self.drag = None;
         self.selection
@@ -708,8 +721,23 @@ impl Editor {
             return Change::None;
         }
         self.drag = None;
+        // A layer is the object it holds, so a layer the deletion empties
+        // goes with it. The last layer stays, as it does everywhere else.
+        let emptied: Vec<String> = doc
+            .elements
+            .iter()
+            .filter(|el| self.selection.iter().any(|id| id == el.id()))
+            .map(|el| el.layer().to_owned())
+            .collect();
         doc.elements
             .retain(|el| !self.selection.iter().any(|id| id == el.id()));
+        for id in emptied {
+            if !doc.elements.iter().any(|el| el.layer() == id)
+                && let Some(i) = doc.layer_index(&id)
+            {
+                doc.remove_layer(i);
+            }
+        }
         self.selection.clear();
         Change::Scene
     }
@@ -1101,6 +1129,44 @@ mod tests {
     }
 
     #[test]
+    fn deleting_an_object_takes_its_layer_with_it() {
+        // A layer is the object it holds: what deletes one deletes both.
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        assert_eq!(e.selection(), ids(&["b"]));
+        assert_eq!(e.delete_selection(&mut doc), Change::Scene);
+        assert_eq!(doc.layers.len(), 1, "L2 held b and nothing else");
+        assert_eq!(doc.layers[0].id, "L1");
+        // The last layer stays, even once what it held is gone.
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        let _ = e.delete_selection(&mut doc);
+        assert!(doc.elements.is_empty());
+        assert_eq!(doc.layers.len(), 1);
+    }
+
+    #[test]
+    fn a_layer_with_something_else_on_it_stays() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let v = view();
+        // The paste opens a raster layer and leaves it active; the brush
+        // paints onto that same layer, beside the image.
+        let _ = e.paste_image(&mut doc, &v, None, BLOB.into(), (10, 10));
+        e.set_tool(Tool::Brush, &mut doc);
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(doc.elements.len(), 2);
+        e.set_tool(Tool::Select, &mut doc);
+        let _ = click(&mut e, &v, &mut doc, (5.0, 2.0));
+        assert_eq!(e.selection().len(), 1, "the paint, away from the image");
+        let _ = e.delete_selection(&mut doc);
+        assert_eq!(doc.layers.len(), 2, "the image is still on it");
+        assert_eq!(doc.elements.len(), 1);
+    }
+
+    #[test]
     fn a_pasted_image_always_opens_its_own_raster_layer() {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
@@ -1168,8 +1234,23 @@ mod tests {
         assert_eq!(doc.elements.len(), 1, "b went with L2");
         assert!(e.selection().is_empty());
         assert_eq!(e.active_layer(&doc), 0);
-        assert_eq!(e.remove_layer(&mut doc), Change::None, "the last layer stays");
+        assert_eq!(e.remove_layer(&mut doc), Change::Scene, "a takes its turn");
+        assert_eq!(doc.layers.len(), 1, "the last layer stays");
+        assert!(doc.elements.is_empty(), "though what it held does not");
+        assert_eq!(e.remove_layer(&mut doc), Change::None, "nothing left to take");
+    }
+
+    #[test]
+    fn binning_the_last_layer_empties_it() {
+        // A layer is the object it holds, so the trash always takes the
+        // object — even where the layer itself has to stay.
+        let mut e = Editor::new();
+        let mut doc = board();
         assert_eq!(doc.layers.len(), 1);
+        assert_eq!(e.remove_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.layers.len(), 1, "a board keeps its last layer");
+        assert!(doc.elements.is_empty(), "but not what was on it");
+        assert_eq!(e.remove_layer(&mut doc), Change::None, "nothing left to take");
     }
 
     #[test]

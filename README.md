@@ -78,7 +78,10 @@ selection, navigation, pasted images, and projects in tabs:
   layer, and leaves it active. Painting on a vector layer is not
   possible, so a brush stroke over one opens a raster layer above it —
   Photoshop's answer to the same question. The panel's `+` makes a
-  raster layer: a blank sheet to paint on. A hidden layer paints
+  raster layer: a blank sheet to paint on. A layer is the object it
+  holds, and the two go together: deleting the object takes the layer
+  with it, and the trash takes the object — on the last layer, which
+  always stays, it empties it instead. A hidden layer paints
   nothing and cannot be hit or marqueed; hiding one deselects what was
   on it, removing one takes its elements along, and the last layer
   stays. Boards from before have no `layers`: they get `Layer 1` on
