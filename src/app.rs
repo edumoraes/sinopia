@@ -900,7 +900,7 @@ impl App {
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
-                match gfx.render(self.theme.bg, &frame.prims) {
+                match gfx.render(self.theme.bg, &frame) {
                     Ok(presented) => {
                         if let Some(n) = &mut self.smoke_frames_left {
                             if presented {

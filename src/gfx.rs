@@ -17,7 +17,7 @@ use anyhow::Context as _;
 use wgpu::util::DeviceExt as _;
 
 use crate::bitmap::Bitmap;
-use crate::scene::{self, ImageSlots, Prim, Rgba};
+use crate::scene::{self, Frame, ImageSlots, Pass, Prim, Rgba, Viewport};
 
 const SHADER: &str = r#"
 struct Globals {
@@ -106,8 +106,21 @@ fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     return length(pa - ba * h);
 }
 
+// Straight alpha: what the window is blended with.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return shade(in);
+}
+
+// Premultiplied: what the scratch texture holds, so that a group's
+// union — a max of every channel — is the union of its coverage.
+@fragment
+fn fs_premul(in: VsOut) -> @location(0) vec4<f32> {
+    let c = shade(in);
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+
+fn shade(in: VsOut) -> vec4<f32> {
     var d: f32;
     var rgba = in.color;
     if (in.kind == KIND_SEGMENT) {
@@ -145,7 +158,16 @@ pub struct Gfx {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
+    /// The four ways a prim reaches a target, all from the one shader:
+    /// `direct` onto the window (straight alpha over); `composite` onto
+    /// the window from the scratch's premultiplied pixels; `union` onto
+    /// the scratch, every channel a max, so a group's segments cover
+    /// without adding up; `wipe` onto the scratch with no blending at
+    /// all, which is how a box clears it.
+    direct: wgpu::RenderPipeline,
+    composite: wgpu::RenderPipeline,
+    union: wgpu::RenderPipeline,
+    wipe: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     /// Layout every texture bind group is built with.
@@ -159,6 +181,16 @@ pub struct Gfx {
     /// stays out of `slots`: that map is sha256 to texture (§9.3), and a
     /// name that is not a bare hash has no business in it.
     atlas: Option<u32>,
+    /// The window-sized texture a group is composited in, once a frame
+    /// has needed one. Rebuilt when the window changes size; like the
+    /// atlas, a slot of its own and never an entry in `slots`.
+    scratch: Option<Scratch>,
+}
+
+struct Scratch {
+    slot: u32,
+    view: wgpu::TextureView,
+    size: (u32, u32),
 }
 
 impl Gfx {
@@ -258,44 +290,29 @@ impl Gfx {
             bind_group_layouts: &[Some(&bgl), Some(&tex_bgl)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("prims"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Prim>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4, // geom
-                        1 => Float32x4, // color
-                        2 => Float32,   // radius
-                        3 => Float32,   // feather
-                        4 => Uint32,    // kind
-                        5 => Float32,   // angle
-                        6 => Float32x4, // uv
-                        // `slot` stays on the CPU: it picks the bind group.
-                    ],
-                })],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+        let pipeline = |label, fragment, blend| {
+            pipeline(&device, &layout, &shader, config.format, label, fragment, blend)
+        };
+        let direct = pipeline("direct", "fs_main", Some(wgpu::BlendState::ALPHA_BLENDING));
+        let composite = pipeline(
+            "composite",
+            "fs_main",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
+        let max = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Max,
+        };
+        let union = pipeline(
+            "union",
+            "fs_premul",
+            Some(wgpu::BlendState {
+                color: max,
+                alpha: max,
             }),
-            multiview_mask: None,
-            cache: None,
-        });
+        );
+        let wipe = pipeline("wipe", "fs_premul", None);
 
         // Slot 0: what the runs with no image bind. White and opaque, so
         // the shader path is the same whatever it lands on.
@@ -317,7 +334,10 @@ impl Gfx {
             device,
             queue,
             config,
-            pipeline,
+            direct,
+            composite,
+            union,
+            wipe,
             globals_buf,
             bind_group,
             tex_bgl,
@@ -325,7 +345,47 @@ impl Gfx {
             textures: vec![blank],
             slots: ImageSlots::new(),
             atlas: None,
+            scratch: None,
         })
+    }
+
+    /// The scratch texture at the window's current size, made or remade
+    /// as needed, and its slot.
+    fn ensure_scratch(&mut self) -> u32 {
+        let size = (self.config.width, self.config.height);
+        if let Some(s) = &self.scratch
+            && s.size == size
+        {
+            return s.slot;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scratch"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let group = bind_group(&self.device, &self.tex_bgl, &self.sampler, &view);
+        let slot = match &self.scratch {
+            Some(s) => {
+                self.textures[s.slot as usize] = group;
+                s.slot
+            }
+            None => {
+                self.textures.push(group);
+                (self.textures.len() - 1) as u32
+            }
+        };
+        self.scratch = Some(Scratch { slot, view, size });
+        slot
     }
 
     /// Which blob is in which texture slot — what `scene` needs to decide
@@ -398,11 +458,13 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Renders one frame: clear to `background`, then `prims` in order,
-    /// one draw per texture run.
+    /// Renders one frame: clear to `background`, then the frame's passes
+    /// as [`scene::passes`] plans them — the prims in order, one draw per
+    /// texture run, with each group composited through the scratch.
     /// `Ok(false)` = frame skipped (surface occluded or temporarily lost);
     /// the caller may try again later.
-    pub fn render(&mut self, background: Rgba, prims: &[Prim]) -> anyhow::Result<bool> {
+    pub fn render(&mut self, background: Rgba, frame: &Frame) -> anyhow::Result<bool> {
+        let scratch = self.ensure_scratch();
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -421,45 +483,68 @@ impl Gfx {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let globals: [f32; 4] = [
-            self.config.width as f32,
-            self.config.height as f32,
-            0.0,
-            0.0,
-        ];
+        let viewport = Viewport {
+            w: self.config.width,
+            h: self.config.height,
+        };
+        let globals: [f32; 4] = [viewport.w as f32, viewport.h as f32, 0.0, 0.0];
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::cast_slice(&globals));
 
+        let (prims, passes) = scene::passes(frame, viewport, scratch);
         // A buffer per frame is the simplest thing that works; reuse and
         // per-element caching come with real profiling (§3).
         let instance_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("prims"),
-                contents: bytemuck::cast_slice(prims),
+                contents: bytemuck::cast_slice(&prims),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        let scratch_view = &self.scratch.as_ref().expect("scratch was ensured").view;
+        let [r, g, b, a] = background;
+        let clear = wgpu::LoadOp::Clear(wgpu::Color {
+            r: f64::from(r),
+            g: f64::from(g),
+            b: f64::from(b),
+            a: f64::from(a),
+        });
 
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
-        {
-            let [r, g, b, a] = background;
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("canvas"),
+        let mut first = true;
+        for pass in passes {
+            let (label, target, load, wipe, composite, range, pipeline) = match pass {
+                Pass::Direct {
+                    composite,
+                    start,
+                    end,
+                } => {
+                    let load = if first { clear } else { wgpu::LoadOp::Load };
+                    first = false;
+                    ("window", &view, load, None, composite, start..end, &self.direct)
+                }
+                Pass::Offscreen { wipe, start, end } => (
+                    "scratch",
+                    scratch_view,
+                    wgpu::LoadOp::Load,
+                    Some(wipe),
+                    None,
+                    start..end,
+                    &self.union,
+                ),
+            };
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(r),
-                            g: f64::from(g),
-                            b: f64::from(b),
-                            a: f64::from(a),
-                        }),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -468,24 +553,90 @@ impl Gfx {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !prims.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_vertex_buffer(0, instance_buf.slice(..));
-                for run in scene::runs(prims) {
-                    let group = self
-                        .textures
-                        .get(run.slot as usize)
-                        .unwrap_or(&self.textures[0]);
-                    pass.set_bind_group(1, group, &[]);
-                    pass.draw(0..6, run.start..run.end);
-                }
+            if prims.is_empty() {
+                continue;
+            }
+            rp.set_bind_group(0, &self.bind_group, &[]);
+            rp.set_vertex_buffer(0, instance_buf.slice(..));
+            if let Some(wipe) = wipe {
+                rp.set_pipeline(&self.wipe);
+                rp.set_bind_group(1, &self.textures[0], &[]);
+                rp.draw(0..6, wipe..wipe + 1);
+            }
+            if let Some(composite) = composite {
+                rp.set_pipeline(&self.composite);
+                rp.set_bind_group(1, &self.textures[scratch as usize], &[]);
+                rp.draw(0..6, composite..composite + 1);
+            }
+            if range.is_empty() {
+                continue;
+            }
+            rp.set_pipeline(pipeline);
+            for run in scene::runs(&prims[range.start as usize..range.end as usize]) {
+                let group = self
+                    .textures
+                    .get(run.slot as usize)
+                    .unwrap_or(&self.textures[0]);
+                rp.set_bind_group(1, group, &[]);
+                rp.draw(0..6, range.start + run.start..range.start + run.end);
             }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(texture);
         Ok(true)
     }
+}
+
+/// One pipeline over the instanced-quad vertex stage: `fragment` names
+/// the entry point, `blend` how its output meets the target (`None` is
+/// a plain write).
+fn pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    label: &str,
+    fragment: &str,
+    blend: Option<wgpu::BlendState>,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Prim>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x4, // geom
+                    1 => Float32x4, // color
+                    2 => Float32,   // radius
+                    3 => Float32,   // feather
+                    4 => Uint32,    // kind
+                    5 => Float32,   // angle
+                    6 => Float32x4, // uv
+                    // `slot` stays on the CPU: it picks the bind group.
+                ],
+            })],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// The texture format that matches the surface: the pipeline writes its
@@ -547,18 +698,28 @@ fn upload(
         size,
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    Ok(device.create_bind_group(&wgpu::BindGroupDescriptor {
+    Ok(bind_group(device, layout, sampler, &view))
+}
+
+/// The group 1 that samples `view`.
+fn bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("image"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
+                resource: wgpu::BindingResource::TextureView(view),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
             },
         ],
-    }))
+    })
 }
