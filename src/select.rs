@@ -312,6 +312,7 @@ mod tests {
             curves,
             stroke: "#000".into(),
             width,
+            rotation: 0.0,
         })
     }
 

@@ -790,6 +790,7 @@ mod tests {
                 curves: vec![[[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]],
                 stroke: "#000".into(),
                 width: 2.0,
+                rotation: 0.0,
             })],
             &v,
         );

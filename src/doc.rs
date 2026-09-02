@@ -67,7 +67,11 @@ fn is_zero(v: &f64) -> bool {
 
 /// Freehand pen stroke: a chain of cubic Béziers in world units, each one
 /// self-contained as `[a, c1, c2, b]` and starting where the previous
-/// ended. `width` is in world units too (ink scales with zoom).
+/// ended. `width` is in world units too (ink scales with zoom). Transforms
+/// are baked into the curves; `rotation` (degrees, clockwise on screen)
+/// only records how far the stroke has been turned since it was drawn, so
+/// its box turns with it and snapping counts from the creation state.
+/// Absent on disk when zero.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "PathOnDisk")]
 pub struct Path {
@@ -75,6 +79,8 @@ pub struct Path {
     pub curves: Vec<Cubic>,
     pub stroke: String,
     pub width: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
 }
 
 /// What a `path` may look like on disk: `curves` today, or the raw
@@ -88,6 +94,8 @@ struct PathOnDisk {
     points: Option<Vec<[f64; 2]>>,
     stroke: String,
     width: f64,
+    #[serde(default)]
+    rotation: f64,
 }
 
 /// Fit tolerance for legacy polylines, in world units (one pixel at
@@ -111,6 +119,7 @@ impl TryFrom<PathOnDisk> for Path {
             curves,
             stroke: p.stroke,
             width: p.width,
+            rotation: p.rotation,
         })
     }
 }
@@ -193,6 +202,7 @@ mod tests {
                     curves: vec![[[1.0, 2.0], [2.0, 3.0], [3.5, 4.0], [6.0, 4.0]]],
                     stroke: "#1f1f1f".into(),
                     width: 2.0,
+                    rotation: 0.0,
                 }),
             ],
         }
@@ -375,6 +385,45 @@ mod tests {
         let json = doc.to_json().unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["elements"][0]["rotation"].as_f64(), Some(30.0));
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn path_rotation_defaults_to_zero_and_stays_off_disk() {
+        // Paths written before rotation existed, and legacy polylines, are
+        // in their creation state: zero, and nothing new on disk.
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [
+                { "id": "p1", "type": "path",
+                  "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]],
+                  "stroke": "#000", "width": 3 },
+                { "id": "p2", "type": "path", "points": [[0, 0], [4.5, 0.2], [9, 0]],
+                  "stroke": "#000", "width": 2 }
+            ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        for el in &doc.elements {
+            let Element::Path(p) = el else {
+                panic!("expected a path")
+            };
+            assert_eq!(p.rotation, 0.0, "{}", p.id);
+        }
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        assert!(v["elements"][0].get("rotation").is_none(), "{v}");
+    }
+
+    #[test]
+    fn path_rotation_roundtrips_in_degrees() {
+        let mut doc = sample_doc();
+        let Element::Path(p) = &mut doc.elements[1] else {
+            panic!("expected a path");
+        };
+        p.rotation = 45.0;
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][1]["rotation"].as_f64(), Some(45.0));
         assert_eq!(Document::from_json(&json).unwrap(), doc);
     }
 

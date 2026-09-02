@@ -494,6 +494,7 @@ impl Editor {
                 curves,
                 stroke: ink.to_owned(),
                 width: PEN_WIDTH,
+                rotation: 0.0,
             }));
             return Change::Scene;
         }
