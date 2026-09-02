@@ -13,13 +13,14 @@ use winit::application::ApplicationHandler;
 use winit::event::{
     ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::doc::Document;
 use crate::dock::{Dock, Hit};
-use crate::editor::{Button, Change, Editor, PEN_WIDTH, SCROLL_LINE_PX, Tool};
+use crate::editor::{Button, Change, Editor, Gesture, PEN_WIDTH, SCROLL_LINE_PX, Tool};
+use crate::gestures;
 use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
@@ -36,12 +37,14 @@ struct SharedState {
 #[derive(Debug)]
 enum UserEvent {
     Request(Request),
+    Gesture(Gesture),
 }
 
 struct App {
     store: Store,
     doc: Document,
     shared: Arc<Mutex<SharedState>>,
+    proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     theme: Theme,
@@ -248,6 +251,20 @@ impl App {
         self.update_cursor_icon();
     }
 
+    fn gestured(&mut self, gesture: Gesture) {
+        let Some(view) = self.view() else { return };
+        let cursor = self.cursor.unwrap_or((
+            f64::from(view.viewport.w) / 2.0,
+            f64::from(view.viewport.h) / 2.0,
+        ));
+        if let Some(camera) = self.editor.gesture(&view, cursor, gesture) {
+            self.apply(Change::Camera(camera));
+        }
+        if gesture == Gesture::End {
+            self.flush_camera();
+        }
+    }
+
     /// Keys can't be released into a window that lost focus: drop the held
     /// overrides and whatever gesture they were driving.
     fn focus_lost(&mut self) {
@@ -304,6 +321,11 @@ impl ApplicationHandler<UserEvent> for App {
         match Gfx::new(window.clone()) {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
+                let proxy = self.proxy.clone();
+                let sink = move |g| proxy.send_event(UserEvent::Gesture(g)).is_ok();
+                if let Err(e) = gestures::spawn(&window, Box::new(sink)) {
+                    log::warn!("trackpad gestures unavailable: {e:#}");
+                }
                 self.window = Some(window);
                 self.redraw();
             }
@@ -383,7 +405,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, ev: UserEvent) {
-        let UserEvent::Request(req) = ev;
+        let req = match ev {
+            UserEvent::Request(req) => req,
+            UserEvent::Gesture(g) => return self.gestured(g),
+        };
         match req {
             Request::Raise => {
                 if let Some(w) = &self.window {
@@ -465,6 +490,7 @@ pub fn run(
         store,
         doc,
         shared,
+        proxy: event_loop.create_proxy(),
         window: None,
         gfx: None,
         theme: Theme::light(),

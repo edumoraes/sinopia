@@ -54,6 +54,24 @@ pub enum Change {
     Camera(Camera),
 }
 
+/// Trackpad gesture step. Deltas are the fingers' travel in logical px;
+/// `factor` is the pinch scale relative to the previous step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gesture {
+    Pinch {
+        dx: f64,
+        dy: f64,
+        factor: f64,
+    },
+    Swipe {
+        fingers: u32,
+        dx: f64,
+        dy: f64,
+    },
+    /// The fingers lifted (or the compositor cancelled the gesture).
+    End,
+}
+
 /// Pen width in world units (logical px at zoom 1).
 pub const PEN_WIDTH: f64 = 2.0;
 
@@ -284,6 +302,24 @@ impl Editor {
             delta
         };
         view.panned_by(dx, dy)
+    }
+
+    /// A trackpad gesture step: pinch zooms at `cursor` and follows the
+    /// fingers, a three-finger swipe pans. `None` when nothing moves.
+    pub fn gesture(&self, view: &View, cursor: (f64, f64), gesture: Gesture) -> Option<Camera> {
+        match gesture {
+            Gesture::Pinch { dx, dy, factor } => {
+                let zoomed = View {
+                    camera: view.zoomed_at(factor, cursor),
+                    ..*view
+                };
+                Some(zoomed.panned_by(dx * view.scale, dy * view.scale))
+            }
+            Gesture::Swipe { fingers: 3, dx, dy } => {
+                Some(view.panned_by(dx * view.scale, dy * view.scale))
+            }
+            Gesture::Swipe { .. } | Gesture::End => None,
+        }
     }
 
     /// Drops the stroke and the gesture in progress. True if there was one.
@@ -682,6 +718,48 @@ mod tests {
         // The Z tool does the same.
         let c = tool(Tool::Zoom).scroll(&v, (20.0, 20.0), (0.0, SCROLL_LINE_PX), false);
         assert!((c.zoom - ZOOM_STEP).abs() < 1e-12, "{}", c.zoom);
+    }
+
+    #[test]
+    fn pinch_zooms_at_the_cursor_and_pans_with_the_fingers() {
+        let e = Editor::new();
+        let v = View {
+            scale: 2.0,
+            ..view()
+        };
+        let g = Gesture::Pinch {
+            dx: 5.0,
+            dy: -3.0,
+            factor: 1.5,
+        };
+        let c = e
+            .gesture(&v, (20.0, 20.0), g)
+            .expect("pinch moves the camera");
+        // Logical deltas become physical px on a 2x display.
+        let expected = View {
+            camera: v.zoomed_at(1.5, (20.0, 20.0)),
+            ..v
+        }
+        .panned_by(10.0, -6.0);
+        assert_eq!(c, expected);
+        assert_eq!(c.zoom, 1.5);
+    }
+
+    #[test]
+    fn three_finger_swipe_pans_and_other_counts_are_ignored() {
+        let e = Editor::new();
+        let v = view();
+        let swipe = |fingers| Gesture::Swipe {
+            fingers,
+            dx: 10.0,
+            dy: -4.0,
+        };
+        assert_eq!(
+            e.gesture(&v, (50.0, 50.0), swipe(3)),
+            Some(cam(40.0, 54.0, 1.0))
+        );
+        assert_eq!(e.gesture(&v, (50.0, 50.0), swipe(4)), None);
+        assert_eq!(e.gesture(&v, (50.0, 50.0), Gesture::End), None);
     }
 
     #[test]

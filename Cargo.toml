@@ -10,9 +10,13 @@ clap = { version = "4.6.6", features = ["derive"] }
 env_logger = "0.11.11"
 log = "0.4.34"
 pollster = "1.0.1"
+raw-window-handle = "0.6.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 ulid = "3.0.0"
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
 wgpu = "30.0.1"
 winit = "0.30.13"
 
