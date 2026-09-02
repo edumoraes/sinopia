@@ -17,7 +17,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::bitmap::{self, Bitmap};
-use crate::brush::{self, Brush};
+use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
@@ -109,9 +109,9 @@ struct App {
     gfx: Option<Gfx>,
     theme: Theme,
     font: Font,
-    /// What `B` paints with. One brush for the window, whichever tab is
-    /// in front, as in Photoshop.
-    brush: Brush,
+    /// Every brush there is, and which one `B` paints with. One library
+    /// for the window, whichever tab is in front, as in Photoshop.
+    brushes: Library,
     /// `Shift+L`, or the handle beside it: the layers panel is up.
     layers_shown: bool,
     /// The layer card the pointer picked up, if any. It outlives the
@@ -723,11 +723,11 @@ impl App {
             return false;
         }
         match c {
-            '[' => self.brush.shrink(),
-            ']' => self.brush.grow(),
-            '{' => self.brush.softer(),
-            '}' => self.brush.harder(),
-            '0'..='9' => self.brush.set_opacity_digit(c as u8 - b'0'),
+            '[' => self.brushes.brush_mut().shrink(),
+            ']' => self.brushes.brush_mut().grow(),
+            '{' => self.brushes.brush_mut().softer(),
+            '}' => self.brushes.brush_mut().harder(),
+            '0'..='9' => self.brushes.brush_mut().set_opacity_digit(c as u8 - b'0'),
             _ => return false,
         }
         true
@@ -781,7 +781,7 @@ impl App {
             && !self.over_chrome(view, (x, y))
             && self.editor().pointer_tool(self.doc(), view, (x, y)) == Tool::Brush
         {
-            let radius = (self.brush.size / 2.0 * view.px_per_world()) as f32;
+            let radius = (self.brushes.brush().size / 2.0 * view.px_per_world()) as f32;
             let ink = with_alpha(self.theme.ink, RING_ALPHA);
             frame.extend(brush::ring_prims(
                 (x as f32, y as f32),
@@ -896,7 +896,7 @@ impl App {
             }
             Some(Hit::Panel) => {}
             None => {
-                let brush = self.brush;
+                let brush = *self.brushes.brush();
                 let (editor, doc) = self.active();
                 let change = editor.press(button, &view, (x, y), doc, &brush);
                 self.apply(change);
@@ -1414,7 +1414,7 @@ pub fn run(
         gfx: None,
         theme: Theme::light(),
         font: Font::bundled(),
-        brush: Brush::default(),
+        brushes: Library::default(),
         layers_shown: false,
         carry: None,
         slides: layers::Slides::default(),

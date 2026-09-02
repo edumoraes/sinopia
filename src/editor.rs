@@ -939,11 +939,9 @@ mod tests {
     use crate::scene::Viewport;
     use crate::select::Handle;
 
-    const BRUSH: Brush = Brush {
-        size: 16.0,
-        opacity: 1.0,
-        hardness: 0.5,
-    };
+    fn brush() -> Brush {
+        Brush::default()
+    }
 
     fn points(e: &Editor) -> Option<&[[f64; 2]]> {
         e.stroke().map(|s| s.points.as_slice())
@@ -985,6 +983,7 @@ mod tests {
             size: 20.0,
             opacity: 0.5,
             hardness: 0.25,
+            ..Brush::default()
         };
         assert_eq!(
             e.press(Button::Left, &v, (1.0, 2.0), &mut doc, &brush),
@@ -1008,7 +1007,7 @@ mod tests {
         let mut e = pencil();
         let mut doc = Document::new("t");
         let v = view();
-        let _ = e.press(Button::Left, &v, (1.0, 2.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (1.0, 2.0), &mut doc, &brush());
         assert_eq!(e.stroke().map(|s| s.tip), Some(Tip::PENCIL));
         let _ = e.release(Button::Left, &v, (1.0, 2.0), &mut doc, "#000");
         let p = path_of(&doc, 0);
@@ -1072,6 +1071,7 @@ mod tests {
             size: 4.0,
             opacity: 1.0,
             hardness: 1.0,
+            ..Brush::default()
         };
         let _ = e.press(Button::Left, &v, (1.0, 2.0), &mut doc, &fine);
         let _ = e.release(Button::Left, &v, (9.0, 2.0), &mut doc, "#000");
@@ -1079,6 +1079,7 @@ mod tests {
             size: 20.0,
             opacity: 0.5,
             hardness: 0.25,
+            ..Brush::default()
         };
         let _ = e.press(Button::Left, &v, (1.0, 5.0), &mut doc, &soft);
         let _ = e.release(Button::Left, &v, (9.0, 5.0), &mut doc, "#f00");
@@ -1357,7 +1358,7 @@ mod tests {
     }
 
     fn press(e: &mut Editor, button: Button, v: &View, at: (f64, f64)) -> Change {
-        e.press(button, v, at, &mut Document::new("t"), &BRUSH)
+        e.press(button, v, at, &mut Document::new("t"), &brush())
     }
 
     fn moved(e: &mut Editor, v: &View, at: (f64, f64)) -> Change {
@@ -1417,7 +1418,7 @@ mod tests {
         from: (f64, f64),
         to: (f64, f64),
     ) -> Change {
-        let _ = e.press(Button::Left, v, from, doc, &BRUSH);
+        let _ = e.press(Button::Left, v, from, doc, &brush());
         let _ = e.moved(v, to, doc);
         e.release(Button::Left, v, to, doc, "#000")
     }
@@ -1432,7 +1433,7 @@ mod tests {
         let mut doc = board();
         let v = view();
         assert_eq!(
-            e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH),
+            e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &brush()),
             Change::Selection
         );
         assert_eq!(
@@ -1456,7 +1457,7 @@ mod tests {
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         assert_eq!(
-            e.press(Button::Left, &v, (50.0, 5.0), &mut doc, &BRUSH),
+            e.press(Button::Left, &v, (50.0, 5.0), &mut doc, &brush()),
             Change::Selection
         );
         assert!(e.selection().is_empty(), "cleared on press");
@@ -1493,7 +1494,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         e.hold_shift(false);
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &brush());
         assert_eq!(e.moved(&v, (80.0, 75.0), &mut doc), Change::Scene);
         assert_eq!((rect_of(&doc, "a").x, rect_of(&doc, "a").y), (20.0, 15.0));
         assert_eq!((rect_of(&doc, "b").x, rect_of(&doc, "b").y), (70.0, 65.0));
@@ -1527,7 +1528,7 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = board();
         let v = view();
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &brush());
         assert_eq!(e.moved(&v, (71.0, 71.0), &mut doc), Change::None);
         assert_eq!(
             e.release(Button::Left, &v, (71.0, 71.0), &mut doc, "#000"),
@@ -1542,7 +1543,7 @@ mod tests {
         let mut doc = board();
         let v = view();
         assert_eq!(
-            e.press(Button::Left, &v, (5.0, 5.0), &mut doc, &BRUSH),
+            e.press(Button::Left, &v, (5.0, 5.0), &mut doc, &brush()),
             Change::Selection
         );
         assert_eq!(e.moved(&v, (12.0, 12.0), &mut doc), Change::Selection);
@@ -1572,7 +1573,7 @@ mod tests {
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         // Bottom-right corner of `a` is (30, 20); drag it to (50, 30).
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &brush());
         assert_eq!(e.moved(&v, (50.0, 30.0), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
         assert_eq!((r.x, r.y, r.w, r.h), (10.0, 10.0, 40.0, 20.0));
@@ -1593,7 +1594,7 @@ mod tests {
         // `a` is 20 x 10 at (10, 10); dragging its bottom-right corner
         // (30, 20) to (50, 25) asks 2x across and 1.5x down. The wider
         // one takes both, so 20 x 10 becomes 40 x 20.
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &brush());
         assert_eq!(e.moved(&v, (50.0, 25.0), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
         assert_eq!((r.x, r.y, r.w, r.h), (10.0, 10.0, 40.0, 20.0));
@@ -1607,7 +1608,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         // `a` is centered on (20, 15). Dragging its bottom-right corner
         // (30, 20) to (40, 22.5) grows it both ways out of that center.
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &brush());
         e.hold_ctrl(true);
         assert_eq!(e.moved(&v, (40.0, 22.5), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
@@ -1622,7 +1623,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         e.hold_shift(true);
         e.hold_ctrl(true);
-        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &brush());
         // 2x across, 1.5x down about (20, 15): the 2x takes both axes.
         assert_eq!(e.moved(&v, (40.0, 22.5), &mut doc), Change::Scene);
         let r = rect_of(&doc, "a");
@@ -1656,7 +1657,7 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
         e.hold_ctrl(true);
         assert_eq!(
-            e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &BRUSH),
+            e.press(Button::Left, &v, (30.0, 20.0), &mut doc, &brush()),
             Change::None
         );
         // A zoom would answer with a camera; the handle reshapes instead.
@@ -1674,7 +1675,7 @@ mod tests {
         // past (80, 60) along the diagonal. Sweeping it a quarter turn
         // clockwise puts it past (80, 80).
         let d = f64::from(crate::select::ROTATE_OFFSET_PX) / std::f64::consts::SQRT_2;
-        let _ = e.press(Button::Left, &v, (80.0 + d, 60.0 - d), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (80.0 + d, 60.0 - d), &mut doc, &brush());
         assert_eq!(e.moved(&v, (80.0 + d, 80.0 + d), &mut doc), Change::Scene);
         let r = rect_of(&doc, "b");
         assert!((r.rotation - 90.0).abs() < 1e-9, "{}", r.rotation);
@@ -1701,7 +1702,7 @@ mod tests {
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         // The top-right rotation handle sits at -45°; sweep to -8° (37°).
-        let _ = e.press(Button::Left, &v, around_b(-45.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, around_b(-45.0), &mut doc, &brush());
         e.hold_shift(true);
         let _ = e.moved(&v, around_b(-8.0), &mut doc);
         assert_eq!(rect_of(&doc, "b").rotation, 30.0);
@@ -1712,7 +1713,7 @@ mod tests {
         let _ = e.release(Button::Left, &v, around_b(-8.0), &mut doc, "#000");
         // Already at 37°, a 5° sweep with Shift lands on 45°, not on 42°:
         // the grid is anchored on the creation state.
-        let _ = e.press(Button::Left, &v, around_b(-8.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, around_b(-8.0), &mut doc, &brush());
         e.hold_shift(true);
         let _ = e.moved(&v, around_b(-3.0), &mut doc);
         assert_eq!(rect_of(&doc, "b").rotation, 45.0);
@@ -1730,7 +1731,7 @@ mod tests {
         // The group frame spans (10, 10)–(80, 80): its bottom-right rotation
         // handle sits past (80, 80) on the diagonal.
         let d = f64::from(crate::select::ROTATE_OFFSET_PX) / std::f64::consts::SQRT_2;
-        let _ = e.press(Button::Left, &v, (80.0 + d, 80.0 + d), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (80.0 + d, 80.0 + d), &mut doc, &brush());
         // A quarter turn: the handle goes from 45° to 135° around (45, 45).
         let r = (35.0 + d) * std::f64::consts::SQRT_2;
         let to = (45.0 - r * 0.5f64.sqrt(), 45.0 + r * 0.5f64.sqrt());
@@ -1753,7 +1754,7 @@ mod tests {
         let mut doc = board();
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &brush());
         let _ = e.moved(&v, (90.0, 90.0), &mut doc);
         assert_ne!(doc.elements, board().elements);
         assert!(e.escape(&mut doc));
@@ -1804,7 +1805,7 @@ mod tests {
         let mut e = pencil();
         let mut doc = board();
         let v = view();
-        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &v, (70.0, 70.0), &mut doc, &brush());
         assert!(e.is_drawing());
         assert!(e.selection().is_empty());
     }
@@ -2313,7 +2314,7 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
         e.set_tool(Tool::Pencil, &mut doc);
-        let _ = e.press(Button::Left, &view(), (10.0, 10.0), &mut doc, &BRUSH);
+        let _ = e.press(Button::Left, &view(), (10.0, 10.0), &mut doc, &brush());
         let _ = e.moved(&view(), (20.0, 20.0), &mut doc);
         assert!(e.is_drawing());
         let _ = e.paste_image(&mut doc, &view(), None, BLOB.into(), (10, 10));
