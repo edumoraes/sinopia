@@ -15,6 +15,7 @@ mod gfx;
 mod grid;
 mod ipc;
 mod scene;
+mod select;
 mod store;
 mod theme;
 

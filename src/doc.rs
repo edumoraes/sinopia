@@ -35,6 +35,15 @@ pub enum Element {
     Path(Path),
 }
 
+impl Element {
+    pub fn id(&self) -> &str {
+        match self {
+            Element::Rect(r) => &r.id,
+            Element::Path(p) => &p.id,
+        }
+    }
+}
+
 /// `x, y, w, h` is the box before rotation; `rotation` turns it about its
 /// center, in degrees, clockwise on screen (y down, as in SVG). Absent on
 /// disk when zero, so unrotated boards keep the §6.1 shape.

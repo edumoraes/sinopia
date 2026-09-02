@@ -17,6 +17,10 @@ pub struct Theme {
     pub icon: Rgba,
     pub icon_active: Rgba,
     pub active_bg: Rgba,
+    /// Selection outline, handles' border, marquee.
+    pub selection: Rgba,
+    /// Handle body.
+    pub handle: Rgba,
 }
 
 const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
@@ -56,6 +60,8 @@ impl Theme {
             icon: mix(ink, bg_c, 0.15),
             icon_active: parse_color(accent),
             active_bg: mix(panel, ink, 0.09),
+            selection: parse_color(accent),
+            handle: panel,
         }
     }
 }

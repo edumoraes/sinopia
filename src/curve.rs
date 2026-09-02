@@ -350,7 +350,7 @@ fn len(v: Point) -> f64 {
 
 /// Distance from `p` to the segment `ab`; the distance to `a` when the
 /// segment is degenerate.
-fn point_segment_distance(p: Point, a: Point, b: Point) -> f64 {
+pub fn point_segment_distance(p: Point, a: Point, b: Point) -> f64 {
     let ab = sub(b, a);
     let ap = sub(p, a);
     let ab_len_sq = dot(ab, ab);
