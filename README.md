@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 432 tests.
+- `cargo build` clean, `cargo test` with 431 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -55,21 +55,19 @@ selection, navigation, pasted images, and projects in tabs:
   opacity — so a stroke crossing itself does not darken, and a soft
   edge has no beads at the joints. Hardness spends `1 − hardness` of
   the radius on the edge ramp, inside the nominal width.
-- Brush palette: picking the brush brings up Sketchbook's panel on the
-  left, one shelf of the library at a time. A row per brush — a dab
-  drawn with that brush's own size, opacity and edge, so the row looks
-  like what it paints, and its name beside it — with the one in the
-  hand filled. Down the panel's right edge stands the rail Sketchbook
-  puts there: size on top, opacity under it, each a slider standing on
-  end, full at the top, grabbed anywhere across the rail and dragged
-  from there. The size slider moves over the cube of its travel, so the
-  widths people draw with get the first third of it instead of being
-  crushed against the bottom of 1–500. The header names the shelf and
-  offers the next one, and an arrow curling back on itself puts the
-  brush back the way it shipped. It is the tool's own chrome: it comes
-  and goes with the brush, and `Shift+B` shuts it without putting the
-  brush down. A window too short for the shelf cuts it and the wheel
-  walks the list.
+- Brush palette: picking the brush brings up Sketchbook's Brush Library
+  on the left. Every set stands one under the next in a single scroll —
+  its name, then its brushes as a grid of icons six across, drawn with
+  Sketchbook's own art — and the brush in the hand wears a ring. Above
+  them a preview says which brush it is: its icon, its name, the set it
+  came off, and a dab of what it actually lays. The icon is the art and
+  may promise a mark the canvas cannot stamp yet; the dab is the part
+  that cannot. Two buttons there open Brush Properties and put the
+  brush back the way it shipped. 211 brushes fit no window, so the
+  panel is a scroll area with a thumb: the wheel over it walks the
+  list, and taking up a brush brings its cell into sight. It is the
+  tool's own chrome: it comes and goes with the brush, and `Shift+B`
+  shuts it without putting the brush down.
 - Brush properties: a bar floats under the tab strip while the brush is
   in hand — the brush's name, a dot after it while it is off the
   settings it shipped with, and the pair a brush is judged by, Size and
@@ -84,7 +82,7 @@ selection, navigation, pasted images, and projects in tabs:
   drawn in ink; every other slider is muted. It still moves, and it
   still writes the brush's own value, but the muting is the bar saying
   it does not promise paint yet: the stamp engine those belong to is
-  still ahead. The palette's sliders button opens the same panel.
+  still ahead. The palette's `≡` opens the same panel.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it
@@ -202,11 +200,11 @@ the stamp engine every muted slider in the properties bar waits on.
 | `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
 | Left drag (Brush) | Paint with the brush; the stroke is fitted to Béziers on release |
 | `Shift` + `B` | Show / hide the brush palette |
-| Palette `≡` (sliders) / bar chevron | Open / fold Brush Properties |
+| Palette `≡` / bar chevron | Open / fold Brush Properties |
 | Drag a slider in the bar | That property of the brush in hand |
-| Click a row in the palette | Take up that brush |
-| Drag the palette's rails | Brush size (top) / opacity (bottom) |
-| Palette `▤` / `↺` | The library's next shelf / the brush as it shipped |
+| Click an icon in the palette | Take up that brush |
+| Wheel over the palette | Walk the library |
+| Palette `↺` | Put the brush back the way it shipped |
 | `[` / `]` (Brush selected) | Brush smaller / larger |
 | `{` / `}` (Brush selected) | Brush softer / harder |
 | `1`–`9`, `0` (Brush selected) | Brush opacity 10%–90%, 100% |
@@ -274,7 +272,7 @@ src/theme.rs     palette: light default, derived from op: theme (pure, tested)
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
 src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)
-src/palette.rs   brush palette on the left: layout, hit-test, rows and their dabs, the size/opacity rail (pure, tested)
+src/palette.rs   brush library on the left: the shelves, the grid of icons, the preview (pure, tested)
 src/props.rs     brush properties bar under the strip: the basic pair, and the Advanced layout it drops (pure, tested)
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)

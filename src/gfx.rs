@@ -199,6 +199,10 @@ pub struct Gfx {
     /// stays out of `slots`: that map is sha256 to texture (§9.3), and a
     /// name that is not a bare hash has no business in it.
     atlas: Option<u32>,
+    /// The sheet of brush icons, once it has been uploaded. Built into
+    /// the binary and the same at every scale, so unlike the glyph atlas
+    /// it is uploaded once and never replaced.
+    icons: Option<u32>,
     /// The window-sized texture a group is composited in, once a frame
     /// has needed one. Rebuilt when the window changes size; like the
     /// atlas, a slot of its own and never an entry in `slots`.
@@ -362,6 +366,7 @@ impl Gfx {
             sampler,
             textures: vec![blank],
             slots: ImageSlots::new(),
+            icons: None,
             atlas: None,
             scratch: None,
         })
@@ -463,6 +468,27 @@ impl Gfx {
             }
         };
         self.atlas = Some(slot);
+        Ok(slot)
+    }
+
+    /// Uploads the brush icon sheet and answers its slot, or the slot it
+    /// already has. Like the glyph atlas it is not a blob and stays out
+    /// of `slots`.
+    pub fn upload_icons(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        if let Some(slot) = self.icons {
+            return Ok(slot);
+        }
+        let group = upload(
+            &self.device,
+            &self.queue,
+            &self.tex_bgl,
+            &self.sampler,
+            texture_format(self.config.format),
+            bmp,
+        )?;
+        self.textures.push(group);
+        let slot = (self.textures.len() - 1) as u32;
+        self.icons = Some(slot);
         Ok(slot)
     }
 

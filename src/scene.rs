@@ -339,6 +339,13 @@ impl Prim {
         }
     }
 
+    /// One cell of a sheet, painted as it is: the box `r` filled with the
+    /// slice `uv` names of the texture in `slot`, untinted. What draws a
+    /// brush's icon, which carries its own colors.
+    pub fn sprite(r: ScreenRect, uv: [f32; 4], slot: u32) -> Prim {
+        Prim::glyph(r, uv, slot, NO_TINT)
+    }
+
     /// One glyph: the box `r` filled with the cell `uv` names in the atlas
     /// living in `slot`. The atlas is white, so `color` is the ink.
     pub fn glyph(r: ScreenRect, uv: [f32; 4], slot: u32, color: Rgba) -> Prim {

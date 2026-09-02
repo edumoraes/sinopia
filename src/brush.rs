@@ -529,30 +529,13 @@ pub struct Set {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Library {
     sets: Vec<Set>,
-    pinned: usize,
-    /// The brush in the hand: which set, and which brush of it. It is
-    /// not the same as the pinned set — pinning changes what is on show,
-    /// never what is painting.
+    /// The brush in the hand: which set, and which brush of it.
     selected: (usize, usize),
 }
 
 impl Library {
     pub fn sets(&self) -> &[Set] {
         &self.sets
-    }
-
-    pub fn pinned(&self) -> &Set {
-        &self.sets[self.pinned]
-    }
-
-    pub fn pinned_index(&self) -> usize {
-        self.pinned
-    }
-
-    pub fn pin(&mut self, set: usize) {
-        if set < self.sets.len() {
-            self.pinned = set;
-        }
     }
 
     pub fn selected(&self) -> (usize, usize) {
@@ -693,7 +676,6 @@ impl Default for Library {
         }
         Library {
             sets,
-            pinned: 0,
             selected: (0, 0),
         }
     }
@@ -714,7 +696,6 @@ impl Library {
                     stamp: false,
                 }],
             }],
-            pinned: 0,
             selected: (0, 0),
         }
     }
@@ -1042,7 +1023,7 @@ mod tests {
         assert_eq!(total, 211);
         assert_eq!(lib.sets()[0].name, "Basic", "the shelf it opens on");
         assert_eq!(lib.selected(), (0, 0), "the first brush of the first set");
-        assert_eq!(*lib.brush(), lib.pinned().presets[0].brush);
+        assert_eq!(*lib.brush(), lib.sets()[0].presets[0].brush);
         assert!(!lib.name().is_empty());
         for name in ["Legacy", "Markers", "Fine Art", "Half Tone", "Smudge"] {
             assert!(
@@ -1186,14 +1167,13 @@ mod tests {
     }
 
     #[test]
-    fn pinning_another_set_leaves_the_brush_in_hand_alone() {
+    fn a_brush_can_be_taken_off_any_shelf() {
         let mut lib = Library::default();
-        let held = *lib.brush();
-        lib.pin(1);
-        assert_eq!(lib.pinned_index(), 1);
-        assert_eq!(lib.pinned().name, lib.sets()[1].name);
-        assert_eq!(*lib.brush(), held, "the palette changed, not the hand");
-        assert_eq!(lib.selected(), (0, 0));
+        let last = lib.sets().len() - 1;
+        lib.select(last, 0);
+        assert_eq!(lib.selected(), (last, 0));
+        assert_eq!(*lib.brush(), lib.sets()[last].presets[0].brush);
+        assert_eq!(lib.name(), lib.sets()[last].presets[0].name);
     }
 
     #[test]
@@ -1203,8 +1183,6 @@ mod tests {
         lib.select(999, 0);
         lib.select(0, 999);
         assert_eq!(lib.selected(), held);
-        lib.pin(999);
-        assert_eq!(lib.pinned_index(), 0);
     }
 
     #[test]

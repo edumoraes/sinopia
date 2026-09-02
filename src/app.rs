@@ -17,7 +17,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::bitmap::{self, Bitmap};
-use crate::brush::{self, Library, Property};
+use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
@@ -68,18 +68,6 @@ enum UserEvent {
     },
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
-}
-
-/// A slider the pointer has taken, on whichever of the brush's two
-/// panels it belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Grab {
-    /// The palette's rail, standing on end: it is addressed by the
-    /// property, since the rail carries one each.
-    Rail(Property),
-    /// A field of the properties bar, by its place in the layout — the
-    /// same property sits somewhere else when the bar is folded.
-    Field(usize),
 }
 
 /// What happens to a project once the dialog it is waiting on answers.
@@ -135,10 +123,15 @@ struct App {
     palette_scroll: f32,
     /// Brush Properties' Advanced layout is dropped under the bar.
     props_open: bool,
-    /// The slider the pointer took, if any. A slider keeps the pointer
-    /// until the button comes up, so a drag off the track still moves
-    /// it — as every slider does.
-    grab: Option<Grab>,
+    /// The properties bar's slider the pointer took, if any. It keeps the
+    /// pointer until the button comes up, so a drag off the track still
+    /// moves it — as every slider does.
+    grab: Option<usize>,
+    /// Where the brush icon sheet was uploaded, once it has been.
+    icon_slot: u32,
+    /// The brush the palette last brought into sight. A change of hand
+    /// glides the list to it; scrolling away from it does not snap back.
+    shown_brush: Option<(usize, usize)>,
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
@@ -440,6 +433,7 @@ impl App {
         {
             self.palette_scroll = pal.scroll();
         }
+        self.follow_brush();
         self.follow_active();
     }
 
@@ -465,6 +459,22 @@ impl App {
             self.scroll = want;
             self.redraw();
         }
+    }
+
+    /// Brings the brush in the hand into the palette's band when it
+    /// changes. Edge-triggered on which brush it is, so picking one on
+    /// another shelf shows it while scrolling away from it does not snap
+    /// back.
+    fn follow_brush(&mut self) {
+        let held = self.brushes.selected();
+        if self.shown_brush == Some(held) {
+            return;
+        }
+        self.shown_brush = Some(held);
+        let Some(view) = self.view() else { return };
+        let Some(pal) = self.palette(&view) else { return };
+        let (set, index) = held;
+        self.palette_scroll = pal.scroll_showing(self.brushes.sets(), set, index);
     }
 
     /// Moves the panel's list by `d` physical px, at once — the wheel
@@ -754,7 +764,7 @@ impl App {
             view.viewport,
             view.scale,
             top,
-            self.brushes.pinned(),
+            self.brushes.sets(),
             self.palette_scroll,
         ))
     }
@@ -771,25 +781,12 @@ impl App {
             || self.dock(view).hit(x, y).is_some()
     }
 
-    /// A click on the brush palette. A rail keeps the pointer: the press
-    /// writes where it landed and the drag carries on from there.
-    fn palette_hit(&mut self, pal: &Palette, hit: palette::Hit, y: f64) {
+    /// A click on the brush palette.
+    fn palette_hit(&mut self, hit: palette::Hit) {
         match hit {
-            palette::Hit::Brush(i) => {
-                let shelf = self.brushes.pinned_index();
-                self.brushes.select(shelf, i);
-            }
-            palette::Hit::Set => {
-                let next = (self.brushes.pinned_index() + 1) % self.brushes.sets().len();
-                self.brushes.pin(next);
-                self.palette_scroll = 0.0;
-            }
+            palette::Hit::Brush(set, index) => self.brushes.select(set, index),
             palette::Hit::Properties => self.props_open = !self.props_open,
             palette::Hit::Reset => self.brushes.reset(),
-            palette::Hit::Rail(property) => {
-                self.grab = Some(Grab::Rail(property));
-                self.drag_rail(pal, property, y);
-            }
             palette::Hit::Panel => {}
         }
     }
@@ -799,18 +796,11 @@ impl App {
         match hit {
             props::Hit::Toggle => self.props_open = !self.props_open,
             props::Hit::Slider(i) => {
-                self.grab = Some(Grab::Field(i));
+                self.grab = Some(i);
                 self.drag_field(bar, i, x);
             }
             props::Hit::Bar => {}
         }
-    }
-
-    /// The palette's rails run down the panel, so a drag on one reads
-    /// the pointer's y.
-    fn drag_rail(&mut self, pal: &Palette, property: Property, y: f64) {
-        let f = pal.fraction(property, y);
-        property.set_fraction(self.brushes.brush_mut(), f);
     }
 
     /// The bar's fields lie flat, so a drag on one reads the x. The
@@ -855,6 +845,26 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// The brush icon sheet, built into the binary. Uploaded once: it is
+    /// raster art, the same at every scale, unlike the glyph atlas.
+    fn ensure_icons(&mut self) {
+        if self.icon_slot != 0 {
+            return;
+        }
+        const SHEET: &[u8] = include_bytes!("../assets/brushes/icons.png");
+        let bmp = match bitmap::decode(SHEET) {
+            Ok(b) => b,
+            // Without it the palette draws no icons and the grid is bare;
+            // the names and the preview's dab still say what is what.
+            Err(e) => return log::error!("brush icons did not decode: {e}"),
+        };
+        let Some(gfx) = &mut self.gfx else { return };
+        match gfx.upload_icons(&bmp) {
+            Ok(slot) => self.icon_slot = slot,
+            Err(e) => log::error!("brush icons did not upload: {e}"),
+        }
     }
 
     /// Builds and uploads the glyph atlas for the current scale factor,
@@ -916,16 +926,13 @@ impl App {
         }
         frame.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
         if let (Some(pal), Some(atlas)) = (self.palette(view), self.atlas.as_ref()) {
-            // The shelf on show is not always the one the brush came
-            // off: only then does a row read as the one in hand.
-            let (shelf, index) = self.brushes.selected();
-            let selected = (shelf == self.brushes.pinned_index()).then_some(index);
             frame.extend(pal.prims(
-                self.brushes.pinned(),
-                selected,
+                self.brushes.sets(),
+                self.brushes.selected(),
                 self.brushes.brush(),
                 atlas,
                 self.atlas_slot,
+                self.icon_slot,
                 &self.theme,
             ));
         }
@@ -1047,7 +1054,7 @@ impl App {
             && let Some(hit) = pal.hit(x, y)
         {
             if button == Button::Left {
-                self.palette_hit(&pal, hit, y);
+                self.palette_hit(hit);
                 self.redraw();
             }
             return self.update_cursor_icon();
@@ -1121,20 +1128,11 @@ impl App {
             return self.update_cursor_icon();
         }
         // A slider has the pointer to itself, wherever it wanders to.
-        if let Some(grab) = self.grab {
-            if let Some(view) = self.view() {
-                match grab {
-                    Grab::Rail(property) => {
-                        if let Some(pal) = self.palette(&view) {
-                            self.drag_rail(&pal, property, y);
-                        }
-                    }
-                    Grab::Field(field) => {
-                        if let Some(bar) = self.props(&view) {
-                            self.drag_field(&bar, field, x);
-                        }
-                    }
-                }
+        if let Some(field) = self.grab {
+            if let Some(view) = self.view()
+                && let Some(bar) = self.props(&view)
+            {
+                self.drag_field(&bar, field, x);
             }
             self.redraw();
             return self.update_cursor_icon();
@@ -1408,6 +1406,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }));
                 self.window = Some(window);
                 self.ensure_atlas();
+                self.ensure_icons();
                 self.load_images();
                 self.redraw();
             }
@@ -1444,6 +1443,7 @@ impl App {
                 // The chrome is sized in logical px: a new scale factor
                 // asks for glyphs at a new size.
                 self.ensure_atlas();
+                self.ensure_icons();
                 self.redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1625,6 +1625,8 @@ pub fn run(
         palette_scroll: 0.0,
         props_open: false,
         grab: None,
+        icon_slot: 0,
+        shown_brush: None,
         carry: None,
         slides: layers::Slides::default(),
         scroll: 0.0,
