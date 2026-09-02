@@ -41,15 +41,20 @@ selection, navigation, pasted images, and projects in tabs:
   the radius on the edge ramp, inside the nominal width.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
-  a layer. `Shift+L` shows and hides the panel on the right: one row
-  per layer, top first, with an eye to show or hide it and the active
-  layer highlighted; the header has up, down, add and remove. New ink
-  and pastes land on the active layer; picking an element with the
-  select tool makes its layer active. A hidden layer paints nothing
-  and cannot be hit or marqueed; hiding one deselects what was on it,
-  removing one takes its elements along, and the last layer stays.
-  Boards from before have no `layers`: they get `Layer 1` on load, and
-  their elements join it.
+  a layer. A handle on the header's line pulls the panel out and puts
+  it back — closed it hangs off the window's right edge as `◀ Layers`,
+  open it steps aside to the panel's left, a chevron alone; `Shift+L`
+  does the same from the keyboard. The panel is one row per layer, top
+  first, with an eye to show or hide it and the active layer
+  highlighted; the header has up, down, add and remove. A row dragged
+  by its name carries its layer through the stack, live: the rows
+  reorder under the pointer and the layer is left where the button
+  comes up. New ink and pastes land on the active layer; picking an
+  element with the select tool makes its layer active. A hidden layer
+  paints nothing and cannot be hit or marqueed; hiding one deselects
+  what was on it, removing one takes its elements along, and the last
+  layer stays. Boards from before have no `layers`: they get `Layer 1`
+  on load, and their elements join it.
 - Select: click picks the topmost element, `Shift`+click toggles one in
   or out, dragging on empty canvas draws a marquee that selects whatever
   it overlaps (`Shift` adds to the selection). The selection shows its
