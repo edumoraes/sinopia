@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 339 tests.
+- `cargo build` clean, `cargo test` with 360 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -41,31 +41,36 @@ selection, navigation, pasted images, and projects in tabs:
   the radius on the edge ramp, inside the nominal width.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
-  a layer. A handle on the header's line pulls the panel out and puts
-  it back — closed it hangs off the window's right edge as `◀ Layers`,
-  open it steps aside to the panel's left, a chevron alone; `Shift+L`
-  does the same from the keyboard. The panel is one card per layer, top
-  first — a hairline border and a light shadow each, the active one
-  filled — with an eye to show or hide it; the header has up, down, add
-  and remove. A card dragged by its name leaves the stack and follows
-  the pointer instead of stepping from row to row: it grows a little,
-  turns a couple of degrees clockwise, leans toward the canvas, takes a
-  blue outline and a shadow with further to fall, and draws over the
-  cards it passes. The lift eases in over about a seventh of a second
-  and runs backwards when the card is let go, so nothing snaps. The
-  stack reorders live under the pointer — the cards it passes slide out
-  of its way rather than jumping — and the layer is left where the
-  button comes up. The panel is a scroll area: it grows to the room the
-  window has, cuts the card at its edge, and shows a thumb for how much
-  of the stack is in view; the wheel over it walks the list. Picking an
-  element on the canvas makes its layer active, and the panel glides to
-  bring that card into sight. New ink and
-  pastes land on the active layer; picking an
-  element with the select tool makes its layer active. A hidden layer
-  paints nothing and cannot be hit or marqueed; hiding one deselects
-  what was on it, removing one takes its elements along, and the last
-  layer stays. Boards from before have no `layers`: they get `Layer 1`
-  on load, and their elements join it.
+  a layer. A handle on the header's line pulls the panel out and puts it
+  back — closed it stands on end off the window's right edge: a chevron
+  pointing the way the panel comes, the word `Layers` turned a quarter
+  turn counter-clockwise so it reads up the tab with its letters facing
+  the canvas, and under it `Shift+L` on a key of its own, so the
+  shortcut is taught by the thing it makes unnecessary. Open it steps
+  aside to the panel's left, a chevron alone — the header behind it
+  already says the word, and a shut door is the only one worth a
+  shortcut. A window too short to letter the tab gives up the key first,
+  then the word. The panel is one card per layer, top first — a hairline
+  border and a light shadow each, the active one filled — with an eye to
+  show or hide it; the header has up, down, add and remove. A card
+  dragged by its name leaves the stack and follows the pointer instead
+  of stepping from row to row: it grows a little, turns a couple of
+  degrees clockwise, leans toward the canvas, takes a blue outline and a
+  shadow with further to fall, and draws over the cards it passes. The
+  lift eases in over about a seventh of a second and runs backwards when
+  the card is let go, so nothing snaps. The stack reorders live under
+  the pointer — the cards it passes slide out of its way rather than
+  jumping — and the layer is left where the button comes up. The panel
+  is a scroll area: it grows to the room the window has, cuts the card
+  at its edge, and shows a thumb for how much of the stack is in view;
+  the wheel over it walks the list. Picking an element on the canvas
+  makes its layer active, and the panel glides to bring that card into
+  sight. New ink and pastes land on the active layer; picking an element
+  with the select tool makes its layer active. A hidden layer paints
+  nothing and cannot be hit or marqueed; hiding one deselects what was
+  on it, removing one takes its elements along, and the last layer
+  stays. Boards from before have no `layers`: they get `Layer 1` on
+  load, and their elements join it.
 - Select: click picks the topmost element, `Shift`+click toggles one in
   or out, dragging on empty canvas draws a marquee that selects whatever
   it overlaps (`Shift` adds to the selection). The selection shows its

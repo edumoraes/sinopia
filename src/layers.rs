@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::doc::Layer;
-use crate::scene::{Prim, ScreenRect, Viewport, icon_prims, mix};
+use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix};
 use crate::text::Atlas;
 use crate::theme::Theme;
 
@@ -49,8 +49,8 @@ const BAR_MIN: f32 = 24.0;
 /// How long the lift takes to come on, and to go off again.
 pub const LIFT_SECONDS: f32 = 0.14;
 const BUTTON_GAP: f32 = 2.0;
-/// Between an icon and the label beside it: a row's eye and its name,
-/// the handle's chevron and its word.
+/// Between an icon and the label it introduces: a row's eye and its name,
+/// the handle's chevron and the word under it.
 const LABEL_GAP: f32 = 6.0;
 /// The clickable area around the eye, past the box itself.
 const EYE_SLOP: f32 = 2.0;
@@ -60,13 +60,27 @@ const ICON_STROKE: f32 = 1.5;
 const PUPIL: f32 = 2.5;
 const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
-/// The handle: a pill on the header's line.
-const HANDLE_H: f32 = 28.0;
-/// Inside the handle, left and right of what it carries.
+/// The handle: a tab on the header's line, standing on end. This is its
+/// short side — the long one is however much it carries.
+const HANDLE_W: f32 = 28.0;
+/// Inside the handle, above and below what it carries.
 const HANDLE_PAD: f32 = 8.0;
 /// Between the handle and the panel it opens.
 const HANDLE_GAP: f32 = 8.0;
 const TITLE: &str = "Layers";
+/// The shortcut the handle teaches, on a key of its own under the word.
+const KBD: &str = "Shift+L";
+/// The key: this much across the tab, this much padding at either end of
+/// the letters, and corners of its own.
+const KBD_W: f32 = 18.0;
+const KBD_PAD: f32 = 5.0;
+const KBD_RADIUS: f32 = 4.0;
+/// Between the word and the key under it.
+const KBD_GAP: f32 = 8.0;
+/// A quarter turn counter-clockwise: what the word and the key's letters
+/// take, so they read up the tab instead of across the window, their tops
+/// facing the canvas the panel comes out over.
+const QUARTER: f32 = -std::f32::consts::FRAC_PI_2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelHit {
@@ -621,19 +635,26 @@ impl Panel {
     }
 }
 
-/// The panel's handle: a pill on the header's line that pulls the panel
-/// out and puts it back. Closed it hangs off the window's right edge and
-/// carries the panel's word, so the panel is findable without knowing
-/// `Shift+L`; open it steps aside to the panel's left, a chevron alone —
-/// the header behind it already says "Layers".
+/// The panel's handle: a tab on the header's line that pulls the panel
+/// out and puts it back. Closed it hangs off the window's right edge,
+/// standing on end: the chevron on the header's line, and under it the
+/// panel's word turned a quarter turn counter-clockwise so it reads up
+/// the tab, then the shortcut on a key of its own. The word makes the panel
+/// findable without knowing `Shift+L`; the key is how it stops being
+/// needed. Open it steps aside to the panel's left, a chevron alone — the
+/// header behind it already says "Layers", and a shortcut is only worth
+/// teaching for the door that is shut.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Handle {
     pub rect: ScreenRect,
     /// True while the panel is up: the chevron points back.
     pub open: bool,
     chevron: ScreenRect,
-    /// Where the word's pen starts. Only drawn while closed.
-    label_x: f32,
+    /// Where the word's pen starts, running down the tab. Absent while
+    /// the panel is up, or the window too short to letter it.
+    word_y: Option<f32>,
+    /// The key under the word, when the window has room for it too.
+    kbd: Option<ScreenRect>,
     scale: f32,
 }
 
@@ -643,34 +664,52 @@ impl Handle {
     pub fn layout(viewport: Viewport, scale: f64, top: f32, atlas: &Atlas, open: bool) -> Handle {
         let s = scale as f32;
         let icon = ICON_BOX * s;
-        let w = 2.0 * HANDLE_PAD * s
-            + icon
-            + if open {
-                0.0
-            } else {
-                LABEL_GAP * s + atlas.measure(TITLE)
-            };
+        let w = HANDLE_W * s;
         let right = if open {
             (viewport.w as f32 - (MARGIN + WIDTH) * s).round() - HANDLE_GAP * s
         } else {
             (viewport.w as f32 - MARGIN * s).round()
         };
         let x = right - w;
-        let h = HANDLE_H * s;
-        // On the header's line, so a click that toggles the panel does
-        // not slide the handle out from under the pointer that made it.
-        let y = (top + (MARGIN + PADDING + (HEADER - HANDLE_H) / 2.0) * s).round();
+        // The chevron is on the header's line whether the tab under it is
+        // lettered or not, so a click that toggles the panel does not
+        // slide the handle out from under the pointer that made it.
+        let y = (top + (MARGIN + PADDING + HEADER / 2.0 - HANDLE_PAD - ICON_BOX / 2.0) * s).round();
         let chevron = ScreenRect {
-            x: x + HANDLE_PAD * s,
-            y: y + (h - icon) / 2.0,
+            x: x + (w - icon) / 2.0,
+            y: y + HANDLE_PAD * s,
             w: icon,
             h: icon,
+        };
+        // What the tab carries, measured down from the chevron — and what
+        // the window has room for, down to the margin it keeps from its
+        // own bottom edge.
+        let word_y = chevron.y + icon + LABEL_GAP * s;
+        let word = atlas.measure(TITLE);
+        let kbd_len = 2.0 * KBD_PAD * s + atlas.measure(KBD);
+        let kbd = ScreenRect {
+            x: x + (w - KBD_W * s) / 2.0,
+            y: word_y + word + KBD_GAP * s,
+            w: KBD_W * s,
+            h: kbd_len,
+        };
+        let end = |bottom: f32| bottom + HANDLE_PAD * s;
+        let room = viewport.h as f32 - MARGIN * s;
+        let (word_y, kbd, h) = if open {
+            (None, None, 2.0 * HANDLE_PAD * s + icon)
+        } else if end(kbd.y + kbd.h) <= room {
+            (Some(word_y), Some(kbd), end(kbd.y + kbd.h) - y)
+        } else if end(word_y + word) <= room {
+            (Some(word_y), None, end(word_y + word) - y)
+        } else {
+            (None, None, 2.0 * HANDLE_PAD * s + icon)
         };
         Handle {
             rect: ScreenRect { x, y, w, h },
             open,
             chevron,
-            label_x: (chevron.x + chevron.w + LABEL_GAP * s).round(),
+            word_y,
+            kbd,
             scale: s,
         }
     }
@@ -680,10 +719,10 @@ impl Handle {
     }
 
     /// Paint order: shadow, border, body, the chevron, and — closed — the
-    /// word it opens.
+    /// word it opens and the key that opens it.
     pub fn prims(&self, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
         let s = self.scale;
-        let radius = self.rect.h / 2.0;
+        let radius = self.rect.w.min(self.rect.h) / 2.0;
         let mut out = vec![
             Prim::soft(
                 self.rect.offset(0.0, SHADOW_OFFSET * s),
@@ -704,14 +743,54 @@ impl Handle {
             s,
             theme.icon,
         ));
-        if !self.open {
-            let baseline = atlas.baseline_in(self.rect);
-            for g in atlas.layout(TITLE, self.label_x, baseline) {
-                out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
-            }
+        let across = (self.rect.x, self.rect.w);
+        if let Some(top) = self.word_y {
+            out.extend(reading_up(atlas, TITLE, across, top, slot, theme.ink));
+        }
+        if let Some(k) = self.kbd {
+            out.push(Prim::rounded(k.inset(-s), KBD_RADIUS * s + s, theme.border));
+            out.push(Prim::rounded(k, KBD_RADIUS * s, theme.active_bg));
+            let top = k.y + KBD_PAD * s;
+            out.extend(reading_up(atlas, KBD, (k.x, k.w), top, slot, theme.icon));
         }
         out
     }
+}
+
+/// `s` written up a tab: laid out flat, then turned [`QUARTER`] about the
+/// origin and carried into place, so it reads bottom to top down a run
+/// that starts at `top`, with its line centered across `across` — an
+/// `(x, width)` span. The turn maps `(x, y)` to `(y, -x)`: the string's
+/// own x becomes the distance back up the tab, which is why the run is
+/// carried its whole measure past `top`, and the height it was laid out
+/// in becomes the width it is centered across.
+fn reading_up(
+    atlas: &Atlas,
+    s: &str,
+    across: (f32, f32),
+    top: f32,
+    slot: u32,
+    color: Rgba,
+) -> Vec<Prim> {
+    let flat = ScreenRect {
+        x: 0.0,
+        y: 0.0,
+        w: atlas.measure(s),
+        h: across.1,
+    };
+    let baseline = atlas.baseline_in(flat);
+    atlas
+        .layout(s, 0.0, baseline)
+        .into_iter()
+        .map(|g| {
+            Prim::glyph(g.rect, g.uv, slot, color).transformed(
+                (0.0, 0.0),
+                1.0,
+                QUARTER,
+                (across.0, top + flat.w),
+            )
+        })
+        .collect()
 }
 
 // Icons as polylines on a 24×24 grid, like the dock's.
@@ -972,31 +1051,66 @@ mod tests {
         let open = handle(VP, 1.0, true);
         let p = panel(VP, 1.0, 2);
 
-        // Both sit on the header's line, so the toggle does not make the
-        // handle jump up or down under the pointer that just clicked it.
+        // Both start on the same line and the chevron sits at the same
+        // place in each, so the toggle does not make the arrow jump out
+        // from under the pointer that just clicked it.
         assert_eq!(closed.rect.y, open.rect.y);
-        assert_eq!(closed.rect.h, HANDLE_H);
-        assert_eq!(open.rect.h, HANDLE_H);
-        let (_, hy) = closed.rect.center();
+        assert_eq!(closed.chevron, open.chevron.offset(closed.rect.x - open.rect.x, 0.0));
+        let (_, cy) = closed.chevron.center();
         let (_, header_y) = p.header.center();
-        assert!((hy - header_y).abs() < 1.0, "centered on the header's line");
+        assert!((cy - header_y).abs() < 1.0, "on the header's line");
+
+        // The tab stands on end: the same short side either way, and the
+        // long one is whatever it carries.
+        assert_eq!(closed.rect.w, HANDLE_W);
+        assert_eq!(open.rect.w, HANDLE_W);
+        assert_eq!(open.rect.h, 2.0 * HANDLE_PAD + ICON_BOX);
+        assert!(
+            closed.rect.h > open.rect.h + atlas().measure(TITLE) + atlas().measure(KBD),
+            "the closed one is taller by the word and the key it carries"
+        );
 
         // Closed there is no panel, so it takes the panel's own margin
         // from the right edge; open it steps aside and leaves it clear.
         assert_eq!(closed.rect.x + closed.rect.w, 1200.0 - MARGIN);
         assert_eq!(open.rect.x + open.rect.w, p.rect.x - HANDLE_GAP);
-        assert!(
-            open.rect.w < closed.rect.w,
-            "the closed one is wider by the word it carries"
-        );
-        assert!(closed.rect.w > 2.0 * HANDLE_PAD + ICON_BOX + atlas().measure(TITLE));
     }
 
     #[test]
     fn handle_layout_scales_with_the_display() {
         let h = handle(VP, 2.0, false);
-        assert_eq!(h.rect.h, 2.0 * HANDLE_H);
+        assert_eq!(h.rect.w, 2.0 * HANDLE_W);
+        assert_eq!(h.kbd.unwrap().w, 2.0 * KBD_W);
+        assert_eq!(h.chevron.w, 2.0 * ICON_BOX);
         assert_eq!(h.rect.x + h.rect.w, 1200.0 - 2.0 * MARGIN);
+    }
+
+    #[test]
+    fn a_window_too_short_gives_up_the_key_and_then_the_word() {
+        let full = handle(VP, 1.0, false).rect.h;
+        let top = handle(VP, 1.0, false).rect.y;
+        let room = |h: f32| Viewport {
+            w: 1200,
+            h: (top + h + MARGIN).ceil() as u32,
+        };
+
+        // Room for everything, then for everything but the key, then for
+        // neither: the tab gives up its cargo before it runs off the
+        // window's bottom edge.
+        let all = handle(room(full), 1.0, false);
+        assert_eq!(all.rect.h, full);
+        assert!(all.kbd.is_some() && all.word_y.is_some());
+
+        let no_key = handle(room(full - 1.0), 1.0, false);
+        assert!(no_key.kbd.is_none(), "the key goes first");
+        assert!(no_key.word_y.is_some(), "the word still says what it opens");
+        assert!(no_key.rect.h < full);
+
+        let short = room(2.0 * HANDLE_PAD + ICON_BOX);
+        let bare = handle(short, 1.0, false);
+        assert_eq!(bare.word_y, None);
+        assert_eq!(bare.rect.h, 2.0 * HANDLE_PAD + ICON_BOX, "the chevron alone");
+        assert!(bare.rect.y + bare.rect.h + MARGIN <= short.h as f32);
     }
 
     #[test]
@@ -1038,7 +1152,11 @@ mod tests {
             .iter()
             .filter(|q| q.kind == KIND_IMAGE && q.slot == 7)
             .count();
-        assert_eq!(glyphs, TITLE.chars().count(), "it says what it opens");
+        assert_eq!(
+            glyphs,
+            TITLE.chars().count() + KBD.chars().count(),
+            "it says what it opens, and the key that opens it"
+        );
         assert!(
             chevron_tip(&prims) < closed.chevron.center().0,
             "the arrow points left, the way the panel comes out"
@@ -1048,12 +1166,60 @@ mod tests {
         let prims = open.prims(&a, 7, &theme);
         assert!(
             !prims.iter().any(|q| q.kind == KIND_IMAGE),
-            "the panel's header already says 'Layers'"
+            "the panel's header already says 'Layers', and a shut door \
+             is the only one worth a shortcut"
         );
         assert!(
             chevron_tip(&prims) > open.chevron.center().0,
             "the arrow points back, the way the panel goes"
         );
+    }
+
+    #[test]
+    fn the_word_reads_up_the_tab_with_the_shortcut_under_it() {
+        let theme = Theme::light();
+        let a = atlas();
+        let h = handle(VP, 1.0, false);
+        let prims = h.prims(&a, 7, &theme);
+        let glyphs: Vec<&Prim> = prims
+            .iter()
+            .filter(|q| q.kind == KIND_IMAGE && q.slot == 7)
+            .collect();
+
+        // Every letter has taken the same quarter turn, and none of them
+        // is left lying across the window.
+        assert!(glyphs.iter().all(|q| q.angle == QUARTER), "a quarter turn");
+
+        // Reading order runs up the tab, not across it: each letter
+        // starts above the one before, and the whole word stays inside
+        // the tab's own width.
+        let word = &glyphs[..TITLE.chars().count()];
+        for pair in word.windows(2) {
+            assert!(
+                pair[1].geom[1] < pair[0].geom[1],
+                "'{TITLE}' reads bottom to top"
+            );
+        }
+        for q in &glyphs {
+            let b = q.bounds();
+            assert!(
+                h.rect.contains_rect(&b),
+                "the letters stay on the tab: {b:?} in {:?}",
+                h.rect
+            );
+        }
+
+        // The key is a card of its own under the word, and its letters
+        // are the ones left over.
+        let kbd = h.kbd.expect("the window has room for the key");
+        assert!(kbd.y > h.word_y.unwrap() + a.measure(TITLE), "under the word");
+        assert!(
+            prims.iter().any(|q| q.bounds() == kbd && q.color == theme.active_bg),
+            "the key's own face"
+        );
+        for q in &glyphs[TITLE.chars().count()..] {
+            assert!(kbd.contains_rect(&q.bounds()), "the shortcut sits on its key");
+        }
     }
 
     #[test]
