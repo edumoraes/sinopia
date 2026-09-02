@@ -1,9 +1,9 @@
-//! Protocolo de linha (§5): schema fechado, `v: 1`, frame ≤ 64 KiB.
+//! Line protocol (§5): closed schema, `v: 1`, frame ≤ 64 KiB.
 //!
-//! O parser é manual de propósito: `deny_unknown_fields` do serde não cobre
-//! enums com tag interna + campo irmão (`v`), e "campo desconhecido → erro,
-//! não best effort" é regra da spec. Cada op declara exatamente os campos
-//! que aceita; qualquer sobra é recusada com o nome do campo no erro.
+//! The parser is hand-written on purpose: serde's `deny_unknown_fields`
+//! does not cover internally tagged enums with a sibling field (`v`), and
+//! "unknown field → error, not best effort" is a spec rule. Each op declares
+//! exactly the fields it accepts; any leftover is rejected, naming the field.
 
 use std::path::PathBuf;
 
@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 
-/// Plugin → app. Intenção, nunca conteúdo de cena.
+/// Plugin → app. Intent, never scene content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     Ping,
@@ -57,8 +57,8 @@ pub struct ThemeColors {
     pub accent: String,
 }
 
-/// App → plugin. `Saved`/`Exported` são do contrato §5; o app passa a
-/// emiti-los com autosave e export (§15 itens 4–5).
+/// App → plugin. `Saved`/`Exported` belong to the §5 contract; the app
+/// starts emitting them with autosave and export (§15 items 4–5).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "ev", rename_all = "lowercase")]
 #[allow(dead_code)]
@@ -70,23 +70,23 @@ pub enum Event {
     Exited { code: i32 },
 }
 
-/// Desserializa uma linha de request, aplicando o schema fechado.
+/// Deserializes a request line, enforcing the closed schema.
 pub fn parse_request(line: &str) -> anyhow::Result<Request> {
-    let value: Value = serde_json::from_str(line).context("JSON inválido")?;
+    let value: Value = serde_json::from_str(line).context("invalid JSON")?;
     let Value::Object(mut map) = value else {
-        anyhow::bail!("request deve ser um objeto JSON");
+        anyhow::bail!("request must be a JSON object");
     };
 
     match map.remove("v") {
         Some(Value::Number(n)) if n.as_u64() == Some(PROTOCOL_VERSION) => {}
-        Some(other) => anyhow::bail!("campo v deve ser {PROTOCOL_VERSION}, veio {other}"),
-        None => anyhow::bail!("campo v ausente"),
+        Some(other) => anyhow::bail!("field v must be {PROTOCOL_VERSION}, got {other}"),
+        None => anyhow::bail!("field v missing"),
     }
 
     let op = match map.remove("op") {
         Some(Value::String(s)) => s,
-        Some(other) => anyhow::bail!("campo op deve ser string, veio {other}"),
-        None => anyhow::bail!("campo op ausente"),
+        Some(other) => anyhow::bail!("field op must be a string, got {other}"),
+        None => anyhow::bail!("field op missing"),
     };
 
     let req = match op.as_str() {
@@ -104,15 +104,15 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         "theme" => Request::Theme {
             colors: take_colors(&mut map)?,
         },
-        other => anyhow::bail!("op desconhecida: {other:?}"),
+        other => anyhow::bail!("unknown op: {other:?}"),
     };
 
     reject_leftovers(&map, &op)?;
     Ok(req)
 }
 
-/// Serializa um request como linha de wire (JSON + `v` + `\n`) — a CLI fala
-/// o mesmo protocolo que o plugin (§5).
+/// Serializes a request as a wire line (JSON + `v` + `\n`) — the CLI speaks
+/// the same protocol as the plugin (§5).
 pub fn request_line(req: &Request) -> String {
     let mut map = Map::new();
     map.insert("v".into(), PROTOCOL_VERSION.into());
@@ -146,20 +146,20 @@ pub fn request_line(req: &Request) -> String {
     line
 }
 
-/// Serializa um evento como linha de wire (JSON + `v` + `\n`).
+/// Serializes an event as a wire line (JSON + `v` + `\n`).
 pub fn event_line(ev: &Event) -> String {
-    let mut value = serde_json::to_value(ev).expect("Event sempre vira JSON");
+    let mut value = serde_json::to_value(ev).expect("Event always serializes to JSON");
     value
         .as_object_mut()
-        .expect("Event serializa como objeto")
+        .expect("Event serializes as an object")
         .insert("v".into(), PROTOCOL_VERSION.into());
     let mut line = value.to_string();
     line.push('\n');
     line
 }
 
-/// Lê um frame (linha) de `r`, recusando frames acima de MAX_FRAME_BYTES.
-/// `Ok(None)` em EOF limpo.
+/// Reads one frame (line) from `r`, rejecting frames above MAX_FRAME_BYTES.
+/// `Ok(None)` on clean EOF.
 pub fn read_frame(r: &mut impl std::io::BufRead) -> anyhow::Result<Option<String>> {
     use std::io::{BufRead, Read};
     let mut line = String::new();
@@ -167,14 +167,11 @@ pub fn read_frame(r: &mut impl std::io::BufRead) -> anyhow::Result<Option<String
         .by_ref()
         .take(MAX_FRAME_BYTES as u64 + 1)
         .read_line(&mut line)
-        .context("lendo frame")?;
+        .context("reading frame")?;
     if n == 0 {
         return Ok(None);
     }
-    anyhow::ensure!(
-        n <= MAX_FRAME_BYTES,
-        "frame acima de {MAX_FRAME_BYTES} bytes"
-    );
+    anyhow::ensure!(n <= MAX_FRAME_BYTES, "frame above {MAX_FRAME_BYTES} bytes");
     while line.ends_with('\n') || line.ends_with('\r') {
         line.pop();
     }
@@ -184,17 +181,17 @@ pub fn read_frame(r: &mut impl std::io::BufRead) -> anyhow::Result<Option<String
 fn take_string(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<String> {
     match map.remove(key) {
         Some(Value::String(s)) => Ok(s),
-        Some(other) => anyhow::bail!("campo {key} deve ser string, veio {other}"),
-        None => anyhow::bail!("campo {key} ausente"),
+        Some(other) => anyhow::bail!("field {key} must be a string, got {other}"),
+        None => anyhow::bail!("field {key} missing"),
     }
 }
 
 fn take_formats(map: &mut Map<String, Value>) -> anyhow::Result<Vec<ExportFormat>> {
     let Some(value) = map.remove("formats") else {
-        anyhow::bail!("campo formats ausente");
+        anyhow::bail!("field formats missing");
     };
     let Value::Array(items) = value else {
-        anyhow::bail!("campo formats deve ser lista");
+        anyhow::bail!("field formats must be a list");
     };
     items
         .into_iter()
@@ -203,19 +200,19 @@ fn take_formats(map: &mut Map<String, Value>) -> anyhow::Result<Vec<ExportFormat
                 "png" => Ok(ExportFormat::Png),
                 "json" => Ok(ExportFormat::Json),
                 "md" => Ok(ExportFormat::Md),
-                other => anyhow::bail!("formato de export desconhecido: {other:?}"),
+                other => anyhow::bail!("unknown export format: {other:?}"),
             },
-            other => anyhow::bail!("formats deve conter strings, veio {other}"),
+            other => anyhow::bail!("formats must contain strings, got {other}"),
         })
         .collect()
 }
 
 fn take_colors(map: &mut Map<String, Value>) -> anyhow::Result<ThemeColors> {
     let Some(value) = map.remove("colors") else {
-        anyhow::bail!("campo colors ausente");
+        anyhow::bail!("field colors missing");
     };
     let Value::Object(mut m) = value else {
-        anyhow::bail!("campo colors deve ser objeto");
+        anyhow::bail!("field colors must be an object");
     };
     let colors = ThemeColors {
         bg: take_string(&mut m, "bg")?,
@@ -228,7 +225,7 @@ fn take_colors(map: &mut Map<String, Value>) -> anyhow::Result<ThemeColors> {
 
 fn reject_leftovers(map: &Map<String, Value>, ctx: &str) -> anyhow::Result<()> {
     if let Some(key) = map.keys().next() {
-        anyhow::bail!("campo desconhecido em {ctx}: {key:?}");
+        anyhow::bail!("unknown field in {ctx}: {key:?}");
     }
     Ok(())
 }
@@ -245,7 +242,7 @@ mod tests {
             (r#"{ "v": 1, "op": "raise" }"#, Request::Raise),
             (r#"{ "v": 1, "op": "shutdown" }"#, Request::Shutdown),
         ] {
-            assert_eq!(parse_request(line).unwrap(), want, "linha: {line}");
+            assert_eq!(parse_request(line).unwrap(), want, "line: {line}");
         }
     }
 
@@ -308,7 +305,7 @@ mod tests {
             parse_request(r#"{ "v": 1, "op": "open", "id": "x", "path": "/etc" }"#).unwrap_err();
         assert!(err.to_string().contains("path"), "{err}");
 
-        // Campo desconhecido dentro de objeto aninhado também é recusado.
+        // An unknown field inside a nested object is rejected too.
         let err = parse_request(
             r##"{ "v": 1, "op": "theme", "colors": { "bg": "#000", "fg": "#fff", "accent": "#7aa", "url": "http://x" } }"##,
         )
@@ -324,17 +321,14 @@ mod tests {
             r#"{ "v": "1", "op": "ping" }"#,
         ] {
             let err = parse_request(line).unwrap_err();
-            assert!(err.to_string().contains('v'), "linha {line}: {err}");
+            assert!(err.to_string().contains('v'), "line {line}: {err}");
         }
     }
 
     #[test]
     fn rejects_garbage() {
         for line in ["", "42", "\"ping\"", "[1,2]", "{", r#"{ "v": 1 }"#] {
-            assert!(
-                parse_request(line).is_err(),
-                "linha {line:?} deveria falhar"
-            );
+            assert!(parse_request(line).is_err(), "line {line:?} should fail");
         }
     }
 
@@ -349,7 +343,7 @@ mod tests {
 
     #[test]
     fn event_lines_match_wire_format() {
-        // serde_json sem preserve_order = chaves em ordem alfabética.
+        // serde_json without preserve_order = keys in alphabetical order.
         let line = event_line(&Event::Ready {
             id: "01J".into(),
             pid: 1234,
@@ -393,12 +387,8 @@ mod tests {
         ];
         for req in all {
             let line = request_line(&req);
-            assert!(line.ends_with('\n'), "linha deve terminar em \\n: {line:?}");
-            assert_eq!(
-                parse_request(line.trim_end()).unwrap(),
-                req,
-                "linha: {line}"
-            );
+            assert!(line.ends_with('\n'), "line must end in \\n: {line:?}");
+            assert_eq!(parse_request(line.trim_end()).unwrap(), req, "line: {line}");
         }
     }
 
@@ -409,12 +399,12 @@ mod tests {
 
     #[test]
     fn read_frame_returns_lines_then_eof() {
-        let mut input = std::io::Cursor::new(b"{\"v\":1,\"op\":\"ping\"}\nresto\n".to_vec());
+        let mut input = std::io::Cursor::new(b"{\"v\":1,\"op\":\"ping\"}\nrest\n".to_vec());
         assert_eq!(
             read_frame(&mut input).unwrap().as_deref(),
             Some("{\"v\":1,\"op\":\"ping\"}")
         );
-        assert_eq!(read_frame(&mut input).unwrap().as_deref(), Some("resto"));
+        assert_eq!(read_frame(&mut input).unwrap().as_deref(), Some("rest"));
         assert_eq!(read_frame(&mut input).unwrap(), None);
     }
 

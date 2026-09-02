@@ -1,7 +1,7 @@
-//! omawhite — whiteboard local-first para Omarchy (ver ARCHITECTURE.md).
+//! omawhite — local-first whiteboard for Omarchy (see ARCHITECTURE.md).
 //!
-//! Single-instance: se o socket responde, a intenção é encaminhada e este
-//! processo sai; senão, este processo vira a instância principal.
+//! Single instance: if the socket answers, the intent is forwarded and this
+//! process exits; otherwise this process becomes the main instance.
 
 mod app;
 mod cli;
@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
         Action::Shutdown => Request::Shutdown,
     };
 
-    // §5: segundo omawhite vira comando no socket, não segunda janela.
+    // §5: a second omawhite becomes a command on the socket, not a second window.
     if let Some(reply) = try_forward(&socket_path, &request)? {
         println!("{reply}");
         let denied = serde_json::from_str::<serde_json::Value>(&reply)
@@ -59,29 +59,29 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Ninguém escutando: ações que exigem instância viva falham explícito.
+    // Nobody listening: actions that need a live instance fail explicitly.
     match action {
         Action::Export(_) => {
-            anyhow::bail!("nenhuma instância do omawhite rodando; abra o board antes de exportar")
+            anyhow::bail!("no omawhite instance running; open the board before exporting")
         }
         Action::Shutdown => {
-            log::info!("nenhuma instância rodando; nada a encerrar");
+            log::info!("no instance running; nothing to shut down");
             Ok(())
         }
         Action::Default | Action::New | Action::Open(_) => {
             let store = open_default_store()?;
             let doc = match &action {
                 Action::New => {
-                    let doc = Document::new("sem título");
+                    let doc = Document::new("untitled");
                     store.save(&doc)?;
                     doc
                 }
                 Action::Open(id) => store.load(id)?,
-                // Sem flags: board mais recente, ou um novo se não há nenhum.
+                // No flags: the most recent board, or a new one if there is none.
                 _ => match store.index()?.first() {
                     Some(entry) => store.load(&entry.id)?,
                     None => {
-                        let doc = Document::new("sem título");
+                        let doc = Document::new("untitled");
                         store.save(&doc)?;
                         doc
                     }
@@ -94,12 +94,12 @@ fn main() -> anyhow::Result<()> {
 
 fn default_socket_path() -> anyhow::Result<std::path::PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .context("XDG_RUNTIME_DIR não definido (necessário para o socket, §5)")?;
+        .context("XDG_RUNTIME_DIR not set (required for the socket, §5)")?;
     Ok(std::path::PathBuf::from(dir).join("omawhite.sock"))
 }
 
 fn open_default_store() -> anyhow::Result<Store> {
     let xdg = std::env::var("XDG_DATA_HOME").ok();
-    let home = std::env::var("HOME").context("HOME não definido")?;
+    let home = std::env::var("HOME").context("HOME not set")?;
     Store::open(store::data_root(xdg.as_deref(), &home))
 }

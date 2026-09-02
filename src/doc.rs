@@ -1,13 +1,13 @@
-//! Documento do board: cena retida, JSON versionado (ARCHITECTURE.md §6.1).
+//! Board document: retained scene, versioned JSON (ARCHITECTURE.md §6.1).
 //!
-//! O documento é dado puro. Transformações de câmera e geometria vivem em
-//! `scene`; I/O de disco vive em `store`.
+//! The document is pure data. Camera and geometry transforms live in
+//! `scene`; disk I/O lives in `store`.
 
 use serde::{Deserialize, Serialize};
 
 use crate::curve::{self, Cubic};
 
-/// Versão de schema que este binário escreve e aceita.
+/// Schema version this binary writes and accepts.
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,7 +108,7 @@ impl Default for Camera {
 }
 
 impl Document {
-    /// Documento novo, vazio, com id ULID e câmera na origem.
+    /// New, empty document with a ULID id and the camera at the origin.
     pub fn new(title: &str) -> Self {
         Document {
             schema: SCHEMA_VERSION,
@@ -119,12 +119,12 @@ impl Document {
         }
     }
 
-    /// Desserializa e valida a versão de schema.
+    /// Deserializes and validates the schema version.
     pub fn from_json(s: &str) -> anyhow::Result<Self> {
         let doc: Document = serde_json::from_str(s)?;
         if doc.schema != SCHEMA_VERSION {
             anyhow::bail!(
-                "schema {} não suportado (este binário fala schema {})",
+                "schema {} not supported (this binary speaks schema {})",
                 doc.schema,
                 SCHEMA_VERSION
             );
@@ -132,14 +132,14 @@ impl Document {
         Ok(doc)
     }
 
-    /// Serializa para o JSON canônico do disco (pretty: debug com $EDITOR é
-    /// objetivo declarado da fase local).
+    /// Serializes to the canonical on-disk JSON (pretty: debugging with
+    /// $EDITOR is a stated goal of the local phase).
     pub fn to_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
 }
 
-/// Id novo no formato ULID (estável, ordenável por tempo — ponte para CRDT).
+/// New id in ULID format (stable, time-sortable — the bridge to a CRDT).
 pub fn new_id() -> String {
     ulid::Ulid::from_datetime(std::time::SystemTime::now()).to_string()
 }
@@ -207,19 +207,19 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
         let el = &v["elements"][0];
-        // Formato do §6.1: campos achatados + "type": "rect", não {"Rect": {...}}.
+        // §6.1 format: flattened fields + "type": "rect", not {"Rect": {...}}.
         assert_eq!(el["type"], "rect");
         assert_eq!(el["id"], "el_01");
         assert_eq!(el["x"].as_f64(), Some(40.0));
         assert_eq!(el["text"], "API Gateway");
-        // fill: null aparece explícito, como no exemplo da spec.
+        // fill: null shows up explicitly, as in the spec example.
         assert!(el.get("fill").is_some());
         assert!(el["fill"].is_null());
     }
 
     #[test]
     fn parses_the_spec_example_verbatim() {
-        // Exemplo do §6.1 da ARCHITECTURE.md, com inteiros crus no JSON.
+        // The §6.1 example from ARCHITECTURE.md, with raw integers in the JSON.
         let json = r##"{
             "schema": 1,
             "id": "01JXXXXXXXXXXXXXXXXXXXXXXX",

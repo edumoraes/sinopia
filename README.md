@@ -37,6 +37,22 @@ navigation:
 Not yet: selection, eraser, text, shapes, undo, export, Omarchy plugin,
 thumbnails.
 
+## Controls
+
+| Input | Effect |
+|---|---|
+| `V` / `H` / `P` / `Z` | Select / Hand / Pencil / Zoom tool (also clickable in the dock) |
+| `Esc` | Cancel the stroke or gesture in progress |
+| Left drag (Pencil) | Draw; the stroke is fitted to Béziers on release |
+| Left drag (Hand), `Space` + drag, middle drag | Pan |
+| Wheel, two-finger scroll | Pan (`Shift`: horizontally) |
+| Three-finger swipe | Pan (trackpad) |
+| Left drag (Zoom) or `Ctrl` + drag | Zoom in/out around the press point (100 px per 25% step) |
+| Click / right-click (Zoom or `Ctrl`) | One step (25%) in / out |
+| Wheel (Zoom active), pinch | Zoom at the cursor / on the trackpad |
+
+Zoom range is 10%–1000%. The camera is saved with the board.
+
 ## Run
 
 ```sh

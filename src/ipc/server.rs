@@ -1,6 +1,6 @@
-//! Lado servidor do socket (§5, §9.2): bind 0600, um JSON por linha,
-//! request → evento de resposta. Request malformado recebe `denied` e a
-//! conexão fecha — schema fechado não faz best effort.
+//! Server side of the socket (§5, §9.2): bind at 0600, one JSON per line,
+//! request → reply event. A malformed request gets `denied` and the
+//! connection closes — a closed schema does no best effort.
 
 use std::io::{BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -11,8 +11,8 @@ use anyhow::Context as _;
 
 use crate::ipc::proto::{Event, Request, event_line, parse_request, read_frame};
 
-/// Cliente parado não pode deixar o servidor refém (§9.2): conexão ociosa
-/// além disso é fechada — o plugin reconecta quando quiser.
+/// A stalled client must not hold the server hostage (§9.2): a connection
+/// idle beyond this is closed — the plugin reconnects whenever it wants.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Server {
@@ -21,24 +21,23 @@ pub struct Server {
 }
 
 impl Server {
-    /// Faz bind com permissão 0600. Se existir socket morto no caminho
-    /// (bind anterior sem unlink), substitui. Se houver instância viva,
-    /// devolve erro.
+    /// Binds at 0600. A stale socket at the path (earlier bind without
+    /// unlink) is replaced. A live instance yields an error.
     pub fn bind(path: &Path) -> anyhow::Result<Server> {
         match UnixListener::bind(path) {
             Ok(listener) => Server::finish_bind(listener, path),
             Err(e) if e.kind() == ErrorKind::AddrInUse => match UnixStream::connect(path) {
-                Ok(_) => anyhow::bail!("outra instância viva escutando em {path:?}"),
+                Ok(_) => anyhow::bail!("another live instance is listening on {path:?}"),
                 Err(ce) if ce.kind() == ErrorKind::ConnectionRefused => {
                     std::fs::remove_file(path)
-                        .with_context(|| format!("removendo socket morto {path:?}"))?;
+                        .with_context(|| format!("removing stale socket {path:?}"))?;
                     let listener =
-                        UnixListener::bind(path).with_context(|| format!("bind em {path:?}"))?;
+                        UnixListener::bind(path).with_context(|| format!("binding {path:?}"))?;
                     Server::finish_bind(listener, path)
                 }
-                Err(ce) => Err(ce).with_context(|| format!("sondando socket {path:?}")),
+                Err(ce) => Err(ce).with_context(|| format!("probing socket {path:?}")),
             },
-            Err(e) => Err(e).with_context(|| format!("bind em {path:?}")),
+            Err(e) => Err(e).with_context(|| format!("binding {path:?}")),
         }
     }
 
@@ -52,14 +51,14 @@ impl Server {
         })
     }
 
-    #[allow(dead_code)] // usado nos testes; produção usa após §15.3
+    #[allow(dead_code)] // used in tests; production uses it after §15.3
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Consome o servidor e serve conexões numa thread própria (uma conexão
-    /// por vez — o plugin é o único cliente esperado no MVP).
-    /// `on_request` roda na thread do servidor e devolve o evento de resposta.
+    /// Consumes the server and serves connections on its own thread (one
+    /// connection at a time — the plugin is the only expected client in the MVP).
+    /// `on_request` runs on the server thread and returns the reply event.
     pub fn serve(
         self,
         on_request: impl Fn(Request) -> Event + Send + 'static,
@@ -67,7 +66,7 @@ impl Server {
         std::thread::spawn(move || {
             for conn in self.listener.incoming() {
                 let Ok(stream) = conn else { continue };
-                // Erro numa conexão não derruba o servidor (§9.2).
+                // An error on one connection does not bring the server down (§9.2).
                 let _ = handle_conn(stream, &on_request);
             }
         })
@@ -89,7 +88,7 @@ fn handle_conn(stream: UnixStream, on_request: &impl Fn(Request) -> Event) -> an
                         reason: e.to_string(),
                     };
                     writer.write_all(event_line(&denied).as_bytes())?;
-                    break; // schema fechado: conexão que fala errado é encerrada
+                    break; // closed schema: a connection that speaks wrong is dropped
                 }
             },
             Ok(None) => break,
@@ -120,7 +119,7 @@ mod tests {
         let server = Server::bind(&path).unwrap();
         assert_eq!(server.path(), path);
         let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
-        assert_eq!(mode, 0o600, "socket deve ser 0600");
+        assert_eq!(mode, 0o600, "socket must be 0600");
     }
 
     #[test]
@@ -128,12 +127,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("omawhite.sock");
 
-        // Morto: bind + drop deixa o arquivo → o próximo bind assume.
+        // Stale: bind + drop leaves the file → the next bind takes over.
         drop(Server::bind(&path).unwrap());
         assert!(path.exists());
         let live = Server::bind(&path).unwrap();
 
-        // Vivo: segundo bind no mesmo caminho falha.
+        // Live: a second bind on the same path fails.
         assert!(Server::bind(&path).is_err());
         drop(live);
     }
@@ -150,13 +149,13 @@ mod tests {
             },
             _ => Event::Denied {
                 op: "?".into(),
-                reason: "não esperado no teste".into(),
+                reason: "unexpected in test".into(),
             },
         });
 
         let reply = try_forward(&path, &Request::Ping)
             .unwrap()
-            .expect("havia instância viva");
+            .expect("a live instance existed");
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(v["ev"], "ready");
         assert_eq!(v["id"], "01JBOARD");

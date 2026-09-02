@@ -1,104 +1,104 @@
-# Omawhite — especificação de arquitetura
+# Omawhite — architecture specification
 
-Whiteboard local-first para Omarchy.  
-Decisões desta versão: Omaboard é só referência de produto, não de código. Motor em Rust, nativo e rápido. Colaboração remota fica para depois. Este documento detalha arquitetura, tradeoffs, segurança e distribuição via plugin.
-
----
-
-## 1. Decisões travadas
-
-1. **Não forkar o Omaboard.** Ele prova que existe demanda por um board no desktop Omarchy (galeria, caneta, formas, PNG, plugin fino). O código é Qt/C++, local-only, sem export para agente. Usamos a ideia, não o repositório.
-2. **App nativo em Rust.** O canvas, o documento, o undo e o I/O vivem num binário próprio. Nada de QML desenhando stroke, nada de WebView, nada de Excalidraw embedado no MVP.
-3. **Plugin Omarchy é casca.** Sobe e derruba o processo, oferece atalho, chip na barra, tema, galeria rasa e o comando “exportar para o agente”. Não interpreta o documento.
-4. **Local primeiro.** Ferramentas de desenho, persistência, reopen, export para o cwd do agente. Sem Iroh, sem Automerge, sem áudio, sem ticket nesta fase.
-5. **Collab é um plano de transporte futuro**, não um requisito do modelo de dados atual — mas o arquivo do board deve ser *capaz* de virar um CRDT depois, sem reescrever o canvas.
-
-Nome de trabalho neste doc: **Omawhite** (binário `omawhite`, plugin id `…omawhite`). Troque quando houver nome final.
+Local-first whiteboard for Omarchy.  
+Decisions in this version: Omaboard is a product reference only, not a code reference. Engine in Rust, native and fast. Remote collaboration comes later. This document details architecture, tradeoffs, security and distribution via plugin.
 
 ---
 
-## 2. Problema que o produto resolve
+## 1. Locked decisions
 
-No Omarchy o fluxo típico é: terminal + agente (`claude`, `codex`, `opencode`, …) no workspace, Hyprland tileando tudo. Falta um quadro que:
+1. **Don't fork Omaboard.** It proves there is demand for a board on the Omarchy desktop (gallery, pen, shapes, PNG, thin plugin). The code is Qt/C++, local-only, no export for the agent. We use the idea, not the repository.
+2. **Native app in Rust.** The canvas, the document, undo and I/O live in their own binary. No QML drawing strokes, no WebView, no embedded Excalidraw in the MVP.
+3. **The Omarchy plugin is a shell.** It starts and stops the process, offers a shortcut, a chip on the bar, theme, a shallow gallery and the “export to agent” command. It does not interpret the document.
+4. **Local first.** Drawing tools, persistence, reopen, export to the agent's cwd. No Iroh, no Automerge, no audio, no ticket in this phase.
+5. **Collab is a future transport plan**, not a requirement of the current data model — but the board file must be *able* to become a CRDT later, without rewriting the canvas.
 
-- abre no atalho, sem frição;
-- deixa rabiscar arquitetura / fluxo / UI em vetor;
-- deposita o desenho **dentro da pasta do projeto** para o agente ler;
-- volta a ser editável amanhã.
-
-O Presenter Overlay resolve “rabisco em cima da demo e some”.  
-O Omaboard resolve “board local com galeria”.  
-Omawhite resolve “board que o agente come”.
+Working name in this doc: **Omawhite** (binary `omawhite`, plugin id `…omawhite`). Swap it when there is a final name.
 
 ---
 
-## 3. Princípios
+## 2. The problem the product solves
 
-- Um processo do shell, um processo do board. Crash do canvas não leva a barra.
-- O documento é soberano no filho. O plugin só fala intenção.
-- Abrir em menos de ~150 ms a quente; a frio, caber numa virada de tecla.
-- Zero rede no MVP. Binário que funciona offline depois de instalado.
-- Cada arquivo escrito no disco do usuário tem dono, modo e destino explícitos.
-- Export para agente é ação local, nunca efeito colateral de um stroke.
+On Omarchy the typical flow is: terminal + agent (`claude`, `codex`, `opencode`, …) in the workspace, Hyprland tiling everything. What's missing is a board that:
+
+- opens on a shortcut, without friction;
+- lets you sketch architecture / flow / UI in vector;
+- drops the drawing **inside the project folder** for the agent to read;
+- is editable again tomorrow.
+
+The Presenter Overlay solves “scribble over the demo and vanish”.  
+Omaboard solves “local board with gallery”.  
+Omawhite solves “board the agent eats”.
 
 ---
 
-## 4. Arquitetura
+## 3. Principles
+
+- One shell process, one board process. A canvas crash doesn't take the bar down.
+- The document is sovereign in the child. The plugin only speaks intent.
+- Open in under ~150 ms warm; cold, fit inside a keystroke.
+- Zero network in the MVP. A binary that works offline once installed.
+- Every file written to the user's disk has an explicit owner, mode and destination.
+- Export to agent is a local action, never a side effect of a stroke.
+
+---
+
+## 4. Architecture
 
 ```
- Super+… / clique na barra
+ Super+… / click on the bar
             │
             ▼
  ┌──────────────────────┐     Unix socket 0600      ┌─────────────────────────┐
- │  plugin Omarchy      │◄─────────────────────────►│  omawhite (Rust)        │
- │  omarchy-shell       │   JSON schema fechado     │                         │
+ │  Omarchy plugin      │◄─────────────────────────►│  omawhite (Rust)        │
+ │  omarchy-shell       │   closed JSON schema      │                         │
  │                      │                           │  canvas + scene graph   │
- │  bar-widget          │                           │  ferramentas            │
- │  menu / overlay raso │                           │  undo / clipboard       │
- │  spawn / kill        │                           │  persistência           │
+ │  bar-widget          │                           │  tools                  │
+ │  menu / thin overlay │                           │  undo / clipboard       │
+ │  spawn / kill        │                           │  persistence            │
  │  “export to agent”   │                           │  export png/json/md     │
  └──────────────────────┘                           └───────────┬─────────────┘
-        mesmo processo                                          │
-        que a barra                                    ~/.local/share/omawhite/
+        same process                                            │
+        as the bar                                     ~/.local/share/omawhite/
                                                        ~/Work/<proj>/docs/boards/
 ```
 
-Três peças, três ciclos de vida:
+Three pieces, three lifecycles:
 
-| Peça | Processo | Quando existe |
+| Piece | Process | When it exists |
 |---|---|---|
-| Plugin QML | `omarchy-shell` (Quickshell) | Enquanto o plugin estiver enabled |
-| Binário `omawhite` | filho do usuário | Enquanto o board estiver em uso (MVP: nasce no open, morre no close) |
-| Arquivos do board | disco | Sempre |
+| QML plugin | `omarchy-shell` (Quickshell) | While the plugin is enabled |
+| `omawhite` binary | child of the user | While the board is in use (MVP: born on open, dies on close) |
+| Board files | disk | Always |
 
-O plugin **não** embute a janela Wayland do filho no QML (foreign toplevel / xdg-foreign). No Hyprland isso quebra foco, escala, IME e tablet. O filho tem janela própria.
+The plugin does **not** embed the child's Wayland window in QML (foreign toplevel / xdg-foreign). On Hyprland that breaks focus, scaling, IME and tablet. The child has its own window.
 
-### 4.1 Responsabilidades
+### 4.1 Responsibilities
 
 **Plugin**
 
-- Registrar atalho / chip / menu.
-- Descobrir o binário (`PATH` ou `~/.local/bin/omawhite`).
-- `spawn` com `--socket` e `--board`.
-- Encerrar com `shutdown` gracioso; timeout → SIGTERM → SIGKILL.
-- Listar galeria a partir de um índice **sanitizado** (título, id, thumb path).
-- Disparar export: o plugin pode sugerir o cwd; o binário valida e escreve.
-- Pintar-se com a paleta Omarchy (`qs.Commons` / tema corrente).
+- Register shortcut / chip / menu.
+- Discover the binary (`PATH` or `~/.local/bin/omawhite`).
+- `spawn` with `--socket` and `--board`.
+- Terminate with a graceful `shutdown`; timeout → SIGTERM → SIGKILL.
+- List the gallery from a **sanitized** index (title, id, thumb path).
+- Trigger export: the plugin may suggest the cwd; the binary validates and writes.
+- Paint itself with the Omarchy palette (`qs.Commons` / current theme).
 
-**Binário**
+**Binary**
 
-- Janela, input, canvas infinito, zoom/pan.
-- Ferramentas, hit-test, snap, undo/redo.
-- Ler/gravar o documento.
-- Render de export (PNG da bbox + margem).
-- Recusar destinos de export inseguros.
-- Single-instance: segundo launch vira comando no socket, não segunda janela.
+- Window, input, infinite canvas, zoom/pan.
+- Tools, hit-test, snap, undo/redo.
+- Read/write the document.
+- Export render (PNG of the bbox + margin).
+- Refuse unsafe export destinations.
+- Single-instance: a second launch becomes a command on the socket, not a second window.
 
-**Fora dos dois (depois)**
+**Outside both (later)**
 
-- Daemon Iroh / Automerge / WebRTC. Mesmo binário, feature flag, outro thread. O plugin continua sem rede.
+- Iroh / Automerge / WebRTC daemon. Same binary, feature flag, another thread. The plugin stays network-free.
 
-### 4.2 Kinds do plugin
+### 4.2 Plugin kinds
 
 ```json
 {
@@ -108,7 +108,7 @@ O plugin **não** embute a janela Wayland do filho no QML (foreign toplevel / xd
   "version": "0.1.0",
   "author": "…",
   "license": "MIT",
-  "description": "Whiteboard local-first com export para o agente.",
+  "description": "Local-first whiteboard with export for the agent.",
   "kinds": ["bar-widget", "menu"],
   "entryPoints": {
     "barWidget": "BarWidget.qml",
@@ -123,10 +123,10 @@ O plugin **não** embute a janela Wayland do filho no QML (foreign toplevel / xd
 }
 ```
 
-- `bar-widget` — chip na barra, preview da galeria, “New board”.
-- `menu` — superfície evocada no atalho, mesma galeria, sem ocupar fullscreen.
-- `overlay` — só se quisermos picker fullscreen. Evitar overlay que *é* o canvas.
-- `service` — fase 2, se o processo passar a ficar residente. No MVP o menu/bar sobe o filho sob demanda. Não usar `kind: bar` (substitui a barra inteira).
+- `bar-widget` — chip on the bar, gallery preview, “New board”.
+- `menu` — surface summoned by the shortcut, same gallery, without taking fullscreen.
+- `overlay` — only if we want a fullscreen picker. Avoid an overlay that *is* the canvas.
+- `service` — phase 2, if the process becomes resident. In the MVP the menu/bar starts the child on demand. Don't use `kind: bar` (it replaces the whole bar).
 
 Summon:
 
@@ -134,7 +134,7 @@ Summon:
 omarchy-shell shell toggle seu.omawhite '{}'
 ```
 
-Bind sugerido (não roubar Super+W do Omawrite nem Super+D de desks):
+Suggested bind (don't steal Super+W from Omawrite or Super+D from desks):
 
 ```
 o.bind("SUPER + SHIFT + B", "Omawhite", "omarchy-shell shell toggle seu.omawhite '{}'")
@@ -144,10 +144,10 @@ o.bind("SUPER + SHIFT + B", "Omawhite", "omarchy-shell shell toggle seu.omawhite
 
 ## 5. IPC
 
-Transporte: Unix domain socket em `$XDG_RUNTIME_DIR/omawhite.sock`.  
-Permissão `0600`. Aceitar só o mesmo uid. Frame = um JSON por linha, `v: 1`, tamanho máximo (ex.: 64 KiB).
+Transport: Unix domain socket at `$XDG_RUNTIME_DIR/omawhite.sock`.  
+Permission `0600`. Accept only the same uid. Frame = one JSON per line, `v: 1`, maximum size (e.g. 64 KiB).
 
-O plugin fala intenção. O filho não manda stroke pelo socket.
+The plugin speaks intent. The child does not send strokes over the socket.
 
 ### Plugin → app
 
@@ -171,17 +171,17 @@ O plugin fala intenção. O filho não manda stroke pelo socket.
 { "v": 1, "ev": "exited", "code": 0 }
 ```
 
-Regras:
+Rules:
 
-- Schema fechado. Campo desconhecido → erro, não “best effort”.
-- Sem caminhos vindos de preview/title sem canonicalizar.
-- `export.dir` é *candidato*. O binário decide se escreve.
-- Segundo `omawhite` na CLI: se o socket vive, encaminha `open`/`new`/`raise` e sai `0`.
+- Closed schema. Unknown field → error, not “best effort”.
+- No paths coming from preview/title without canonicalizing.
+- `export.dir` is a *candidate*. The binary decides whether to write.
+- A second `omawhite` on the CLI: if the socket is alive, forward `open`/`new`/`raise` and exit `0`.
 
-CLI espelha o socket, para o plugin e para humanos:
+The CLI mirrors the socket, for the plugin and for humans:
 
 ```
-omawhite                  # raise ou galeria nativa
+omawhite                  # raise or native gallery
 omawhite --new
 omawhite --open <id>
 omawhite --export <dir>
@@ -190,22 +190,22 @@ omawhite --shutdown
 
 ---
 
-## 6. Modelo de dados (fase local)
+## 6. Data model (local phase)
 
-Diretório XDG:
+XDG directory:
 
 ```
 ~/.local/share/omawhite/
   index.json          # id, title, updated_at, thumb
-  boards/<id>.json    # documento
-  thumbs/<id>.png     # preview pequeno, sem metadados de sessão
+  boards/<id>.json    # document
+  thumbs/<id>.png     # small preview, no session metadata
 ```
 
-`index.json` é o único arquivo que o plugin lê. Título e paths tratados como texto não confiável (mesmo sendo o próprio usuário: o índice é a superfície entre dois processos).
+`index.json` is the only file the plugin reads. Title and paths are treated as untrusted text (even though it's the user themself: the index is the surface between two processes).
 
-### 6.1 Documento
+### 6.1 Document
 
-JSON versionado, cena retida — não um replay de input.
+Versioned JSON, retained scene — not an input replay.
 
 ```json
 {
@@ -225,7 +225,7 @@ JSON versionado, cena retida — não um replay de input.
 }
 ```
 
-Tipos do MVP: `path` (caneta), `rect`, `ellipse`, `arrow`, `line`, `text`, `sticky`, `image` (blob referenciado por hash local, não path absoluto).
+MVP types: `path` (pen), `rect`, `ellipse`, `arrow`, `line`, `text`, `sticky`, `image` (blob referenced by local hash, not absolute path).
 
 Landed — `path` (pencil strokes):
 
@@ -244,37 +244,37 @@ pixel at zoom 1. The stroke is simplified and fitted on release
 written before the fit landed hold a raw `points` polyline instead; those
 are fitted on load and rewritten as `curves` on the next save.
 
-Por que JSON plano agora, e não Automerge já:
+Why plain JSON now, and not Automerge already:
 
-- Menos dependência, debug com `$EDITOR`, diff no git se o usuário commitar o export.
-- Automerge no dia 1 força compactação, sync e API antes de existir o segundo peer.
+- Fewer dependencies, debugging with `$EDITOR`, git diff if the user commits the export.
+- Automerge on day 1 forces compaction, sync and API before the second peer exists.
 
-Ponte para o futuro: **cada elemento já tem `id` estável**. Collab vira “este map no CRDT”, não “reescreve o renderer”. Quando chegar a hora, `boards/<id>.json` pode passar a ser snapshot Automerge + sidecar de câmera, sem mudar a cena.
+Bridge to the future: **every element already has a stable `id`**. Collab becomes “this map in the CRDT”, not “rewrite the renderer”. When the time comes, `boards/<id>.json` can become an Automerge snapshot + camera sidecar, without changing the scene.
 
-### 6.2 O que não entra no documento
+### 6.2 What stays out of the document
 
-- Cursor, seleção, ferramenta ativa, hover.
-- Ticket, peers, áudio.
-- Cwd do agente, path de export.
+- Cursor, selection, active tool, hover.
+- Ticket, peers, audio.
+- Agent cwd, export path.
 
-Esses são estado de sessão, no processo ou no socket.
+Those are session state, in the process or on the socket.
 
 ---
 
-## 7. Stack Rust e o canvas
+## 7. Rust stack and the canvas
 
-Objetivo: vetor 2D em Wayland (Hyprland), input de mouse/tablet, texto editável, 60–120 Hz no pan/zoom, cold start baixo.
+Goal: 2D vector on Wayland (Hyprland), mouse/tablet input, editable text, 60–120 Hz on pan/zoom, low cold start.
 
-### 7.1 Três jeitos de desenhar a janela
+### 7.1 Three ways to draw the window
 
-| Stack | Prós | Contras | Veredito |
+| Stack | Pros | Cons | Verdict |
 |---|---|---|---|
-| **winit + wgpu + cena própria** (Vello/peniko ou tessellate manual) | Controle total, Wayland de primeira, sem runtime de UI imposto, binário magro | IME, acessibilidade, widgets de toolbar na mão | **Escolha padrão** |
-| iced / slint | Toolbar e diálogos mais rápido | Canvas infinito e hit-test de cena não é o forte; iced ainda muda API | Só se a chrome do app virar dor |
-| egui / eframe | Protótipo em um fim de semana | Visual imediato, texto e seleção “de ferramenta”, menos nativo | Protótipo descartável, não produto |
-| cxx-qt | Parece Omawrite | Abandona a premissa Rust-nativo | Fora |
+| **winit + wgpu + own scene** (Vello/peniko or manual tessellation) | Full control, first-class Wayland, no imposed UI runtime, lean binary | IME, accessibility, toolbar widgets by hand | **Default choice** |
+| iced / slint | Toolbar and dialogs faster | Infinite canvas and scene hit-testing aren't its strength; iced still changes API | Only if the app chrome becomes a pain |
+| egui / eframe | Prototype in a weekend | Immediate-mode look, “tool-grade” text and selection, less native | Throwaway prototype, not product |
+| cxx-qt | Looks like Omawrite | Abandons the Rust-native premise | Out |
 
-Recomendação: **winit + wgpu**. Cena retida na CPU (árvore de elementos + AABB). GPU só rasteriza frames sujos (dirty rect ou layer da viewport). Caneta: buffer de pontos na ferramenta ativa; no mouseup vira um `path` no documento — evita gravar 120 Hz no JSON.
+Recommendation: **winit + wgpu**. Retained scene on the CPU (element tree + AABB). The GPU only rasterizes dirty frames (dirty rect or viewport layer). Pen: point buffer in the active tool; on mouseup it becomes a `path` in the document — avoids writing 120 Hz into the JSON.
 
 Landed: one instanced wgpu pipeline of signed-distance primitives — rounded
 box or round-capped segment, evaluated per fragment with analytic
@@ -283,31 +283,31 @@ span, overlapping caps make the joins), rect edges, the dock and its icons.
 No tessellation, no MSAA. Per-element caching and dirty rects wait for real
 profiling.
 
-Texto: um editor inline mínimo (cosmic-text / parley), não um webview. IME via winit/smithay-client no Wayland; testar no Hyprland cedo, é a armadilha clássica.
+Text: a minimal inline editor (cosmic-text / parley), not a webview. IME via winit/smithay-client on Wayland; test on Hyprland early, it's the classic trap.
 
-Imagens: decode (image crate) → textura wgpu. Guardar original em `~/.local/share/omawhite/blobs/<sha256>`. Elemento no JSON só aponta o hash.
+Images: decode (image crate) → wgpu texture. Keep the original in `~/.local/share/omawhite/blobs/<sha256>`. The element in the JSON only points to the hash.
 
-Portais: `xdg-desktop-portal` para “abrir imagem” / “salvar PNG em outro lugar”. Não implementar file picker próprio.
+Portals: `xdg-desktop-portal` for “open image” / “save PNG elsewhere”. Don't implement a file picker of our own.
 
-### 7.2 Ferramentas do MVP
+### 7.2 MVP tools
 
-| Tecla | Ferramenta |
+| Key | Tool |
 |---|---|
-| V | select (mover, resize, multi-select) |
+| V | select (move, resize, multi-select) |
 | H | pan |
-| P | caneta |
-| E | borracha (apaga elemento, não pixel — somos vetor) |
-| R | retângulo |
-| O | elipse |
-| L | linha |
-| A | seta |
-| T | texto |
+| P | pen |
+| E | eraser (deletes the element, not pixels — we're vector) |
+| R | rectangle |
+| O | ellipse |
+| L | line |
+| A | arrow |
+| T | text |
 | N | sticky |
 | Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+0 / 1 | fit / 100% |
-| Ctrl+Shift+E | export para o último cwd conhecido ou diálogo |
+| Ctrl+Shift+E | export to the last known cwd or dialog |
 
-Borracha vetorial (hit-test + delete) é mais simples e mais útil para o agente do que eraser de pixel. Highlighter pode ser caneta com alpha, fase 1.1.
+A vector eraser (hit-test + delete) is simpler and more useful for the agent than a pixel eraser. Highlighter can be a pen with alpha, phase 1.1.
 
 Landed: tools live in a dock centered at the bottom of the canvas (rounded
 panel, one button per tool, active tool highlighted); the canvas has a
@@ -324,33 +324,33 @@ a guest client on a thread and forwards steps to the event loop (the same
 bridge shape as the IPC server). The camera persists in the document and
 is saved when a gesture ends.
 
-Snap e conectores estilo Omaboard: fase 1.1. No MVP, seta é geometria, não binding vivo.
+Omaboard-style snap and connectors: phase 1.1. In the MVP an arrow is geometry, not a live binding.
 
-### 7.3 Janela vs overlay
+### 7.3 Window vs overlay
 
-Dois modos de apresentação, um só no MVP:
+Two presentation modes, only one in the MVP:
 
-- **Janela tiled Hyprland** — o board senta ao lado do terminal do agente. Certo para o caso de uso “insumo”. Default.
-- **Layer-shell fullscreen** — rabisco rápido que some no Esc. Concorrência direta com o Presenter Overlay. Não no MVP.
+- **Tiled Hyprland window** — the board sits next to the agent's terminal. Right for the “input material” use case. Default.
+- **Fullscreen layer-shell** — quick scribble that vanishes on Esc. Direct competition with the Presenter Overlay. Not in the MVP.
 
-O plugin abre/foca a janela; o compositor tileia. Single-instance + `raise` evita 12 boards empilhados.
+The plugin opens/focuses the window; the compositor tiles it. Single-instance + `raise` avoids 12 stacked boards.
 
 ---
 
-## 8. Export para o agente
+## 8. Export for the agent
 
-É a feature que justifica não ser “mais um Omaboard”.
+This is the feature that justifies not being “yet another Omaboard”.
 
-Agentes no Omarchy rodam no cwd do projeto (launch a partir de `$HOME` cai em `~/Work`). Eles leem arquivos. PNG sozinho perde estrutura. O trio:
+Agents on Omarchy run in the project's cwd (launching from `$HOME` lands in `~/Work`). They read files. A PNG alone loses structure. The trio:
 
 ```
 <dir>/docs/boards/<slug>/
-  board.png     # bbox + margem, DPI alto
-  board.json    # mesma schema do documento (sem camera de UI se quiser)
-  board.md      # inventário gerado
+  board.png     # bbox + margin, high DPI
+  board.json    # same schema as the document (without the UI camera if you like)
+  board.md      # generated inventory
 ```
 
-`board.md` é gerado pelo binário, nunca é o texto cru das stickies colado como instrução:
+`board.md` is generated by the binary; it is never the raw text of the stickies pasted as an instruction:
 
 ```markdown
 # Board: auth flow
@@ -361,106 +361,106 @@ Agentes no Omarchy rodam no cwd do projeto (launch a partir de `$HOME` cai em `~
 - arrow API Gateway → Auth Service
 ```
 
-### 8.1 Como achar `<dir>`
+### 8.1 How to find `<dir>`
 
-Heurística, nesta ordem, sempre validada pelo binário:
+Heuristic, in this order, always validated by the binary:
 
-1. Argumento `--export <dir>` / `op: export`.
-2. Cwd da janela de terminal focada (Hyprland active window → pid → `/proc/<pid>/cwd` se for shell/agente conhecido).
-3. Último cwd de export bem-sucedido neste board (estado local).
-4. Picker portal, último recurso.
+1. `--export <dir>` argument / `op: export`.
+2. Cwd of the focused terminal window (Hyprland active window → pid → `/proc/<pid>/cwd` if it's a known shell/agent).
+3. Last successful export cwd for this board (local state).
+4. Portal picker, last resort.
 
-Nunca: path gravado no documento por um peer (não existe peer ainda, e não existirá como fonte de export).
+Never: a path written into the document by a peer (there is no peer yet, and there won't be one as an export source).
 
-### 8.2 Allowlist de escrita
+### 8.2 Write allowlist
 
-Depois de `realpath`:
+After `realpath`:
 
-- destino é diretório;
-- destino é prefixo de um workspace razoável: debaixo de `$HOME/Work`, ou debaixo de um git root que **não** seja `$HOME`, ou debaixo do cwd detectado;
-- recusar `..` efetivo, symlink saindo do prefixo, `$HOME` nu, `~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.config`, `/etc`, `/usr`;
-- nomes de arquivo fixos (`board.png|json|md`). O documento remoto/local não escolhe o nome.
+- the destination is a directory;
+- the destination is prefixed by a reasonable workspace: under `$HOME/Work`, or under a git root that is **not** `$HOME`, or under the detected cwd;
+- refuse effective `..`, symlinks leaving the prefix, bare `$HOME`, `~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.config`, `/etc`, `/usr`;
+- fixed file names (`board.png|json|md`). The remote/local document does not choose the name.
 
-Fase 2 (collab): peer **não** dispara export. Só o owner local, no clique.
+Phase 2 (collab): a peer does **not** trigger export. Only the local owner, on click.
 
 ---
 
-## 9. Segurança — fase local
+## 9. Security — local phase
 
-Ameaça principal hoje não é o NAT. É o plugin no shell + o agente em auto-approve + arquivos no disco.
+The main threat today is not NAT. It's the plugin in the shell + the agent on auto-approve + files on disk.
 
-### 9.1 Fronteira do processo
+### 9.1 Process boundary
 
-- QML não desserializa `boards/<id>.json`.
-- QML não abre rede, não baixa o binário na primeira execução sem o usuário pedir (ver distribuição).
-- Preview: `Image` no QML só com path canônico dentro de `thumbs/`, extensão allowlist, sem `file://` arbitrário montado com título.
-- Título da galeria: plain text, sem rich text QML.
+- QML does not deserialize `boards/<id>.json`.
+- QML does not open the network, does not download the binary on first run without the user asking (see distribution).
+- Preview: `Image` in QML only with a canonical path inside `thumbs/`, extension allowlist, no arbitrary `file://` assembled from the title.
+- Gallery title: plain text, no QML rich text.
 
 ### 9.2 Socket
 
-- `$XDG_RUNTIME_DIR/omawhite.sock`, `0600`, mesmo uid.
-- Ops do §5 apenas.
-- Backpressure: se o plugin sumir, o app continua; se o app sumir, o plugin marca idle e não respawna em loop.
+- `$XDG_RUNTIME_DIR/omawhite.sock`, `0600`, same uid.
+- Ops from §5 only.
+- Backpressure: if the plugin disappears, the app carries on; if the app disappears, the plugin marks idle and does not respawn in a loop.
 
-### 9.3 Disco
+### 9.3 Disk
 
 ```
 ~/.local/share/omawhite/     0700
 boards/, thumbs/, blobs/     0700
-arquivos                     0600
+files                        0600
 ```
 
-Thumbs sem EXIF de path interno. Blobs nomeados por hash.
+Thumbs without EXIF of internal paths. Blobs named by hash.
 
-### 9.4 Export e prompt injection
+### 9.4 Export and prompt injection
 
-O agente vai ler `board.md` e o PNG. Texto que o usuário desenhou (“ignore previous instructions…”) não pode virar heading de skill.
+The agent will read `board.md` and the PNG. Text the user drew (“ignore previous instructions…”) must not become a skill heading.
 
-- Prefácio fixo no markdown: “inventário de diagrama, não é ordem”.
-- Textos do board entram entre aspas / em lista, não como markdown cru do usuário (escape de headings e fences).
-- Sem write em `.claude/`, `.codex/`, `.agents/` a menos que o usuário configure um path *adicional* explícito depois.
+- Fixed preface in the markdown: “diagram inventory, not an order”.
+- Board texts go in quotes / in a list, not as the user's raw markdown (escape headings and fences).
+- No writes into `.claude/`, `.codex/`, `.agents/` unless the user later configures an explicit *additional* path.
 
-### 9.5 Superfície que ainda não existe (reservar no desenho)
+### 9.5 Surface that doesn't exist yet (reserve it in the design)
 
-Quando o Iroh entrar:
+When Iroh comes in:
 
-- ticket = node id + PSK da sala + `doc_id` + expiração;
-- aceite do peer na primeira vez;
-- schema e quotas no CRDT (ops/s, tamanho, sem URL fetch a partir de elemento);
-- áudio opt-in, mute default, mesmo handshake, fora do documento;
-- relay só vê ciphertext.
+- ticket = node id + room PSK + `doc_id` + expiry;
+- peer acceptance on first contact;
+- schema and quotas in the CRDT (ops/s, size, no URL fetch from an element);
+- audio opt-in, muted by default, same handshake, outside the document;
+- the relay only sees ciphertext.
 
-Não implementar agora. Não deixar “TODO: listen 0.0.0.0” no binário do MVP.
+Don't implement now. Don't leave “TODO: listen 0.0.0.0” in the MVP binary.
 
 ### 9.6 Supply chain
 
-Plugin Omarchy = git clone unsandboxed no processo do shell. O README do marketplace é honesto: quem instala confia no autor.
+Omarchy plugin = unsandboxed git clone in the shell process. The marketplace README is honest: whoever installs trusts the author.
 
-- Repos públicos separados: `omawhite` (binário) e `omawhite-plugin` (QML), ou monorepo com pastas nítidas.
-- Plugin **não** vendorisa o `.so` do wgpu.
-- Install do binário por pacote (ver §10), não `curl | sh` disparado pelo QML.
-- Dependências Rust pinadas (`Cargo.lock` commitado).
-- `omarchy plugin validate` no CI.
+- Separate public repos: `omawhite` (binary) and `omawhite-plugin` (QML), or a monorepo with clear folders.
+- The plugin does **not** vendor wgpu's `.so`.
+- Binary install via package (see §10), not `curl | sh` fired by QML.
+- Pinned Rust dependencies (`Cargo.lock` committed).
+- `omarchy plugin validate` in CI.
 
 ---
 
-## 10. Distribuição
+## 10. Distribution
 
-Dois artefatos. Quem mistura os dois no mesmo “é só um plugin” se machuca: o marketplace distribui QML; o wgpu não cabe nesse contrato.
+Two artifacts. Whoever mixes the two into the same “it's just a plugin” gets hurt: the marketplace distributes QML; wgpu does not fit that contract.
 
-### 10.1 Binário
+### 10.1 Binary
 
-Caminhos, do mais Omarchy ao mais frouxo:
+Paths, from most Omarchy to loosest:
 
-1. **Pacote Arch / repo Omarchy** — `omawhite` no PATH, atualiza com `omarchy update` / pacman. Melhor destino.
-2. **AUR + `makepkg`** — padrão que o Omaboard já usa. Aceitável no dia 1.
-3. **`cargo install --path` / tarball em `~/.local/bin`** — desenvolvimento.
+1. **Arch package / Omarchy repo** — `omawhite` on the PATH, updates with `omarchy update` / pacman. Best destination.
+2. **AUR + `makepkg`** — the pattern Omaboard already uses. Acceptable on day 1.
+3. **`cargo install --path` / tarball in `~/.local/bin`** — development.
 
-O plugin procura, nesta ordem: `omawhite` no `PATH`, `~/.local/bin/omawhite`, path configurável. Se não achar: painel “instalar o motor” que **abre o terminal** com o comando do pacote, igual outros plugins Omarchy fazem com dependências. O QML não baixa binário silencioso.
+The plugin looks, in this order: `omawhite` on the `PATH`, `~/.local/bin/omawhite`, configurable path. If not found: an “install the engine” panel that **opens the terminal** with the package command, as other Omarchy plugins do with dependencies. QML does not silently download a binary.
 
-Target: `x86_64-unknown-linux-gnu` primeiro. Wayland only. Sem X11 no MVP, a menos que winit entregue de graça.
+Target: `x86_64-unknown-linux-gnu` first. Wayland only. No X11 in the MVP, unless winit delivers it for free.
 
-Release: binário stripped, `opt-level = 3`, LTO no release profile quando o tempo de CI deixar. GPU: wgpu Vulkan no Arch é o caminho; fallback GL se um dia precisar, não no dia 1.
+Release: stripped binary, `opt-level = 3`, LTO in the release profile when CI time allows. GPU: wgpu Vulkan on Arch is the path; GL fallback if ever needed, not on day 1.
 
 ### 10.2 Plugin
 
@@ -468,7 +468,7 @@ Release: binário stripped, `opt-level = 3`, LTO no release profile quando o tem
 omarchy plugin add https://github.com/<you>/omawhite-plugin.git --enable
 ```
 
-Repositório com:
+Repository with:
 
 ```
 manifest.json
@@ -476,54 +476,54 @@ BarWidget.qml
 Menu.qml
 README.md
 LICENSE
-preview.png          # opcional, marketplace
+preview.png          # optional, marketplace
 ```
 
-Sem submodule do engine. README com:
+No engine submodule. README with:
 
-- requer Omarchy Quattro (`omarchy-shell`);
-- requer `omawhite` ≥ 0.1 no PATH;
-- bind sugerido;
+- requires Omarchy Quattro (`omarchy-shell`);
+- requires `omawhite` ≥ 0.1 on the PATH;
+- suggested bind;
 - `omarchy plugin validate .`;
-- aviso de que plugins correm unsandboxed.
+- a warning that plugins run unsandboxed.
 
-Listar no marketplace (plugins.omarchy.org / omarchyplugins.com) na categoria Developer Tools / Productivity. Tags curtas: `whiteboard`, `agent`, `productivity`.
+List on the marketplace (plugins.omarchy.org / omarchyplugins.com) under Developer Tools / Productivity. Short tags: `whiteboard`, `agent`, `productivity`.
 
-### 10.3 Versionamento conjunto
+### 10.3 Joint versioning
 
-`manifest.json` `version` e o binário `omawhite --version` seguem semver paralelo. Plugin recusa motor com major diferente. Campo opcional no `ready`: `{ "engine": "0.1.0" }`.
+`manifest.json` `version` and the binary's `omawhite --version` follow parallel semver. The plugin refuses an engine with a different major. Optional field in `ready`: `{ "engine": "0.1.0" }`.
 
-Remoção:
+Removal:
 
 ```
 omarchy plugin remove seu.omawhite
-# pacote do binário à parte
-# dados do usuário ficam em ~/.local/share/omawhite até o usuário apagar
+# binary package handled separately
+# user data stays in ~/.local/share/omawhite until the user deletes it
 ```
 
-Não borre o home no `plugin remove`.
+Don't wipe the home on `plugin remove`.
 
 ---
 
-## 11. Ciclo de vida (MVP)
+## 11. Lifecycle (MVP)
 
 ```
-atalho ou clique
-  → menu/bar do plugin abre (QML, leve)
-  → se não há socket: spawn omawhite --socket $XDG_RUNTIME_DIR/omawhite.sock --board <id|new>
-  → app cria janela, carrega JSON, ev: ready
-  → usuário desenha (100% no filho)
-  → autosave debounce 300–500 ms no documento
-  → Super+E / botão Export → trio em docs/boards/<slug>/
-  → fechar janela ou op: shutdown
+shortcut or click
+  → plugin menu/bar opens (QML, light)
+  → if there is no socket: spawn omawhite --socket $XDG_RUNTIME_DIR/omawhite.sock --board <id|new>
+  → app creates the window, loads the JSON, ev: ready
+  → user draws (100% in the child)
+  → autosave debounced 300–500 ms into the document
+  → Super+E / Export button → trio in docs/boards/<slug>/
+  → close the window or op: shutdown
        → flush
        → exit 0
-       → plugin esquece o pid
+       → plugin forgets the pid
 ```
 
-Se o shell reinicia no meio: o JSON já está no disco; o filho recebe SIGPIPE no socket e faz shutdown. Não deixar o board zumbi sem UI.
+If the shell restarts midway: the JSON is already on disk; the child gets SIGPIPE on the socket and shuts down. Don't leave a zombie board without UI.
 
-Promoção futura a `kind: service` (filho residente, overlay só levanta a janela) só se o cold start medir acima do tolerável. Medir antes de inventar daemon.
+Future promotion to `kind: service` (resident child, the overlay only raises the window) only if the cold start measures above what's tolerable. Measure before inventing a daemon.
 
 ---
 
@@ -531,80 +531,80 @@ Promoção futura a `kind: service` (filho residente, overlay só levanta a jane
 
 **MVP (local)**
 
-- Janela, cena, ferramentas da tabela §7.2.
-- Persistência + galeria via plugin.
-- Undo/redo, copy/paste interno.
-- Export png + json + md com allowlist.
-- Tema: cores do Omarchy via `op: theme` (plugin lê a paleta e manda).
+- Window, scene, tools from the §7.2 table.
+- Persistence + gallery via plugin.
+- Undo/redo, internal copy/paste.
+- Export png + json + md with allowlist.
+- Theme: Omarchy colors via `op: theme` (the plugin reads the palette and sends it).
 - Single-instance + CLI.
 
 **1.1**
 
-- Conectores com snap.
+- Connectors with snap.
 - Highlighter.
-- Multi-página / vários boards no mesmo projeto (`docs/boards/<slug>/`).
-- Heurística de cwd mais esperta (lista de pids de `claude`/`opencode`/`codex`).
-- Skill minúsculo para agentes: “se existir `docs/boards/**/board.md`, leia antes de implementar”.
+- Multi-page / several boards in the same project (`docs/boards/<slug>/`).
+- Smarter cwd heuristic (list of `claude`/`opencode`/`codex` pids).
+- Tiny skill for agents: “if `docs/boards/**/board.md` exists, read it before implementing”.
 
-**2.0 — collab (depois)**
+**2.0 — collab (later)**
 
-- Automerge no lugar do JSON plano (migração: import schema 1 → doc CRDT).
-- Transporte Iroh (QUIC, ticket + PSK). LAN/Tailscale primeiro.
-- Awareness (cursor) fora do documento.
-- Aceite de peer, papéis owner/editor/viewer.
-- Áudio: WebRTC à parte, signaling no canal Iroh já autenticado. Opt-in.
+- Automerge in place of plain JSON (migration: import schema 1 → CRDT doc).
+- Iroh transport (QUIC, ticket + PSK). LAN/Tailscale first.
+- Awareness (cursor) outside the document.
+- Peer acceptance, owner/editor/viewer roles.
+- Audio: separate WebRTC, signaling over the already-authenticated Iroh channel. Opt-in.
 
-Não puxar 2.0 para o manifesto do 0.1.
+Don't pull 2.0 into the 0.1 manifest.
 
 ---
 
-## 13. Tradeoffs explícitos
+## 13. Explicit tradeoffs
 
-| Escolha | Em troca de | Custo |
+| Choice | In exchange for | Cost |
 |---|---|---|
-| Rust + winit/wgpu, não Qt | Isolamento e premissa nativa | IME, file portal, polish de widget na mão; zero reuso do Omaboard |
-| Plugin ≠ canvas | Shell vivo se o board morrer | Dois artefatos para instalar; IPC para manter |
-| Matar o filho no close | Sem daemon, sem porta aberta | Cold start a cada sessão (ok se <150 ms) |
-| JSON plano agora | Simplicidade, git-diff, menos crate | Migração para Automerge depois |
-| Janela tiled, não overlay | Convive com o agente | Não é “aparece e some” tipo Presenter |
-| Borracha de objeto, não de pixel | Modelo vetorial limpo para o agente | Quem quiser rasurar bitmap se frustra |
-| Trio png+json+md | Agente multimodal + estruturado | Três arquivos para o usuário entender |
-| Dois repositórios (ou pastas) | Marketplace não carrega wgpu | “instalar o plugin” não basta — precisa do motor |
-| Sem rede no binário MVP | Superfície mínima | Quem esperar Miro no dia 1 sai |
+| Rust + winit/wgpu, not Qt | Isolation and the native premise | IME, file portal, widget polish by hand; zero reuse of Omaboard |
+| Plugin ≠ canvas | Shell alive if the board dies | Two artifacts to install; IPC to maintain |
+| Kill the child on close | No daemon, no open port | Cold start every session (ok if <150 ms) |
+| Plain JSON now | Simplicity, git-diff, fewer crates | Migration to Automerge later |
+| Tiled window, not overlay | Coexists with the agent | Not “appears and vanishes” like Presenter |
+| Object eraser, not pixel | Clean vector model for the agent | Whoever wants to scrub bitmap gets frustrated |
+| png+json+md trio | Multimodal + structured agent | Three files for the user to understand |
+| Two repositories (or folders) | Marketplace doesn't carry wgpu | “install the plugin” isn't enough — needs the engine |
+| No network in the MVP binary | Minimal surface | Whoever expects Miro on day 1 leaves |
 
-### O que recusamos de propósito
+### What we refuse on purpose
 
-- Excalidraw dentro de WebEngine no shell.
-- UDP caseiro “porque é mais rápido”.
-- Embed da janela nativa no QML.
-- Auto-export a cada stroke.
-- `curl | sh` no `Component.onCompleted`.
-- Collab no mesmo milestone que o pincel.
-
----
-
-## 14. Critérios de pronto (MVP)
-
-- Atalho abre um board vazio e aceita o primeiro stroke sem o usuário sentir o spawn.
-- Fechar e reabrir restaura elementos e câmera.
-- Export escreve os três arquivos só dentro da allowlist; caso contrário `denied`.
-- Plugin sem o binário mostra erro acionável, não tela preta.
-- `omarchy plugin validate` passa.
-- Derrubar o filho com `kill -9` não trava o shell; o plugin volta a “idle”.
-- Nenhum listen TCP/UDP no processo.
+- Excalidraw inside WebEngine in the shell.
+- Homemade UDP “because it's faster”.
+- Embedding the native window in QML.
+- Auto-export on every stroke.
+- `curl | sh` in `Component.onCompleted`.
+- Collab in the same milestone as the brush.
 
 ---
 
-## 15. Próximo corte de implementação
+## 14. Definition of done (MVP)
 
-Ordem que reduz risco de desenhar a stack errada:
+- The shortcut opens an empty board and accepts the first stroke without the user feeling the spawn.
+- Closing and reopening restores elements and camera.
+- Export writes the three files only inside the allowlist; otherwise `denied`.
+- Plugin without the binary shows an actionable error, not a black screen.
+- `omarchy plugin validate` passes.
+- Killing the child with `kill -9` doesn't hang the shell; the plugin goes back to “idle”.
+- No TCP/UDP listen in the process.
 
-1. Binário: janela Wayland + retângulo + persistência JSON + CLI `--new/--open`.
+---
+
+## 15. Next implementation cut
+
+Order that reduces the risk of designing the wrong stack:
+
+1. Binary: Wayland window + rectangle + JSON persistence + CLI `--new/--open`.
 2. Socket + single-instance.
-3. Plugin `bar-widget` + `menu` que só spawna/abre.
-4. Caneta, texto, seta, undo.
-5. Export + allowlist + heurística de cwd.
-6. Tema Omarchy e thumbs da galeria.
-7. Pacote AUR / install script. Aí sim marketplace.
+3. `bar-widget` + `menu` plugin that only spawns/opens.
+4. Pen, text, arrow, undo.
+5. Export + allowlist + cwd heuristic.
+6. Omarchy theme and gallery thumbs.
+7. AUR package / install script. Only then the marketplace.
 
-A colaboração remota só entra quando 1–6 estão no uso diário com um agente de verdade. Se o export não virar hábito, o Iroh é engenharia sem produto.
+Remote collaboration only comes in once 1–6 are in daily use with a real agent. If export doesn't become a habit, Iroh is engineering without a product.

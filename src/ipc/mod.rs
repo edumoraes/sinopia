@@ -1,4 +1,4 @@
-//! IPC plugin ↔ binário (ARCHITECTURE.md §5): Unix socket, um JSON por linha.
+//! Plugin ↔ binary IPC (ARCHITECTURE.md §5): Unix socket, one JSON per line.
 
 pub mod client;
 pub mod proto;

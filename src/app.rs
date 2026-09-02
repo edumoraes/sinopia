@@ -416,7 +416,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             Request::New => {
-                let doc = Document::new("sem título");
+                let doc = Document::new("untitled");
                 if let Err(e) = self.store.save(&doc) {
                     log::error!("creating a new board: {e:#}");
                     return;

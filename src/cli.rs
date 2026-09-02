@@ -1,5 +1,5 @@
-//! CLI do binário (§5): espelha o protocolo do socket, para o plugin e
-//! para humanos.
+//! The binary's CLI (§5): mirrors the socket protocol, for the plugin and
+//! for humans.
 
 use std::path::PathBuf;
 
@@ -9,39 +9,39 @@ use clap::Parser;
 #[command(
     name = "omawhite",
     version,
-    about = "Whiteboard local-first com export para o agente"
+    about = "Local-first whiteboard with export for the agent"
 )]
 #[command(group = clap::ArgGroup::new("action").multiple(false))]
 pub struct Cli {
-    /// Cria um board novo
+    /// Create a new board
     #[arg(long, group = "action")]
     pub new: bool,
 
-    /// Abre um board existente pelo id
+    /// Open an existing board by id
     #[arg(long, value_name = "ID", group = "action")]
     pub open: Option<String>,
 
-    /// Exporta o board atual para DIR (exige instância viva)
+    /// Export the current board to DIR (requires a live instance)
     #[arg(long, value_name = "DIR", group = "action")]
     pub export: Option<PathBuf>,
 
-    /// Encerra a instância viva
+    /// Shut down the live instance
     #[arg(long, group = "action")]
     pub shutdown: bool,
 
-    /// Caminho do socket (default: $XDG_RUNTIME_DIR/omawhite.sock)
+    /// Socket path (default: $XDG_RUNTIME_DIR/omawhite.sock)
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
 
-    /// Renderiza N frames e sai (verificação de fumaça, uso em CI)
+    /// Render N frames and exit (smoke check, for CI)
     #[arg(long, value_name = "N", hide = true)]
     pub smoke_frames: Option<u32>,
 }
 
-/// Intenção de alto nível depois do parse.
+/// High-level intent after parsing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
-    /// Sem flags: levanta a instância viva ou abre o board mais recente.
+    /// No flags: raise the live instance or open the most recent board.
     Default,
     New,
     Open(String),
@@ -100,7 +100,7 @@ mod tests {
             &["--open", "x", "--export", "/tmp"][..],
             &["--export", "/tmp", "--shutdown"][..],
         ] {
-            assert!(parse(args).is_err(), "combinação {args:?} deveria falhar");
+            assert!(parse(args).is_err(), "combination {args:?} should fail");
         }
     }
 
