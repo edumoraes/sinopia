@@ -8,6 +8,7 @@ mod bitmap;
 mod cli;
 mod clipboard;
 mod curve;
+mod dialogs;
 mod doc;
 mod dock;
 mod editor;
