@@ -37,6 +37,11 @@ const LIFT_BORDER: f32 = 2.0;
 const LIFT_SCALE: f32 = 0.05;
 const LIFT_TILT: f32 = 2.0;
 const LIFT_LEFT: f32 = 12.0;
+/// How far past the band a card in flight is allowed to reach: the lean
+/// toward the canvas, plus what the growth and the turn add to a corner.
+/// The band lets go by this much as the card lifts, so the lean is not
+/// cut off at the panel's own edge.
+const LIFT_REACH: f32 = LIFT_LEFT + WIDTH * LIFT_SCALE;
 /// The scrollbar's thumb, and the room it keeps from the cards.
 const BAR_W: f32 = 4.0;
 const BAR_GAP: f32 = 3.0;
@@ -457,12 +462,14 @@ impl Panel {
     }
 
     /// Where a carried card's top edge actually goes: what the pointer
-    /// asks for, kept inside the rows on show.
+    /// asks for, kept inside the band. It is the band that holds it, not
+    /// the rows — a row can be part shown at either edge, and a card
+    /// riding one out of the panel is not what a lift looks like.
     fn free_y(&self, y: f32) -> f32 {
-        match (self.rows.first(), self.rows.last()) {
-            (Some(first), Some(last)) => y.clamp(first.card.y, last.card.y),
-            _ => y,
-        }
+        let inset = CARD_INSET * self.scale;
+        let top = self.band.y + inset;
+        let bottom = (self.band.y + self.band.h - inset - (ROW * self.scale - 2.0 * inset)).max(top);
+        y.clamp(top, bottom)
     }
 
     /// Paint order: shadow, border, panel, the title and the buttons,
@@ -601,13 +608,15 @@ impl Panel {
         };
         let pivot = row.card.center();
         let moved = k != 1.0 || angle != 0.0 || by.0 != 0.0 || by.1 != 0.0;
+        // The band is where the stack is shown, and the rest of a row
+        // that reaches past it is not drawn — but a card in flight is
+        // out of the stack, so the band lets go of it as it lifts.
+        let cut = self.band.inset(-LIFT_REACH * s * e);
         for prim in &mut out[start..] {
             if moved {
                 *prim = prim.transformed(pivot, k, angle, by);
             }
-            // The band is where the stack is shown; the rest of a row
-            // that reaches past it is not drawn.
-            *prim = prim.clipped(self.band);
+            *prim = prim.clipped(cut);
         }
     }
 }
@@ -1259,6 +1268,49 @@ mod tests {
                 row.index
             );
         }
+    }
+
+    #[test]
+    fn the_band_lets_go_of_a_card_in_flight() {
+        let theme = Theme::light();
+        let a = atlas();
+        let ls = layers(3);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let card = p.rows[1].card;
+        let band = [p.band.x, p.band.y, p.band.w, p.band.h];
+
+        // At rest a card is cut to the band exactly.
+        let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
+        let at = prims.iter().position(|q| q.bounds() == card).unwrap();
+        assert_eq!(prims[at].clip, band);
+
+        // In flight it leans out of the panel, so the cut goes with it:
+        // every piece of the card — its shadow, its outline, its body,
+        // its eye and its name — falls inside what it is cut to.
+        let prims = p.prims(&ls, &showing(1, Some(lift(1, card.y, 1.0))), &a, 7, &theme);
+        let body = prims[carried_body(&prims, &theme)];
+        let [cx, cy, cw, ch] = body.clip;
+        assert!(cx < p.band.x - LIFT_LEFT, "the cut clears the lean");
+        assert_ne!(body.clip, band);
+        let cut = ScreenRect {
+            x: cx,
+            y: cy,
+            w: cw,
+            h: ch,
+        };
+        let carried: Vec<&Prim> = prims.iter().filter(|q| q.clip == body.clip).collect();
+        assert!(carried.len() > 5, "a card is more than its body");
+        for q in carried {
+            assert!(
+                cut.contains_rect(&q.bounds()),
+                "{:?} is cut short by {cut:?}",
+                q.bounds()
+            );
+        }
+
+        // And the cards it left behind are cut to the band as before.
+        let still = prims.iter().position(|q| q.bounds() == p.rows[0].card).unwrap();
+        assert_eq!(prims[still].clip, band);
     }
 
     #[test]
