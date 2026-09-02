@@ -4,8 +4,9 @@
 //! Pure — `app` feeds it pointer events in screen px together with the
 //! current [`View`] and the document, and stores whatever comes back.
 
+use crate::bitmap;
 use crate::curve;
-use crate::doc::{Camera, Document, Element, Path, new_id};
+use crate::doc::{Camera, Document, Element, Image, Path, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
@@ -101,6 +102,10 @@ pub const HIT_SLOP_PX: f64 = 4.0;
 
 /// Rotation step, in degrees, while Shift is held.
 pub const ROTATE_SNAP_DEG: f64 = 15.0;
+
+/// How much of the visible world a paste may take up before it is shrunk
+/// to fit: a 4K screenshot should not cover the board wall to wall.
+pub const PASTE_ROOM: f64 = 0.8;
 
 /// Pan or zoom gesture in progress.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -496,6 +501,44 @@ impl Editor {
 
     /// Deletes the selected elements. Whatever drag was reshaping them
     /// goes with them.
+    /// Drops a pasted bitmap on the board. `blob` names it in the store
+    /// and `px` is its pixel size; it lands centered on `screen` — the
+    /// pointer — or in the middle of the view when the pointer is
+    /// elsewhere, at one world unit per pixel, shrunk to [`PASTE_ROOM`] of
+    /// what the view shows when it would not fit. It arrives selected
+    /// under the select tool, so the next drag moves it.
+    pub fn paste_image(
+        &mut self,
+        doc: &mut Document,
+        view: &View,
+        screen: Option<(f64, f64)>,
+        blob: String,
+        px: (u32, u32),
+    ) -> Change {
+        // Also drops whatever was in progress, and the old selection with
+        // it: what lands is what is selected.
+        self.set_tool(Tool::Select, doc);
+        let (sx, sy) = screen.unwrap_or((
+            f64::from(view.viewport.w) / 2.0,
+            f64::from(view.viewport.h) / 2.0,
+        ));
+        let (cx, cy) = view.screen_to_world(sx, sy);
+        let showing = |px: u32| f64::from(px) / view.px_per_world() * PASTE_ROOM;
+        let (w, h) = bitmap::fit_size(px, (showing(view.viewport.w), showing(view.viewport.h)));
+        let id = new_id();
+        doc.elements.push(Element::Image(Image {
+            id: id.clone(),
+            x: cx - w / 2.0,
+            y: cy - h / 2.0,
+            w,
+            h,
+            rotation: 0.0,
+            blob,
+        }));
+        self.selection = vec![id];
+        Change::Scene
+    }
+
     pub fn delete_selection(&mut self, doc: &mut Document) -> Change {
         if self.selection.is_empty() {
             return Change::None;
@@ -1491,5 +1534,95 @@ mod tests {
         let _ = press(&mut e, Button::Left, &v, (0.0, 0.0));
         set_tool(&mut e, Tool::Pencil);
         assert!(!e.is_panning());
+    }
+
+    const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    fn pasted(doc: &Document) -> &crate::doc::Image {
+        let Element::Image(i) = doc.elements.last().expect("nothing pasted") else {
+            panic!("last element is not an image");
+        };
+        i
+    }
+
+    #[test]
+    fn a_paste_lands_centered_on_the_pointer() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        // The view looks at (50, 50) with a 100x100 viewport at zoom 1, so
+        // screen (10, 20) is world (10, 20).
+        let change = e.paste_image(&mut doc, &view(), Some((10.0, 20.0)), BLOB.into(), (40, 20));
+        assert_eq!(change, Change::Scene);
+        let i = pasted(&doc);
+        assert_eq!((i.w, i.h), (40.0, 20.0));
+        assert_eq!((i.x, i.y), (-10.0, 10.0));
+        assert_eq!(i.blob, BLOB);
+        assert_eq!(i.rotation, 0.0);
+    }
+
+    #[test]
+    fn a_paste_with_the_pointer_away_lands_in_the_middle_of_the_view() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let _ = e.paste_image(&mut doc, &view(), None, BLOB.into(), (40, 20));
+        let i = pasted(&doc);
+        assert_eq!((i.x, i.y), (30.0, 40.0));
+    }
+
+    #[test]
+    fn a_paste_larger_than_the_view_is_shrunk_to_fit_it() {
+        // A 4K screenshot must not cover the board wall to wall.
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let _ = e.paste_image(&mut doc, &view(), None, BLOB.into(), (3840, 2160));
+        let i = pasted(&doc);
+        // 80% of the 100x100 the view shows, aspect kept.
+        assert!((i.w - 80.0).abs() < 1e-9, "{}", i.w);
+        assert!((i.h - 45.0).abs() < 1e-9, "{}", i.h);
+    }
+
+    #[test]
+    fn the_room_a_paste_gets_follows_the_zoom() {
+        // Zoomed out, the same viewport shows more world — so more fits.
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let mut v = view();
+        v.camera.zoom = 0.5;
+        let _ = e.paste_image(&mut doc, &v, None, BLOB.into(), (160, 80));
+        assert_eq!((pasted(&doc).w, pasted(&doc).h), (160.0, 80.0));
+    }
+
+    #[test]
+    fn a_pasted_image_becomes_the_selection() {
+        // Paste then drag: the thing that just landed is what moves.
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let _ = e.paste_image(&mut doc, &view(), Some((50.0, 50.0)), BLOB.into(), (10, 10));
+        assert_eq!(e.selection(), &[doc.elements[0].id().to_owned()]);
+    }
+
+    #[test]
+    fn a_paste_cancels_whatever_was_in_progress() {
+        // Ctrl+V mid-stroke must not leave half a pen stroke behind.
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        e.set_tool(Tool::Pencil, &mut doc);
+        let _ = e.press(Button::Left, &view(), (10.0, 10.0), &mut doc);
+        let _ = e.moved(&view(), (20.0, 20.0), &mut doc);
+        assert!(e.is_drawing());
+        let _ = e.paste_image(&mut doc, &view(), None, BLOB.into(), (10, 10));
+        assert!(!e.is_drawing());
+        assert_eq!(doc.elements.len(), 1, "only the image landed");
+    }
+
+    #[test]
+    fn a_paste_switches_to_select_so_the_new_image_can_be_moved() {
+        // Landing selected is only useful if the next drag moves it.
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        e.set_tool(Tool::Pencil, &mut doc);
+        let _ = e.paste_image(&mut doc, &view(), None, BLOB.into(), (10, 10));
+        assert_eq!(e.tool(), Tool::Select);
+        assert_eq!(e.selection().len(), 1);
     }
 }

@@ -17,7 +17,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
-use crate::doc::Document;
+use crate::bitmap::{self, Bitmap};
+use crate::clipboard::{self, Clipboard, Paste};
+use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, PEN_WIDTH, SCROLL_LINE_PX, Tool};
 use crate::geom::Corner;
@@ -40,6 +42,12 @@ struct SharedState {
 enum UserEvent {
     Request(Request),
     Gesture(Gesture),
+    /// A clipboard image, already decoded off the loop. The original
+    /// bytes go to the blob store; the texels go to the GPU.
+    Pasted {
+        bytes: Vec<u8>,
+        bitmap: Bitmap,
+    },
 }
 
 struct App {
@@ -51,6 +59,7 @@ struct App {
     gfx: Option<Gfx>,
     theme: Theme,
     editor: Editor,
+    clipboard: Option<Clipboard>,
     /// Last pointer position in physical px, while inside the window.
     cursor: Option<(f64, f64)>,
     modifiers: Modifiers,
@@ -92,7 +101,75 @@ impl App {
         if let Some(w) = &self.window {
             w.set_title(&format!("Omawhite — {}", self.doc.title));
         }
+        self.load_images();
         self.redraw();
+    }
+
+    /// Uploads the texture for every image in the current document that
+    /// the renderer does not have yet, so a board that is reopened shows
+    /// its images instead of placeholders.
+    fn load_images(&mut self) {
+        let blobs: Vec<String> = self
+            .doc
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Image(i) => Some(i.blob.clone()),
+                _ => None,
+            })
+            .collect();
+        let Some(gfx) = &mut self.gfx else { return };
+        for blob in blobs {
+            if gfx.image_slots().contains_key(&blob) {
+                continue;
+            }
+            let loaded = self
+                .store
+                .read_blob(&blob)
+                .and_then(|bytes| bitmap::decode(&bytes))
+                .and_then(|bmp| gfx.upload_image(&blob, &bmp));
+            if let Err(e) = loaded {
+                // The element keeps its box and shows as a placeholder.
+                log::error!("loading image {blob}: {e:#}");
+            }
+        }
+    }
+
+    /// Asks the clipboard for an image. The bytes arrive later, as
+    /// [`UserEvent::Pasted`].
+    fn paste(&mut self) {
+        match &self.clipboard {
+            Some(clipboard) => {
+                clipboard.paste_image();
+            }
+            None => log::debug!("paste: no clipboard on this display"),
+        }
+    }
+
+    /// A clipboard image came back: keep the original bytes, upload the
+    /// texels, and let the editor place it.
+    fn pasted(&mut self, bytes: Vec<u8>, bitmap: Bitmap) {
+        let Some(view) = self.view() else { return };
+        let blob = match self.store.write_blob(&bytes) {
+            Ok(blob) => blob,
+            Err(e) => return log::error!("storing the pasted image: {e:#}"),
+        };
+        if let Some(gfx) = &mut self.gfx
+            && let Err(e) = gfx.upload_image(&blob, &bitmap)
+        {
+            log::error!("uploading the pasted image: {e:#}");
+        }
+        let change = self.editor.paste_image(
+            &mut self.doc,
+            &view,
+            self.cursor,
+            blob,
+            (bitmap.w, bitmap.h),
+        );
+        if change == Change::Scene {
+            self.save();
+        }
+        self.apply(change);
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, e: anyhow::Error) {
@@ -243,6 +320,11 @@ impl App {
                     self.redraw();
                 }
             }
+            Key::Character(text) if pressed && self.modifiers.state().control_key() => {
+                if text.eq_ignore_ascii_case("v") {
+                    self.paste();
+                }
+            }
             Key::Character(text) if pressed => {
                 let mods = self.modifiers.state();
                 if mods.control_key() || mods.alt_key() || mods.super_key() {
@@ -359,7 +441,29 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Err(e) = gestures::spawn(&window, Box::new(sink)) {
                     log::warn!("trackpad gestures unavailable: {e:#}");
                 }
+                let proxy = self.proxy.clone();
+                let sink: clipboard::Sink = std::sync::Arc::new(move |p: Paste| {
+                    // Decoding a 4K screenshot is tens of milliseconds:
+                    // it happens here, on the paste thread, not on the loop.
+                    match bitmap::decode(&p.bytes) {
+                        Ok(bitmap) => proxy
+                            .send_event(UserEvent::Pasted {
+                                bytes: p.bytes,
+                                bitmap,
+                            })
+                            .is_ok(),
+                        Err(e) => {
+                            log::warn!("pasting {}: {e:#}", p.mime);
+                            true
+                        }
+                    }
+                });
+                match Clipboard::spawn(&window, sink) {
+                    Ok(clipboard) => self.clipboard = Some(clipboard),
+                    Err(e) => log::warn!("clipboard unavailable: {e:#}"),
+                }
                 self.window = Some(window);
+                self.load_images();
                 self.redraw();
             }
             Err(e) => self.fail(event_loop, e),
@@ -441,6 +545,7 @@ impl ApplicationHandler<UserEvent> for App {
         let req = match ev {
             UserEvent::Request(req) => req,
             UserEvent::Gesture(g) => return self.gestured(g),
+            UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
         };
         match req {
             Request::Raise => {
@@ -528,6 +633,7 @@ pub fn run(
         gfx: None,
         theme: Theme::light(),
         editor: Editor::new(),
+        clipboard: None,
         cursor: None,
         modifiers: Modifiers::default(),
         cursor_icon: CursorIcon::Default,

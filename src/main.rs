@@ -6,6 +6,7 @@
 mod app;
 mod bitmap;
 mod cli;
+mod clipboard;
 mod curve;
 mod doc;
 mod dock;
