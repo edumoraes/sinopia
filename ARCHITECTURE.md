@@ -244,6 +244,21 @@ pixel at zoom 1. The stroke is simplified and fitted on release
 written before the fit landed hold a raw `points` polyline instead; those
 are fitted on load and rewritten as `curves` on the next save.
 
+Landed — `image` (clipboard paste):
+
+```json
+{ "id": "el_03", "type": "image",
+  "x": -200, "y": -130, "w": 400, "h": 260,
+  "blob": "fdb7ce9b…8547a44" }
+```
+
+A box exactly like a rect's — same `x, y, w, h`, same `rotation` — so the
+selection frame, hit-testing and the transforms follow from the same
+fields. `blob` names the original bytes under `blobs/<sha256>` and nothing
+else: it is checked as a bare lowercase-hex sha256 on the way in, so a
+hand-edited board cannot walk out of the store. A board therefore carries
+no path, and says nothing about the machine that wrote it.
+
 Landed — `rotation` on `rect` and `path`: degrees, clockwise on screen,
 counted from the element's creation; absent when zero, so older boards
 keep the shape above. A rect turns about its center; `x, y, w, h` describe
@@ -296,6 +311,24 @@ Text: a minimal inline editor (cosmic-text / parley), not a webview. IME via win
 
 Images: decode (image crate) → wgpu texture. Keep the original in `~/.local/share/omawhite/blobs/<sha256>`. The element in the JSON only points to the hash.
 
+Landed: an image is the same signed-distance box with a texture in it —
+`KIND_IMAGE` reads its UV from the box's own axes, so the turn, the
+corners and the analytic antialiasing come along, and there is no second
+pipeline. One texture per image, one bind group per texture; the frame's
+instances are cut into runs wherever the texture changes and each run is
+one draw over the same buffer, which keeps the document's paint order
+without an atlas and without sorting. Slot 0 is a 1×1 white stand-in for
+every run that draws no image. No mip chain yet: the sample asks for
+level 0, which also keeps it out of the derivative rules a branch like
+that would otherwise break. Decoding is off the frame path (the paste
+thread, or the board's load); until a texture lands, the element paints
+as a placeholder box.
+
+Clipboard: `wl_data_device` on the window's own Wayland connection, the
+guest-client shape `gestures` uses. The compositor sees one client, so the
+`selection` events that only reach the keyboard focus reach us too; a
+separate connection would need `wlr-data-control` and a reason to want it.
+
 Portals: `xdg-desktop-portal` for “open image” / “save PNG elsewhere”. Don't implement a file picker of our own.
 
 ### 7.2 MVP tools
@@ -312,6 +345,7 @@ Portals: `xdg-desktop-portal` for “open image” / “save PNG elsewhere”. D
 | A | arrow |
 | T | text |
 | N | sticky |
+| Ctrl+V | paste the clipboard image |
 | Ctrl+Z / Ctrl+Y | undo / redo |
 | Ctrl+0 / 1 | fit / 100% |
 | Ctrl+Shift+E | export to the last known cwd or dialog |
@@ -430,7 +464,12 @@ boards/, thumbs/, blobs/     0700
 files                        0600
 ```
 
-Thumbs without EXIF of internal paths. Blobs named by hash.
+Thumbs without EXIF of internal paths. Blobs named by hash: content
+addressed, so the same screenshot pasted twice is one file, and a name
+that is not a bare sha256 never becomes a path. A pasted image is
+decoded before it is stored — nothing over 8192 px a side, and the size
+is read from the header before any texel is allocated, so a few KiB
+cannot become gigabytes.
 
 ### 9.4 Export and prompt injection
 

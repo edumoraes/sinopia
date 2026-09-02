@@ -6,14 +6,22 @@ the real architecture emerges from development.
 
 ## Status
 
-Scaffold (§15 items 1–2), the pencil (item 4), selection and navigation:
+Scaffold (§15 items 1–2), the pencil (item 4), selection, navigation and
+pasted images:
 
-- `cargo build` clean, `cargo test` with 174 tests.
+- `cargo build` clean, `cargo test` with 208 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
 - Dotted background fixed in world space; light theme matching the
   reference look, re-derived from `op: theme`.
+- Images: `Ctrl+V` pastes what the clipboard holds (PNG, JPEG, WebP) as an
+  `image` element — centered on the pointer, one world unit per pixel,
+  shrunk to 80% of the visible world if it would not fit, and selected.
+  The original bytes are kept in `blobs/<sha256>`; the element only names
+  the hash, so a board says nothing about the machine that wrote it.
+  Images move, resize and turn like any other element, and paint in
+  document order: one instanced draw per texture over the same buffer.
 - Pencil: on release the stroke is simplified (Ramer–Douglas–Peucker) and
   fitted with cubic Béziers (Schneider), then saved as a `path` of
   self-contained `[a, c1, c2, b]` curves; rendering flattens them per
@@ -60,6 +68,7 @@ Not yet: eraser, text, shapes, undo, export, Omarchy plugin, thumbnails.
 | Left drag on the selection | Move |
 | Drag a corner handle | Resize, opposite corner pinned |
 | Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
+| `Ctrl` + `V` | Paste the clipboard image onto the board |
 | `Delete` / `Backspace` | Delete the selection |
 | Left drag (Pencil) | Draw; the stroke is fitted to Béziers on release |
 | Left drag (Hand), `Space` + drag, middle drag | Pan |
@@ -91,9 +100,10 @@ XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- \
 ```
 src/main.rs      CLI dispatch → forward to the live instance, or become it
 src/cli.rs       flags (clap), mutually exclusive actions
-src/doc.rs       document §6.1 (pure data, serde): rect, path
-src/store.rs     ~/.local/share/omawhite: boards/, index.json, perms §9.3
+src/doc.rs       document §6.1 (pure data, serde): rect, path, image
+src/store.rs     ~/.local/share/omawhite: boards/, blobs/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
+src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
 src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
 src/scene.rs     View (camera + viewport + scale) and document → SDF prims (pure, tested)
 src/geom.rs      affine maps, corners and oriented frames (pure, tested)
@@ -102,9 +112,10 @@ src/grid.rs      dotted background (pure, tested)
 src/theme.rs     palette: light default, derived from op: theme (pure, tested)
 src/editor.rs    active tool, held keys, stroke, pan/zoom gesture, selection and its drag (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
-src/gfx.rs       wgpu 30: the instanced SDF pipeline
+src/gfx.rs       wgpu 30: the instanced SDF pipeline, image textures
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
+src/clipboard.rs selection reads (wl_data_device) → event loop bridge
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay + dock
