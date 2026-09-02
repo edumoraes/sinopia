@@ -128,8 +128,9 @@ pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
 }
 
 /// Applies `m` to an element. Path control points map exactly; a rect maps
-/// its frame (see [`Frame::transformed`]) and lands back on zero rotation
-/// when the turn cancels out, so the field stays off disk.
+/// its frame (see [`Frame::transformed`]). The rotation is rounded to a
+/// nanodegree: degrees do not survive a trip through radians otherwise,
+/// and a turn that cancels out must land on exactly zero to stay off disk.
 pub fn transform(el: &mut Element, m: &Affine) {
     match el {
         Element::Path(p) => {
@@ -145,8 +146,7 @@ pub fn transform(el: &mut Element, m: &Affine) {
             r.y = f.center[1] - f.half[1];
             r.w = 2.0 * f.half[0];
             r.h = 2.0 * f.half[1];
-            let degrees = f.angle.to_degrees();
-            r.rotation = if degrees.abs() < 1e-9 { 0.0 } else { degrees };
+            r.rotation = (f.angle.to_degrees() * 1e9).round() / 1e9 + 0.0;
         }
     }
 }
@@ -459,6 +459,21 @@ mod tests {
         transform(&mut r, &Affine::scale(2.0, 1.0));
         let Element::Rect(inner) = &r else { panic!() };
         assert_eq!((inner.x, inner.y, inner.w, inner.h), (2.0, 1.0, 4.0, 2.0));
+    }
+
+    #[test]
+    fn moving_a_turned_rect_keeps_its_rotation_exact() {
+        // Degrees → radians → degrees does not round-trip in floats; the
+        // document must not pick up 29.999999999999996 from a plain move.
+        let mut r = rect("r", 0.0, 0.0, 20.0, 10.0, 30.0);
+        transform(&mut r, &Affine::translate(5.0, -1.0));
+        let Element::Rect(inner) = &r else { panic!() };
+        assert_eq!((inner.x, inner.y), (5.0, -1.0));
+        assert_eq!(inner.rotation, 30.0);
+        // A quarter turn on top lands on a round number too.
+        transform(&mut r, &Affine::rotate(QUARTER).about([15.0, 4.0]));
+        let Element::Rect(inner) = &r else { panic!() };
+        assert_eq!(inner.rotation, 120.0);
     }
 
     #[test]
