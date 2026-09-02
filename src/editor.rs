@@ -549,6 +549,7 @@ impl Editor {
         let id = new_id();
         doc.elements.push(Element::Image(Image {
             id: id.clone(),
+            layer: first_layer(doc),
             x: cx - w / 2.0,
             y: cy - h / 2.0,
             w,
@@ -591,9 +592,12 @@ impl Editor {
             let curves = curve::fit(&curve::simplify(&points, tolerance), tolerance);
             doc.elements.push(Element::Path(Path {
                 id: new_id(),
+                layer: first_layer(doc),
                 curves,
                 stroke: ink.to_owned(),
                 width: PEN_WIDTH,
+                opacity: 1.0,
+                hardness: 1.0,
                 rotation: 0.0,
             }));
             return Change::Scene;
@@ -709,6 +713,11 @@ fn point((x, y): (f64, f64)) -> Point {
     [x, y]
 }
 
+/// The layer new elements land on.
+fn first_layer(doc: &Document) -> String {
+    doc.layers.first().map(|l| l.id.clone()).unwrap_or_default()
+}
+
 /// Writes the snapshot back through `m`.
 fn apply(doc: &mut Document, snapshot: &Snapshot, m: &Affine) {
     for (i, el) in snapshot {
@@ -774,6 +783,7 @@ mod tests {
     fn rect(id: &str, x: f64, y: f64, w: f64, h: f64) -> Element {
         Element::Rect(Rect {
             id: id.into(),
+            layer: String::new(),
             x,
             y,
             w,
@@ -799,6 +809,11 @@ mod tests {
             rect("a", 10.0, 10.0, 20.0, 10.0),
             rect("b", 60.0, 60.0, 20.0, 20.0),
         ];
+        // A fixed layer id, so two boards compare equal element by element.
+        doc.layers[0].id = "L1".into();
+        for el in &mut doc.elements {
+            el.set_layer("L1");
+        }
         doc
     }
 

@@ -286,6 +286,7 @@ mod tests {
         };
         d.elements.push(Element::Rect(Rect {
             id: "el_01".into(),
+            layer: d.layers[0].id.clone(),
             x: 1.0,
             y: 2.0,
             w: 3.0,

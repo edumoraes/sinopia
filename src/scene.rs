@@ -557,12 +557,17 @@ mod tests {
         let mut d = Document::new("t");
         d.camera = view.camera;
         d.elements = elements;
+        let layer = d.layers[0].id.clone();
+        for el in &mut d.elements {
+            el.set_layer(&layer);
+        }
         d
     }
 
     fn rect(x: f64, y: f64, w: f64, h: f64, stroke: Option<&str>, fill: Option<&str>) -> Element {
         Element::Rect(Rect {
             id: "el".into(),
+            layer: String::new(),
             x,
             y,
             w,
@@ -901,9 +906,12 @@ mod tests {
         let doc = doc_with(
             vec![Element::Path(Path {
                 id: "p".into(),
+                layer: String::new(),
                 curves: vec![[[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]],
                 stroke: "#000".into(),
                 width: 2.0,
+                opacity: 1.0,
+                hardness: 1.0,
                 rotation: 0.0,
             })],
             &v,
@@ -960,6 +968,7 @@ mod tests {
     fn image(x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Element {
         Element::Image(crate::doc::Image {
             id: "i1".into(),
+            layer: String::new(),
             x,
             y,
             w,

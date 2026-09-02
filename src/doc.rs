@@ -16,7 +16,54 @@ pub struct Document {
     pub id: String,
     pub title: String,
     pub camera: Camera,
+    /// Bottom to top. Never empty once parsed: a board written before
+    /// layers existed gets one on the way in (see [`Document::from_json`]).
+    #[serde(default)]
+    pub layers: Vec<Layer>,
     pub elements: Vec<Element>,
+}
+
+/// A layer: a name, whether it shows, and a place in the order. Elements
+/// name it by id. `visible` is absent on disk when true, so boards that
+/// never hid anything keep their shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Layer {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub visible: bool,
+}
+
+impl Layer {
+    /// A visible layer with a fresh ULID.
+    pub fn new(name: &str) -> Layer {
+        Layer {
+            id: new_id(),
+            name: name.to_owned(),
+            visible: true,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(v: &f64) -> bool {
+    *v == 1.0
+}
+
+/// Whether `v` is a fraction — what `opacity` and `hardness` have to be.
+fn is_unit(v: f64) -> bool {
+    (0.0..=1.0).contains(&v)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -44,14 +91,35 @@ impl Element {
             Element::Image(i) => &i.id,
         }
     }
+
+    /// The id of the layer this element is on.
+    pub fn layer(&self) -> &str {
+        match self {
+            Element::Rect(r) => &r.layer,
+            Element::Path(p) => &p.layer,
+            Element::Image(i) => &i.layer,
+        }
+    }
+
+    pub fn set_layer(&mut self, id: &str) {
+        let layer = match self {
+            Element::Rect(r) => &mut r.layer,
+            Element::Path(p) => &mut p.layer,
+            Element::Image(i) => &mut i.layer,
+        };
+        id.clone_into(layer);
+    }
 }
 
 /// `x, y, w, h` is the box before rotation; `rotation` turns it about its
 /// center, in degrees, clockwise on screen (y down, as in SVG). Absent on
-/// disk when zero, so unrotated boards keep the §6.1 shape.
+/// disk when zero, so unrotated boards keep the §6.1 shape. `layer` names
+/// the layer the rect is on; absent on disk, it is the first one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub id: String,
+    #[serde(default)]
+    pub layer: String,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -67,9 +135,13 @@ fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
-/// Freehand pen stroke: a chain of cubic Béziers in world units, each one
-/// self-contained as `[a, c1, c2, b]` and starting where the previous
-/// ended. `width` is in world units too (ink scales with zoom). Transforms
+/// Freehand stroke — the pencil's or the brush's: a chain of cubic
+/// Béziers in world units, each one self-contained as `[a, c1, c2, b]`
+/// and starting where the previous ended. `width` is in world units too
+/// (ink scales with zoom). `opacity` is the stroke's as one shape —
+/// where it crosses itself it does not darken — and `hardness` is how
+/// much of its radius is crisp: 1 is the pencil's edge, 0 fades from the
+/// center out. Both are fractions, both absent on disk when 1. Transforms
 /// are baked into the curves; `rotation` (degrees, clockwise on screen)
 /// only records how far the stroke has been turned since it was drawn, so
 /// its box turns with it and snapping counts from the creation state.
@@ -78,9 +150,15 @@ fn is_zero(v: &f64) -> bool {
 #[serde(try_from = "PathOnDisk")]
 pub struct Path {
     pub id: String,
+    #[serde(default)]
+    pub layer: String,
     pub curves: Vec<Cubic>,
     pub stroke: String,
     pub width: f64,
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f64,
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub hardness: f64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rotation: f64,
 }
@@ -92,10 +170,16 @@ pub struct Path {
 #[derive(Deserialize)]
 struct PathOnDisk {
     id: String,
+    #[serde(default)]
+    layer: String,
     curves: Option<Vec<Cubic>>,
     points: Option<Vec<[f64; 2]>>,
     stroke: String,
     width: f64,
+    #[serde(default = "one")]
+    opacity: f64,
+    #[serde(default = "one")]
+    hardness: f64,
     #[serde(default)]
     rotation: f64,
 }
@@ -116,11 +200,20 @@ impl TryFrom<PathOnDisk> for Path {
             ),
             (None, None) => return Err("path needs `curves`".into()),
         };
+        if !is_unit(p.opacity) {
+            return Err(format!("opacity {} is not between 0 and 1", p.opacity));
+        }
+        if !is_unit(p.hardness) {
+            return Err(format!("hardness {} is not between 0 and 1", p.hardness));
+        }
         Ok(Path {
             id: p.id,
+            layer: p.layer,
             curves,
             stroke: p.stroke,
             width: p.width,
+            opacity: p.opacity,
+            hardness: p.hardness,
             rotation: p.rotation,
         })
     }
@@ -135,6 +228,8 @@ impl TryFrom<PathOnDisk> for Path {
 #[serde(try_from = "ImageOnDisk")]
 pub struct Image {
     pub id: String,
+    #[serde(default)]
+    pub layer: String,
     pub x: f64,
     pub y: f64,
     pub w: f64,
@@ -150,6 +245,8 @@ pub struct Image {
 #[derive(Deserialize)]
 struct ImageOnDisk {
     id: String,
+    #[serde(default)]
+    layer: String,
     x: f64,
     y: f64,
     w: f64,
@@ -168,6 +265,7 @@ impl TryFrom<ImageOnDisk> for Image {
         }
         Ok(Image {
             id: i.id,
+            layer: i.layer,
             x: i.x,
             y: i.y,
             w: i.w,
@@ -197,20 +295,24 @@ impl Default for Camera {
 }
 
 impl Document {
-    /// New, empty document with a ULID id and the camera at the origin.
+    /// New, empty document with a ULID id, one layer and the camera at
+    /// the origin.
     pub fn new(title: &str) -> Self {
         Document {
             schema: SCHEMA_VERSION,
             id: new_id(),
             title: title.to_owned(),
             camera: Camera::default(),
+            layers: vec![Layer::new("Layer 1")],
             elements: Vec::new(),
         }
     }
 
-    /// Deserializes and validates the schema version.
+    /// Deserializes and validates the schema version, then settles the
+    /// layers: a board without any gets one, an element without one joins
+    /// the first, and a layer that is named has to exist.
     pub fn from_json(s: &str) -> anyhow::Result<Self> {
-        let doc: Document = serde_json::from_str(s)?;
+        let mut doc: Document = serde_json::from_str(s)?;
         if doc.schema != SCHEMA_VERSION {
             anyhow::bail!(
                 "schema {} not supported (this binary speaks schema {})",
@@ -218,13 +320,114 @@ impl Document {
                 SCHEMA_VERSION
             );
         }
+        doc.settle_layers()?;
         Ok(doc)
+    }
+
+    fn settle_layers(&mut self) -> anyhow::Result<()> {
+        if self.layers.is_empty() {
+            self.layers.push(Layer::new("Layer 1"));
+        }
+        for (i, layer) in self.layers.iter().enumerate() {
+            if layer.id.is_empty() {
+                anyhow::bail!("layer {i} has no id");
+            }
+            if self.layers[..i].iter().any(|l| l.id == layer.id) {
+                anyhow::bail!("layer id {:?} is used twice", layer.id);
+            }
+        }
+        let layers = &self.layers;
+        for el in &mut self.elements {
+            if el.layer().is_empty() {
+                el.set_layer(&layers[0].id);
+            } else if !layers.iter().any(|l| l.id == el.layer()) {
+                anyhow::bail!(
+                    "element {:?} names layer {:?}, which does not exist",
+                    el.id(),
+                    el.layer()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Serializes to the canonical on-disk JSON (pretty: debugging with
     /// $EDITOR is a stated goal of the local phase).
     pub fn to_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
+    }
+}
+
+// Reached from the editor once it drives layers; until then only the
+// tests call these.
+#[allow(dead_code)]
+impl Document {
+    /// The elements in paint order — bottom layer first, document order
+    /// within a layer — each with its index in `elements`. Hidden layers
+    /// are skipped: what is not painted is not there.
+    pub fn painted(&self) -> impl Iterator<Item = (usize, &Element)> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.visible)
+            .flat_map(move |layer| {
+                self.elements
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, el)| el.layer() == layer.id)
+            })
+    }
+
+    pub fn layer_index(&self, id: &str) -> Option<usize> {
+        self.layers.iter().position(|l| l.id == id)
+    }
+
+    /// Adds a layer just above `above` (on top when that is past the end)
+    /// and answers its index. It is named `Layer N` with N past every
+    /// number in use, so a name is never handed out twice.
+    pub fn add_layer(&mut self, above: usize) -> usize {
+        let name = self.next_layer_name();
+        let at = above.saturating_add(1).min(self.layers.len());
+        self.layers.insert(at, Layer::new(&name));
+        at
+    }
+
+    fn next_layer_name(&self) -> String {
+        let highest = self
+            .layers
+            .iter()
+            .filter_map(|l| l.name.strip_prefix("Layer ")?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("Layer {}", highest.saturating_add(1))
+    }
+
+    /// Removes layer `index` and every element on it. A board keeps its
+    /// last layer: false then, and for an index past the end.
+    pub fn remove_layer(&mut self, index: usize) -> bool {
+        if self.layers.len() < 2 || index >= self.layers.len() {
+            return false;
+        }
+        let gone = self.layers.remove(index);
+        self.elements.retain(|el| el.layer() != gone.id);
+        true
+    }
+
+    /// Swaps layer `index` with the one above it (`up`) or below, and
+    /// answers where it went. Nothing moves past the edge.
+    pub fn move_layer(&mut self, index: usize, up: bool) -> Option<usize> {
+        if index >= self.layers.len() {
+            return None;
+        }
+        let to = if up {
+            index + 1
+        } else {
+            index.checked_sub(1)?
+        };
+        if to >= self.layers.len() {
+            return None;
+        }
+        self.layers.swap(index, to);
+        Some(to)
     }
 }
 
@@ -240,6 +443,17 @@ mod tests {
     /// sha256 of the empty input — a valid hash, and easy to recognize.
     const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+    /// The one layer of [`sample_doc`].
+    const L1: &str = "01JLAYER1LAYER1LAYER1LAYER";
+
+    fn layer(id: &str, name: &str) -> Layer {
+        Layer {
+            id: id.into(),
+            name: name.into(),
+            visible: true,
+        }
+    }
+
     fn sample_doc() -> Document {
         Document {
             schema: SCHEMA_VERSION,
@@ -250,9 +464,11 @@ mod tests {
                 y: 0.0,
                 zoom: 1.0,
             },
+            layers: vec![layer(L1, "Layer 1")],
             elements: vec![
                 Element::Rect(Rect {
                     id: "el_01".into(),
+                    layer: L1.into(),
                     x: 40.0,
                     y: 80.0,
                     w: 220.0,
@@ -264,13 +480,17 @@ mod tests {
                 }),
                 Element::Path(Path {
                     id: "el_02".into(),
+                    layer: L1.into(),
                     curves: vec![[[1.0, 2.0], [2.0, 3.0], [3.5, 4.0], [6.0, 4.0]]],
                     stroke: "#1f1f1f".into(),
                     width: 2.0,
+                    opacity: 1.0,
+                    hardness: 1.0,
                     rotation: 0.0,
                 }),
                 Element::Image(Image {
                     id: "el_03".into(),
+                    layer: L1.into(),
                     x: 10.0,
                     y: 20.0,
                     w: 64.0,
@@ -280,6 +500,228 @@ mod tests {
                 }),
             ],
         }
+    }
+
+    /// A board with `layers` and three elements, one per layer, in the
+    /// JSON `elements` order `top, bottom, middle` — so paint order and
+    /// document order disagree on purpose.
+    fn three_layers() -> Document {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [
+                { "id": "bottom", "name": "Layer 1" },
+                { "id": "middle", "name": "Layer 2" },
+                { "id": "top", "name": "Layer 3" }
+            ],
+            "elements": [
+                { "id": "on_top", "type": "rect", "layer": "top",
+                  "x": 0, "y": 0, "w": 1, "h": 1, "stroke": null, "fill": null, "text": null },
+                { "id": "on_bottom", "type": "rect", "layer": "bottom",
+                  "x": 0, "y": 0, "w": 1, "h": 1, "stroke": null, "fill": null, "text": null },
+                { "id": "on_middle", "type": "rect", "layer": "middle",
+                  "x": 0, "y": 0, "w": 1, "h": 1, "stroke": null, "fill": null, "text": null }
+            ]
+        }"##;
+        Document::from_json(json).unwrap()
+    }
+
+    fn painted_ids(doc: &Document) -> Vec<(usize, &str)> {
+        doc.painted().map(|(i, el)| (i, el.id())).collect()
+    }
+
+    #[test]
+    fn new_document_has_one_visible_layer_named_layer_1() {
+        let doc = Document::new("t");
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.layers[0].name, "Layer 1");
+        assert!(doc.layers[0].visible);
+        assert_eq!(doc.layers[0].id.len(), 26, "layer ids are ULIDs");
+    }
+
+    #[test]
+    fn a_board_without_layers_gets_one_and_its_elements_join_it() {
+        // Every board written before layers existed looks like the §6.1
+        // example: no `layers`, no `layer` on the elements.
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "auth flow",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [
+                { "id": "el_01", "type": "rect", "x": 40, "y": 80, "w": 220, "h": 80,
+                  "stroke": "#222", "fill": null, "text": "API Gateway" }
+            ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.layers[0].name, "Layer 1");
+        assert!(doc.layers[0].visible);
+        assert_eq!(doc.elements[0].layer(), doc.layers[0].id);
+        // And it is written back with both, so the next reader need not guess.
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        assert_eq!(v["layers"][0]["id"], doc.layers[0].id.as_str());
+        assert_eq!(v["elements"][0]["layer"], doc.layers[0].id.as_str());
+    }
+
+    #[test]
+    fn layers_and_element_layers_roundtrip() {
+        let mut doc = sample_doc();
+        doc.layers.push(Layer {
+            id: "L2".into(),
+            name: "Layer 2".into(),
+            visible: false,
+        });
+        doc.elements[1].set_layer("L2");
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["layers"][0].get("visible").is_none(), "visible: absent when true");
+        assert_eq!(v["layers"][1]["visible"], false);
+        assert_eq!(v["layers"][1]["name"], "Layer 2");
+        assert_eq!(v["elements"][1]["layer"], "L2");
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn an_element_naming_an_unknown_layer_is_an_error() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "L1", "name": "Layer 1" } ],
+            "elements": [ { "id": "el_01", "type": "rect", "layer": "nope",
+                "x": 0, "y": 0, "w": 1, "h": 1, "stroke": null, "fill": null, "text": null } ]
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("layer") && err.contains("nope"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_layer_ids_are_an_error() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "L1", "name": "a" }, { "id": "L1", "name": "b" } ],
+            "elements": []
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("L1"), "{err}");
+    }
+
+    #[test]
+    fn path_opacity_and_hardness_default_to_one_and_stay_off_disk() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [ { "id": "p1", "type": "path",
+                "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]], "stroke": "#000", "width": 3 } ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Path(p) = &doc.elements[0] else {
+            panic!("expected a path");
+        };
+        assert_eq!((p.opacity, p.hardness), (1.0, 1.0));
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        assert!(v["elements"][0].get("opacity").is_none(), "{v}");
+        assert!(v["elements"][0].get("hardness").is_none(), "{v}");
+    }
+
+    #[test]
+    fn path_opacity_and_hardness_roundtrip() {
+        let mut doc = sample_doc();
+        let Element::Path(p) = &mut doc.elements[1] else {
+            panic!("expected a path");
+        };
+        p.opacity = 0.5;
+        p.hardness = 0.25;
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][1]["opacity"].as_f64(), Some(0.5));
+        assert_eq!(v["elements"][1]["hardness"].as_f64(), Some(0.25));
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn path_opacity_or_hardness_outside_the_unit_range_is_an_error() {
+        for (field, value) in [
+            ("opacity", "1.5"),
+            ("opacity", "-0.1"),
+            ("hardness", "2"),
+            ("hardness", "-1"),
+        ] {
+            let json = format!(
+                r##"{{
+                "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                "elements": [ {{ "id": "p1", "type": "path", "{field}": {value},
+                    "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]], "stroke": "#000", "width": 3 }} ]
+            }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains(field), "{field} = {value}: {err}");
+        }
+    }
+
+    #[test]
+    fn painted_walks_layers_bottom_up_and_skips_hidden_ones() {
+        let mut doc = three_layers();
+        assert_eq!(
+            painted_ids(&doc),
+            vec![(1, "on_bottom"), (2, "on_middle"), (0, "on_top")]
+        );
+        doc.layers[1].visible = false;
+        assert_eq!(painted_ids(&doc), vec![(1, "on_bottom"), (0, "on_top")]);
+    }
+
+    #[test]
+    fn layer_index_finds_a_layer_by_id() {
+        let doc = three_layers();
+        assert_eq!(doc.layer_index("middle"), Some(1));
+        assert_eq!(doc.layer_index("nope"), None);
+    }
+
+    #[test]
+    fn add_layer_inserts_above_and_names_past_the_highest_number() {
+        let mut doc = Document::new("t");
+        assert_eq!(doc.add_layer(0), 1);
+        assert_eq!(doc.layers[1].name, "Layer 2");
+        assert!(doc.remove_layer(1));
+        // "Layer 2" is gone, but its number is not reused: numbering only
+        // ever counts up, as in Photoshop.
+        assert_eq!(doc.add_layer(0), 1);
+        assert_eq!(doc.layers[1].name, "Layer 2");
+        doc.layers[1].name = "Layer 7".into();
+        assert_eq!(doc.add_layer(0), 1);
+        assert_eq!(doc.layers[1].name, "Layer 8");
+        assert_eq!(doc.layers[2].name, "Layer 7", "the new layer went in above index 0");
+        assert!(doc.layers[1].visible);
+        assert_eq!(doc.layers[1].id.len(), 26);
+        // Past the end still lands on top.
+        assert_eq!(doc.add_layer(99), 3);
+    }
+
+    #[test]
+    fn remove_layer_drops_its_elements_and_refuses_the_last() {
+        let mut doc = three_layers();
+        assert!(doc.remove_layer(1));
+        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(painted_ids(&doc), vec![(1, "on_bottom"), (0, "on_top")]);
+        assert_eq!(doc.elements.len(), 2, "the middle layer's element went with it");
+        assert!(!doc.remove_layer(5), "no such layer");
+        assert!(doc.remove_layer(0));
+        assert!(!doc.remove_layer(0), "a board keeps its last layer");
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.elements.len(), 1);
+    }
+
+    #[test]
+    fn move_layer_swaps_with_the_neighbour_and_stops_at_the_edge() {
+        let mut doc = three_layers();
+        assert_eq!(doc.move_layer(0, true), Some(1));
+        assert_eq!(doc.layers[1].id, "bottom");
+        assert_eq!(doc.layers[0].id, "middle");
+        assert_eq!(doc.move_layer(2, true), None, "already on top");
+        assert_eq!(doc.move_layer(0, false), None, "already at the bottom");
+        assert_eq!(doc.move_layer(9, true), None, "no such layer");
+        assert_eq!(doc.move_layer(1, false), Some(0));
+        assert_eq!(doc.layers[0].id, "bottom");
     }
 
     #[test]

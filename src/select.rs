@@ -388,6 +388,7 @@ mod tests {
     fn rect(id: &str, x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Element {
         Element::Rect(Rect {
             id: id.into(),
+            layer: String::new(),
             x,
             y,
             w,
@@ -402,9 +403,12 @@ mod tests {
     fn path(id: &str, curves: Vec<Cubic>, width: f64) -> Element {
         Element::Path(Path {
             id: id.into(),
+            layer: String::new(),
             curves,
             stroke: "#000".into(),
             width,
+            opacity: 1.0,
+            hardness: 1.0,
             rotation: 0.0,
         })
     }
@@ -412,6 +416,7 @@ mod tests {
     fn image(id: &str, x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Element {
         Element::Image(Image {
             id: id.into(),
+            layer: String::new(),
             x,
             y,
             w,
@@ -429,6 +434,10 @@ mod tests {
     fn doc(elements: Vec<Element>) -> Document {
         let mut d = Document::new("t");
         d.elements = elements;
+        let layer = d.layers[0].id.clone();
+        for el in &mut d.elements {
+            el.set_layer(&layer);
+        }
         d
     }
 
