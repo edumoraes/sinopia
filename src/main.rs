@@ -9,6 +9,7 @@ mod curve;
 mod doc;
 mod dock;
 mod editor;
+mod geom;
 mod gestures;
 mod gfx;
 mod grid;
