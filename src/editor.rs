@@ -7,7 +7,7 @@
 use crate::bitmap;
 use crate::brush::{Brush, Tip};
 use crate::curve;
-use crate::doc::{Camera, Document, Element, Image, Kind, Path, new_id};
+use crate::doc::{Camera, Document, Element, Image, Kind, Paint, Path, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
@@ -740,16 +740,44 @@ impl Editor {
                 _ => Kind::Raster,
             };
             let layer = self.ink_layer(doc, kind);
-            doc.elements.push(Element::Path(Path {
-                id: new_id(),
-                layer,
+            let laid = crate::doc::Stroke {
                 curves,
                 stroke: ink.to_owned(),
                 width: tip.width,
                 opacity: tip.opacity,
                 hardness: tip.hardness,
-                rotation: 0.0,
-            }));
+            };
+            if kind == Kind::Vector {
+                doc.elements.push(Element::Path(Path {
+                    id: new_id(),
+                    layer,
+                    curves: laid.curves,
+                    stroke: laid.stroke,
+                    width: laid.width,
+                    opacity: laid.opacity,
+                    hardness: laid.hardness,
+                    rotation: 0.0,
+                }));
+                return Change::Scene;
+            }
+            // A raster layer holds one painting: the stroke joins the
+            // paint already on it, and opens one only when there is none.
+            let onto = doc
+                .elements
+                .iter()
+                .position(|el| matches!(el, Element::Paint(p) if p.layer == layer));
+            if let Some(i) = onto
+                && let Element::Paint(p) = &mut doc.elements[i]
+            {
+                p.strokes.push(laid);
+            } else {
+                doc.elements.push(Element::Paint(Paint {
+                    id: new_id(),
+                    layer,
+                    strokes: vec![laid],
+                    rotation: 0.0,
+                }));
+            }
             return Change::Scene;
         }
         if button == Button::Left
@@ -900,6 +928,13 @@ mod tests {
         p
     }
 
+    fn paint_of(doc: &Document, i: usize) -> &Paint {
+        let Element::Paint(p) = &doc.elements[i] else {
+            panic!("expected a paint at {i}");
+        };
+        p
+    }
+
     /// [`board`] with `b` moved onto a second layer, `L2`, above `L1`.
     fn layered_board() -> Document {
         let mut doc = board();
@@ -914,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn brush_records_the_tip_at_the_press_and_writes_it_into_the_path() {
+    fn brush_records_the_tip_at_the_press_and_writes_it_into_the_paint() {
         let mut e = tool(Tool::Brush);
         let mut doc = Document::new("t");
         let v = view();
@@ -933,9 +968,10 @@ mod tests {
             e.release(Button::Left, &v, (9.0, 2.0), &mut doc, "#000"),
             Change::Scene
         );
-        let p = path_of(&doc, 0);
-        assert_eq!((p.width, p.opacity, p.hardness), (20.0, 0.5, 0.25));
-        assert_eq!(p.stroke, "#000");
+        let p = paint_of(&doc, 0);
+        let laid = &p.strokes[0];
+        assert_eq!((laid.width, laid.opacity, laid.hardness), (20.0, 0.5, 0.25));
+        assert_eq!(laid.stroke, "#000");
         assert_eq!(p.layer, doc.layers[0].id);
     }
 
@@ -976,14 +1012,14 @@ mod tests {
         assert_eq!(doc.layers.len(), 2);
         assert_eq!(e.active_layer(&doc), 1);
         let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
-        assert_eq!(path_of(&doc, 0).layer, doc.layers[1].id);
+        assert_eq!(paint_of(&doc, 0).layer, doc.layers[1].id);
         let _ = e.select_layer(&doc, 0);
         let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
-        assert_eq!(path_of(&doc, 1).layer, doc.layers[0].id);
+        assert_eq!(paint_of(&doc, 1).layer, doc.layers[0].id, "another layer, another paint");
     }
 
     #[test]
-    fn brush_strokes_pile_up_on_the_raster_layer_they_find() {
+    fn brush_strokes_join_the_paint_on_the_raster_layer() {
         let mut e = tool(Tool::Brush);
         let mut doc = Document::new("t");
         let v = view();
@@ -991,8 +1027,39 @@ mod tests {
         let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
         let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
         assert_eq!(doc.layers.len(), 1, "pixels join what is already there");
-        assert_eq!(path_of(&doc, 0).layer, sheet);
-        assert_eq!(path_of(&doc, 1).layer, sheet);
+        assert_eq!(doc.elements.len(), 1, "and so does the object they make");
+        let p = paint_of(&doc, 0);
+        assert_eq!(p.strokes.len(), 2, "one paint, two strokes");
+        assert_eq!(p.layer, sheet);
+    }
+
+    #[test]
+    fn a_stroke_laid_with_another_tip_joins_the_paint_all_the_same() {
+        // The ink belongs to the stroke, not to the object, so changing
+        // the brush mid-painting does not start a second one.
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        let fine = Brush {
+            size: 4.0,
+            opacity: 1.0,
+            hardness: 1.0,
+        };
+        let _ = e.press(Button::Left, &v, (1.0, 2.0), &mut doc, &fine);
+        let _ = e.release(Button::Left, &v, (9.0, 2.0), &mut doc, "#000");
+        let soft = Brush {
+            size: 20.0,
+            opacity: 0.5,
+            hardness: 0.25,
+        };
+        let _ = e.press(Button::Left, &v, (1.0, 5.0), &mut doc, &soft);
+        let _ = e.release(Button::Left, &v, (9.0, 5.0), &mut doc, "#f00");
+        assert_eq!(doc.elements.len(), 1);
+        let p = paint_of(&doc, 0);
+        assert_eq!(p.strokes.len(), 2);
+        assert_eq!((p.strokes[0].width, p.strokes[0].stroke.as_str()), (4.0, "#000"));
+        assert_eq!((p.strokes[1].width, p.strokes[1].opacity), (20.0, 0.5));
+        assert_eq!(p.strokes[1].stroke, "#f00");
     }
 
     #[test]
@@ -1024,12 +1091,13 @@ mod tests {
         let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
         assert_eq!(doc.layers.len(), 3, "pixels cannot go on a vector layer");
         assert_eq!(doc.layers[2].kind, Kind::Raster);
-        assert_eq!(path_of(&doc, 1).layer, doc.layers[2].id);
+        assert_eq!(paint_of(&doc, 1).layer, doc.layers[2].id);
         assert_eq!(e.active_layer(&doc), 2);
-        // The one after it finds that raster layer and joins it.
+        // The one after it finds that paint and joins it.
         let _ = drag(&mut e, &v, &mut doc, (1.0, 8.0), (9.0, 8.0));
         assert_eq!(doc.layers.len(), 3);
-        assert_eq!(path_of(&doc, 2).layer, doc.layers[2].id);
+        assert_eq!(doc.elements.len(), 2);
+        assert_eq!(paint_of(&doc, 1).strokes.len(), 2);
     }
 
     #[test]

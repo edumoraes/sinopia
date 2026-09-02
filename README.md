@@ -31,9 +31,11 @@ selection, navigation, pasted images, and projects in tabs:
   `[` `]` step the size (Photoshop's steps, 1–500 world units), `{` `}`
   the hardness by a quarter, `1`–`9` and `0` set the opacity to
   10%–90% and 100%. A ring the size of the brush follows the pointer.
-  The stroke is saved as the same `path`, with `opacity` and `hardness`
-  beside `width` (absent when 1), so it selects, moves and turns like a
-  pencil stroke. A soft or translucent stroke is composited as one
+  The stroke joins the `paint` on the layer it lands on — one object
+  per raster layer, however many strokes went into it — each stroke
+  keeping the ink it was laid with: `stroke`, `width`, and `opacity`
+  and `hardness` when they are not 1. The paint selects, moves and
+  turns as one. A soft or translucent stroke is composited as one
   shape: its segments are drawn into an offscreen texture as the union
   of their coverage, then laid on the frame once at the stroke's
   opacity — so a stroke crossing itself does not darken, and a soft
@@ -67,10 +69,12 @@ selection, navigation, pasted images, and projects in tabs:
   makes its layer active, and the panel glides to bring that card into
   sight. A layer holds one of two things, and its card says which — a
   grid of pixels or a curve, at the end opposite the eye. A raster
-  layer accumulates: brush strokes pile up on the active one, and a
-  pasted image opens one of its own so the next stroke paints over the
-  picture instead of beside it. A vector layer holds the one object it
-  was made for: every pencil stroke opens its own, above the active
+  layer accumulates: every brush stroke joins the `paint` already on
+  the active one instead of becoming an element of its own, so the
+  layer holds one painting however many strokes went into it, and a
+  pasted image opens a layer of its own so the next stroke paints over
+  the picture instead of beside it. A vector layer holds the one object
+  it was made for: every pencil stroke opens its own, above the active
   layer, and leaves it active. Painting on a vector layer is not
   possible, so a brush stroke over one opens a raster layer above it —
   Photoshop's answer to the same question. The panel's `+` makes a

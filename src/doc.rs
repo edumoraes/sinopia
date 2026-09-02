@@ -114,6 +114,7 @@ pub struct Camera {
 pub enum Element {
     Rect(Rect),
     Path(Path),
+    Paint(Paint),
     Image(Image),
 }
 
@@ -122,6 +123,7 @@ impl Element {
         match self {
             Element::Rect(r) => &r.id,
             Element::Path(p) => &p.id,
+            Element::Paint(p) => &p.id,
             Element::Image(i) => &i.id,
         }
     }
@@ -131,6 +133,7 @@ impl Element {
         match self {
             Element::Rect(r) => &r.layer,
             Element::Path(p) => &p.layer,
+            Element::Paint(p) => &p.layer,
             Element::Image(i) => &i.layer,
         }
     }
@@ -139,6 +142,7 @@ impl Element {
         let layer = match self {
             Element::Rect(r) => &mut r.layer,
             Element::Path(p) => &mut p.layer,
+            Element::Paint(p) => &mut p.layer,
             Element::Image(i) => &mut i.layer,
         };
         id.clone_into(layer);
@@ -249,6 +253,70 @@ impl TryFrom<PathOnDisk> for Path {
             opacity: p.opacity,
             hardness: p.hardness,
             rotation: p.rotation,
+        })
+    }
+}
+
+/// The painting on a raster layer: one object, however many strokes went
+/// into it. A raster layer accumulates — a second brush stroke joins the
+/// paint already there instead of becoming an element of its own — so the
+/// layer holds one thing, which moves, turns and is deleted as one.
+/// Every stroke keeps the ink it was laid with, because that is what a
+/// layer of pixels would have kept.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Paint {
+    pub id: String,
+    #[serde(default)]
+    pub layer: String,
+    pub strokes: Vec<Stroke>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
+}
+
+/// One stroke of a [`Paint`]: a `path` without an identity of its own.
+/// The curves are a chain, as a path's are; two strokes are not, which is
+/// why they cannot share one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "StrokeOnDisk")]
+pub struct Stroke {
+    pub curves: Vec<Cubic>,
+    pub stroke: String,
+    pub width: f64,
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f64,
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub hardness: f64,
+}
+
+/// What a stroke may look like on disk. Checked on the way in, like a
+/// path's: a fraction is a fraction.
+#[derive(Deserialize)]
+struct StrokeOnDisk {
+    curves: Vec<Cubic>,
+    stroke: String,
+    width: f64,
+    #[serde(default = "one")]
+    opacity: f64,
+    #[serde(default = "one")]
+    hardness: f64,
+}
+
+impl TryFrom<StrokeOnDisk> for Stroke {
+    type Error = String;
+
+    fn try_from(s: StrokeOnDisk) -> Result<Stroke, String> {
+        if !is_unit(s.opacity) {
+            return Err(format!("opacity {} is not between 0 and 1", s.opacity));
+        }
+        if !is_unit(s.hardness) {
+            return Err(format!("hardness {} is not between 0 and 1", s.hardness));
+        }
+        Ok(Stroke {
+            curves: s.curves,
+            stroke: s.stroke,
+            width: s.width,
+            opacity: s.opacity,
+            hardness: s.hardness,
         })
     }
 }
@@ -724,6 +792,53 @@ mod tests {
         assert_eq!(v["elements"][1]["opacity"].as_f64(), Some(0.5));
         assert_eq!(v["elements"][1]["hardness"].as_f64(), Some(0.25));
         assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_paint_is_one_element_holding_every_stroke_laid_on_it() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": [ { "id": "pt1", "type": "paint", "layer": "l1", "strokes": [
+                { "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]], "stroke": "#000", "width": 3 },
+                { "curves": [[[0, 9], [3, 9], [7, 9], [10, 9]]], "stroke": "#f00", "width": 8,
+                  "opacity": 0.5, "hardness": 0.25 }
+            ] } ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Paint(p) = &doc.elements[0] else {
+            panic!("expected a paint");
+        };
+        assert_eq!(p.strokes.len(), 2, "one object, two strokes");
+        assert_eq!(p.layer, "l1");
+        // Every stroke keeps the ink it was laid with.
+        assert_eq!((p.strokes[0].width, p.strokes[0].opacity), (3.0, 1.0));
+        assert_eq!((p.strokes[1].width, p.strokes[1].opacity), (8.0, 0.5));
+        assert_eq!(p.strokes[1].stroke, "#f00");
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][0]["type"], "paint");
+        assert!(
+            v["elements"][0]["strokes"][0].get("opacity").is_none(),
+            "a full stroke stays off disk: {v}"
+        );
+        assert_eq!(v["elements"][0]["strokes"][1]["hardness"], 0.25);
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_paint_stroke_outside_the_unit_range_is_an_error() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [ { "id": "pt1", "type": "paint", "strokes": [
+                { "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]], "stroke": "#000",
+                  "width": 3, "opacity": 1.5 }
+            ] } ]
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("opacity"), "{err}");
     }
 
     #[test]

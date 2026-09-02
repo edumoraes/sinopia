@@ -830,6 +830,16 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame
                 frame.stroke(path_prims(&p.curves, tip, parse_color(&p.stroke), view), tip);
                 continue;
             }
+            // A paint is one object made of many strokes: each is drawn
+            // with the ink it was laid with, and composited on its own —
+            // painting twice over the same place darkens it, as pixels do.
+            Element::Paint(p) => {
+                for s in &p.strokes {
+                    let tip = Tip::of_stroke(s);
+                    frame.stroke(path_prims(&s.curves, tip, parse_color(&s.stroke), view), tip);
+                }
+                continue;
+            }
             Element::Image(i) => {
                 let (sx, sy) = view.world_to_screen(i.x, i.y);
                 let r = ScreenRect {
@@ -857,7 +867,7 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame
 mod tests {
     use super::*;
     use crate::brush::Tip;
-    use crate::doc::{Camera, Kind, Layer, Path, Rect};
+    use crate::doc::{Camera, Kind, Layer, Paint, Path, Rect, Stroke};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
 
@@ -983,6 +993,55 @@ mod tests {
         assert_eq!(dot[0].kind, KIND_BOX);
         assert_eq!((dot[0].radius, dot[0].feather), (2.0, 4.0));
         assert_eq!(dot[0].geom, [48.0, 48.0, 4.0, 4.0]);
+    }
+
+    fn path_of(curves: Vec<Cubic>, tip: Tip) -> Element {
+        Element::Path(Path {
+            id: "p".into(),
+            layer: String::new(),
+            curves,
+            stroke: "#000".into(),
+            width: tip.width,
+            opacity: tip.opacity,
+            hardness: tip.hardness,
+            rotation: 0.0,
+        })
+    }
+
+    fn laid(curves: Vec<Cubic>, tip: Tip) -> Stroke {
+        Stroke {
+            curves,
+            stroke: "#000".into(),
+            width: tip.width,
+            opacity: tip.opacity,
+            hardness: tip.hardness,
+        }
+    }
+
+    #[test]
+    fn a_paint_draws_every_stroke_with_the_ink_it_was_laid_with() {
+        let v = view(0.0, 0.0, 1.0);
+        let none = ImageSlots::new();
+        let a: Vec<Cubic> = vec![[[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]];
+        let b: Vec<Cubic> = vec![[[0.0, 40.0], [3.0, 40.0], [6.0, 40.0], [9.0, 40.0]]];
+        let soft = tip(8.0, 0.5, 0.5);
+        let paint = Element::Paint(Paint {
+            id: "pt".into(),
+            layer: String::new(),
+            strokes: vec![laid(a.clone(), Tip::PENCIL), laid(b.clone(), soft)],
+            rotation: 0.0,
+        });
+        let together = document_prims(&doc_with(vec![paint], &v), &v, &none);
+        // Two strokes in one paint draw what two paths draw: nothing
+        // joins them, and the soft one is still composited on its own.
+        let apart = document_prims(
+            &doc_with(vec![path_of(a, Tip::PENCIL), path_of(b, soft)], &v),
+            &v,
+            &none,
+        );
+        assert_eq!(together.prims, apart.prims);
+        assert_eq!(together.groups.len(), 1, "one group, for the soft stroke");
+        assert_eq!(together.groups[0].opacity, 0.5);
     }
 
     #[test]

@@ -41,23 +41,11 @@ pub fn frame(el: &Element) -> Option<Frame> {
     match el {
         Element::Rect(r) => Some(box_frame(r.x, r.y, r.w, r.h, r.rotation)),
         Element::Image(i) => Some(box_frame(i.x, i.y, i.w, i.h, i.rotation)),
-        Element::Path(p) => {
-            let angle = p.rotation.to_radians();
-            let back = Affine::rotate(-angle);
-            let drawn: Vec<Cubic> = p
-                .curves
-                .iter()
-                .map(|c| c.map(|point| back.apply(point)))
-                .collect();
-            let (lo, hi) = curve::bounds(&drawn)?;
-            let pad = p.width / 2.0;
-            let unturned = Frame::spanning([lo[0] - pad, lo[1] - pad], [hi[0] + pad, hi[1] + pad]);
-            Some(Frame {
-                center: Affine::rotate(angle).apply(unturned.center),
-                half: unturned.half,
-                angle,
-            })
-        }
+        Element::Path(p) => ink_frame([(p.curves.as_slice(), p.width)], p.rotation),
+        Element::Paint(p) => ink_frame(
+            p.strokes.iter().map(|s| (s.curves.as_slice(), s.width)),
+            p.rotation,
+        ),
     }
 }
 
@@ -122,18 +110,62 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
     match el {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
         Element::Rect(_) | Element::Image(_) => true,
-        Element::Path(path) => {
-            let reach = path.width / 2.0 + slop;
-            // Flatten far finer than the reach so the polyline's error
-            // cannot decide the answer.
-            let tolerance = (reach / 20.0).max(1e-6);
-            path.curves.iter().any(|c| {
-                curve::flatten(c, tolerance)
-                    .windows(2)
-                    .any(|w| curve::point_segment_distance(p, w[0], w[1]) <= reach)
-            })
-        }
+        Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
+        // Any one of its strokes is the object: the gaps between them
+        // are not.
+        Element::Paint(paint) => paint
+            .strokes
+            .iter()
+            .any(|s| ink_hit(&s.curves, s.width, p, slop)),
     }
+}
+
+/// The oriented box around strokes drawn together: each one's curve
+/// bounds grown by half its width, unturned by `rotation` so the box is
+/// the one they were drawn in, then turned back. `None` when there is no
+/// ink at all.
+fn ink_frame<'a>(strokes: impl IntoIterator<Item = (&'a [Cubic], f64)>, rotation: f64) -> Option<Frame> {
+    let angle = rotation.to_radians();
+    let back = Affine::rotate(-angle);
+    let mut span: Option<([f64; 2], [f64; 2])> = None;
+    for (curves, width) in strokes {
+        let drawn: Vec<Cubic> = curves
+            .iter()
+            .map(|c| c.map(|point| back.apply(point)))
+            .collect();
+        let Some((lo, hi)) = curve::bounds(&drawn) else {
+            continue;
+        };
+        let pad = width / 2.0;
+        let (lo, hi) = ([lo[0] - pad, lo[1] - pad], [hi[0] + pad, hi[1] + pad]);
+        span = Some(match span {
+            None => (lo, hi),
+            Some((l, h)) => (
+                [l[0].min(lo[0]), l[1].min(lo[1])],
+                [h[0].max(hi[0]), h[1].max(hi[1])],
+            ),
+        });
+    }
+    let (lo, hi) = span?;
+    let unturned = Frame::spanning(lo, hi);
+    Some(Frame {
+        center: Affine::rotate(angle).apply(unturned.center),
+        half: unturned.half,
+        angle,
+    })
+}
+
+/// Whether `p` is within `slop` of ink `width` wide laid along `curves`.
+fn ink_hit(curves: &[Cubic], width: f64, p: Point, slop: f64) -> bool {
+    let reach = width / 2.0 + slop;
+    // Flatten far finer than the reach so the polyline's error cannot
+    // decide the answer.
+    let tolerance = (reach / 20.0).max(1e-6);
+    curves.iter().any(|c| {
+        curve::flatten(c, tolerance)
+            .windows(2)
+            .any(|w| curve::point_segment_distance(p, w[0], w[1]) <= reach)
+    })
 }
 
 /// Ids of the painted elements whose box overlaps the unturned box with
@@ -161,6 +193,16 @@ pub fn transform(el: &mut Element, m: &Affine) {
             for c in &mut p.curves {
                 for point in c {
                     *point = m.apply(*point);
+                }
+            }
+            p.rotation = turned(p.rotation, m);
+        }
+        Element::Paint(p) => {
+            for s in &mut p.strokes {
+                for c in &mut s.curves {
+                    for point in c {
+                        *point = m.apply(*point);
+                    }
                 }
             }
             p.rotation = turned(p.rotation, m);
@@ -361,7 +403,7 @@ pub fn marquee_prims(a: (f64, f64), b: (f64, f64), theme: &Theme) -> Vec<Prim> {
 mod tests {
     use super::*;
     use crate::curve::Cubic;
-    use crate::doc::{Camera, Image, Kind, Layer, Path, Rect};
+    use crate::doc::{Camera, Image, Kind, Layer, Paint, Path, Rect, Stroke};
     use crate::scene::{KIND_BOX, KIND_SEGMENT, Viewport};
     use crate::theme::Theme;
 
@@ -413,6 +455,24 @@ mod tests {
         })
     }
 
+    fn paint(id: &str, strokes: Vec<(Vec<Cubic>, f64)>) -> Element {
+        Element::Paint(Paint {
+            id: id.into(),
+            layer: String::new(),
+            strokes: strokes
+                .into_iter()
+                .map(|(curves, width)| Stroke {
+                    curves,
+                    stroke: "#000".into(),
+                    width,
+                    opacity: 1.0,
+                    hardness: 1.0,
+                })
+                .collect(),
+            rotation: 0.0,
+        })
+    }
+
     fn image(id: &str, x: f64, y: f64, w: f64, h: f64, rotation: f64) -> Element {
         Element::Image(Image {
             id: id.into(),
@@ -429,6 +489,32 @@ mod tests {
     fn path_rotation(el: &Element) -> f64 {
         let Element::Path(p) = el else { panic!() };
         p.rotation
+    }
+
+    #[test]
+    fn a_paint_is_framed_and_hit_across_every_stroke() {
+        let flat = |y: f64| -> Vec<Cubic> { vec![[[0.0, y], [3.0, y], [7.0, y], [10.0, y]]] };
+        let el = paint("pt", vec![(flat(0.0), 2.0), (flat(20.0), 2.0)]);
+        let f = frame(&el).unwrap();
+        assert_eq!(f.center, [5.0, 10.0], "the box spans both strokes");
+        assert_eq!(f.half, [6.0, 11.0], "each grown by half its width");
+        assert!(hits(&el, [5.0, 20.0], 0.0), "on the second stroke");
+        assert!(!hits(&el, [5.0, 10.0], 0.0), "the gap between them is not ink");
+        // An empty paint has no frame, as a curveless path has none.
+        assert!(frame(&paint("empty", vec![])).is_none());
+    }
+
+    #[test]
+    fn transforming_a_paint_carries_every_stroke() {
+        let flat = |y: f64| -> Vec<Cubic> { vec![[[0.0, y], [3.0, y], [7.0, y], [10.0, y]]] };
+        let mut el = paint("pt", vec![(flat(0.0), 2.0), (flat(20.0), 2.0)]);
+        transform(&mut el, &Affine::translate(5.0, -1.0));
+        let Element::Paint(p) = &el else { panic!() };
+        assert_eq!(p.strokes[0].curves[0][0], [5.0, -1.0]);
+        assert_eq!(p.strokes[1].curves[0][3], [15.0, 19.0]);
+        transform(&mut el, &Affine::rotate(std::f64::consts::FRAC_PI_2));
+        let Element::Paint(p) = &el else { panic!() };
+        assert_eq!(p.rotation, 90.0, "the object turns as one");
     }
 
     fn doc(elements: Vec<Element>) -> Document {

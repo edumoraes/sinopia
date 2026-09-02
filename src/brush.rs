@@ -5,7 +5,7 @@
 //! Photoshop, and only the keyboard changes them: `[` `]` for size, `{`
 //! `}` for hardness, the digits for opacity.
 
-use crate::doc::Path;
+use crate::doc::{Path, Stroke};
 use crate::editor::PEN_WIDTH;
 use crate::scene::{Prim, Rgba, polyline_prims};
 
@@ -112,6 +112,16 @@ impl Tip {
             width: path.width,
             opacity: path.opacity,
             hardness: path.hardness,
+        }
+    }
+
+    /// The tip one stroke of a `paint` was laid with. A raster layer keeps
+    /// them stroke by stroke, so each one is composited as it was made.
+    pub fn of_stroke(s: &Stroke) -> Tip {
+        Tip {
+            width: s.width,
+            opacity: s.opacity,
+            hardness: s.hardness,
         }
     }
 
