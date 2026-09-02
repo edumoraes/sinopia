@@ -10,14 +10,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
 use crate::doc::Document;
 use crate::dock::{Dock, Hit};
-use crate::editor::{Editor, FIT_TOLERANCE_PX, PEN_WIDTH, Tool};
+use crate::editor::{Button, Change, Editor, PEN_WIDTH, SCROLL_LINE_PX, Tool};
 use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
@@ -48,15 +50,25 @@ struct App {
     cursor: Option<(f64, f64)>,
     modifiers: Modifiers,
     cursor_icon: CursorIcon,
+    /// The camera moved since the last save (pans and zooms are saved when
+    /// the gesture ends, not per frame).
+    camera_dirty: bool,
     /// Smoke-test mode: exit cleanly after N presented frames.
     smoke_frames_left: Option<u32>,
     exit_error: Option<anyhow::Error>,
 }
 
 impl App {
-    fn save(&self) {
+    fn save(&mut self) {
         if let Err(e) = self.store.save(&self.doc) {
             log::error!("saving board {}: {e:#}", self.doc.id);
+        }
+        self.camera_dirty = false;
+    }
+
+    fn flush_camera(&mut self) {
+        if self.camera_dirty {
+            self.save();
         }
     }
 
@@ -67,6 +79,7 @@ impl App {
     }
 
     fn switch_to(&mut self, doc: Document) {
+        self.flush_camera();
         self.editor.cancel();
         self.doc = doc;
         self.shared.lock().expect("lock shared").board_id = self.doc.id.clone();
@@ -108,63 +121,106 @@ impl App {
         prims
     }
 
-    fn pointer_pressed(&mut self) {
+    /// Stores what an editor input changed and redraws if anything did.
+    fn apply(&mut self, change: Change) {
+        match change {
+            Change::None => {}
+            Change::Scene => self.redraw(),
+            Change::Camera(camera) => {
+                self.doc.camera = camera;
+                self.camera_dirty = true;
+                self.redraw();
+            }
+        }
+    }
+
+    fn pointer_pressed(&mut self, button: Button) {
         let (Some(view), Some((x, y))) = (self.view(), self.cursor) else {
             return;
         };
+        self.flush_camera();
         match self.dock(&view).hit(x, y) {
             Some(Hit::Tool(tool)) => {
-                self.editor.set_tool(tool);
-                self.redraw();
+                if button == Button::Left {
+                    self.editor.set_tool(tool);
+                    self.redraw();
+                }
             }
             Some(Hit::Panel) => {}
             None => {
-                let (wx, wy) = view.screen_to_world(x, y);
-                if self.editor.pointer_down([wx, wy]) {
-                    self.redraw();
-                }
+                let change = self.editor.press(button, &view, (x, y));
+                self.apply(change);
             }
         }
         self.update_cursor_icon();
     }
 
-    fn pointer_released(&mut self) {
-        let tolerance = self
-            .view()
-            .map_or(FIT_TOLERANCE_PX, |v| FIT_TOLERANCE_PX / v.px_per_world());
-        if self
+    fn pointer_released(&mut self, button: Button) {
+        let Some(view) = self.view() else { return };
+        let (x, y) = self.cursor.unwrap_or_default();
+        let ink = self.theme.ink_hex.clone();
+        match self
             .editor
-            .pointer_up(&mut self.doc, &self.theme.ink_hex, tolerance)
+            .release(button, &view, (x, y), &mut self.doc, &ink)
         {
-            self.save();
-            self.redraw();
+            Change::None => self.flush_camera(),
+            Change::Scene => {
+                self.save();
+                self.redraw();
+            }
+            change @ Change::Camera(_) => {
+                self.apply(change);
+                self.flush_camera();
+            }
         }
         self.update_cursor_icon();
     }
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
-        if self.editor.is_drawing()
-            && let Some(view) = self.view()
-        {
-            let (wx, wy) = view.screen_to_world(x, y);
-            // Anything finer than one physical pixel is jitter.
-            let min_step = 1.0 / view.px_per_world();
-            if self.editor.pointer_move([wx, wy], min_step) {
-                self.redraw();
-            }
+        if let Some(view) = self.view() {
+            let change = self.editor.moved(&view, (x, y));
+            self.apply(change);
         }
         self.update_cursor_icon();
     }
 
-    fn key_pressed(&mut self, key: &Key) {
+    fn scrolled(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
+        let Some(view) = self.view() else { return };
+        let delta = match delta {
+            MouseScrollDelta::LineDelta(x, y) => (
+                f64::from(x) * SCROLL_LINE_PX * view.scale,
+                f64::from(y) * SCROLL_LINE_PX * view.scale,
+            ),
+            MouseScrollDelta::PixelDelta(p) => (p.x, p.y),
+        };
+        let cursor = self.cursor.unwrap_or((
+            f64::from(view.viewport.w) / 2.0,
+            f64::from(view.viewport.h) / 2.0,
+        ));
+        let shift = self.modifiers.state().shift_key();
+        let camera = self.editor.scroll(&view, cursor, delta, shift);
+        self.apply(Change::Camera(camera));
+        if phase == TouchPhase::Ended {
+            self.flush_camera();
+        }
+    }
+
+    fn key(&mut self, key: &Key, state: ElementState) {
+        let pressed = state == ElementState::Pressed;
         match key {
-            Key::Named(NamedKey::Escape) => {
+            Key::Named(NamedKey::Space) => {
+                self.editor.hold_space(pressed);
+                if !pressed {
+                    self.flush_camera();
+                }
+            }
+            Key::Named(NamedKey::Escape) if pressed => {
                 if self.editor.cancel() {
                     self.redraw();
                 }
             }
-            Key::Character(text) => {
+            Key::Character(text) if pressed => {
                 let mods = self.modifiers.state();
                 if mods.control_key() || mods.alt_key() || mods.super_key() {
                     return;
@@ -182,17 +238,47 @@ impl App {
         self.update_cursor_icon();
     }
 
-    /// Crosshair over the canvas while the pencil is active; arrow elsewhere.
+    fn modifiers_changed(&mut self, modifiers: Modifiers) {
+        self.modifiers = modifiers;
+        let ctrl = modifiers.state().control_key();
+        self.editor.hold_ctrl(ctrl);
+        if !ctrl {
+            self.flush_camera();
+        }
+        self.update_cursor_icon();
+    }
+
+    /// Keys can't be released into a window that lost focus: drop the held
+    /// overrides and whatever gesture they were driving.
+    fn focus_lost(&mut self) {
+        self.editor.hold_space(false);
+        self.editor.hold_ctrl(false);
+        if self.editor.cancel() {
+            self.redraw();
+        }
+        self.flush_camera();
+        self.update_cursor_icon();
+    }
+
+    /// Cursor for the active tool over the canvas; arrow over the dock.
     fn update_cursor_icon(&mut self) {
         let over_dock = match (self.view(), self.cursor) {
             (Some(view), Some((x, y))) => self.dock(&view).hit(x, y).is_some(),
             _ => false,
         };
-        let pencil_on_canvas = self.editor.tool() == Tool::Pencil && !over_dock;
-        let icon = if self.editor.is_drawing() || pencil_on_canvas {
+        let icon = if self.editor.is_panning() {
+            CursorIcon::Grabbing
+        } else if self.editor.is_drawing() {
             CursorIcon::Crosshair
-        } else {
+        } else if over_dock {
             CursorIcon::Default
+        } else {
+            match self.editor.active_tool() {
+                Tool::Select => CursorIcon::Default,
+                Tool::Hand => CursorIcon::Grab,
+                Tool::Pencil => CursorIcon::Crosshair,
+                Tool::Zoom => CursorIcon::ZoomIn,
+            }
         };
         if icon != self.cursor_icon {
             self.cursor_icon = icon;
@@ -243,27 +329,34 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.cursor = None;
+                self.flush_camera();
                 self.update_cursor_icon();
             }
-            WindowEvent::MouseInput {
-                state,
-                button: MouseButton::Left,
-                ..
-            } => match state {
-                ElementState::Pressed => self.pointer_pressed(),
-                ElementState::Released => self.pointer_released(),
-            },
-            WindowEvent::ModifiersChanged(m) => self.modifiers = m,
+            WindowEvent::Focused(false) => self.focus_lost(),
+            WindowEvent::MouseInput { state, button, .. } => {
+                let button = match button {
+                    MouseButton::Left => Button::Left,
+                    MouseButton::Middle => Button::Middle,
+                    MouseButton::Right => Button::Right,
+                    _ => return,
+                };
+                match state {
+                    ElementState::Pressed => self.pointer_pressed(button),
+                    ElementState::Released => self.pointer_released(button),
+                }
+            }
+            WindowEvent::MouseWheel { delta, phase, .. } => self.scrolled(delta, phase),
+            WindowEvent::ModifiersChanged(m) => self.modifiers_changed(m),
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
                         logical_key,
-                        state: ElementState::Pressed,
+                        state,
                         repeat: false,
                         ..
                     },
                 ..
-            } => self.key_pressed(&logical_key),
+            } => self.key(&logical_key, state),
             WindowEvent::RedrawRequested => {
                 let Some(view) = self.view() else { return };
                 let prims = self.frame(&view);
@@ -379,6 +472,7 @@ pub fn run(
         cursor: None,
         modifiers: Modifiers::default(),
         cursor_icon: CursorIcon::Default,
+        camera_dirty: false,
         smoke_frames_left: smoke_frames,
         exit_error: None,
     };
