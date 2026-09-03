@@ -451,6 +451,42 @@ fn read_at(readings: &[f32], u: f32) -> Option<f32> {
     }
 }
 
+/// The paper a stroke was dragged over. It belongs to the canvas and
+/// not to the nib, which is the whole difference between it and a
+/// [`Stamp::grain`]: a grain is the nib's own and turns with it, while
+/// the paper stands still under a nib that turns over it, so two
+/// strokes crossing one place meet the same fibres. One tile of it
+/// covers `period` world units, which is hundreds of them and not one
+/// dab's worth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Paper {
+    /// Its image, by the name the brush library gives it — a name and
+    /// never a cell, for the reason [`Stamp::shape`] is one.
+    pub name: String,
+    /// How wide one tile of it is, in world units.
+    pub period: f64,
+    /// How deep it bites into the ink, 0–1: at 0 the paper is not
+    /// there, at 1 the ink is the paper's own coverage.
+    pub depth: f64,
+}
+
+impl Paper {
+    /// The same paper if the canvas could drag a nib over it, or why it
+    /// could not.
+    fn checked(self) -> Result<Paper, String> {
+        if self.name.is_empty() {
+            return Err("a paper is named or absent, never empty".into());
+        }
+        if !(self.period.is_finite() && self.period > 0.0) {
+            return Err(format!("period {} is not a tile of a paper", self.period));
+        }
+        if !is_unit(self.depth) {
+            return Err(format!("depth {} is not between 0 and 1", self.depth));
+        }
+        Ok(self)
+    }
+}
+
 /// The nib a stroke was stamped with: what one dab is, beyond the
 /// width, opacity and hardness the stroke already names. A stroke
 /// carrying none was swept, not stamped — the pencil's.
@@ -501,6 +537,10 @@ pub struct Stamp {
     /// how much they are worth.
     #[serde(default, skip_serializing_if = "Pressure::is_none")]
     pub pressure: Pressure,
+    /// The paper the nib was dragged over, when it was dragged over
+    /// one. Absent on disk otherwise, which is most strokes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<Paper>,
 }
 
 impl Stamp {
@@ -530,7 +570,8 @@ impl Stamp {
         }
         self.scatter.checked()?;
         self.pressure.checked()?;
-        Ok(self)
+        let paper = self.paper.map(Paper::checked).transpose()?;
+        Ok(Stamp { paper, ..self })
     }
 }
 
@@ -1414,6 +1455,7 @@ mod tests {
             Some(Stamp {
                 shape: None,
                 grain: None,
+                paper: None,
                 follow: false,
                 spacing: 0.4,
                 roundness: 0.5,
@@ -1450,6 +1492,21 @@ mod tests {
                      "scatter": { "rotation": -5 } }"#,
                 "rotation scatter",
             ),
+            (
+                r#"{ "spacing": 0.4, "roundness": 1, "rotation": 0,
+                     "paper": { "name": "", "period": 512, "depth": 1 } }"#,
+                "paper is named",
+            ),
+            (
+                r#"{ "spacing": 0.4, "roundness": 1, "rotation": 0,
+                     "paper": { "name": "canvas", "period": 0, "depth": 1 } }"#,
+                "period",
+            ),
+            (
+                r#"{ "spacing": 0.4, "roundness": 1, "rotation": 0,
+                     "paper": { "name": "canvas", "period": 512, "depth": 2 } }"#,
+                "depth",
+            ),
         ] {
             let json = format!(
                 r##"{{
@@ -1463,6 +1520,43 @@ mod tests {
             let err = Document::from_json(&json).unwrap_err().to_string();
             assert!(err.contains(want), "{nib} → {err}");
         }
+    }
+
+    #[test]
+    fn a_stroke_keeps_the_paper_it_was_dragged_over() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "elements": [ { "id": "p1", "type": "path",
+                "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]],
+                "stroke": "#000", "width": 8,
+                "stamp": { "spacing": 1, "roundness": 1, "rotation": 0, "grain": "tooth", "paper": { "name": "canvas", "period": 512, "depth": 0.8 } } } ]
+        }"##;
+        let doc = Document::from_json(json).expect("a papered stroke opens");
+        let Element::Path(p) = &doc.elements[0] else {
+            panic!("expected a path");
+        };
+        let stamp = p.stamp.as_ref().expect("the stroke was stamped");
+        // A nib's own grain and the canvas's paper are not alternatives:
+        // the grain turns with the dab, the paper stands still under it.
+        assert_eq!(stamp.grain.as_deref(), Some("tooth"));
+        assert_eq!(
+            stamp.paper,
+            Some(Paper {
+                name: "canvas".to_owned(),
+                period: 512.0,
+                depth: 0.8,
+            })
+        );
+        let back = Document::from_json(&doc.to_json().unwrap()).unwrap();
+        assert_eq!(back.elements, doc.elements, "and it survives the round trip");
+        // A stroke that was dragged over nothing says nothing on disk.
+        let plain = json.replace(
+            r#", "paper": { "name": "canvas", "period": 512, "depth": 0.8 }"#,
+            "",
+        );
+        let bare = Document::from_json(&plain).unwrap().to_json().unwrap();
+        assert!(!bare.contains("paper"), "{bare}");
     }
 
     #[test]

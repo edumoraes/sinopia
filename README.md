@@ -57,7 +57,11 @@ selection, navigation, pasted images, and projects in tabs:
   Sketchbook's other kind of nib image, and the opposite thing — the
   dab stays round and keeps its own edge, and the grain eats into what
   that edge covers, which is what breaks up a hard watercolour edge.
-  Both kinds ride on the one sheet the binary carries, now 114 nibs.
+  Both kinds ride on the one sheet the binary carries, now 114 nibs —
+  and reading it got a correction: an image says its coverage in its
+  gray or in its alpha depending on how it was drawn, and thirteen
+  nibs drawn in black on transparency had been read for empty, so the
+  brushes naming them stamped nothing at all.
   A nib is also thrown off true dab by dab:
   its radius and its angle, each by an amount in its own unit, which is
   how Sketchbook states randomness. Three of its five amounts stay out,
@@ -72,13 +76,23 @@ selection, navigation, pasted images, and projects in tabs:
   Edge slider gives it, so an airbrush fades over its whole band
   instead of ramping straight across. The rest of the body is read off
   the real sets and described truthfully while the engine grows into
-  it — how deep the paper bites into the nib. What is
-  left promising a mark the ink cannot make is the brush told apart by
-  the canvas's own *paper* — 22 of them — and the library says so per
-  brush. The art for it is not missing: 49 of the 211 turn a paper on,
-  they name 30 images between them, and every one of those TIFFs ships
-  in the sets. What is owed is the reading, not the finding. A ring the
-  size of the brush follows the pointer.
+  it. **Forty-nine brushes are dragged over a paper**, and that is
+  Sketchbook's third kind of art — the one that is not the nib's. A
+  grain turns with the dab because it *is* the dab's; a paper belongs
+  to the board, so the nib is dragged over it: it stands still while
+  the nib turns, and two strokes crossing one place meet the same
+  fibres. Thirty of the forty-nine wear a nib as well, and one dab
+  wears both, so the papers ride on the same sheet in a band under the
+  nibs. How wide one tile of a paper is is the brush's own — a
+  pencil's spans two hundred world units, a halftone's fifty — which
+  is what turns the Half Tone shelf into the dots and grids its icons
+  promise. **Depth** paints with it: how deep the paper bites, and at
+  the bottom of its track the paper is not there at all. What the
+  canvas will not read is Sketchbook's brightness and contrast on a
+  paper — nothing says what those numbers mean, and the one band they
+  could plainly be turns eight of the 49 papers solid black, one of
+  them under a brush named Textured Pencil. A ring the size of the
+  brush follows the pointer.
   **The eight erasers erase.** Sketchbook gives every brush a stamp
   blend style and 91 of the 211 name something other than plain ink;
   the erasers used to paint. A raster layer is now built on a sheet of
@@ -271,8 +285,10 @@ selection, navigation, pasted images, and projects in tabs:
   `--socket <path>`.
 
 Not yet: the text tool, shapes, undo, export, Omarchy plugin,
-thumbnails, layer opacity and renaming, and the canvas's own paper —
-the grain the one muted slider in the Nib section still waits on.
+thumbnails, layer opacity and renaming, and the six sliders that stay
+muted — three randomness amounts whose scale the sets contradict, and
+the whole of Paint, which asks the canvas to read back the ink it has
+already laid.
 
 ## Controls
 

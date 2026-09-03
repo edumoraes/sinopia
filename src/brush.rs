@@ -280,6 +280,11 @@ impl Property {
     /// land negative more often than not, and nobody ships that. The
     /// canvas does not guess at any of the three.
     ///
+    /// Depth is honored the way Rotation is: the canvas answers to it,
+    /// and whether a given brush shows a difference is the brush's own
+    /// business — a nib that names no paper is no more moved by Depth
+    /// than a round one is by Rotation.
+    ///
     /// Nor does it guess at Strength, Blending and Dilution: those
     /// describe what a dab does with the paint *under* it, which asks
     /// the canvas to read back what it has already drawn. Every stroke
@@ -298,6 +303,7 @@ impl Property {
                 | Property::Rotation
                 | Property::JitterSize
                 | Property::JitterRotation
+                | Property::TextureDepth
         )
     }
 
@@ -446,8 +452,8 @@ impl Brush {
     }
 
     /// What this body lays, wearing `face` — the nib image the preset
-    /// carries, which is not part of the body a slider can reach.
-    /// [`Preset::tip`] is the one that knows both.
+    /// carries, which is not part of the body a slider can reach. Nor
+    /// is the paper: [`Preset::tip`] is the one that knows all three.
     pub fn tip(&self, face: Face) -> Tip {
         Tip {
             width: self.size,
@@ -473,6 +479,9 @@ impl Brush {
                     rotation: self.jitter.rotation,
                 },
                 pressure: self.pressure,
+                // The preset's, and dressed on after: the body knows
+                // how deep a paper bites but not which paper it is.
+                paper: None,
             }),
         }
     }
@@ -505,6 +514,16 @@ impl<'a> Face<'a> {
             _ => None,
         }
     }
+}
+
+/// The paper a preset drags its nib over: the image, and how wide one
+/// tile of it is in world units. Not part of the body either — no
+/// slider addresses either half — though how deep it bites is
+/// `Brush::texture_depth`, which one does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Paper {
+    pub name: String,
+    pub period: f64,
 }
 
 /// What a stroke is drawn with, taken at the press and written into the
@@ -638,26 +657,38 @@ pub struct Preset {
     pub brush: Brush,
     /// Its cell of the icon sheet: the art Sketchbook draws it with.
     pub icon: u16,
-    /// Whether the brush is told apart by a nib or a paper of its own.
-    /// Two thirds of the shipped brushes are. The ones whose mark is a
-    /// nib now lay it — `shape` or `grain` names it — and what is
-    /// left, `stamp` with neither, is the icon promising the canvas's
-    /// own paper, which Sketchbook ships no image for and this board
-    /// has no notion of.
-    pub stamp: bool,
     /// The nib image it carries, by the name the sheet gives it: a
     /// shape it stamps in place of a round dab, or a grain it wears
     /// over one. Not part of the body: no slider addresses it, and
     /// `reset` has nothing to take back.
     pub shape: Option<String>,
     pub grain: Option<String>,
+    /// The paper it is dragged over, on the same terms. Forty-nine of
+    /// the shipped brushes name one and thirty of those wear a nib as
+    /// well: the two are not alternatives.
+    pub paper: Option<Paper>,
     factory: Brush,
 }
 
 impl Preset {
-    /// What this brush lays: its body, wearing the nib it carries.
+    /// What this brush lays: its body, wearing the nib it carries and
+    /// dragged over the paper it names. The depth is the body's, so a
+    /// Depth of nothing is a paper that is not there — which is what
+    /// the slider means at the bottom of its own track, and what one
+    /// shipped brush already says.
     pub fn tip(&self) -> Tip {
-        self.brush.tip(self.face())
+        let mut tip = self.brush.tip(self.face());
+        if let Some(paper) = &self.paper
+            && self.brush.texture_depth > 0.0
+            && let Some(stamp) = tip.stamp.as_mut()
+        {
+            stamp.paper = Some(crate::doc::Paper {
+                name: paper.name.clone(),
+                period: paper.period,
+                depth: self.brush.texture_depth,
+            });
+        }
+        tip
     }
 
     /// The nib image it carries, if it carries one. A brush names a
@@ -701,8 +732,13 @@ pub struct Library {
     /// The nib shapes the sheet carries, in its own order: a name's
     /// place here is the cell it is in.
     shapes: Vec<String>,
-    /// How many cells the sheet stands across, as the asset was built.
+    /// How many cells the sheet stands across, as the asset was built,
+    /// and how big one is.
     shape_cols: u16,
+    shape_px: u16,
+    /// The papers, in the band under them, on the same terms.
+    papers: Vec<String>,
+    paper_px: u16,
     /// The brush in the hand: which set, and which brush of it.
     selected: (usize, usize),
 }
@@ -758,6 +794,13 @@ impl Library {
     /// says how the sheet is cut up: a name's place in the shipped list
     /// is its cell, and the asset says how many cells stand across.
     pub fn sheet(&self, slot: u32) -> Shapes {
+        let named = |names: &[String]| {
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i as u16))
+                .collect()
+        };
         Shapes {
             slot,
             cols: self.shape_cols,
@@ -765,12 +808,10 @@ impl Library {
                 0 => 0,
                 cols => (self.shapes.len() as u16).div_ceil(cols),
             },
-            cells: self
-                .shapes
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i as u16))
-                .collect(),
+            px: self.shape_px,
+            cells: named(&self.shapes),
+            paper_px: self.paper_px,
+            papers: named(&self.papers),
         }
     }
 
@@ -861,6 +902,13 @@ struct LibraryOnDisk {
     shapes: Vec<String>,
     #[serde(default)]
     shape_cols: u16,
+    #[serde(default)]
+    shape_px: u16,
+    /// And the papers, in the band under them.
+    #[serde(default)]
+    papers: Vec<String>,
+    #[serde(default)]
+    paper_px: u16,
     sets: Vec<SetOnDisk>,
 }
 
@@ -879,14 +927,21 @@ struct PresetOnDisk {
     /// every brush in the sets that came with it.
     #[serde(default)]
     factory: Option<Brush>,
-    #[serde(default)]
-    stamp: bool,
     /// The nib image, by name, when the brush carries one of its own:
     /// a shape it stamps, or a grain it wears.
     #[serde(default)]
     shape: Option<String>,
     #[serde(default)]
     grain: Option<String>,
+    /// The paper it is dragged over, when it names one.
+    #[serde(default)]
+    paper: Option<PaperOnDisk>,
+}
+
+#[derive(Deserialize)]
+struct PaperOnDisk {
+    name: String,
+    period: f64,
 }
 
 /// Holds every property inside the band its slider runs over, so what
@@ -930,12 +985,22 @@ impl Default for Library {
                             factory: p.factory.map_or(brush, settled),
                             brush,
                             icon: p.icon.min(disk.icons.saturating_sub(1)),
-                            stamp: p.stamp,
                             // A nib the sheet does not carry is no nib:
                             // an asset built wrong must not seat one
                             // the renderer cannot find.
                             shape: p.shape.filter(|n| disk.shapes.contains(n)),
                             grain: p.grain.filter(|n| disk.shapes.contains(n)),
+                            paper: p
+                                .paper
+                                .filter(|q| {
+                                    disk.papers.contains(&q.name)
+                                        && q.period.is_finite()
+                                        && q.period > 0.0
+                                })
+                                .map(|q| Paper {
+                                    name: q.name,
+                                    period: q.period,
+                                }),
                         }
                     })
                     .collect(),
@@ -949,6 +1014,9 @@ impl Default for Library {
             sets,
             shapes: disk.shapes,
             shape_cols: disk.shape_cols,
+            shape_px: disk.shape_px,
+            papers: disk.papers,
+            paper_px: disk.paper_px,
             selected: (0, 0),
         }
     }
@@ -966,13 +1034,16 @@ impl Library {
                     brush: Brush::default(),
                     factory: Brush::default(),
                     icon: 0,
-                    stamp: false,
                     shape: None,
                     grain: None,
+                    paper: None,
                 }],
             }],
             shapes: Vec::new(),
             shape_cols: 0,
+            shape_px: 0,
+            papers: Vec::new(),
+            paper_px: 0,
             selected: (0, 0),
         }
     }
@@ -1137,6 +1208,7 @@ mod tests {
                 flow: 1.0,
                 scatter: Scatter::default(),
                 pressure: Brush::default().pressure,
+                paper: None,
             }),
             "every brush is a nib stamped at a spacing"
         );
@@ -1588,6 +1660,7 @@ mod tests {
                     | Property::Rotation
                     | Property::JitterSize
                     | Property::JitterRotation
+                    | Property::TextureDepth
             );
             assert_eq!(p.honored(), honored, "{p:?}");
         }
@@ -1685,20 +1758,91 @@ mod tests {
     }
 
     #[test]
-    fn two_thirds_of_the_acquired_brushes_lay_a_nib_and_the_rest_want_a_paper() {
+    fn a_brush_dragged_over_a_paper_names_one_the_sheet_has() {
+        let lib = Library::default();
+        let sheet = lib.sheet(3);
+        let mut widest: f64 = 0.0;
+        for set in lib.sets() {
+            for p in &set.presets {
+                let Some(paper) = &p.paper else { continue };
+                assert!(
+                    sheet.paper(&paper.name).is_some(),
+                    "{} names {}, which is not on the sheet",
+                    p.name,
+                    paper.name
+                );
+                assert!(
+                    paper.period > 0.0 && paper.period.is_finite(),
+                    "{} has a tile of {}",
+                    p.name,
+                    paper.period
+                );
+                widest = widest.max(paper.period);
+                // The papers are on the same sheet as the nibs, and a
+                // name belongs to one band or the other, never both.
+                assert!(sheet.cell(&paper.name).is_none(), "{}", paper.name);
+            }
+        }
+        // A tile is a stretch of the board, not a stretch of the nib:
+        // the widest of them covers hundreds of world units.
+        assert!(widest > 500.0, "the widest tile is {widest}");
+    }
+
+    #[test]
+    fn a_preset_hands_the_tip_its_paper_and_the_body_says_how_deep() {
+        let mut lib = Library::default();
+        let papered = lib
+            .sets()
+            .iter()
+            .enumerate()
+            .find_map(|(s, set)| {
+                let i = set.presets.iter().position(|p| p.paper.is_some())?;
+                Some((s, i))
+            })
+            .expect("some shipped brush is dragged over a paper");
+        lib.select(papered.0, papered.1);
+        let paper = lib.sets()[papered.0].presets[papered.1]
+            .paper
+            .clone()
+            .expect("it kept its paper");
+        let nib = lib.tip().stamp.expect("a brush stamps");
+        assert_eq!(
+            nib.paper,
+            Some(crate::doc::Paper {
+                name: paper.name.clone(),
+                period: paper.period,
+                depth: lib.brush().texture_depth,
+            })
+        );
+        // Depth is the one half of it a slider reaches, and at the
+        // bottom of its track the paper is simply not there.
+        Property::TextureDepth.set(lib.brush_mut(), 0.0);
+        assert_eq!(lib.tip().stamp.and_then(|s| s.paper), None);
+        Property::TextureDepth.set(lib.brush_mut(), 0.5);
+        assert_eq!(
+            lib.tip().stamp.and_then(|s| s.paper).map(|p| p.depth),
+            Some(0.5)
+        );
+    }
+
+    #[test]
+    fn two_thirds_of_the_acquired_brushes_lay_a_nib_and_a_quarter_a_paper() {
         let lib = Library::default();
         let all: Vec<&Preset> = lib.sets().iter().flat_map(|s| s.presets.iter()).collect();
         let nibbed = all.iter().filter(|p| p.face() != Face::Round).count();
         assert!(nibbed > all.len() / 2, "{nibbed} of {} lay a nib", all.len());
-        // What is left is the canvas's own paper: Sketchbook ships no
-        // image for it here, and the board has no notion of one.
-        let owed = all
+        let papered = all.iter().filter(|p| p.paper.is_some()).count();
+        assert_eq!(papered, 49, "dragged over a paper of their own");
+        // The two are not alternatives: most of the papered brushes
+        // carry a nib as well, and one dab wears both.
+        let both = all
             .iter()
-            .filter(|p| p.stamp && p.face() == Face::Round)
+            .filter(|p| p.paper.is_some() && p.face() != Face::Round)
             .count();
-        assert_eq!(owed, 22, "told apart by a paper the canvas still owes");
+        assert_eq!(both, 30, "a nib and a paper at once");
         assert!(
-            all.iter().any(|p| !p.stamp),
+            all.iter()
+                .any(|p| p.paper.is_none() && p.face() == Face::Round),
             "some are the plain round nib they look like"
         );
     }
@@ -1744,16 +1888,14 @@ mod tests {
 
     #[test]
     fn no_two_brushes_on_a_shelf_lay_the_same_ink_today() {
-        // Left out: a brush told apart by a grain — a texture nib, or
-        // the canvas's own paper — which is the mark the engine still
-        // owes. A brush with a shape is told apart by the shape, and
-        // the shape is stamped, so it counts like any other.
+        // Every brush counts now: a tip names the nib it stamps, the
+        // grain it wears and the paper it is dragged over, and the
+        // canvas lays all three.
         let lib = Library::default();
         for s in lib.sets() {
             let mut tips: Vec<String> = s
                 .presets
                 .iter()
-                .filter(|p| p.shape.is_some() || !p.stamp)
                 .map(|p| format!("{:?}", p.tip()))
                 .collect();
             let all = tips.len();

@@ -36,6 +36,8 @@ struct Inst {
     @location(6) uv: vec4<f32>,
     @location(7) clip: vec4<f32>,
     @location(8) falloff: f32,
+    @location(9) paper: vec4<f32>,
+    @location(10) weave: vec4<f32>,
 };
 
 struct VsOut {
@@ -49,6 +51,8 @@ struct VsOut {
     @location(6) @interpolate(flat) uv: vec4<f32>,
     @location(7) @interpolate(flat) cut: vec4<f32>,
     @location(8) @interpolate(flat) falloff: f32,
+    @location(9) @interpolate(flat) paper: vec4<f32>,
+    @location(10) @interpolate(flat) weave: vec4<f32>,
 };
 
 const KIND_SEGMENT: u32 = 1u;
@@ -104,6 +108,8 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.uv = inst.uv;
     out.cut = inst.clip;
     out.falloff = inst.falloff;
+    out.paper = inst.paper;
+    out.weave = inst.weave;
     return out;
 }
 
@@ -174,6 +180,19 @@ fn shade(in: VsOut) -> vec4<f32> {
                 rgba = texel * in.color;
             }
         }
+    }
+    // The paper the nib is dragged over, which is the canvas's and not
+    // the nib's: it is sampled by where the pixel falls on the board,
+    // not by where it falls on the dab, so it stands still while the
+    // nib turns over it and two strokes crossing one place meet the
+    // same fibres. `w` is how deep it bites, and zero is no paper.
+    if (in.weave.w > 0.0) {
+        // One tile of it, wrapped: the cell is drawn in half a texel on
+        // every side, so the seam samples this paper and not the one
+        // beside it on the sheet.
+        let tile = fract(in.px * in.weave.x + in.weave.yz);
+        let tooth = textureSampleLevel(tex, samp, mix(in.paper.xy, in.paper.zw, tile), 0.0);
+        rgba.a = rgba.a * mix(1.0, tooth.a, in.weave.w);
     }
     let ramp = max(in.params.y, 1.0);
     // The prim ramps over its own feather, bent by the nib's profile —
@@ -761,6 +780,8 @@ fn pipeline(
                     6 => Float32x4, // uv
                     7 => Float32x4, // clip
                     8 => Float32,   // falloff
+                    9 => Float32x4, // paper
+                    10 => Float32x4, // weave
                     // `slot` stays on the CPU: it picks the bind group.
                 ],
             })],

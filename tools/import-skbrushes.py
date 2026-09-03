@@ -7,22 +7,26 @@ the body `brush.rs` keeps, and writes:
 
     assets/brushes/library.json   the sets, their brushes, and the body
     assets/brushes/icons.png      every icon @2x, one grid cell each
-    assets/brushes/shapes.png     every nib shape, one grid cell each
+    assets/brushes/shapes.png     every nib and every paper
 
-A brush with a nib of its own names a TIFF in the same zip, and the
-image says its coverage in one of two places. The sets use both: a nib
-drawn white on opaque black says it in its gray, and one drawn on
-transparency says it in its alpha — the colour there is whatever it
-happened to be drawn in, and eleven of the 114 are drawn in black, so
-reading the gray would take them for empty. Either way what comes out is
-the nib sheet: gray + alpha, the gray full and the alpha the coverage,
-exactly as the glyph atlas is read. Sketchbook has two kinds and the sheet carries both: a `shape` is
-a silhouette stamped in place of a round dab, a `texture` is a grain
-worn over one, and the library says which a brush names. A
-`paperTexture` is neither — it belongs to the canvas, not to the nib —
-and this passes over it, though its art is here too: 49 brushes turn a
-paper on, they name 30 TIFFs between them, and every one of those is in
-the sets.
+A brush with art of its own names a TIFF in the same zip, and the image
+says its coverage in one of two places. The sets use both: one drawn
+white on opaque black says it in its gray, and one drawn on transparency
+says it in its alpha — the colour left there is whatever it happened to
+be drawn in, and thirteen of the 114 nibs are drawn in black, so reading
+the gray would take them for empty. Either way what comes out is a cell
+of gray + alpha, the gray full and the alpha the coverage, exactly as
+the glyph atlas is read.
+
+Sketchbook has three kinds of art and one sheet carries all of them. Two
+belong to the nib: a `shape` is a silhouette stamped in place of a round
+dab, a `texture` is a grain worn over one, and the library says which a
+brush names. The third is the `paperTexture`, and it belongs to the
+canvas rather than to the nib — the nib is dragged over it, so it stands
+still while the nib turns, and one tile of it covers hundreds of world
+units instead of one dab. Forty-nine brushes turn one on, thirty of
+those wear a nib as well, and a dab wearing both has one sheet to
+sample.
 
 The originals are 34 MB and 438 MB of shape/texture TIFFs once opened, so
 they stay out of the repo: only what this writes is committed. Run it
@@ -53,6 +57,20 @@ ICON_PX = 80  # the @2x icon; the 1x copy is 40x40
 # — the whole sheet is half a megabyte at it.
 SHAPE_PX = 128
 SHAPE_COLS = 12
+# A paper is not a nib. One tile of it covers hundreds of world units
+# rather than one dab, so a stroke crosses only a handful of its texels
+# and a nib's 128 would read as blobs. It rides on the same sheet all
+# the same — a dab wearing a nib and a paper at once has one texture to
+# sample — in a band of its own under the nibs, at its own size, which
+# has to divide the sheet's width.
+#
+# What is left on the cutting-room floor at 192 is noise. The seventeen
+# photographic grains cost four fifths of the band and are the ones
+# nobody can see a texel of; the geometric patterns, which are the whole
+# of what the Half Tone shelf is, are line art that has to stay crisp
+# and costs a tenth of it. Going to 256 keeps the grains at three world
+# units to a texel instead of four and charges half a megabyte for it.
+PAPER_PX = 192
 # Where an image keeps its coverage. The two ways the sets are drawn do
 # not blur into each other: every TIFF they ship is either opaque to
 # within a hair — the alpha averages 0.998 and up, which is antialiasing
@@ -162,17 +180,36 @@ def art_of(body):
     return (kind, name.rsplit(".", 1)[0]) if kind and name else None
 
 
-def wants_stamp(body):
-    """Whether the brush is told apart by a nib or a paper of its own.
-    It describes the brush, not its body: with a `shape` or a `grain`
-    beside it, it is the paper — which belongs to the canvas, and which
-    nothing here reads yet — that says the icon promises a mark the ink
-    cannot make."""
-    custom = tag(body, "customBrush")
+def paper_of(body):
+    """The paper a brush drags its nib over, or None for the 162 that
+    turn it off: the TIFF it names, whether it is used inverted, and how
+    far one tile of it is stretched.
+
+    Sketchbook adjusts a paper by a brightness and a contrast as well,
+    and those go where the three randomness amounts went. It does not say
+    what its numbers mean, and the one band they could plainly be — the
+    -100..100 every brightness and contrast control uses, and that
+    ImageMagick's own takes — turns eight of the 49 papers solid black,
+    one of them under a brush named Textured Pencil. A brush that paints
+    nothing is not what anybody ships, so the reading is wrong, and the
+    canvas does not guess. The invert is a flag and says exactly what it
+    means, so it is baked into the cell instead of carried: the same TIFF
+    used both ways is two cells under two names."""
     paper = tag(body, "paperTexture")
-    return (custom.get("type", "off") != "off"
-            or custom.get("name") is not None
-            or paper.get("paperTextureEnabled") == "true")
+    if paper.get("paperTextureEnabled") != "true" or not paper.get("name"):
+        return None
+    return {
+        "stem": paper["name"].rsplit(".", 1)[0],
+        "invert": paper.get("paperTextureInvert") == "true",
+        "scale": f(paper, "paperTextureScale", 1.0),
+    }
+
+
+def paper_key(paper):
+    """What the sheet and a saved board call one paper: the TIFF's own
+    name, and `~i` after it when the cell was baked inverted — so a name
+    is one image and not one image under two readings."""
+    return paper["stem"] + ("~i" if paper["invert"] else "")
 
 
 def read_set(zf, xml_name):
@@ -191,12 +228,16 @@ def read_set(zf, xml_name):
         entry = {
             "name": person.get("name") or name,
             "icon": person.get("icon", ""),
-            "stamp": wants_stamp(live),
             "brush": brush,
         }
         art = art_of(live)
         if art:
             entry[art[0]] = art[1]
+        # What the paper asks for. `main` holds the zip, and puts back
+        # the cell it was baked into and the period it stretches to.
+        paper = paper_of(live)
+        if paper:
+            entry["paper"] = paper
         # Every set ships its brushes at their factory settings, so the
         # copy is only written when one of them does not — half the file
         # otherwise, saying the same thing twice.
@@ -206,23 +247,14 @@ def read_set(zf, xml_name):
     return group.get("name") or Path(xml_name).stem, out
 
 
-def png_grid(cells, px, cols, channels):
-    """Every cell into one sheet, row by row. `channels` is 4 for the
-    icons, which carry their own colors, and 2 for the shapes, which are
-    a full gray under the coverage — the same white-with-alpha the glyph
+def encode_png(sheet, w, h, channels):
+    """One sheet of texels as a PNG. `channels` is 4 for the icons, which
+    carry their own colors, and 2 for the nibs and papers, which are a
+    full gray under the coverage — the same white-with-alpha the glyph
     atlas is. Written by hand: the binary decodes PNG already, and a
     build step should not need a library the app does not."""
     color_type = {4: 6, 2: 4}[channels]
-    rows = (len(cells) + cols - 1) // cols
-    w, h = cols * px, rows * px
-    stride, run = w * channels, px * channels
-    sheet = bytearray(h * stride)
-    for i, cell in enumerate(cells):
-        ox, oy = (i % cols) * px, (i // cols) * px
-        for y in range(px):
-            src = y * run
-            dst = (oy + y) * stride + ox * channels
-            sheet[dst:dst + run] = cell[src:src + run]
+    stride = w * channels
     raw = b"".join(b"\x00" + bytes(sheet[y * stride:(y + 1) * stride]) for y in range(h))
 
     def chunk(kind, data):
@@ -232,28 +264,88 @@ def png_grid(cells, px, cols, channels):
     return (b"\x89PNG\r\n\x1a\n"
             + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, color_type, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw, 9))
-            + chunk(b"IEND", b"")), w, h
+            + chunk(b"IEND", b""))
 
 
-def shape_cell(data):
-    """One nib TIFF into a `SHAPE_PX` square of gray + alpha: whichever
-    channel the image keeps its coverage in goes into the alpha, and the
-    color stays full, which is what makes `texel * ink` the mark. A shape
-    and a grain are read the same way; what differs is whether the dab is
-    the image or wears it."""
+def blit(sheet, w, channels, cell, px, x, y):
+    """One `px`-square cell into the sheet, its corner at `(x, y)` px."""
+    stride, run = w * channels, px * channels
+    for r in range(px):
+        dst = (y + r) * stride + x * channels
+        sheet[dst:dst + run] = cell[r * run:(r + 1) * run]
+
+
+def png_grid(cells, px, cols, channels):
+    """Every cell into a sheet of its own, row by row."""
+    rows = -(-len(cells) // cols)
+    w, h = cols * px, rows * px
+    sheet = bytearray(h * w * channels)
+    for i, cell in enumerate(cells):
+        blit(sheet, w, channels, cell, px, (i % cols) * px, (i // cols) * px)
+    return encode_png(sheet, w, h, channels), w, h
+
+
+def stamp_sheet(shapes, papers):
+    """The one sheet the canvas stamps from: the nibs in a `SHAPE_PX`
+    grid `SHAPE_COLS` across, and under them the papers in a band of
+    their own, `PAPER_PX` a side and as many across as the sheet's width
+    takes. Each is placed in the order it is given, so a name's cell is
+    its place in its own list and nothing else has to be recorded.
+
+    They share a sheet because a dab can wear both at once: 30 of the 49
+    papered brushes carry a nib of their own as well, and two textures
+    would be two draws of what is one dab."""
+    w = SHAPE_COLS * SHAPE_PX
+    if w % PAPER_PX:
+        raise ValueError(f"{PAPER_PX} px papers do not divide a {w} px sheet")
+    top = -(-len(shapes) // SHAPE_COLS) * SHAPE_PX
+    across = w // PAPER_PX
+    h = top + -(-len(papers) // across) * PAPER_PX
+    sheet = bytearray(h * w * 2)
+    for i, art in enumerate(shapes):
+        blit(sheet, w, 2, art, SHAPE_PX,
+             (i % SHAPE_COLS) * SHAPE_PX, (i // SHAPE_COLS) * SHAPE_PX)
+    for i, art in enumerate(papers.values()):
+        blit(sheet, w, 2, art, PAPER_PX,
+             (i % across) * PAPER_PX, top + (i // across) * PAPER_PX)
+    return encode_png(sheet, w, h, 2), w, h
+
+
+def art_cell(data, px, through=()):
+    """One TIFF into a `px` square of gray + alpha: whichever channel the
+    image keeps its coverage in goes into the alpha, `through` on the
+    way, and the color stays full — which is what makes `texel * ink` the
+    mark, exactly as the glyph atlas works."""
     import subprocess
     opaque = float(subprocess.run(
         ["magick", "identify", "-format", "%[fx:mean.a]", "tif:-"],
         input=data, capture_output=True, check=True).stdout) >= OPAQUE
     read = ["-alpha", "off", "-colorspace", "gray"] if opaque else ["-alpha", "extract"]
     out = subprocess.run(
-        ["magick", "tif:-", *read,
-         "-resize", f"{SHAPE_PX}x{SHAPE_PX}!", "-depth", "8", "gray:-"],
+        ["magick", "tif:-", *read, *through,
+         "-resize", f"{px}x{px}!", "-depth", "8", "gray:-"],
         input=data, capture_output=True, check=True).stdout
-    want = SHAPE_PX * SHAPE_PX
-    if len(out) != want:
-        raise ValueError(f"shape is {len(out)} bytes, not {want}")
+    if len(out) != px * px:
+        raise ValueError(f"art is {len(out)} bytes, not {px * px}")
     return b"".join(b"\xff" + bytes([v]) for v in out)
+
+
+def shape_cell(data):
+    """A nib's own image. A shape and a grain are read the same way; what
+    differs is whether the dab is the image or wears it."""
+    return art_cell(data, SHAPE_PX)
+
+
+def paper_cell(data, paper):
+    """A paper's image, at a paper's size and inverted where the brush
+    asks for it. Answers the source's own width beside it: that is what
+    `paperTextureScale` stretches, so one tile covers the image's size
+    and not the cell's."""
+    import subprocess
+    width = int(subprocess.run(
+        ["magick", "identify", "-format", "%w", "tif:-"],
+        input=data, capture_output=True, check=True).stdout)
+    return art_cell(data, PAPER_PX, ["-negate"] if paper["invert"] else []), width
 
 
 def decode_png(data):
@@ -285,6 +377,10 @@ def main():
     # by every brush that names it, and the name is what a saved board
     # keeps — an index would move the day a set is added.
     shapes, no_shape = {}, []
+    # And the papers, keyed by the reading they were baked under: one
+    # TIFF used both ways is two cells. `periods` is how wide the source
+    # of each is, which is what the brush's own scale stretches.
+    papers, periods, no_paper = {}, {}, []
     for stem in order:
         with zipfile.ZipFile(found[stem]) as zf:
             names = zf.namelist()
@@ -312,33 +408,59 @@ def main():
                         b.pop("grain", None)
                     else:
                         shapes[shape] = shape_cell(zf.read(tif))
+                paper = b.get("paper")
+                if paper:
+                    key = paper_key(paper)
+                    if key not in papers:
+                        tif = next((n for n in names
+                                    if n.lower().endswith(".tif")
+                                    and n.rsplit(".", 1)[0] == paper["stem"]),
+                                   None)
+                        if tif is not None:
+                            papers[key], periods[key] = paper_cell(zf.read(tif),
+                                                                   paper)
+                    if key in papers:
+                        # One tile in world units: the image's own size,
+                        # stretched by what the brush asks for.
+                        b["paper"] = {
+                            "name": key,
+                            "period": round(periods[key] * paper["scale"], 2),
+                        }
+                    else:
+                        no_paper.append(f"{title}/{b['name']}")
+                        b.pop("paper")
             sets.append({"name": title.replace("+", " "), "brushes": brushes})
             print(f"  {title:20} {len(brushes):3} brushes")
 
     cols = 16
     sheet, w, h = png_grid(icons, ICON_PX, cols, 4)
     (dst / "icons.png").write_bytes(sheet)
-    nibs, sw, sh = png_grid(list(shapes.values()), SHAPE_PX, SHAPE_COLS, 2)
+    nibs, sw, sh = stamp_sheet(list(shapes.values()), papers)
     (dst / "shapes.png").write_bytes(nibs)
     (dst / "library.json").write_text(json.dumps(
         {"icon_px": ICON_PX, "icon_cols": cols, "icons": len(icons),
          "shape_px": SHAPE_PX, "shape_cols": SHAPE_COLS, "shapes": list(shapes),
+         "paper_px": PAPER_PX, "papers": list(papers),
          "sets": sets},
         separators=(",", ":")) + "\n")
 
     total = sum(len(s["brushes"]) for s in sets)
     stamping = sum(1 for s in sets for b in s["brushes"] if b.get("shape"))
     grained = sum(1 for s in sets for b in s["brushes"] if b.get("grain"))
+    papered = sum(1 for s in sets for b in s["brushes"] if b.get("paper"))
     print(f"\n{total} brushes in {len(sets)} sets, "
-          f"{stamping} stamping a shape and {grained} wearing a grain")
+          f"{stamping} stamping a shape, {grained} wearing a grain "
+          f"and {papered} dragged over a paper")
     print(f"  library.json  {(dst / 'library.json').stat().st_size / 1024:.0f} KB")
     print(f"  icons.png     {(dst / 'icons.png').stat().st_size / 1024:.0f} KB  ({w}x{h})")
     print(f"  shapes.png    {(dst / 'shapes.png').stat().st_size / 1024:.0f} KB  "
-          f"({sw}x{sh}, {len(shapes)} nibs)")
+          f"({sw}x{sh}, {len(shapes)} nibs and {len(papers)} papers)")
     if missing:
         print(f"  no icon: {len(missing)} — {', '.join(missing[:5])}")
     if no_shape:
         print(f"  no shape image: {len(no_shape)} — {', '.join(no_shape[:5])}")
+    if no_paper:
+        print(f"  no paper image: {len(no_paper)} — {', '.join(no_paper[:5])}")
 
 
 if __name__ == "__main__":

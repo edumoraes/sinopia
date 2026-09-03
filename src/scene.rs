@@ -14,7 +14,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::brush::Tip;
 use crate::curve::{self, Cubic};
-use crate::doc::{Camera, Document, Element, Envelope, Pressure, Stamp};
+use crate::doc::{Camera, Document, Element, Envelope, Paper, Pressure, Stamp};
 
 /// Viewport in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,16 +250,28 @@ pub type ImageSlots = std::collections::HashMap<String, u32>;
 /// Multiplies the sampled texel: an image passes through untouched.
 const NO_TINT: Rgba = [1.0, 1.0, 1.0, 1.0];
 
-/// Where the nib shapes are: the sheet's texture slot, how it is cut up,
-/// and which cell each shape is in by the name a stroke calls it. What
-/// [`ImageSlots`] is for a board's images — a stroke names its nib, the
-/// renderer says where it is.
+/// Where the art the canvas stamps from is: the sheet's texture slot,
+/// how it is cut up, and which cell each image is in by the name a
+/// stroke calls it. What [`ImageSlots`] is for a board's images — a
+/// stroke names its nib and its paper, the renderer says where they are.
+///
+/// One sheet holds both, in two bands: the nibs in a grid of `px`-square
+/// cells `cols` across from the top, then the papers under them in
+/// cells of their own size. A dab can wear a nib and a paper at once —
+/// thirty of the shipped brushes do — and one sheet is what lets it be
+/// one draw.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Shapes {
     pub slot: u32,
     pub cols: u16,
     pub rows: u16,
+    /// One nib cell, in texels.
+    pub px: u16,
     pub cells: std::collections::HashMap<String, u16>,
+    /// One paper cell, in texels. Bigger than a nib's: a tile of paper
+    /// covers hundreds of world units, not one dab.
+    pub paper_px: u16,
+    pub papers: std::collections::HashMap<String, u16>,
 }
 
 /// One nib image's place: its cell of the sheet, and the slot the sheet
@@ -282,6 +294,37 @@ pub enum Art {
     Grain(Cell),
 }
 
+/// The paper as it lies under the window: which cell of the sheet, and
+/// where on it a pixel of the screen sits. `scale` is screen px into
+/// tiles and `offset` is where world zero falls, already wrapped into
+/// the one tile it is in — the camera can be a long way from the
+/// origin, and `fract` of a big number has no precision left to give.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Weave {
+    pub cell: Cell,
+    pub scale: f32,
+    pub offset: (f32, f32),
+    /// How deep it bites, 0–1.
+    pub depth: f32,
+}
+
+impl Weave {
+    /// The paper under a window whose world zero is at `origin` screen
+    /// px, one tile of it `period` px across.
+    pub fn new(cell: Cell, period: f64, origin: (f64, f64), depth: f64) -> Weave {
+        let scale = 1.0 / period;
+        Weave {
+            cell,
+            scale: scale as f32,
+            offset: (
+                (-origin.0 * scale).rem_euclid(1.0) as f32,
+                (-origin.1 * scale).rem_euclid(1.0) as f32,
+            ),
+            depth: depth as f32,
+        }
+    }
+}
+
 /// A nib measured for the screen: what a tip and a view make of it,
 /// which is everything the walk needs that the [`Stamp`] itself does
 /// not say.
@@ -298,9 +341,37 @@ pub struct Nib {
     pub falloff: f32,
     /// Its own art, when it carries any.
     pub art: Art,
+    /// The paper it is dragged over, when it is dragged over one. Not
+    /// the nib's own, which is why it is beside `art` and not in it: a
+    /// nib may wear a grain and a paper at once, and the two do
+    /// opposite things as the nib turns.
+    pub paper: Option<Weave>,
 }
 
 impl Shapes {
+    /// How many papers stand across the sheet, and how many rows of
+    /// them there are. A paper cell has to divide the sheet's width,
+    /// which is the asset's business to keep true.
+    fn paper_grid(&self) -> (u16, u16) {
+        let across = match self.paper_px {
+            0 => 0,
+            px => self.cols * self.px / px,
+        };
+        match across {
+            0 => (0, 0),
+            n => (n, (self.papers.len() as u16).div_ceil(n)),
+        }
+    }
+
+    /// The sheet, in texels: the nib band, then the paper band under it.
+    fn size(&self) -> (f32, f32) {
+        let (_, down) = self.paper_grid();
+        (
+            f32::from(self.cols) * f32::from(self.px),
+            f32::from(self.rows) * f32::from(self.px) + f32::from(down) * f32::from(self.paper_px),
+        )
+    }
+
     /// Where the nib a stroke names is, or `None` when this build's
     /// sheet does not carry it — the stroke then lays a plain round
     /// nib, because a board painted somewhere else must still open.
@@ -309,15 +380,38 @@ impl Shapes {
         if self.cols == 0 || self.rows == 0 || cell >= self.cols * self.rows {
             return None;
         }
-        let (col, row) = (cell % self.cols, cell / self.cols);
-        let (w, h) = (f32::from(self.cols), f32::from(self.rows));
+        let (w, h) = self.size();
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let px = f32::from(self.px);
+        let (x, y) = (f32::from(cell % self.cols) * px, f32::from(cell / self.cols) * px);
         Some(Cell {
-            uv: [
-                f32::from(col) / w,
-                f32::from(row) / h,
-                f32::from(col + 1) / w,
-                f32::from(row + 1) / h,
-            ],
+            uv: [x / w, y / h, (x + px) / w, (y + px) / h],
+            slot: self.slot,
+        })
+    }
+
+    /// Where the paper a stroke names is, on the same terms — and drawn
+    /// in half a texel on every side. A paper is sampled by wrapping,
+    /// which a nib is not: without the inset the texel at the seam is
+    /// blended with the cell next door and the tiling shows as a grid.
+    pub fn paper(&self, name: &str) -> Option<Cell> {
+        let cell = *self.papers.get(name)?;
+        let (across, down) = self.paper_grid();
+        if across == 0 || cell >= across * down {
+            return None;
+        }
+        let (w, h) = self.size();
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let px = f32::from(self.paper_px);
+        let top = f32::from(self.rows) * f32::from(self.px);
+        let (x, y) = (f32::from(cell % across) * px, top + f32::from(cell / across) * px);
+        let (du, dv) = (0.5 / w, 0.5 / h);
+        Some(Cell {
+            uv: [x / w + du, y / h + dv, (x + px) / w - du, (y + px) / h - dv],
             slot: self.slot,
         })
     }
@@ -349,6 +443,15 @@ pub struct Prim {
     /// coverage, 1 for the plain ramp everything but a nib is drawn
     /// with. See [`Profile::falloff`].
     pub falloff: f32,
+    /// The cell of the paper the prim is dragged over: `u0, v0, u1, v1`
+    /// of the same sheet `slot` names. Wrapped over, not mapped onto —
+    /// the paper is the canvas's and stands still under a dab that
+    /// turns. Only read when `weave` says the paper bites at all.
+    pub paper: [f32; 4],
+    /// How that paper lies under the prim: screen px into tiles, where
+    /// world zero falls in tiles, and how deep it bites. A depth of
+    /// zero is no paper, which is what everything but a dab carries.
+    pub weave: [f32; 4],
     /// [`KIND_IMAGE`] only: which texture to sample. Read on the CPU, to
     /// pick the bind group — the shader never sees it.
     pub slot: u32,
@@ -357,6 +460,10 @@ pub struct Prim {
 /// A clip that cuts nothing: what every prim carries until it is put
 /// inside something with an edge.
 pub const NO_CLIP: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
+/// No paper under it: a depth of nothing, which is what every prim but
+/// a papered dab carries.
+const NO_PAPER: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 /// The whole texture: what anything that is not a glyph samples.
 const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
@@ -385,6 +492,8 @@ impl Prim {
             uv: WHOLE,
             clip: NO_CLIP,
             falloff: PLAIN_RAMP,
+            paper: NO_PAPER,
+            weave: NO_PAPER,
             slot: 0,
         }
     }
@@ -550,6 +659,30 @@ impl Prim {
         }
     }
 
+    /// Whether the prim reads the texture in its slot at all, which is
+    /// what decides where one run of them ends and the next begins. An
+    /// image or a glyph maps one onto itself and a grain is eaten into
+    /// by one — and so is any dab dragged over a paper, whatever kind
+    /// it is otherwise. Everything else is a flat colour and does not
+    /// care which texture is bound behind it.
+    fn samples(&self) -> bool {
+        self.kind == KIND_IMAGE || self.kind == KIND_GRAIN || self.weave[3] > 0.0
+    }
+
+    /// The same dab, dragged over a paper: its coverage is eaten into
+    /// by `weave`'s cell wherever the paper's own is thin. The cell is
+    /// on the sheet the nibs are on, so a dab already stamping a shape
+    /// or wearing a grain keeps the one slot it had; a plain round one
+    /// takes the sheet's, since it has to sample it now.
+    pub fn papered(self, weave: Weave) -> Prim {
+        Prim {
+            paper: weave.cell.uv,
+            weave: [weave.scale, weave.offset.0, weave.offset.1, weave.depth],
+            slot: weave.cell.slot,
+            ..self
+        }
+    }
+
     pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
         let r = ScreenRect {
             x: cx - radius,
@@ -582,6 +715,8 @@ impl Prim {
             uv: WHOLE,
             clip: NO_CLIP,
             falloff: PLAIN_RAMP,
+            paper: NO_PAPER,
+            weave: NO_PAPER,
             slot: 0,
         }
     }
@@ -650,7 +785,7 @@ pub fn runs(prims: &[Prim]) -> Vec<Run> {
     let mut start = 0u32;
     let mut slot: Option<u32> = None;
     for (i, p) in prims.iter().enumerate() {
-        if p.kind != KIND_IMAGE && p.kind != KIND_GRAIN {
+        if !p.samples() {
             continue;
         }
         match slot {
@@ -842,6 +977,7 @@ pub fn stamp_prims(
         px_per_world,
         falloff,
         art,
+        paper,
     } = nib;
     let squish = (stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX / radius.max(NIB_MIN_PX));
     let angle = stamp.rotation as f32;
@@ -853,17 +989,25 @@ pub fn stamp_prims(
     let size_throw = scatter.size as f32 * px_per_world;
     let leaning = !pen.twist.is_empty();
 
-    let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32, ink: Rgba| match art {
-        // A shape is its own edge, with no ramp of the box's to bend.
-        Art::Shape(cell) => Prim::shaped_dab(at, half, turn, cell, ink),
-        Art::Grain(cell) => Prim {
-            falloff,
-            ..Prim::grained_dab(at, half, feather, turn, cell, ink)
-        },
-        Art::Round => Prim {
-            falloff,
-            ..Prim::dab(at, half, feather, turn, ink)
-        },
+    let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32, ink: Rgba| {
+        let dab = match art {
+            // A shape is its own edge, with no ramp of the box's to bend.
+            Art::Shape(cell) => Prim::shaped_dab(at, half, turn, cell, ink),
+            Art::Grain(cell) => Prim {
+                falloff,
+                ..Prim::grained_dab(at, half, feather, turn, cell, ink)
+            },
+            Art::Round => Prim {
+                falloff,
+                ..Prim::dab(at, half, feather, turn, ink)
+            },
+        };
+        // The paper goes on last and over any of the three: it is the
+        // canvas's, so what the nib is says nothing about it.
+        match paper {
+            Some(weave) => dab.papered(weave),
+            None => dab,
+        }
     };
     // The way the stroke is going where the dab lands, in radians, when
     // the nib runs along it — a nib that stands still has none.
@@ -984,11 +1128,36 @@ fn tip_prims(
                     (None, Some(n)) => shapes.cell(n).map_or(Art::Round, Art::Grain),
                     (None, None) => Art::Round,
                 },
+                paper: paper_weave(stamp.paper.as_ref(), view, shapes),
             },
             color,
         ),
         None => soft_polyline_prims(screen, radius, feather, color),
     }
+}
+
+/// How thin a tile of paper is allowed to get on the screen. Past this
+/// the weave is finer than the pixels reading it and the paper is not
+/// there to be seen — so it stops getting finer rather than turning
+/// into noise that changes every time the board is zoomed.
+const PAPER_MIN_PX: f64 = 2.0;
+
+/// The paper a stroke names, as it lies under this window — or `None`
+/// when it names none, or one this build's sheet does not carry. The
+/// stroke then lays its ink undivided, for the reason a nib the sheet
+/// does not carry lays a round dab.
+fn paper_weave(paper: Option<&Paper>, view: &View, shapes: &Shapes) -> Option<Weave> {
+    let paper = paper?;
+    let cell = shapes.paper(&paper.name)?;
+    let period = (paper.period * view.px_per_world()).max(PAPER_MIN_PX);
+    // World zero, not the stroke's start: the paper is the board's, so
+    // two strokes crossing one place meet the same fibres.
+    Some(Weave::new(
+        cell,
+        period,
+        view.world_to_screen(0.0, 0.0),
+        paper.depth,
+    ))
 }
 
 /// Stroke in progress (a raw polyline in world units) → screen prims.
@@ -1528,7 +1697,7 @@ mod tests {
         // clipped prim still measures as the whole thing.
         assert_eq!(cut.bounds(), plain.bounds());
         // The instance layout the shader is fed mirrors the struct.
-        assert_eq!(std::mem::size_of::<Prim>(), 88);
+        assert_eq!(std::mem::size_of::<Prim>(), 120);
     }
 
     #[test]
@@ -1637,6 +1806,7 @@ mod tests {
     const ROUND: Stamp = Stamp {
         shape: None,
         grain: None,
+        paper: None,
         follow: false,
         spacing: 0.5,
         roundness: 1.0,
@@ -1675,7 +1845,24 @@ mod tests {
             slot: 5,
             cols: 1,
             rows: 1,
+            px: 128,
             cells: std::iter::once((name.to_owned(), 0)).collect(),
+            paper_px: 0,
+            papers: std::collections::HashMap::new(),
+        }
+    }
+
+    /// A sheet of one nib and one paper, the paper cell as wide as the
+    /// whole nib row so that the two bands sit one under the other.
+    fn one_paper(name: &str) -> Shapes {
+        Shapes {
+            slot: 5,
+            cols: 2,
+            rows: 1,
+            px: 100,
+            cells: std::collections::HashMap::new(),
+            paper_px: 200,
+            papers: std::iter::once((name.to_owned(), 0)).collect(),
         }
     }
 
@@ -1716,6 +1903,146 @@ mod tests {
         let got = stroke_prims(&[[0.0, 0.0]], &shaped, &no_pen(), WHITE, &v, &sheet);
         assert_eq!(got[0].kind, KIND_IMAGE);
         assert_eq!((got[0].radius, got[0].feather, got[0].falloff), (0.0, 0.0, 1.0));
+    }
+
+    /// A paper `period` world units to the tile, biting by `depth`.
+    fn dragged(width: f64, stamp: Stamp, period: f64, depth: f64) -> Tip {
+        stamped(
+            width,
+            Stamp {
+                paper: Some(Paper {
+                    name: "canvas".into(),
+                    period,
+                    depth,
+                }),
+                ..stamp
+            },
+        )
+    }
+
+    #[test]
+    fn every_kind_of_dab_wears_the_paper_over_whatever_else_it_is() {
+        let v = view(0.0, 0.0, 1.0);
+        let sheet = Shapes {
+            cells: std::iter::once(("bristle".to_owned(), 0u16)).collect(),
+            ..one_paper("canvas")
+        };
+        let cell = sheet.paper("canvas").expect("the sheet carries it");
+        for nib in [
+            ROUND,
+            Stamp {
+                grain: Some("bristle".into()),
+                ..ROUND
+            },
+            Stamp {
+                shape: Some("bristle".into()),
+                ..ROUND
+            },
+        ] {
+            let kind = format!("{:?}/{:?}", nib.shape, nib.grain);
+            let tip = dragged(20.0, nib, 400.0, 0.75);
+            let got = stroke_prims(&[[0.0, 0.0]], &tip, &no_pen(), WHITE, &v, &sheet);
+            let dab = got[0];
+            assert_eq!(dab.paper, cell.uv, "{kind} misses the paper's cell");
+            assert_eq!(dab.weave[3], 0.75, "{kind} misses its depth");
+            assert_eq!(dab.weave[0], 1.0 / 400.0, "{kind} misses its scale");
+            // Whatever the dab is, it samples the paper off the one
+            // sheet the nibs are on.
+            assert_eq!(dab.slot, sheet.slot, "{kind}");
+        }
+    }
+
+    #[test]
+    fn the_paper_belongs_to_the_board_and_not_to_the_stroke() {
+        let v = view(0.0, 0.0, 1.0);
+        let sheet = one_paper("canvas");
+        let tip = dragged(20.0, ROUND, 400.0, 1.0);
+        let weave = |at: [f64; 2], v: &View| {
+            stroke_prims(&[at], &tip, &no_pen(), WHITE, v, &sheet)[0].weave
+        };
+        // Two strokes a long way apart lie on the same sheet of paper:
+        // where it is anchored has nothing to do with where either one
+        // began, so both read it the same way.
+        assert_eq!(weave([0.0, 0.0], &v), weave([137.0, -409.0], &v));
+        // The board carries the paper, so panning moves it under the
+        // window, and zooming stretches a tile with the ink.
+        assert_ne!(weave([0.0, 0.0], &view(50.0, 0.0, 1.0)), weave([0.0, 0.0], &v));
+        assert_eq!(weave([0.0, 0.0], &view(0.0, 0.0, 2.0))[0], 1.0 / 800.0);
+        // However far the camera is from world zero, the offset it
+        // hands the shader is inside one tile: `fract` of a big number
+        // has no precision left, so the wrapping is done here.
+        let far = weave([0.0, 0.0], &view(1.0e7, -1.0e7, 1.0));
+        for k in [far[1], far[2]] {
+            assert!((0.0..1.0).contains(&k), "{k} is not inside a tile");
+        }
+    }
+
+    #[test]
+    fn a_paper_the_sheet_does_not_carry_leaves_the_ink_undivided() {
+        let v = view(0.0, 0.0, 1.0);
+        let tip = dragged(20.0, ROUND, 400.0, 1.0);
+        // A board painted on a build that had this paper still opens,
+        // and its ink is laid whole rather than not at all.
+        let got = stroke_prims(&[[0.0, 0.0]], &tip, &no_pen(), WHITE, &v, &one_paper("other"));
+        assert_eq!(got[0].weave[3], 0.0, "no paper bites");
+        assert_eq!(got[0].paper, [0.0; 4]);
+        // And so does one whose brush was turned down to no depth.
+        let none = dragged(20.0, ROUND, 400.0, 0.0);
+        let got = stroke_prims(&[[0.0, 0.0]], &none, &no_pen(), WHITE, &v, &one_paper("canvas"));
+        assert_eq!(got[0].weave[3], 0.0);
+    }
+
+    #[test]
+    fn a_tile_thinner_than_the_pixels_reading_it_stops_getting_finer() {
+        let sheet = one_paper("canvas");
+        let tip = dragged(20.0, ROUND, 400.0, 1.0);
+        let scale = |zoom: f64| {
+            let v = view(0.0, 0.0, zoom);
+            stroke_prims(&[[0.0, 0.0]], &tip, &no_pen(), WHITE, &v, &sheet)[0].weave[0]
+        };
+        // Zoomed far out the weave is finer than the screen can read,
+        // and a paper that went on getting finer would be noise that
+        // changed every time the board moved.
+        assert_eq!(scale(0.0001), (1.0 / PAPER_MIN_PX) as f32);
+        assert!(scale(1.0) < scale(0.0001));
+    }
+
+    #[test]
+    fn a_papers_cell_is_drawn_in_half_a_texel_and_a_nibs_is_not() {
+        // Four nib cells of 64 across and four rows of them, then a
+        // band of 128-texel papers two across and two down under that:
+        // 256 by 512 texels in all.
+        let sheet = Shapes {
+            slot: 3,
+            cols: 4,
+            rows: 4,
+            px: 64,
+            cells: std::iter::once(("nib".to_owned(), 5u16)).collect(),
+            paper_px: 128,
+            papers: ["a", "b", "c", "d"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, n)| (n.to_owned(), i as u16))
+                .collect(),
+        };
+        // A nib's cell reaches its own edges: it is mapped onto the dab
+        // and never sampled past them.
+        let nib = sheet.cell("nib").expect("the nib is on it");
+        assert_eq!(nib.uv, [0.25, 0.125, 0.5, 0.25]);
+        // A paper's is drawn in half a texel, because it is sampled by
+        // wrapping: the seam has to come back to this paper and not to
+        // the cell beside it on the sheet.
+        let (du, dv) = (0.5 / 256.0, 0.5 / 512.0);
+        assert_eq!(
+            sheet.paper("a").expect("the paper is on it").uv,
+            [du, 0.5 + dv, 0.5 - du, 0.75 - dv]
+        );
+        assert_eq!(
+            sheet.paper("d").expect("the last of them").uv,
+            [0.5 + du, 0.75 + dv, 1.0 - du, 1.0 - dv]
+        );
+        assert_eq!(sheet.paper("e"), None, "one the sheet does not carry");
+        assert_eq!(sheet.paper("a").unwrap().slot, sheet.slot, "one sheet, one slot");
     }
 
     #[test]
@@ -2201,7 +2528,10 @@ mod tests {
             slot: 7,
             cols: 4,
             rows: 2,
+            px: 128,
             cells: [("bristle".to_owned(), 5u16)].into_iter().collect(),
+            paper_px: 0,
+            papers: std::collections::HashMap::new(),
         };
         let nib = stamped(
             8.0,
@@ -3279,6 +3609,28 @@ mod tests {
                 start: 0,
                 end: 5,
                 slot: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn a_papered_dab_names_the_sheet_it_reads_however_plain_it_is() {
+        // A round dab is a flat box until it is dragged over a paper,
+        // and then it reads the sheet like any glyph: a run of nothing
+        // but those has to bind the sheet, or the paper is sampled from
+        // whatever texture happened to be there and never bites.
+        let sheet = one_paper("canvas");
+        let v = view(0.0, 0.0, 1.0);
+        let tip = dragged(20.0, ROUND, 400.0, 1.0);
+        let dabs = stroke_prims(&[[0.0, 0.0], [60.0, 0.0]], &tip, &no_pen(), WHITE, &v, &sheet);
+        assert!(dabs.len() > 1, "a stroke of dabs");
+        assert!(dabs.iter().all(|d| d.kind == KIND_BOX), "still plain boxes");
+        assert_eq!(
+            runs(&dabs),
+            vec![Run {
+                start: 0,
+                end: dabs.len() as u32,
+                slot: sheet.slot,
             }]
         );
     }
