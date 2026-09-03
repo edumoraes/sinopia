@@ -638,16 +638,52 @@ const STAMP_STEP_MIN: f32 = 1.0;
 /// A nib is never let vanish, however flat it is squished.
 const NIB_MIN_PX: f32 = 0.5;
 
+/// One throw of the dice, in `-1..1`: splitmix64 over the stroke's own
+/// seed, the dab's place in it and a salt that keeps one property's
+/// throw from tracking another's. Deterministic on purpose — the
+/// document is redrawn every frame, and a dab that rolled again each
+/// time would shimmer.
+fn dice(seed: u64, index: u32, salt: u64) -> f64 {
+    let mut z = seed
+        .wrapping_add(u64::from(index).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add(salt);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // The top 53 bits are the ones a f64 can hold exactly.
+    (z >> 11) as f64 / f64::from(1u32 << 26) / f64::from(1u32 << 27) * 2.0 - 1.0
+}
+
+/// The seed a stroke scatters by: drawn from where it began, in world
+/// units, and from nothing that moves or grows. The camera must not
+/// re-roll it, and neither must the next point of a stroke still being
+/// drawn — a live stroke and the path it is fitted into start at the
+/// same place, so the ink does not jump at the release.
+fn seed_at(start: [f64; 2]) -> u64 {
+    start[0]
+        .to_bits()
+        .rotate_left(17)
+        .wrapping_mul(0xD6E8_FEB8_6659_FD93)
+        ^ start[1].to_bits()
+}
+
 /// The dabs a stamped nib lays along `points` (screen px): one where
 /// the press was, then one every `spacing` widths of arc length after
 /// it. The tail left over past the last dab is not stamped — a stroke
 /// ends on a dab, as it does in Sketchbook, and the nib's own radius
 /// covers the gap at any spacing anyone paints with.
+///
+/// A nib with a scatter is thrown off true dab by dab: its radius by
+/// `scatter.size` world units, its angle by `scatter.rotation` degrees
+/// and the gap before it by `scatter.spacing` tip widths, each from
+/// `seed` so the same stroke lands the same way every frame.
 pub fn stamp_prims(
     points: &[(f32, f32)],
     stamp: Stamp,
+    seed: u64,
     radius: f32,
     feather: f32,
+    px_per_world: f32,
     color: Rgba,
 ) -> Vec<Prim> {
     let Some(&first) = points.first() else {
@@ -655,11 +691,8 @@ pub fn stamp_prims(
     };
     let width = 2.0 * radius + feather;
     let step = (stamp.spacing as f32 * width).max(STAMP_STEP_MIN);
-    let half = (
-        radius,
-        (radius * stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX),
-    );
-    let angle = (stamp.rotation as f32).to_radians();
+    let squish = (stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX / radius.max(NIB_MIN_PX));
+    let angle = stamp.rotation as f32;
     // Flow is what one dab lays; the stroke's opacity is the ceiling
     // the composite puts on the pile.
     let ink = [
@@ -668,12 +701,44 @@ pub fn stamp_prims(
         color[2],
         color[3] * stamp.flow.clamp(0.0, 1.0) as f32,
     ];
-    let dab = |at: (f32, f32)| Prim::dab(at, half, feather, angle, ink);
+    let scatter = stamp.scatter;
+    let true_nib = scatter.is_true();
+    let size_throw = scatter.size as f32 * px_per_world;
 
-    let mut out = vec![dab(first)];
+    // `n` is the dab's place in the stroke: what the dice are rolled
+    // against, so a dab keeps its own throw however the walk arrives.
+    let dab = |at: (f32, f32), n: u32| {
+        if true_nib {
+            let half = (radius, radius * squish);
+            return Prim::dab(at, half, feather, angle.to_radians(), ink);
+        }
+        let r = (radius + size_throw * dice(seed, n, SALT_SIZE) as f32).max(NIB_MIN_PX);
+        let softness = r / radius.max(NIB_MIN_PX);
+        let turn = angle + scatter.rotation as f32 * dice(seed, n, SALT_ANGLE) as f32;
+        Prim::dab(
+            at,
+            (r, (r * squish).max(NIB_MIN_PX)),
+            feather * softness,
+            turn.to_radians(),
+            ink,
+        )
+    };
+    // The gap before dab `n`, thrown by the scatter and never shorter
+    // than two dabs may sit.
+    let gap = |n: u32| {
+        if true_nib {
+            return step;
+        }
+        let thrown = stamp.spacing as f32 + scatter.spacing as f32 * dice(seed, n, SALT_GAP) as f32;
+        (thrown * width).max(STAMP_STEP_MIN)
+    };
+
+    let mut out = vec![dab(first, 0)];
+    let mut n = 1u32;
     // How far the walk has come since the last dab, carried across the
     // polyline's corners so the spacing is of the stroke, not of a span.
     let mut carry = 0.0f32;
+    let mut next = gap(n);
     let mut prev = first;
     for &p in &points[1..] {
         let (dx, dy) = (p.0 - prev.0, p.1 - prev.1);
@@ -681,25 +746,40 @@ pub fn stamp_prims(
         if span <= 0.0 {
             continue;
         }
-        let mut at = step - carry;
+        let mut at = next - carry;
         while at <= span {
             let k = at / span;
-            out.push(dab((prev.0 + dx * k, prev.1 + dy * k)));
-            at += step;
+            out.push(dab((prev.0 + dx * k, prev.1 + dy * k), n));
+            n += 1;
+            next = gap(n);
+            at += next;
         }
-        carry = span - (at - step);
+        carry = span - (at - next);
         prev = p;
     }
     out
 }
 
+/// Salts, so that a dab's size, angle and gap are thrown independently.
+const SALT_SIZE: u64 = 0x51_7C_C1_B7_27_22_0A_95;
+const SALT_ANGLE: u64 = 0x2545_F491_4F6C_DD1D;
+const SALT_GAP: u64 = 0x14057B7EF767814F;
+
 /// What a tip lays along a screen polyline: a row of dabs if it stamps,
 /// one swept span per segment if it does not. The pencil sweeps; every
 /// brush stamps.
-fn tip_prims(screen: &[(f32, f32)], tip: Tip, color: Rgba, view: &View) -> Vec<Prim> {
+fn tip_prims(screen: &[(f32, f32)], tip: Tip, seed: u64, color: Rgba, view: &View) -> Vec<Prim> {
     let (radius, feather) = soft_radius(tip.width, tip.hardness, view);
     match tip.stamp {
-        Some(stamp) => stamp_prims(screen, stamp, radius, feather, color),
+        Some(stamp) => stamp_prims(
+            screen,
+            stamp,
+            seed,
+            radius,
+            feather,
+            view.px_per_world() as f32,
+            color,
+        ),
         None => soft_polyline_prims(screen, radius, feather, color),
     }
 }
@@ -713,7 +793,8 @@ pub fn stroke_prims(points: &[[f64; 2]], tip: Tip, color: Rgba, view: &View) -> 
             (sx as f32, sy as f32)
         })
         .collect();
-    tip_prims(&screen, tip, color, view)
+    let seed = points.first().copied().map_or(0, seed_at);
+    tip_prims(&screen, tip, seed, color, view)
 }
 
 /// How far the flattened polyline may stray from the curve, in px.
@@ -735,7 +816,8 @@ pub fn path_prims(curves: &[Cubic], tip: Tip, color: Rgba, view: &View) -> Vec<P
                 .map(|[x, y]| (x as f32, y as f32)),
         );
     }
-    tip_prims(&screen, tip, color, view)
+    let seed = curves.first().map_or(0, |c| seed_at(c[0]));
+    tip_prims(&screen, tip, seed, color, view)
 }
 
 /// How a group's prims meet each other in the scratch texture.
@@ -991,7 +1073,7 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame
 mod tests {
     use super::*;
     use crate::brush::Tip;
-    use crate::doc::{Camera, Kind, Layer, Paint, Path, Rect, Stroke};
+    use crate::doc::{Camera, Kind, Layer, Paint, Path, Rect, Scatter, Stroke};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
 
@@ -1127,6 +1209,11 @@ mod tests {
         roundness: 1.0,
         rotation: 0.0,
         flow: 1.0,
+        scatter: Scatter {
+            size: 0.0,
+            rotation: 0.0,
+            spacing: 0.0,
+        },
     };
 
     fn stamped(width: f64, stamp: Stamp) -> Tip {
@@ -1169,6 +1256,7 @@ mod tests {
             roundness: 0.25,
             rotation: 90.0,
             flow: 1.0,
+            ..ROUND
         };
         let got = stroke_prims(&[[0.0, 0.0]], stamped(8.0, flat), WHITE, &v);
         assert_eq!(got.len(), 1, "a tap is one dab");
@@ -1291,6 +1379,59 @@ mod tests {
         assert_eq!(f.groups.len(), 1);
         assert_eq!((f.groups[0].start, f.groups[0].end), (1, 2));
         assert_eq!(f.groups[0].opacity, 0.25);
+    }
+
+    #[test]
+    fn a_scattered_nib_throws_every_dab_off_true_and_lands_there_again() {
+        let v = view(0.0, 0.0, 1.0);
+        let wild = Stamp {
+            scatter: Scatter {
+                size: 3.0,
+                rotation: 45.0,
+                spacing: 1.0,
+            },
+            ..ROUND
+        };
+        let pts = [[-40.0, 0.0], [40.0, 0.0]];
+        let got = stroke_prims(&pts, stamped(8.0, wild), WHITE, &v);
+        assert!(got.len() > 4);
+
+        // No two dabs alike: the radius, the angle and the gap are all
+        // thrown off what the nib says.
+        assert!(
+            got.windows(2).any(|w| w[0].radius != w[1].radius),
+            "the size is thrown"
+        );
+        assert!(
+            got.windows(2).any(|w| w[0].angle != w[1].angle),
+            "the angle is thrown"
+        );
+        let xs: Vec<f32> = got.iter().map(|d| d.geom[0] + d.geom[2] / 2.0).collect();
+        let gaps: Vec<f32> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(
+            gaps.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-4),
+            "the gap is thrown: {gaps:?}"
+        );
+
+        // And thrown no further than it was told to: a radius of 4 px
+        // by 3 world units, at zoom 1.
+        for d in &got {
+            assert!((d.radius - 4.0).abs() <= 3.0 + 1e-4, "radius {}", d.radius);
+        }
+
+        // The throw belongs to the stroke, not to the frame it is drawn
+        // in: drawing it again lands every dab where it was.
+        assert_eq!(stroke_prims(&pts, stamped(8.0, wild), WHITE, &v), got);
+        // Panning must not re-roll it either — the same dabs, moved.
+        let moved = stroke_prims(&pts, stamped(8.0, wild), WHITE, &view(10.0, 0.0, 1.0));
+        assert_eq!(moved.len(), got.len());
+        for (a, b) in moved.iter().zip(&got) {
+            assert_eq!((a.radius, a.angle), (b.radius, b.angle));
+            assert!(
+                (a.geom[0] + 10.0 - b.geom[0]).abs() < 1e-3,
+                "moved by the camera and no more"
+            );
+        }
     }
 
     #[test]

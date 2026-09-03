@@ -173,6 +173,44 @@ fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
+/// How far each dab is thrown off the nib, in the unit of the thing it
+/// throws: `size` a radius in world units, `rotation` degrees,
+/// `spacing` tip widths. Sketchbook's Randomness, less the two whose
+/// amount is not in their property's own unit — see `brush::Jitter`.
+/// All zero is a nib laid true, which is what a board without one says.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Scatter {
+    pub size: f64,
+    pub rotation: f64,
+    pub spacing: f64,
+}
+
+impl Scatter {
+    /// Nothing thrown at all: absent on disk, and the walk skips the
+    /// dice for it.
+    pub fn is_true(&self) -> bool {
+        *self == Scatter::default()
+    }
+
+    /// The same scatter if the canvas could throw by it, or why not. An
+    /// amount is a distance, never a direction: negative is refused
+    /// rather than folded, so a board cannot say something it does not
+    /// mean.
+    fn checked(self) -> Result<Scatter, String> {
+        for (what, amount) in [
+            ("size", self.size),
+            ("rotation", self.rotation),
+            ("spacing", self.spacing),
+        ] {
+            if !(amount.is_finite() && amount >= 0.0) {
+                return Err(format!("{what} scatter {amount} is not an amount"));
+            }
+        }
+        Ok(self)
+    }
+}
+
 /// The nib a stroke was stamped with: what one dab is, beyond the
 /// width, opacity and hardness the stroke already names. A stroke
 /// carrying none was swept, not stamped — the pencil's.
@@ -188,6 +226,9 @@ pub struct Stamp {
     /// where the dabs cross; 1 is a dab that covers on its own.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub flow: f64,
+    /// How far each dab is thrown off it.
+    #[serde(default, skip_serializing_if = "Scatter::is_true")]
+    pub scatter: Scatter,
 }
 
 impl Stamp {
@@ -207,6 +248,7 @@ impl Stamp {
         if !is_unit(self.flow) {
             return Err(format!("flow {} is not between 0 and 1", self.flow));
         }
+        self.scatter.checked()?;
         Ok(self)
     }
 }
@@ -868,6 +910,7 @@ mod tests {
                 roundness: 0.5,
                 rotation: 30.0,
                 flow: 1.0,
+                scatter: Scatter::default(),
             }),
             "a brush stroke says which nib laid it"
         );
@@ -890,6 +933,11 @@ mod tests {
             (r#"{ "spacing": 0, "roundness": 1, "rotation": 0 }"#, "spacing"),
             (r#"{ "spacing": 0.4, "roundness": 1, "rotation": 400 }"#, "rotation"),
             (r#"{ "spacing": 0.4, "roundness": 1, "rotation": 0, "flow": -1 }"#, "flow"),
+            (
+                r#"{ "spacing": 0.4, "roundness": 1, "rotation": 0,
+                     "scatter": { "rotation": -5 } }"#,
+                "rotation scatter",
+            ),
         ] {
             let json = format!(
                 r##"{{

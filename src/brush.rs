@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::doc::{Path, Stamp, Stroke};
+use crate::doc::{Path, Scatter, Stamp, Stroke};
 use crate::editor::PEN_WIDTH;
 use crate::scene::{Prim, Rgba, polyline_prims};
 
@@ -284,7 +284,10 @@ impl Property {
     }
 
     /// Whether the canvas paints with it yet: the ones [`Tip`] carries,
-    /// its [`Stamp`] included. The rest wait on the stamp engine.
+    /// its [`Stamp`] and that nib's `Scatter` included. The two
+    /// randomness amounts left out are the ones Sketchbook does not
+    /// state in their property's own unit — a fraction thrown by five,
+    /// or by twenty — so the canvas would have to guess what they mean.
     pub fn honored(self) -> bool {
         matches!(
             self,
@@ -295,6 +298,9 @@ impl Property {
                 | Property::Spacing
                 | Property::Roundness
                 | Property::Rotation
+                | Property::JitterSize
+                | Property::JitterRotation
+                | Property::JitterSpacing
         )
     }
 
@@ -446,6 +452,11 @@ impl Brush {
                 roundness: self.roundness,
                 rotation: self.rotation,
                 flow: self.flow,
+                scatter: Scatter {
+                    size: self.jitter.size,
+                    rotation: self.jitter.rotation,
+                    spacing: self.jitter.spacing,
+                },
             }),
         }
     }
@@ -872,9 +883,39 @@ mod tests {
                 roundness: 0.5,
                 rotation: 30.0,
                 flow: 1.0,
+                scatter: Scatter::default(),
             }),
             "every brush is a nib stamped at a spacing"
         );
+    }
+
+    #[test]
+    fn a_brush_throws_its_nib_by_the_randomness_the_canvas_can_honor() {
+        let b = Brush {
+            jitter: Jitter {
+                size: 3.0,
+                opacity: 2.0,
+                flow: 7.0,
+                rotation: 45.0,
+                spacing: 1.0,
+            },
+            ..Brush::default()
+        };
+        let nib = b.tip().stamp.expect("a brush stamps");
+        assert_eq!(
+            nib.scatter,
+            Scatter {
+                size: 3.0,
+                rotation: 45.0,
+                spacing: 1.0,
+            },
+            "an amount in the unit of what it throws goes straight through"
+        );
+        // The other two are thrown by an amount that is not in their own
+        // unit — five and twenty on a fraction — so the canvas does not
+        // pretend to know what they mean.
+        assert!(!Property::JitterOpacity.honored());
+        assert!(!Property::JitterFlow.honored());
     }
 
     #[test]
@@ -1015,6 +1056,9 @@ mod tests {
                     | Property::Spacing
                     | Property::Roundness
                     | Property::Rotation
+                    | Property::JitterSize
+                    | Property::JitterRotation
+                    | Property::JitterSpacing
             );
             assert_eq!(p.honored(), honored, "{p:?}");
         }

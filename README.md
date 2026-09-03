@@ -40,10 +40,15 @@ selection, navigation, pasted images, and projects in tabs:
   put down again. A brush is a **nib stamped along the stroke**, never
   a swept line: its `spacing`, `roundness` and `rotation` are what one
   dab is and how far apart they sit, and the canvas paints with all
-  three, and `flow` with them — what one dab lays. The rest of the body
-  is read off the real sets and described truthfully while the engine
-  grows into it — dynamics, the tip's profile, texture depth,
-  randomness per property, and what the pen's pressure drives. Two thirds of the shipped brushes (167 of
+  three, and `flow` with them — what one dab lays. A nib is also thrown
+  off true dab by dab: its radius, its angle and the gap before it,
+  each by an amount in its own unit, which is how Sketchbook states
+  randomness. The other two amounts it states — on opacity and flow —
+  are not in those properties' own unit (a fraction thrown by five, or
+  by twenty), so the canvas does not guess at them. The rest of the
+  body is read off the real sets and described truthfully while the
+  engine grows into it — dynamics, the tip's profile, texture depth,
+  and what the pen's pressure drives. Two thirds of the shipped brushes (167 of
   211) are told apart by a shape or a texture the canvas does not
   stamp yet, and the library says so per brush. A ring the size of the
   brush follows the pointer.
@@ -85,8 +90,9 @@ selection, navigation, pasted images, and projects in tabs:
   Opacity, Flow, Rotation, Spacing), each section under its own
   heading. Closed and open never show the same slider twice, and the
   line above does not move or change width when the panel drops. The
-  ones the canvas actually paints with — Size, Opacity, Flow, Edge and
-  the whole Stamp section — are drawn in ink; every other slider is muted.
+  ones the canvas actually paints with — Size, Opacity, Flow, Edge, the
+  whole Stamp section and three of the five under Randomness — are
+  drawn in ink; every other slider is muted.
   It still moves, and it still writes the brush's own value, but the
   muting is the bar saying it does not promise paint yet. The
   palette's `≡` opens the same panel.
