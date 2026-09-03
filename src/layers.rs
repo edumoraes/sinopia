@@ -89,6 +89,10 @@ pub enum PanelHit {
     Select(usize),
     /// Show or hide this layer.
     Toggle(usize),
+    /// Work inside the frame on this layer: the panel shows its stack.
+    Enter(usize),
+    /// Back out to the board.
+    Leave,
     Add,
     Remove,
     Up,
@@ -243,6 +247,11 @@ pub struct Row {
     /// Where the mark saying what the layer holds is drawn — pixels or a
     /// curve. It is not a control: nothing hits it.
     pub mark: ScreenRect,
+    /// The chevron that goes into a frame, in the mark's own place. A
+    /// mark is read and this is pressed, which is why it is a rect of
+    /// its own and why it is drawn in ink rather than muted. `None` for
+    /// a layer that holds no stack.
+    pub enter: Option<ScreenRect>,
     /// The name, cut down to what fits.
     pub label: String,
     /// Where the label's pen starts.
@@ -264,6 +273,12 @@ pub struct Panel {
     pub remove: ScreenRect,
     /// The scrollbar's thumb, when there is more stack than band.
     pub bar: Option<ScreenRect>,
+    /// What the header writes: the panel's own word, or the name of the
+    /// frame whose stack is on show.
+    title: String,
+    /// The header's title as a target, while it is a way back out of a
+    /// frame. `None` on the board, where there is nowhere to go.
+    crumb: Option<ScreenRect>,
     /// The scroll actually used, in physical px — what was asked for,
     /// kept inside what there is to scroll.
     scroll: f32,
@@ -273,6 +288,10 @@ pub struct Panel {
 }
 
 impl Panel {
+    /// `inside` is the name of the frame whose stack is on show, or none
+    /// for the board's own — the header writes it, and inside one that
+    /// title is also the way out.
+    ///
     /// `top` is where the strip ends, in physical px. Rows are laid out
     /// top layer first from `scroll` px above the band, which is as much
     /// of the stack as there is room for above the bottom margin. Only
@@ -284,6 +303,7 @@ impl Panel {
         top: f32,
         atlas: &Atlas,
         layers: &[Layer],
+        inside: Option<&str>,
         scroll: f32,
     ) -> Panel {
         let s = scale as f32;
@@ -361,6 +381,7 @@ impl Panel {
                 w: side,
                 h: side,
             };
+            let enter = (layer.kind == Kind::Frame).then_some(mark);
             let room = mark.x - LABEL_GAP * s - label_x;
             let label = if room > 0.0 {
                 atlas.truncate(&layer.name, room)
@@ -373,6 +394,7 @@ impl Panel {
                 card: rect.inset(CARD_INSET * s),
                 eye,
                 mark,
+                enter,
                 label,
                 label_x,
             });
@@ -391,6 +413,23 @@ impl Panel {
             }
         });
 
+        // The header says where the panel is standing: its own word on
+        // the board, the frame's name inside one — and inside one it is
+        // also the way out. It is cut to the room before the buttons, so
+        // a long name never runs into them.
+        let title_x = header.x + PADDING * s;
+        let room = (up.x - LABEL_GAP * s - title_x).max(0.0);
+        let title = match inside {
+            None => TITLE.to_owned(),
+            Some(name) => atlas.truncate(name, room),
+        };
+        let crumb = inside.map(|_| ScreenRect {
+            x: title_x,
+            y: header.y,
+            w: room,
+            h: header.h,
+        });
+
         let rect = ScreenRect {
             x,
             y,
@@ -407,10 +446,23 @@ impl Panel {
             add,
             remove,
             bar,
+            title,
+            crumb,
             scroll,
             content,
             scale: s,
         }
+    }
+
+    /// What the header writes: the panel's own word, or the name of the
+    /// frame whose stack is on show.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The way back out of a frame, when the panel is standing in one.
+    pub fn crumb(&self) -> Option<ScreenRect> {
+        self.crumb
     }
 
     /// The scroll in use, in physical px.
@@ -456,6 +508,11 @@ impl Panel {
         if let Some((_, hit)) = buttons.iter().find(|(r, _)| r.contains(x, y)) {
             return Some(*hit);
         }
+        if let Some(crumb) = self.crumb
+            && crumb.contains(x, y)
+        {
+            return Some(PanelHit::Leave);
+        }
         // A row reaches past the band when it is only part shown; the
         // pointer never does.
         if self.band.contains(x, y) {
@@ -463,12 +520,15 @@ impl Panel {
                 if !row.rect.contains(x, y) {
                     continue;
                 }
-                let on_eye = row.eye.inset(-EYE_SLOP * self.scale).contains(x, y);
-                return Some(if on_eye {
-                    PanelHit::Toggle(row.index)
-                } else {
-                    PanelHit::Select(row.index)
-                });
+                if row.eye.inset(-EYE_SLOP * self.scale).contains(x, y) {
+                    return Some(PanelHit::Toggle(row.index));
+                }
+                if let Some(enter) = row.enter
+                    && enter.inset(-EYE_SLOP * self.scale).contains(x, y)
+                {
+                    return Some(PanelHit::Enter(row.index));
+                }
+                return Some(PanelHit::Select(row.index));
             }
         }
         Some(PanelHit::Panel)
@@ -519,7 +579,7 @@ impl Panel {
             Prim::rounded(self.rect, RADIUS * s, theme.panel),
         ];
         let baseline = atlas.baseline_in(self.header);
-        for g in atlas.layout(TITLE, self.header.x + PADDING * s, baseline) {
+        for g in atlas.layout(&self.title, self.header.x + PADDING * s, baseline) {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
         }
         for (rect, icon) in [
@@ -614,10 +674,13 @@ impl Panel {
         }
         // What the layer holds, at the card's other end: it says where the
         // next stroke goes, so it is read, never clicked.
-        let holds = match layer.kind {
-            Kind::Raster => PIXELS,
-            Kind::Vector => CURVE,
-            Kind::Frame => AREA,
+        // A frame's card ends in the chevron that goes into it, in the
+        // mark's own place: a mark is read and a chevron is pressed, and
+        // the panel says that difference in colour.
+        let (holds, tint) = match layer.kind {
+            Kind::Raster => (PIXELS, theme.muted),
+            Kind::Vector => (CURVE, theme.muted),
+            Kind::Frame => (CHEVRON_RIGHT, theme.icon),
         };
         out.extend(icon_prims(
             holds,
@@ -626,7 +689,7 @@ impl Panel {
             ICON_BOX,
             ICON_STROKE,
             s,
-            theme.muted,
+            tint,
         ));
         if !row.label.is_empty() {
             let ink = if is_active { theme.ink } else { theme.icon };
@@ -873,14 +936,6 @@ const CURVE: &[&[(f32, f32)]] = &[&[
     (20.0, 8.0),
 ]];
 
-/// What a frame layer holds: an area, and the two marks that say it
-/// crops rather than draws.
-const AREA: &[&[(f32, f32)]] = &[
-    &[(6.0, 6.0), (18.0, 6.0), (18.0, 18.0), (6.0, 18.0), (6.0, 6.0)],
-    &[(10.0, 3.5), (10.0, 20.5)],
-    &[(3.5, 10.0), (20.5, 10.0)],
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,7 +959,7 @@ mod tests {
     }
 
     fn panel(viewport: Viewport, scale: f64, n: usize) -> Panel {
-        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &layers(n), 0.0)
+        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &layers(n), None, 0.0)
     }
 
     const VP: Viewport = Viewport { w: 1200, h: 800 };
@@ -950,7 +1005,7 @@ mod tests {
         let a = atlas();
         let mut ls = layers(2);
         ls[1].kind = Kind::Vector;
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
         for row in &p.rows {
             assert!(row.card.contains_rect(&row.mark), "the mark sits in the card");
             assert!(
@@ -1014,7 +1069,7 @@ mod tests {
         let vp = Viewport { w: 1200, h };
         let a = atlas();
         let ls = layers(4);
-        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, scroll);
+        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, None, scroll);
 
         let top = at(0.0);
         assert_eq!(top.scroll(), 0.0);
@@ -1049,7 +1104,7 @@ mod tests {
         let vp = Viewport { w: 1200, h };
         let a = atlas();
         let ls = layers(4);
-        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, scroll);
+        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, None, scroll);
 
         // Looking at the top two rows (layers 3 and 2, top first).
         let p = at(0.0);
@@ -1317,7 +1372,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
         let body = |prims: &[Prim], card: ScreenRect| {
             prims.iter().position(|q| q.bounds() == card && q.feather == 0.0)
         };
@@ -1424,7 +1479,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
         let card = p.rows[1].card;
         let (was_x, was_y) = card.center();
         let body_of = |prims: &[Prim]| prims[carried_body(prims, &theme)];
@@ -1504,7 +1559,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let mut ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
         let mut s = Slides::default();
         s.restack(&ls, ROW);
         ls.swap(1, 2);
@@ -1531,7 +1586,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
         let card = p.rows[1].card;
         let band = [p.band.x, p.band.y, p.band.w, p.band.h];
 
@@ -1574,7 +1629,7 @@ mod tests {
         let theme = Theme::light();
         let a = atlas();
         let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
         let body_of = |y: f32| {
             let prims = p.prims(&ls, &showing(2, Some(lift(2, y, 1.0))), &a, 7, &theme);
             prims[carried_body(&prims, &theme)].bounds()
@@ -1595,7 +1650,7 @@ mod tests {
         let a = atlas();
         let mut ls = layers(3);
         ls[0].visible = false;
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, 0.0);
+        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
         let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
@@ -1646,5 +1701,85 @@ mod tests {
                 "{b:?} has an icon"
             );
         }
+    }
+
+    /// A board stack whose top layer is a frame's.
+    fn with_a_frame() -> Vec<Layer> {
+        vec![
+            Layer::new("Layer 1"),
+            Layer::of("Frame 1", Kind::Frame),
+        ]
+    }
+
+    #[test]
+    fn a_frame_card_carries_a_chevron_where_a_mark_would_be() {
+        let a = atlas();
+        let p = Panel::layout(VP, 1.0, 0.0, &a, &with_a_frame(), None, 0.0);
+        let frame_row = p.rows.iter().find(|r| r.index == 1).unwrap();
+        let plain_row = p.rows.iter().find(|r| r.index == 0).unwrap();
+        assert_eq!(
+            frame_row.enter,
+            Some(frame_row.mark),
+            "the frame's card can be gone into, where a mark would be read"
+        );
+        assert_eq!(plain_row.enter, None, "a raster layer's cannot");
+    }
+
+    #[test]
+    fn clicking_the_chevron_enters_and_the_rest_of_the_card_selects() {
+        let a = atlas();
+        let p = Panel::layout(VP, 1.0, 0.0, &a, &with_a_frame(), None, 0.0);
+        let row = p.rows.iter().find(|r| r.index == 1).unwrap();
+        let chevron = row.enter.unwrap();
+        let (cx, cy) = chevron.center();
+        assert_eq!(p.hit(f64::from(cx), f64::from(cy)), Some(PanelHit::Enter(1)));
+        assert_eq!(
+            p.hit(f64::from(row.label_x) + 1.0, f64::from(row.card.center().1)),
+            Some(PanelHit::Select(1))
+        );
+    }
+
+    #[test]
+    fn inside_a_frame_the_header_says_where_it_is_and_leads_back() {
+        let a = atlas();
+        let out = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), None, 0.0);
+        assert!(out.crumb().is_none(), "there is nowhere to go back to");
+        assert_eq!(out.title(), TITLE);
+
+        let inn = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), Some("Frame 1"), 0.0);
+        let crumb = inn.crumb().expect("a way back");
+        assert_eq!(inn.title(), "Frame 1", "the header says where it is");
+        let (cx, cy) = crumb.center();
+        assert_eq!(p_hit(&inn, cx, cy), Some(PanelHit::Leave));
+    }
+
+    fn p_hit(p: &Panel, x: f32, y: f32) -> Option<PanelHit> {
+        p.hit(f64::from(x), f64::from(y))
+    }
+
+    /// The panel showing a frame's stack is the same panel: the rows, the
+    /// band and the thumb do not know the difference.
+    #[test]
+    fn a_panel_showing_a_frames_stack_lays_out_like_any_other() {
+        let a = atlas();
+        let board = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), None, 0.0);
+        let inside = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), Some("Frame 1"), 0.0);
+        assert_eq!(board.rows.len(), inside.rows.len());
+        assert_eq!(board.band, inside.band);
+        assert_eq!(board.rows[0].card, inside.rows[0].card);
+    }
+
+    /// A frame's name too long for the header is cut, never run past the
+    /// buttons.
+    #[test]
+    fn a_long_frame_name_is_cut_to_the_header() {
+        let a = atlas();
+        let long = "A frame with a name nobody would ever type by hand";
+        let p = Panel::layout(VP, 1.0, 0.0, &a, &layers(1), Some(long), 0.0);
+        let width = a.measure(p.title());
+        assert!(
+            p.crumb().unwrap().x + width <= p.up.x,
+            "the title runs into the buttons: {width}"
+        );
     }
 }

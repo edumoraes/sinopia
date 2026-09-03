@@ -787,14 +787,31 @@ impl App {
         }
         let atlas = self.atlas.as_ref()?;
         let top = (tabs::HEIGHT * view.scale as f32).round();
+        // The panel shows one flat stack, whichever one the editor is
+        // standing in — which is what keeps its lift, its slides and its
+        // scroll from having to know that frames exist at all.
+        let inside = self.editor().inside();
+        let name = inside.and_then(|id| self.frame_name(id));
         Some(Panel::layout(
             view.viewport,
             view.scale,
             top,
             atlas,
-            &self.doc().layers,
+            self.doc().stack(inside),
+            name,
             self.scroll + self.scrolling.offset(),
         ))
+    }
+
+    /// What a frame's card is called: the name of the layer it is the
+    /// object of.
+    fn frame_name(&self, id: &str) -> Option<&str> {
+        let doc = self.doc();
+        let layer = &doc.frame(id)?.layer;
+        doc.layers
+            .iter()
+            .find(|l| &l.id == layer)
+            .map(|l| l.name.as_str())
     }
 
     /// The panel's handle, once there is an atlas to letter it with. It
@@ -935,6 +952,16 @@ impl App {
             PanelHit::Remove => editor.remove_layer(doc),
             PanelHit::Up => editor.move_layer(doc, true),
             PanelHit::Down => editor.move_layer(doc, false),
+            PanelHit::Enter(i) => match doc
+                .stack(editor.inside())
+                .get(i)
+                .and_then(|l| doc.frame_on(&l.id))
+                .map(|f| f.id.clone())
+            {
+                Some(frame) => editor.enter_frame(doc, &frame),
+                None => Change::None,
+            },
+            PanelHit::Leave => editor.leave_frame(doc),
             PanelHit::Panel => Change::None,
         };
         self.apply(change);
