@@ -46,7 +46,9 @@ pub fn frame(el: &Element) -> Option<Frame> {
             p.strokes.iter().map(|s| (s.curves.as_slice(), s.width)),
             p.rotation,
         ),
-        Element::Frame(_) => None,
+        // An area, and one that does not turn: the cut that makes a
+        // frame is an axis-aligned box in the shader.
+        Element::Frame(f) => Some(box_frame(f.x, f.y, f.w, f.h, 0.0)),
     }
 }
 
@@ -97,7 +99,11 @@ pub fn frame_of(doc: &Document, ids: &[String]) -> Option<Frame> {
 pub fn element_at(doc: &Document, p: Point, slop: f64) -> Option<&str> {
     doc.painted()
         .rev()
-        .find(|painted| hits(painted.element, p, slop))
+        .find(|painted| {
+            // What the boundary cut away is not there for the pointer
+            // either: the renderer and the pointer read one answer.
+            painted.within.is_none_or(|f| f.contains(p)) && hits(painted.element, p, slop)
+        })
         .map(|painted| painted.element.id())
 }
 
@@ -112,7 +118,10 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
         Element::Rect(_) | Element::Image(_) => true,
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
-        Element::Frame(_) => false,
+        // A frame is an area with a surface, not an outline. It is
+        // painted before what it holds, so a walk from the top finds
+        // the contents first: the frame is picked on its own ground.
+        Element::Frame(_) => true,
         // Any one of its strokes is the object: the gaps between them
         // are not.
         Element::Paint(paint) => paint
@@ -175,12 +184,19 @@ fn ink_hit(curves: &[Cubic], width: f64, p: Point, slop: f64) -> bool {
 pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
     let lo = [a[0].min(b[0]), a[1].min(b[1])];
     let hi = [a[0].max(b[0]), a[1].max(b[1])];
+    let overlaps = |flo: Point, fhi: Point| {
+        flo[0] <= hi[0] && fhi[0] >= lo[0] && flo[1] <= hi[1] && fhi[1] >= lo[1]
+    };
     doc.painted()
         .filter(|painted| {
-            frame(painted.element).is_some_and(|f| {
-                let (flo, fhi) = f.aabb();
-                flo[0] <= hi[0] && fhi[0] >= lo[0] && flo[1] <= hi[1] && fhi[1] >= lo[1]
-            })
+            // A boundary that cut ink away keeps the marquee off it too.
+            painted
+                .within
+                .is_none_or(|f| overlaps([f.x, f.y], [f.x + f.w, f.y + f.h]))
+                && frame(painted.element).is_some_and(|f| {
+                    let (flo, fhi) = f.aabb();
+                    overlaps(flo, fhi)
+                })
         })
         .map(|painted| painted.element.id().to_owned())
         .collect()
@@ -217,7 +233,16 @@ pub fn transform(el: &mut Element, m: &Affine) {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
         }
-        Element::Frame(_) => {}
+        // A frame does not turn: its box is mapped and whatever
+        // rotation the map carried is spent on nothing.
+        Element::Frame(f) => {
+            let mapped = box_frame(f.x, f.y, f.w, f.h, 0.0).transformed(m);
+            let (lo, hi) = mapped.aabb();
+            f.x = lo[0];
+            f.y = lo[1];
+            f.w = hi[0] - lo[0];
+            f.h = hi[1] - lo[1];
+        }
     }
 }
 
@@ -1061,5 +1086,99 @@ mod tests {
         transform(&mut el, &resize_map(&f, Corner::BottomRight, [80.0, 20.0], FREE));
         let Element::Image(i) = &el else { panic!() };
         assert_eq!((i.x, i.y, i.w, i.h), (0.0, 0.0, 80.0, 20.0));
+    }
+
+    /// A frame at (0,0)–(100,100) holding a rect that runs well past its
+    /// right edge.
+    fn framed_doc() -> Document {
+        Document::from_json(
+            r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [
+                { "id": "fr", "type": "frame", "layer": "fl",
+                  "x": 0, "y": 0, "w": 100, "h": 100, "background": "#fff",
+                  "layers": [ { "id": "in", "name": "Layer 1" } ] },
+                { "id": "inside", "type": "rect", "layer": "in",
+                  "x": 50, "y": 50, "w": 400, "h": 20,
+                  "stroke": null, "fill": "#000", "text": null }
+            ]
+        }"##,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_point_on_a_frames_ground_picks_the_frame() {
+        let doc = framed_doc();
+        assert_eq!(element_at(&doc, [10.0, 10.0], 0.0), Some("fr"));
+    }
+
+    #[test]
+    fn a_point_on_what_a_frame_holds_picks_the_content() {
+        let doc = framed_doc();
+        assert_eq!(element_at(&doc, [60.0, 55.0], 0.0), Some("inside"));
+    }
+
+    #[test]
+    fn ink_the_boundary_cut_away_is_not_there_for_the_pointer_either() {
+        let doc = framed_doc();
+        assert_eq!(
+            element_at(&doc, [300.0, 55.0], 0.0),
+            None,
+            "the rect reaches here, but the frame does not"
+        );
+    }
+
+    #[test]
+    fn a_marquee_misses_what_the_boundary_cut_away() {
+        let doc = framed_doc();
+        let picked = elements_in(&doc, [200.0, 40.0], [400.0, 80.0]);
+        assert!(picked.is_empty(), "{picked:?}");
+    }
+
+    #[test]
+    fn a_marquee_over_a_frame_takes_it_and_what_it_holds() {
+        let doc = framed_doc();
+        let picked = elements_in(&doc, [-10.0, -10.0], [110.0, 110.0]);
+        assert_eq!(picked, ["fr", "inside"]);
+    }
+
+    #[test]
+    fn a_frame_occupies_its_own_area() {
+        let doc = framed_doc();
+        let f = frame(&doc.elements[0]).expect("a frame has a box");
+        assert_eq!(f.center, [50.0, 50.0]);
+        assert_eq!(f.half, [50.0, 50.0]);
+        assert_eq!(f.angle, 0.0);
+    }
+
+    #[test]
+    fn a_frame_does_not_turn() {
+        let mut doc = framed_doc();
+        let before = frame(&doc.elements[0]).unwrap();
+        transform(&mut doc.elements[0], &Affine::rotate(QUARTER));
+        let after = frame(&doc.elements[0]).unwrap();
+        assert_eq!(after.angle, 0.0, "the turn is dropped");
+        assert!(
+            (after.half[0] - before.half[0]).abs() < 1e-9
+                && (after.half[1] - before.half[1]).abs() < 1e-9,
+            "and the box keeps its extents: {:?} was {:?}",
+            after.half,
+            before.half
+        );
+    }
+
+    #[test]
+    fn a_frame_moves_and_resizes_like_any_box() {
+        let mut doc = framed_doc();
+        transform(&mut doc.elements[0], &Affine::translate(10.0, 20.0));
+        let f = frame(&doc.elements[0]).unwrap();
+        assert_eq!(f.center, [60.0, 70.0]);
+        let Element::Frame(fr) = &doc.elements[0] else {
+            panic!("not a frame");
+        };
+        assert_eq!((fr.x, fr.y, fr.w, fr.h), (10.0, 20.0, 100.0, 100.0));
     }
 }
