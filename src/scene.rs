@@ -262,23 +262,39 @@ pub struct Shapes {
 /// One nib's own art: its cell of the shape sheet, and the slot the
 /// sheet is in.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Nib {
+pub struct Art {
     pub uv: [f32; 4],
     pub slot: u32,
+}
+
+/// A nib measured for the screen: what a tip and a view make of it,
+/// which is everything the walk needs that the [`Stamp`] itself does
+/// not say.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Nib {
+    /// The crisp half-width, in px.
+    pub radius: f32,
+    /// The edge ramp hardness gave up of that radius, in px.
+    pub feather: f32,
+    /// World units into px: what a scatter stated in world units is
+    /// thrown by.
+    pub px_per_world: f32,
+    /// Where its own shape is, when it stamps one.
+    pub art: Option<Art>,
 }
 
 impl Shapes {
     /// The nib a stroke names, or `None` when this build's sheet does
     /// not carry it — the stroke then lays a plain round nib, because a
     /// board painted somewhere else must still open.
-    pub fn nib(&self, name: &str) -> Option<Nib> {
+    pub fn art(&self, name: &str) -> Option<Art> {
         let cell = *self.cells.get(name)?;
         if self.cols == 0 || self.rows == 0 || cell >= self.cols * self.rows {
             return None;
         }
         let (col, row) = (cell % self.cols, cell / self.cols);
         let (w, h) = (f32::from(self.cols), f32::from(self.rows));
-        Some(Nib {
+        Some(Art {
             uv: [
                 f32::from(col) / w,
                 f32::from(row) / h,
@@ -473,13 +489,13 @@ impl Prim {
         center: (f32, f32),
         half: (f32, f32),
         angle: f32,
-        nib: Nib,
+        art: Art,
         color: Rgba,
     ) -> Prim {
         Prim {
             kind: KIND_IMAGE,
-            uv: nib.uv,
-            slot: nib.slot,
+            uv: art.uv,
+            slot: art.slot,
             // Square corners: the shape's own alpha is the only edge,
             // and a rounded box would bite into it.
             radius: 0.0,
@@ -747,15 +763,18 @@ pub fn stamp_prims(
     points: &[(f32, f32)],
     stamp: &Stamp,
     seed: u64,
-    radius: f32,
-    feather: f32,
-    px_per_world: f32,
-    nib: Option<Nib>,
+    nib: Nib,
     color: Rgba,
 ) -> Vec<Prim> {
     let Some(&first) = points.first() else {
         return Vec::new();
     };
+    let Nib {
+        radius,
+        feather,
+        px_per_world,
+        art,
+    } = nib;
     let width = 2.0 * radius + feather;
     let step = (stamp.spacing as f32 * width).max(STAMP_STEP_MIN);
     let squish = (stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX / radius.max(NIB_MIN_PX));
@@ -774,8 +793,8 @@ pub fn stamp_prims(
 
     // `n` is the dab's place in the stroke: what the dice are rolled
     // against, so a dab keeps its own throw however the walk arrives.
-    let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32| match nib {
-        Some(nib) => Prim::shaped_dab(at, half, turn, nib, ink),
+    let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32| match art {
+        Some(art) => Prim::shaped_dab(at, half, turn, art, ink),
         None => Prim::dab(at, half, feather, turn, ink),
     };
     // The way the stroke is going where the dab lands, in radians, when
@@ -867,10 +886,12 @@ fn tip_prims(
             screen,
             stamp,
             seed,
-            radius,
-            feather,
-            view.px_per_world() as f32,
-            stamp.shape.as_deref().and_then(|n| shapes.nib(n)),
+            Nib {
+                radius,
+                feather,
+                px_per_world: view.px_per_world() as f32,
+                art: stamp.shape.as_deref().and_then(|n| shapes.art(n)),
+            },
             color,
         ),
         None => soft_polyline_prims(screen, radius, feather, color),

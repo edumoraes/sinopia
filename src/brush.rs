@@ -968,7 +968,7 @@ mod tests {
                 };
                 named += 1;
                 assert!(
-                    sheet.nib(shape).is_some(),
+                    sheet.art(shape).is_some(),
                     "{} names {shape}, which is not on the sheet",
                     p.name
                 );
@@ -982,7 +982,7 @@ mod tests {
                 .any(|p| p.shape.is_none()),
             "and the rest stamp a plain round nib"
         );
-        assert!(sheet.nib("no such nib").is_none());
+        assert!(sheet.art("no such nib").is_none());
         assert_eq!(sheet.rows, 8, "90 nibs, 12 across");
     }
 
