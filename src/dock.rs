@@ -1,7 +1,11 @@
 //! Tool dock: a floating rounded panel centered at the bottom of the
-//! canvas, one button per tool. Sized in logical px so it reads the same on
-//! any display; positioned in physical px. Pure — `app` asks where a click
+//! canvas, one button per tool and, after a divider, the inks a stroke
+//! can be laid in. Sized in logical px so it reads the same on any
+//! display; positioned in physical px. Pure — `app` asks where a click
 //! landed and what to draw.
+//!
+//! The ink lives here and not on the brush's own bar because the pencil
+//! lays it too: it is the window's, like the tool in the hand.
 
 use crate::editor::Tool;
 use crate::scene::{self, Prim, Rgba, ScreenRect, Viewport};
@@ -19,10 +23,24 @@ pub const ICON_BOX: f32 = 20.0;
 pub const ICON_STROKE: f32 = 1.75;
 const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
+/// An ink's cell: narrower than a tool's button, because a dot needs
+/// less room than an icon and there are more of them.
+pub const INK_CELL: f32 = 24.0;
+/// The dot drawn in it.
+pub const INK_DOT: f32 = 15.0;
+/// How much of the cell the ring around the chosen ink takes.
+const INK_RING: f32 = 2.0;
+/// The room the divider between the tools and the inks stands in.
+const DIVIDER: f32 = 11.0;
+const DIVIDER_PX: f32 = 1.0;
+/// How much of the panel's height the divider is tall.
+const DIVIDER_HEIGHT: f32 = 0.55;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
     Tool(Tool),
+    /// One of the inks, by its place in the theme's own list.
+    Ink(usize),
     /// Panel chrome between buttons: swallowed, never reaches the canvas.
     Panel,
 }
@@ -31,14 +49,25 @@ pub enum Hit {
 pub struct Dock {
     pub panel: ScreenRect,
     pub buttons: Vec<(Tool, ScreenRect)>,
+    /// One cell per ink, in the theme's own order.
+    pub inks: Vec<ScreenRect>,
     scale: f32,
 }
 
 impl Dock {
-    pub fn layout(viewport: Viewport, scale: f64, tools: &[Tool]) -> Dock {
+    /// The dock for `tools` and `inks` many colours. No inks is a dock
+    /// with no divider and nothing after it, exactly as it was before
+    /// there were any.
+    pub fn layout(viewport: Viewport, scale: f64, tools: &[Tool], inks: usize) -> Dock {
         let s = scale as f32;
         let n = tools.len() as f32;
-        let w = (n * BUTTON + (n - 1.0).max(0.0) * GAP + 2.0 * PADDING) * s;
+        let k = inks as f32;
+        let strip = if inks == 0 {
+            0.0
+        } else {
+            DIVIDER + k * INK_CELL + (k - 1.0) * GAP
+        };
+        let w = (n * BUTTON + (n - 1.0).max(0.0) * GAP + strip + 2.0 * PADDING) * s;
         let h = (BUTTON + 2.0 * PADDING) * s;
         let panel = ScreenRect {
             x: ((viewport.w as f32 - w) / 2.0).round(),
@@ -46,7 +75,7 @@ impl Dock {
             w,
             h,
         };
-        let buttons = tools
+        let buttons: Vec<(Tool, ScreenRect)> = tools
             .iter()
             .enumerate()
             .map(|(i, &tool)| {
@@ -59,9 +88,21 @@ impl Dock {
                 (tool, r)
             })
             .collect();
+        // The inks pick up where the tools left off, a divider's width
+        // along, and stand centred on the taller buttons' line.
+        let after = buttons.last().map_or(panel.x + PADDING * s, |(_, r)| r.x + r.w);
+        let inks = (0..inks)
+            .map(|i| ScreenRect {
+                x: after + (DIVIDER + i as f32 * (INK_CELL + GAP)) * s,
+                y: panel.y + (PADDING + (BUTTON - INK_CELL) / 2.0) * s,
+                w: INK_CELL * s,
+                h: INK_CELL * s,
+            })
+            .collect();
         Dock {
             panel,
             buttons,
+            inks,
             scale: s,
         }
     }
@@ -70,16 +111,27 @@ impl Dock {
         if !self.panel.contains(x, y) {
             return None;
         }
-        let button = self.buttons.iter().find(|(_, r)| r.contains(x, y));
-        Some(match button {
-            Some((tool, _)) => Hit::Tool(*tool),
-            None => Hit::Panel,
-        })
+        if let Some((tool, _)) = self.buttons.iter().find(|(_, r)| r.contains(x, y)) {
+            return Some(Hit::Tool(*tool));
+        }
+        // An ink's dot is smaller than the room it stands in, and the
+        // room is what is aimed at: the cell takes the click, and the
+        // full height of the panel over it, so a swatch is as easy to
+        // hit as a tool.
+        let reach = |r: &ScreenRect| ScreenRect {
+            y: self.panel.y,
+            h: self.panel.h,
+            ..*r
+        };
+        if let Some(i) = self.inks.iter().position(|r| reach(r).contains(x, y)) {
+            return Some(Hit::Ink(i));
+        }
+        Some(Hit::Panel)
     }
 
     /// Paint order: shadow, border, panel, then per button the active
     /// highlight and the icon.
-    pub fn prims(&self, active: Tool, theme: &Theme) -> Vec<Prim> {
+    pub fn prims(&self, active: Tool, ink: usize, theme: &Theme) -> Vec<Prim> {
         let s = self.scale;
         let mut out = vec![
             Prim::soft(
@@ -102,6 +154,41 @@ impl Dock {
                 theme.icon
             };
             out.extend(icon_prims(*tool, *rect, s, color));
+        }
+        if let Some(first) = self.inks.first() {
+            // The divider stands halfway between the last tool and the
+            // first ink, a hairline of the panel's own border colour.
+            let x = (first.x - DIVIDER * s / 2.0).round();
+            let tall = self.panel.h * DIVIDER_HEIGHT;
+            out.push(Prim::rect(
+                ScreenRect {
+                    x,
+                    y: self.panel.y + (self.panel.h - tall) / 2.0,
+                    w: (DIVIDER_PX * s).max(1.0),
+                    h: tall,
+                },
+                theme.border,
+            ));
+        }
+        for (i, cell) in self.inks.iter().enumerate() {
+            let color = theme
+                .inks
+                .get(i)
+                .map_or(theme.ink, |hex| scene::parse_color(hex));
+            let (cx, cy) = cell.center();
+            // The chosen ink wears a ring, as the brush in the hand does
+            // in the palette: a filled circle with the panel laid back
+            // inside it, so the dot itself is never made smaller.
+            if i == ink {
+                out.push(Prim::circle(cx, cy, INK_CELL * s / 2.0, theme.selection));
+                out.push(Prim::circle(
+                    cx,
+                    cy,
+                    (INK_CELL / 2.0 - INK_RING) * s,
+                    theme.panel,
+                ));
+            }
+            out.push(Prim::circle(cx, cy, INK_DOT * s / 2.0, color));
         }
         out
     }
@@ -210,7 +297,7 @@ mod tests {
 
     #[test]
     fn panel_is_centered_at_the_bottom_with_one_button_per_tool() {
-        let d = Dock::layout(VP, 1.0, &TOOLS);
+        let d = Dock::layout(VP, 1.0, &TOOLS, 0);
         // 2 buttons of 36 + 1 gap of 2 + padding 6 on each side = 86 wide.
         assert_eq!(d.panel, sr(357.0, 532.0, 86.0, 48.0));
         assert_eq!(
@@ -224,14 +311,14 @@ mod tests {
 
     #[test]
     fn layout_scales_with_the_display() {
-        let d = Dock::layout(VP, 2.0, &TOOLS);
+        let d = Dock::layout(VP, 2.0, &TOOLS, 0);
         assert_eq!(d.panel, sr(314.0, 464.0, 172.0, 96.0));
         assert_eq!(d.buttons[1].1, sr(402.0, 476.0, 72.0, 72.0));
     }
 
     #[test]
     fn hit_reports_the_button_or_the_bare_panel() {
-        let d = Dock::layout(VP, 1.0, &TOOLS);
+        let d = Dock::layout(VP, 1.0, &TOOLS, 0);
         assert_eq!(d.hit(381.0, 556.0), Some(Hit::Tool(Tool::Select)));
         assert_eq!(d.hit(419.0, 556.0), Some(Hit::Tool(Tool::Pencil)));
         assert_eq!(
@@ -244,10 +331,92 @@ mod tests {
     }
 
     #[test]
+    fn the_inks_stand_after_the_tools_with_a_divider_between() {
+        let bare = Dock::layout(VP, 1.0, &TOOLS, 0);
+        let d = Dock::layout(VP, 1.0, &TOOLS, 3);
+        assert!(bare.inks.is_empty(), "a dock with no inks has no strip");
+        assert_eq!(d.inks.len(), 3);
+        // 3 cells of 24 and 2 gaps of 2, a divider's 11 before them.
+        assert_eq!(d.panel.w, bare.panel.w + 11.0 + 3.0 * 24.0 + 2.0 * 2.0);
+        assert_eq!(d.panel.h, bare.panel.h, "and stands no taller");
+        let last = d.buttons.last().unwrap().1;
+        assert_eq!(d.inks[0].x, last.x + last.w + 11.0);
+        assert_eq!(d.inks[1].x, d.inks[0].x + 24.0 + 2.0);
+        // A cell is centred on the taller buttons' line.
+        assert_eq!(d.inks[0].h, 24.0);
+        assert_eq!(d.inks[0].y + d.inks[0].h / 2.0, last.y + last.h / 2.0);
+    }
+
+    #[test]
+    fn a_click_anywhere_over_an_ink_is_that_ink() {
+        let d = Dock::layout(VP, 1.0, &TOOLS, 3);
+        let cell = d.inks[1];
+        let (cx, cy) = cell.center();
+        assert_eq!(d.hit(f64::from(cx), f64::from(cy)), Some(Hit::Ink(1)));
+        // The dot is smaller than its cell, and the cell smaller than
+        // the panel: a swatch is as easy to hit as a tool.
+        assert_eq!(
+            d.hit(f64::from(cx), f64::from(d.panel.y) + 1.0),
+            Some(Hit::Ink(1)),
+            "the panel's full height over a cell aims at it"
+        );
+        assert_eq!(
+            d.hit(f64::from(cell.x) - 1.0, f64::from(cy)),
+            Some(Hit::Panel),
+            "the gap between two of them swallows the click"
+        );
+        assert_eq!(
+            d.hit(f64::from(cx), f64::from(d.panel.y) - 1.0),
+            None,
+            "and above the panel is still canvas"
+        );
+    }
+
+    #[test]
+    fn the_chosen_ink_wears_a_ring_and_every_dot_is_its_own_colour() {
+        let theme = Theme::light();
+        let d = Dock::layout(VP, 1.0, &TOOLS, theme.inks.len());
+        let prims = d.prims(Tool::Pencil, 2, &theme);
+        for (i, cell) in d.inks.iter().enumerate() {
+            let (cx, cy) = cell.center();
+            let want = scene::parse_color(&theme.inks[i]);
+            assert!(
+                prims
+                    .iter()
+                    .any(|p| p.color == want && p.bounds().center() == (cx, cy)),
+                "ink {i} is not drawn in its own colour"
+            );
+        }
+        let (cx, cy) = d.inks[2].center();
+        assert!(
+            prims
+                .iter()
+                .any(|p| p.color == theme.selection && p.bounds().center() == (cx, cy)),
+            "the chosen one is ringed"
+        );
+        let (cx, cy) = d.inks[0].center();
+        assert!(
+            !prims
+                .iter()
+                .any(|p| p.color == theme.selection && p.bounds().center() == (cx, cy)),
+            "and only it"
+        );
+        // One hairline between the last tool and the first ink.
+        let last = d.buttons.last().unwrap().1;
+        assert!(
+            prims.iter().any(|p| p.color == theme.border
+                && p.geom[2] <= 1.0
+                && p.geom[0] > last.x + last.w
+                && p.geom[0] < d.inks[0].x),
+            "the divider"
+        );
+    }
+
+    #[test]
     fn prims_paint_shadow_panel_highlight_and_icons_in_place() {
         let theme = Theme::light();
-        let d = Dock::layout(VP, 1.0, &TOOLS);
-        let prims = d.prims(Tool::Pencil, &theme);
+        let d = Dock::layout(VP, 1.0, &TOOLS, 0);
+        let prims = d.prims(Tool::Pencil, 0, &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
         assert!(

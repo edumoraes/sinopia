@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 491 tests.
+- `cargo build` clean, `cargo test` with 495 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -144,6 +144,13 @@ selection, navigation, pasted images, and projects in tabs:
   It still moves, and it still writes the brush's own value, but the
   muting is the bar saying it does not promise paint yet. The
   palette's `≡` opens the same panel.
+- Ink: the dock carries the colours a stroke is laid in, after the
+  tools and a divider — the theme's own near-black first, then red,
+  amber, green, blue and violet. The chosen one wears a ring, as the
+  brush in the hand does in the palette. It is the window's, like the
+  tool: the pencil and every brush lay it, and the brush's ring shows
+  it before the press. Every stroke has always named its colour on
+  disk; what was missing was somewhere to pick one.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it

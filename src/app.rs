@@ -33,7 +33,7 @@ use crate::layers::{self, Panel, PanelHit};
 use crate::palette::{self, Palette};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
-use crate::scene::{self, Frame, ImageSlots, Shapes, View, Viewport, with_alpha};
+use crate::scene::{self, Frame, ImageSlots, Rgba, Shapes, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
@@ -123,6 +123,11 @@ struct App {
     palette_scroll: f32,
     /// Brush Properties' Advanced layout is dropped under the bar.
     props_open: bool,
+    /// Which of the theme's inks the next stroke is laid in. The
+    /// window's, like the brush and the tool: it belongs to the person
+    /// drawing, and every board they open is drawn in it until they
+    /// pick another.
+    ink: usize,
     /// Whether the brush library has been changed since it was last
     /// written back. The brushes are the person's, not a board's: they
     /// are kept as soon as a gesture that changed them ends, and never
@@ -685,7 +690,7 @@ impl App {
     }
 
     fn dock(&self, view: &View) -> Dock {
-        Dock::layout(view.viewport, view.scale, &Tool::ALL)
+        Dock::layout(view.viewport, view.scale, &Tool::ALL, self.theme.inks.len())
     }
 
     /// The strip, or `None` before the atlas exists — there is nothing to
@@ -788,6 +793,21 @@ impl App {
             || self.props(view).and_then(|b| b.hit(x, y)).is_some()
             || self.palette(view).and_then(|p| p.hit(x, y)).is_some()
             || self.dock(view).hit(x, y).is_some()
+    }
+
+    /// The ink the next stroke lays, as the document writes it. The
+    /// theme's own when nothing has been picked, and when the theme
+    /// changes under a pick that is no longer there.
+    fn ink_hex(&self) -> &str {
+        self.theme
+            .inks
+            .get(self.ink)
+            .unwrap_or(&self.theme.ink_hex)
+    }
+
+    /// The same ink, as the canvas draws it.
+    fn ink_rgba(&self) -> Rgba {
+        scene::parse_color(self.ink_hex())
     }
 
     /// A click on the brush palette.
@@ -959,7 +979,7 @@ impl App {
                 &stroke.points,
                 &stroke.tip,
                 &stroke.envelope(),
-                self.theme.ink,
+                self.ink_rgba(),
                 view,
                 &self.shapes,
             ),
@@ -985,7 +1005,7 @@ impl App {
             && self.editor().pointer_tool(self.doc(), view, (x, y)) == Tool::Brush
         {
             let radius = (self.brushes.brush().size / 2.0 * view.px_per_world()) as f32;
-            let ink = with_alpha(self.theme.ink, RING_ALPHA);
+            let ink = with_alpha(self.ink_rgba(), RING_ALPHA);
             frame.extend(brush::ring_prims(
                 (x as f32, y as f32),
                 radius,
@@ -993,7 +1013,7 @@ impl App {
                 ink,
             ));
         }
-        frame.extend(self.dock(view).prims(self.editor().tool(), &self.theme));
+        frame.extend(self.dock(view).prims(self.editor().tool(), self.ink, &self.theme));
         if let (Some(pal), Some(atlas)) = (self.palette(view), self.atlas.as_ref()) {
             frame.extend(pal.prims(
                 self.brushes.sets(),
@@ -1136,6 +1156,12 @@ impl App {
                     self.redraw();
                 }
             }
+            Some(Hit::Ink(i)) => {
+                if button == Button::Left && i < self.theme.inks.len() {
+                    self.ink = i;
+                    self.redraw();
+                }
+            }
             Some(Hit::Panel) => {}
             None => {
                 let tip = self.brushes.tip();
@@ -1168,7 +1194,7 @@ impl App {
         }
         let Some(view) = self.view() else { return };
         let (x, y) = self.cursor.unwrap_or_default();
-        let ink = self.theme.ink_hex.clone();
+        let ink = self.ink_hex().to_owned();
         let (editor, doc) = self.active();
         let change = editor.release(button, &view, (x, y), doc, &ink);
         self.apply(change);
@@ -1721,6 +1747,7 @@ pub fn run(
         palette_shown: true,
         palette_scroll: 0.0,
         props_open: false,
+        ink: 0,
         brushes_dirty: false,
         grab: None,
         icon_slot: 0,
