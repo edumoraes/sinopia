@@ -888,23 +888,87 @@ impl Document {
         Ok(doc)
     }
 
+    /// Settles both stacks: a board without layers gets one, a frame
+    /// without layers gets one too, every layer id is unique across the
+    /// whole document, a frame layer and its frame are one thing that
+    /// neither half stands without, no frame nests, and every element
+    /// names a layer that exists in some stack.
     fn settle_layers(&mut self) -> anyhow::Result<()> {
         if self.layers.is_empty() {
             self.layers.push(Layer::new("Layer 1"));
         }
+        // A frame's area has to be one, and its stack is never empty —
+        // the same rule the board keeps, so every accessor's assumption
+        // that there is a layer to paint on holds in both stacks.
+        for el in &mut self.elements {
+            if let Element::Frame(f) = el {
+                if !(f.w.is_finite() && f.h.is_finite() && f.w > 0.0 && f.h > 0.0) {
+                    anyhow::bail!("frame {:?} has no area: {} by {}", f.id, f.w, f.h);
+                }
+                if f.layers.is_empty() {
+                    f.layers.push(Layer::new("Layer 1"));
+                }
+            }
+        }
+        // Every layer of every stack, board first, checked for an id and
+        // for being used only once in the whole document — which is what
+        // lets an element name its layer and say nothing else about
+        // where it is.
+        let mut seen: Vec<&str> = Vec::new();
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.id.is_empty() {
                 anyhow::bail!("layer {i} has no id");
             }
-            if self.layers[..i].iter().any(|l| l.id == layer.id) {
+            if seen.contains(&layer.id.as_str()) {
                 anyhow::bail!("layer id {:?} is used twice", layer.id);
             }
+            seen.push(&layer.id);
         }
-        let layers = &self.layers;
+        for el in &self.elements {
+            let Element::Frame(f) = el else { continue };
+            for layer in &f.layers {
+                if layer.id.is_empty() {
+                    anyhow::bail!("a layer of frame {:?} has no id", f.id);
+                }
+                if layer.kind == Kind::Frame {
+                    anyhow::bail!(
+                        "layer {:?} is a frame inside frame {:?}; frames do not nest",
+                        layer.id,
+                        f.id
+                    );
+                }
+                if seen.contains(&layer.id.as_str()) {
+                    anyhow::bail!("layer id {:?} is used twice", layer.id);
+                }
+                seen.push(&layer.id);
+            }
+        }
+        // A frame layer and its frame go together in both directions.
+        for layer in &self.layers {
+            if layer.kind == Kind::Frame && self.frame_on(&layer.id).is_none() {
+                anyhow::bail!("layer {:?} is a frame layer with no frame on it", layer.id);
+            }
+        }
+        for el in &self.elements {
+            let Element::Frame(f) = el else { continue };
+            if !self
+                .layers
+                .iter()
+                .any(|l| l.id == f.layer && l.kind == Kind::Frame)
+            {
+                anyhow::bail!(
+                    "frame {:?} names layer {:?}, which is not a frame layer",
+                    f.id,
+                    f.layer
+                );
+            }
+        }
+        let first = self.layers[0].id.clone();
+        let known: Vec<String> = seen.iter().map(|s| (*s).to_owned()).collect();
         for el in &mut self.elements {
             if el.layer().is_empty() {
-                el.set_layer(&layers[0].id);
-            } else if !layers.iter().any(|l| l.id == el.layer()) {
+                el.set_layer(&first);
+            } else if !known.iter().any(|id| id == el.layer()) {
                 anyhow::bail!(
                     "element {:?} names layer {:?}, which does not exist",
                     el.id(),
@@ -941,6 +1005,77 @@ impl Document {
 
     pub fn layer_index(&self, id: &str) -> Option<usize> {
         self.layers.iter().position(|l| l.id == id)
+    }
+
+    /// The frame element `id` names.
+    pub fn frame(&self, id: &str) -> Option<&Frame> {
+        self.elements.iter().find_map(|el| match el {
+            Element::Frame(f) if f.id == id => Some(f),
+            _ => None,
+        })
+    }
+
+    pub fn frame_mut(&mut self, id: &str) -> Option<&mut Frame> {
+        self.elements.iter_mut().find_map(|el| match el {
+            Element::Frame(f) if f.id == id => Some(f),
+            _ => None,
+        })
+    }
+
+    /// The frame that `layer` is the layer of, when it is a frame's.
+    pub fn frame_on(&self, layer: &str) -> Option<&Frame> {
+        self.elements.iter().find_map(|el| match el {
+            Element::Frame(f) if f.layer == layer => Some(f),
+            _ => None,
+        })
+    }
+
+    /// The layers of the frame `frame` names, or the board's own when it
+    /// names none. An empty slice for a frame that is not there.
+    pub fn stack(&self, frame: Option<&str>) -> &[Layer] {
+        match frame {
+            None => &self.layers,
+            Some(id) => self.frame(id).map_or(&[], |f| &f.layers),
+        }
+    }
+
+    pub fn stack_mut(&mut self, frame: Option<&str>) -> Option<&mut Vec<Layer>> {
+        match frame {
+            None => Some(&mut self.layers),
+            Some(id) => self.frame_mut(id).map(|f| &mut f.layers),
+        }
+    }
+
+    /// Where a layer lives: the frame holding it — none for the board's
+    /// own stack — and its index in that stack. A layer id is unique
+    /// across the whole document, so this is the whole answer.
+    pub fn locate(&self, layer: &str) -> Option<(Option<&str>, usize)> {
+        if let Some(i) = self.layers.iter().position(|l| l.id == layer) {
+            return Some((None, i));
+        }
+        self.elements.iter().find_map(|el| match el {
+            Element::Frame(f) => f
+                .layers
+                .iter()
+                .position(|l| l.id == layer)
+                .map(|i| (Some(f.id.as_str()), i)),
+            _ => None,
+        })
+    }
+
+    /// The topmost frame whose area holds `p`, or none for the open
+    /// board. A hidden frame claims nothing: what is not painted is not
+    /// there, for the pointer as for the eye.
+    pub fn frame_at(&self, p: [f64; 2]) -> Option<&str> {
+        self.layers
+            .iter()
+            .rev()
+            .filter(|l| l.visible && l.kind == Kind::Frame)
+            .find_map(|l| {
+                self.frame_on(&l.id)
+                    .filter(|f| f.contains(p))
+                    .map(|f| f.id.as_str())
+            })
     }
 
     /// Adds a layer of `kind` just above `above` (on top when that is
@@ -2110,5 +2245,178 @@ mod tests {
         let back = Document::from_json(&doc.to_json().unwrap()).unwrap();
         assert_eq!(back, doc);
         assert!(!doc.to_json().unwrap().contains("\"kind\""));
+    }
+
+    /// A board with one frame: board layers `bottom` then the frame
+    /// layer `fl`, the frame `fr` spanning (0,0)–(100,100) with one
+    /// inner layer `in`, and one rect on each of `bottom` and `in`.
+    fn framed() -> Document {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [
+                { "id": "bottom", "name": "Layer 1" },
+                { "id": "fl", "name": "Frame 1", "kind": "frame" }
+            ],
+            "elements": [
+                { "id": "outside", "type": "rect", "layer": "bottom",
+                  "x": 200, "y": 200, "w": 10, "h": 10, "stroke": null, "fill": null, "text": null },
+                { "id": "fr", "type": "frame", "layer": "fl",
+                  "x": 0, "y": 0, "w": 100, "h": 100, "background": "#fff",
+                  "layers": [ { "id": "in", "name": "Layer 1" } ] },
+                { "id": "inside", "type": "rect", "layer": "in",
+                  "x": 10, "y": 10, "w": 10, "h": 10, "stroke": null, "fill": null, "text": null }
+            ]
+        }"##;
+        Document::from_json(json).unwrap()
+    }
+
+    #[test]
+    fn stack_answers_the_board_or_one_frame() {
+        let doc = framed();
+        assert_eq!(doc.stack(None).len(), 2, "the board's own");
+        let ids: Vec<&str> = doc.stack(Some("fr")).iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["in"]);
+        assert!(doc.stack(Some("nobody")).is_empty());
+    }
+
+    #[test]
+    fn locate_says_which_stack_a_layer_is_on() {
+        let doc = framed();
+        assert_eq!(doc.locate("bottom"), Some((None, 0)));
+        assert_eq!(doc.locate("fl"), Some((None, 1)));
+        assert_eq!(doc.locate("in"), Some((Some("fr"), 0)));
+        assert_eq!(doc.locate("nobody"), None);
+    }
+
+    #[test]
+    fn a_frame_is_reached_by_its_id_and_by_its_layer() {
+        let doc = framed();
+        assert_eq!(doc.frame("fr").map(|f| f.w), Some(100.0));
+        assert_eq!(doc.frame_on("fl").map(|f| f.id.as_str()), Some("fr"));
+        assert!(doc.frame_on("bottom").is_none());
+    }
+
+    #[test]
+    fn frame_at_names_the_topmost_frame_over_a_point_and_skips_hidden_ones() {
+        let mut doc = framed();
+        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr"));
+        assert_eq!(doc.frame_at([500.0, 500.0]), None, "the open board");
+
+        // A second frame over the same place, higher up, wins.
+        doc.layers.push(Layer {
+            id: "fl2".into(),
+            name: "Frame 2".into(),
+            visible: true,
+            kind: Kind::Frame,
+        });
+        doc.elements.push(Element::Frame(Frame {
+            id: "fr2".into(),
+            layer: "fl2".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+            background: None,
+            layers: vec![layer("in2", "Layer 1")],
+        }));
+        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr2"));
+
+        // A hidden frame claims nothing.
+        doc.layers[2].visible = false;
+        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr"));
+    }
+
+    /// A board holding a frame layer that no frame is on is not a
+    /// document.
+    #[test]
+    fn a_frame_layer_needs_its_frame() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": []
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("fl"), "{err}");
+    }
+
+    /// And a frame sitting on a layer that is not one is not a document
+    /// either: the two halves are one thing.
+    #[test]
+    fn a_frame_needs_a_frame_layer() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": [ { "id": "fr", "type": "frame", "layer": "l1",
+                            "x": 0, "y": 0, "w": 10, "h": 10, "layers": [] } ]
+        }"##;
+        assert!(Document::from_json(json).is_err());
+    }
+
+    /// A frame does not nest.
+    #[test]
+    fn a_frame_layer_inside_a_frame_is_refused() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [ { "id": "fr", "type": "frame", "layer": "fl",
+                            "x": 0, "y": 0, "w": 10, "h": 10,
+                            "layers": [ { "id": "nested", "name": "F", "kind": "frame" } ] } ]
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("nested"), "{err}");
+    }
+
+    /// Layer ids are unique across the whole document, not per stack.
+    #[test]
+    fn a_layer_id_used_in_a_frame_and_on_the_board_is_refused() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "twice", "name": "Layer 1" },
+                        { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [ { "id": "fr", "type": "frame", "layer": "fl",
+                            "x": 0, "y": 0, "w": 10, "h": 10,
+                            "layers": [ { "id": "twice", "name": "Layer 1" } ] } ]
+        }"##;
+        let err = Document::from_json(json).unwrap_err().to_string();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    /// A frame's stack is never empty, exactly as the board's is not.
+    #[test]
+    fn an_empty_frame_stack_gets_layer_1() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [ { "id": "fr", "type": "frame", "layer": "fl",
+                            "x": 0, "y": 0, "w": 10, "h": 10, "layers": [] } ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        assert_eq!(doc.stack(Some("fr")).len(), 1);
+        assert_eq!(doc.stack(Some("fr"))[0].name, "Layer 1");
+    }
+
+    /// An area of no size is not an area.
+    #[test]
+    fn a_frame_with_no_size_is_refused() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [ { "id": "fr", "type": "frame", "layer": "fl",
+                            "x": 0, "y": 0, "w": 0, "h": 10, "layers": [] } ]
+        }"##;
+        assert!(Document::from_json(json).is_err());
+    }
+
+    /// An element on an inner layer is not an orphan.
+    #[test]
+    fn an_element_on_a_frames_layer_parses() {
+        assert_eq!(framed().elements.len(), 3);
     }
 }
