@@ -166,6 +166,10 @@ struct App {
     /// active layer glides to show it; scrolling away from it does not
     /// snap back, because it has not changed.
     focused: Option<String>,
+    /// The frame the panel was last standing in. A different stack under
+    /// it means the slides and the scroll are measured against a list
+    /// that is not there any more, so they start over.
+    standing: Option<String>,
     /// When the panel was last eased, for everything on it that moves.
     clock: Instant,
     /// Built once the scale factor is known, rebuilt when it changes.
@@ -493,8 +497,9 @@ impl App {
         // set off, or a slide born this frame is a third over before its
         // first frame is drawn.
         self.slides.tick(dt);
-        let Open { project, .. } = &self.open[self.active];
-        self.slides.restack(&project.doc.layers, row);
+        let Open { project, editor } = &self.open[self.active];
+        self.slides
+            .restack(project.doc.stack(editor.inside()), row);
         self.scrolling.tick(dt);
         // The window may have grown or shrunk under it: the panel is the
         // authority on how far the stack can be scrolled.
@@ -519,17 +524,30 @@ impl App {
     /// list stays where the wheel left it otherwise.
     fn follow_active(&mut self) {
         let Some(view) = self.view() else { return };
+        let inside = self.editor().inside();
+        let stack = self.doc().stack(inside);
         let index = self.editor().active_layer(self.doc());
-        let id = self.doc().layers.get(index).map(|l| l.id.clone());
+        let id = stack.get(index).map(|l| l.id.clone());
+        let depth = stack.len();
         if self.focused == id {
             return;
+        }
+        // Going into a frame or out of it puts a different stack under
+        // the panel: a slide carried across it would animate a row into a
+        // row that is not the same row, and a scroll kept would be
+        // measured against a list that is not there any more.
+        if self.standing != inside.map(str::to_owned) {
+            self.standing = inside.map(str::to_owned);
+            self.slides = layers::Slides::default();
+            self.scrolling = layers::Coming::default();
+            self.scroll = 0.0;
         }
         self.focused = id;
         // A card in the hand takes the panel where the pointer says.
         let Some(panel) = self.panel(&view).filter(|_| self.carry.is_none()) else {
             return;
         };
-        let want = panel.scroll_showing(index, self.doc().layers.len());
+        let want = panel.scroll_showing(index, depth);
         if want != self.scroll {
             self.scrolling.send(self.scroll - want);
             self.scroll = want;
@@ -654,11 +672,20 @@ impl App {
 
     /// Adds a tab and makes it the one in front.
     fn open_project(&mut self, project: Project) {
-        self.open.push(Open {
-            project,
-            editor: Editor::new(),
-        });
+        let mut editor = Editor::new();
+        editor.set_surface(&self.theme.panel_hex);
+        self.open.push(Open { project, editor });
         self.activate(self.open.len() - 1);
+    }
+
+    /// Tells every tab what a new frame's ground is laid in. The theme is
+    /// the window's, so a frame drawn after `op: theme` is born the new
+    /// surface and the ones already down keep the colour they were given.
+    fn dress_editors(&mut self) {
+        let hex = self.theme.panel_hex.clone();
+        for open in &mut self.open {
+            open.editor.set_surface(&hex);
+        }
     }
 
     /// Brings tab `index` forward. The outgoing editor keeps its own tool
@@ -1097,6 +1124,14 @@ impl App {
         if let Some((a, b)) = self.editor().marquee() {
             frame.extend(select::marquee_prims(a, b, &self.theme));
         }
+        // The area the Frame tool is dragging out, drawn the way a
+        // marquee is: the same hairline rectangle, so the two cannot
+        // drift apart.
+        if let Some((from, to)) = self.editor().framing() {
+            let a = view.world_to_screen(from[0], from[1]);
+            let b = view.world_to_screen(to[0], to[1]);
+            frame.extend(select::marquee_prims(a, b, &self.theme));
+        }
         // The brush shows its size before it paints: a ring at the
         // pointer, wherever the next press would paint.
         if let Some((x, y)) = self.cursor
@@ -1146,7 +1181,7 @@ impl App {
                 slides: &self.slides,
             };
             frame.extend(panel.prims(
-                &self.doc().layers,
+                self.doc().stack(self.editor().inside()),
                 &showing,
                 atlas,
                 self.atlas_slot,
@@ -1258,8 +1293,26 @@ impl App {
             }
             Some(Hit::Ink(i)) => {
                 if button == Button::Left && i < self.theme.inks.len() {
-                    self.ink = i;
-                    self.redraw();
+                    // A colour the window is holding has to go on
+                    // something: with a frame selected it is that
+                    // frame's ground, and otherwise it is the ink new
+                    // strokes are laid in.
+                    let hex = self.theme.inks[i].clone();
+                    let (editor, doc) = self.active();
+                    let selected: Vec<String> = editor.selection().to_vec();
+                    let mut painted = false;
+                    for id in &selected {
+                        if let Some(f) = doc.frame_mut(id) {
+                            f.background = Some(hex.clone());
+                            painted = true;
+                        }
+                    }
+                    if painted {
+                        self.apply(Change::Scene);
+                    } else {
+                        self.ink = i;
+                        self.redraw();
+                    }
                 }
             }
             Some(Hit::Panel) => {}
@@ -1793,6 +1846,7 @@ impl App {
             Request::Shutdown => self.quit(),
             Request::Theme { colors } => {
                 self.theme = Theme::from_hex(&colors.bg, &colors.fg, &colors.accent);
+                self.dress_editors();
                 self.redraw();
             }
             // The server answers `denied` without forwarding; never reaches here.
@@ -1884,6 +1938,7 @@ pub fn run(
         scroll: 0.0,
         scrolling: layers::Coming::default(),
         focused: None,
+        standing: None,
         clock: Instant::now(),
         atlas: None,
         atlas_slot: 0,
@@ -1899,6 +1954,9 @@ pub fn run(
         smoke_frames_left: smoke_frames,
         exit_error: None,
     };
+    // The first tab is built before the theme is in hand, so it is told
+    // what a new frame's ground is once the window owns both.
+    app.dress_editors();
     event_loop.run_app(&mut app)?;
 
     // Window closed: the final flush happens on the exit paths; the socket

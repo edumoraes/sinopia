@@ -390,8 +390,9 @@ impl Editor {
         self.shift = down;
     }
 
-    /// Test-only until the shell needs the ids themselves.
-    #[cfg(test)]
+    /// The selected elements, by id. The shell reads them to answer a
+    /// question a frame is the only one that asks: an ink picked with a
+    /// frame selected paints its ground rather than the next stroke.
     pub fn selection(&self) -> &[String] {
         &self.selection
     }

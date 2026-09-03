@@ -275,10 +275,10 @@ pub struct Panel {
     pub bar: Option<ScreenRect>,
     /// What the header writes: the panel's own word, or the name of the
     /// frame whose stack is on show.
-    title: String,
+    pub title: String,
     /// The header's title as a target, while it is a way back out of a
     /// frame. `None` on the board, where there is nowhere to go.
-    crumb: Option<ScreenRect>,
+    pub crumb: Option<ScreenRect>,
     /// The scroll actually used, in physical px — what was asked for,
     /// kept inside what there is to scroll.
     scroll: f32,
@@ -452,17 +452,6 @@ impl Panel {
             content,
             scale: s,
         }
-    }
-
-    /// What the header writes: the panel's own word, or the name of the
-    /// frame whose stack is on show.
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-
-    /// The way back out of a frame, when the panel is standing in one.
-    pub fn crumb(&self) -> Option<ScreenRect> {
-        self.crumb
     }
 
     /// The scroll in use, in physical px.
@@ -1743,12 +1732,12 @@ mod tests {
     fn inside_a_frame_the_header_says_where_it_is_and_leads_back() {
         let a = atlas();
         let out = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), None, 0.0);
-        assert!(out.crumb().is_none(), "there is nowhere to go back to");
-        assert_eq!(out.title(), TITLE);
+        assert!(out.crumb.is_none(), "there is nowhere to go back to");
+        assert_eq!(out.title, TITLE);
 
         let inn = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), Some("Frame 1"), 0.0);
-        let crumb = inn.crumb().expect("a way back");
-        assert_eq!(inn.title(), "Frame 1", "the header says where it is");
+        let crumb = inn.crumb.expect("a way back");
+        assert_eq!(&inn.title, "Frame 1", "the header says where it is");
         let (cx, cy) = crumb.center();
         assert_eq!(p_hit(&inn, cx, cy), Some(PanelHit::Leave));
     }
@@ -1776,9 +1765,9 @@ mod tests {
         let a = atlas();
         let long = "A frame with a name nobody would ever type by hand";
         let p = Panel::layout(VP, 1.0, 0.0, &a, &layers(1), Some(long), 0.0);
-        let width = a.measure(p.title());
+        let width = a.measure(&p.title);
         assert!(
-            p.crumb().unwrap().x + width <= p.up.x,
+            p.crumb.unwrap().x + width <= p.up.x,
             "the title runs into the buttons: {width}"
         );
     }
