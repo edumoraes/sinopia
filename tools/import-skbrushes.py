@@ -7,6 +7,14 @@ the body `brush.rs` keeps, and writes:
 
     assets/brushes/library.json   the sets, their brushes, and the body
     assets/brushes/icons.png      every icon @2x, one grid cell each
+    assets/brushes/shapes.png     every nib shape, one grid cell each
+
+A brush that stamps a shape of its own names a TIFF in the same zip —
+white on black, the nib's own coverage. Those become the shape sheet:
+gray + alpha, the gray full and the alpha the coverage, exactly as the
+glyph atlas is read. A nib named with `textureImageType="texture"` is a
+round nib wearing a grain rather than a shape of its own, and is not one
+of these; nor is a `paperTexture`, which belongs to the canvas.
 
 The originals are 34 MB and 438 MB of shape/texture TIFFs once opened, so
 they stay out of the repo: only what this writes is committed. Run it
@@ -32,6 +40,11 @@ ORDER = [
 ]
 
 ICON_PX = 80  # the @2x icon; the 1x copy is 40x40
+# The shapes ship 128 to 1024 px square. A nib is a soft mask, not line
+# art, and 128 is past what the widest brush anyone paints with resolves
+# — the whole sheet is half a megabyte at it.
+SHAPE_PX = 128
+SHAPE_COLS = 12
 
 
 def attrs(tag_body):
@@ -108,6 +121,17 @@ def read_brush(body):
     }
 
 
+def shape_of(body):
+    """The nib image a brush stamps, by name without its extension, or
+    None. Only `textureImageType="shape"` is one: a `texture` nib is a
+    round nib wearing a grain, which the canvas does not stamp yet."""
+    custom = tag(body, "customBrush")
+    if custom.get("type", "off") == "off" or custom.get("textureImageType") != "shape":
+        return None
+    name = custom.get("name")
+    return name.rsplit(".", 1)[0] if name else None
+
+
 def wants_stamp(body):
     """Whether the brush is told apart by a shape or a texture of its
     own. It describes the brush, not its body: the canvas cannot stamp
@@ -139,6 +163,9 @@ def read_set(zf, xml_name):
             "stamp": wants_stamp(live),
             "brush": brush,
         }
+        shape = shape_of(live)
+        if shape:
+            entry["shape"] = shape
         # Every set ships its brushes at their factory settings, so the
         # copy is only written when one of them does not — half the file
         # otherwise, saying the same thing twice.
@@ -148,29 +175,49 @@ def read_set(zf, xml_name):
     return group.get("name") or Path(xml_name).stem, out
 
 
-def png_grid(icons, cols):
-    """Every icon into one RGBA sheet, row by row. Written by hand: the
-    binary decodes PNG already, and a build step should not need a
-    library the app does not."""
-    rows = (len(icons) + cols - 1) // cols
-    w, h = cols * ICON_PX, rows * ICON_PX
-    sheet = bytearray(w * h * 4)
-    for i, rgba in enumerate(icons):
-        ox, oy = (i % cols) * ICON_PX, (i // cols) * ICON_PX
-        for y in range(ICON_PX):
-            src = y * ICON_PX * 4
-            dst = ((oy + y) * w + ox) * 4
-            sheet[dst:dst + ICON_PX * 4] = rgba[src:src + ICON_PX * 4]
-    raw = b"".join(b"\x00" + bytes(sheet[y * w * 4:(y + 1) * w * 4]) for y in range(h))
+def png_grid(cells, px, cols, channels):
+    """Every cell into one sheet, row by row. `channels` is 4 for the
+    icons, which carry their own colors, and 2 for the shapes, which are
+    a full gray under the coverage — the same white-with-alpha the glyph
+    atlas is. Written by hand: the binary decodes PNG already, and a
+    build step should not need a library the app does not."""
+    color_type = {4: 6, 2: 4}[channels]
+    rows = (len(cells) + cols - 1) // cols
+    w, h = cols * px, rows * px
+    stride, run = w * channels, px * channels
+    sheet = bytearray(h * stride)
+    for i, cell in enumerate(cells):
+        ox, oy = (i % cols) * px, (i // cols) * px
+        for y in range(px):
+            src = y * run
+            dst = (oy + y) * stride + ox * channels
+            sheet[dst:dst + run] = cell[src:src + run]
+    raw = b"".join(b"\x00" + bytes(sheet[y * stride:(y + 1) * stride]) for y in range(h))
 
     def chunk(kind, data):
         c = kind + data
         return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
 
     return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, color_type, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw, 9))
             + chunk(b"IEND", b"")), w, h
+
+
+def shape_cell(data):
+    """One shape TIFF into a `SHAPE_PX` square of gray + alpha. The
+    originals are white on black — the nib's own coverage — so the gray
+    goes in the alpha and the color stays full, which is what makes
+    `texel * ink` the mark."""
+    import subprocess
+    out = subprocess.run(
+        ["magick", "tif:-", "-colorspace", "gray",
+         "-resize", f"{SHAPE_PX}x{SHAPE_PX}!", "-depth", "8", "gray:-"],
+        input=data, capture_output=True, check=True).stdout
+    want = SHAPE_PX * SHAPE_PX
+    if len(out) != want:
+        raise ValueError(f"shape is {len(out)} bytes, not {want}")
+    return b"".join(b"\xff" + bytes([v]) for v in out)
 
 
 def decode_png(data):
@@ -198,6 +245,10 @@ def main():
         sys.exit(f"no .skbrushes in {src}")
 
     sets, icons, missing = [], [], []
+    # Name to cell, in the order the shapes are met. A shape is shared
+    # by every brush that names it, and the name is what a saved board
+    # keeps — an index would move the day a set is added.
+    shapes, no_shape = {}, []
     for stem in order:
         with zipfile.ZipFile(found[stem]) as zf:
             names = zf.namelist()
@@ -211,22 +262,44 @@ def main():
                 else:
                     missing.append(f"{title}/{b['name']}")
                     b["icon"] = None
+                shape = b.get("shape")
+                if shape and shape not in shapes:
+                    # By stem, and only among the TIFFs: one set ships a
+                    # shape named after the set itself, and its `.xml`
+                    # would otherwise answer first.
+                    tif = next((n for n in names
+                                if n.lower().endswith(".tif")
+                                and n.rsplit(".", 1)[0] == shape), None)
+                    if tif is None:
+                        no_shape.append(f"{title}/{b['name']}")
+                        del b["shape"]
+                    else:
+                        shapes[shape] = shape_cell(zf.read(tif))
             sets.append({"name": title.replace("+", " "), "brushes": brushes})
             print(f"  {title:20} {len(brushes):3} brushes")
 
     cols = 16
-    sheet, w, h = png_grid(icons, cols)
+    sheet, w, h = png_grid(icons, ICON_PX, cols, 4)
     (dst / "icons.png").write_bytes(sheet)
+    nibs, sw, sh = png_grid(list(shapes.values()), SHAPE_PX, SHAPE_COLS, 2)
+    (dst / "shapes.png").write_bytes(nibs)
     (dst / "library.json").write_text(json.dumps(
-        {"icon_px": ICON_PX, "icon_cols": cols, "icons": len(icons), "sets": sets},
+        {"icon_px": ICON_PX, "icon_cols": cols, "icons": len(icons),
+         "shape_px": SHAPE_PX, "shape_cols": SHAPE_COLS, "shapes": list(shapes),
+         "sets": sets},
         separators=(",", ":")) + "\n")
 
     total = sum(len(s["brushes"]) for s in sets)
-    print(f"\n{total} brushes in {len(sets)} sets")
+    stamping = sum(1 for s in sets for b in s["brushes"] if b.get("shape"))
+    print(f"\n{total} brushes in {len(sets)} sets, {stamping} stamping a shape")
     print(f"  library.json  {(dst / 'library.json').stat().st_size / 1024:.0f} KB")
     print(f"  icons.png     {(dst / 'icons.png').stat().st_size / 1024:.0f} KB  ({w}x{h})")
+    print(f"  shapes.png    {(dst / 'shapes.png').stat().st_size / 1024:.0f} KB  "
+          f"({sw}x{sh}, {len(shapes)} nibs)")
     if missing:
         print(f"  no icon: {len(missing)} — {', '.join(missing[:5])}")
+    if no_shape:
+        print(f"  no shape image: {len(no_shape)} — {', '.join(no_shape[:5])}")
 
 
 if __name__ == "__main__":

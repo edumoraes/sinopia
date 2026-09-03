@@ -40,17 +40,20 @@ selection, navigation, pasted images, and projects in tabs:
   put down again. A brush is a **nib stamped along the stroke**, never
   a swept line: its `spacing`, `roundness` and `rotation` are what one
   dab is and how far apart they sit, and the canvas paints with all
-  three, and `flow` with them — what one dab lays. A nib is also thrown
-  off true dab by dab: its radius, its angle and the gap before it,
-  each by an amount in its own unit, which is how Sketchbook states
-  randomness. The other two amounts it states — on opacity and flow —
-  are not in those properties' own unit (a fraction thrown by five, or
-  by twenty), so the canvas does not guess at them. The rest of the
-  body is read off the real sets and described truthfully while the
-  engine grows into it — dynamics, the tip's profile, texture depth,
-  and what the pen's pressure drives. Two thirds of the shipped brushes (167 of
-  211) are told apart by a shape or a texture the canvas does not
-  stamp yet, and the library says so per brush. A ring the size of the
+  three, and `flow` with them — what one dab lays. **103 of the 211
+  stamp a nib of their own**: Sketchbook's own shape images, converted
+  into one sheet of 90 that the binary carries, and a stroke names the
+  nib it was laid with. A nib is also thrown off true dab by dab: its
+  radius, its angle and the gap before it, each by an amount in its own
+  unit, which is how Sketchbook states randomness. The other two
+  amounts it states — on opacity and flow — are not in those
+  properties' own unit (a fraction thrown by five, or by twenty), so
+  the canvas does not guess at them. The rest of the body is read off
+  the real sets and described truthfully while the engine grows into it
+  — dynamics, the tip's profile, texture depth, and what the pen's
+  pressure drives. What is left promising a mark the ink cannot make is
+  the brush told apart by a *grain* — a texture nib, or the canvas's
+  own paper — and the library says so per brush. A ring the size of the
   brush follows the pointer.
   The stroke joins the `paint` on the layer it lands on — one object
   per raster layer, however many strokes went into it — each stroke
@@ -202,8 +205,10 @@ selection, navigation, pasted images, and projects in tabs:
   `--socket <path>`.
 
 Not yet: eraser, the text tool, shapes, undo, export, Omarchy plugin,
-thumbnails, layer opacity and renaming, brush colour and pressure, and
-the stamp engine every muted slider in the properties bar waits on.
+thumbnails, layer opacity and renaming, brush colour and pressure, a
+library that outlives the process, and the grain the muted sliders that
+are left still wait on — a texture nib, the canvas's own paper, and the
+tip profile that shapes a round nib's falloff.
 
 ## Controls
 

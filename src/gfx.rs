@@ -206,6 +206,8 @@ pub struct Gfx {
     /// the binary and the same at every scale, so unlike the glyph atlas
     /// it is uploaded once and never replaced.
     icons: Option<u32>,
+    /// The sheet of nib shapes, on the same terms as the icons.
+    shapes: Option<u32>,
     /// The window-sized texture a group is composited in, once a frame
     /// has needed one. Rebuilt when the window changes size; like the
     /// atlas, a slot of its own and never an entry in `slots`.
@@ -378,6 +380,7 @@ impl Gfx {
             textures: vec![blank],
             slots: ImageSlots::new(),
             icons: None,
+            shapes: None,
             atlas: None,
             scratch: None,
         })
@@ -489,6 +492,24 @@ impl Gfx {
         if let Some(slot) = self.icons {
             return Ok(slot);
         }
+        let slot = self.upload_sheet(bmp)?;
+        self.icons = Some(slot);
+        Ok(slot)
+    }
+
+    pub fn upload_shapes(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        if let Some(slot) = self.shapes {
+            return Ok(slot);
+        }
+        let slot = self.upload_sheet(bmp)?;
+        self.shapes = Some(slot);
+        Ok(slot)
+    }
+
+    /// A sheet the binary ships: a slot of its own, uploaded once and
+    /// never replaced, unlike the glyph atlas which is rebuilt whenever
+    /// the scale factor changes.
+    fn upload_sheet(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
         let group = upload(
             &self.device,
             &self.queue,
@@ -498,9 +519,7 @@ impl Gfx {
             bmp,
         )?;
         self.textures.push(group);
-        let slot = (self.textures.len() - 1) as u32;
-        self.icons = Some(slot);
-        Ok(slot)
+        Ok((self.textures.len() - 1) as u32)
     }
 
     pub fn size(&self) -> (u32, u32) {

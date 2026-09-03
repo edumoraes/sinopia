@@ -214,8 +214,14 @@ impl Scatter {
 /// The nib a stroke was stamped with: what one dab is, beyond the
 /// width, opacity and hardness the stroke already names. A stroke
 /// carrying none was swept, not stamped — the pencil's.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stamp {
+    /// The nib's own shape, by the name the brush library gives it, or
+    /// `None` for a plain round nib. A name and not a cell of the
+    /// sheet: a board outlives the sheet it was painted from, and an
+    /// index would move the day a set is added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
     /// The gap between two dabs, in tip widths.
     pub spacing: f64,
     /// 1 is a round nib; less flattens it across its own y.
@@ -236,6 +242,9 @@ impl Stamp {
     /// A board is not trusted to hold a turn of four hundred degrees or
     /// a gap of nothing, whatever wrote it.
     fn checked(self) -> Result<Stamp, String> {
+        if self.shape.as_ref().is_some_and(|s| s.is_empty()) {
+            return Err("a nib's shape is named or absent, never empty".into());
+        }
         if !is_unit(self.roundness) {
             return Err(format!("roundness {} is not between 0 and 1", self.roundness));
         }
@@ -906,6 +915,7 @@ mod tests {
         assert_eq!(
             p.strokes[0].stamp,
             Some(Stamp {
+                shape: None,
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,

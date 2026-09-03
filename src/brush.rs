@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::{Path, Scatter, Stamp, Stroke};
 use crate::editor::PEN_WIDTH;
-use crate::scene::{Prim, Rgba, polyline_prims};
+use crate::scene::{Prim, Rgba, Shapes, polyline_prims};
 
 /// Brush size in world units (logical px at zoom 1): the diameter. The
 /// top is the widest brush Sketchbook's own sets carry — a 350-unit
@@ -442,12 +442,16 @@ impl Brush {
         };
     }
 
-    pub fn tip(&self) -> Tip {
+    /// What this body lays, stamping `shape` — the nib image the
+    /// preset carries, which is not part of the body a slider can
+    /// reach. [`Preset::tip`] is the one that knows both.
+    pub fn tip(&self, shape: Option<&str>) -> Tip {
         Tip {
             width: self.size,
             opacity: self.opacity,
             hardness: self.hardness,
             stamp: Some(Stamp {
+                shape: shape.map(str::to_owned),
                 spacing: self.spacing,
                 roundness: self.roundness,
                 rotation: self.rotation,
@@ -464,7 +468,7 @@ impl Brush {
 
 /// What a stroke is drawn with, taken at the press and written into the
 /// path on release: the pencil's constant or the brush's settings.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Tip {
     /// World units.
     pub width: f64,
@@ -488,7 +492,7 @@ impl Tip {
             width: path.width,
             opacity: path.opacity,
             hardness: path.hardness,
-            stamp: path.stamp,
+            stamp: path.stamp.clone(),
         }
     }
 
@@ -499,7 +503,7 @@ impl Tip {
             width: s.width,
             opacity: s.opacity,
             hardness: s.hardness,
-            stamp: s.stamp,
+            stamp: s.stamp.clone(),
         }
     }
 
@@ -511,7 +515,7 @@ impl Tip {
     pub fn is_direct(&self) -> bool {
         self.opacity >= 1.0
             && self.hardness >= 1.0
-            && self.stamp.is_none_or(|s| s.flow >= 1.0)
+            && self.stamp.as_ref().is_none_or(|s| s.flow >= 1.0)
     }
 }
 
@@ -524,14 +528,23 @@ pub struct Preset {
     /// Its cell of the icon sheet: the art Sketchbook draws it with.
     pub icon: u16,
     /// Whether the brush is told apart by a shape or a texture of its
-    /// own. Two thirds of the shipped brushes are, and the canvas does
-    /// not stamp yet — so the icon promises a mark the ink cannot make.
-    /// Nothing reads this but the tests; the stamp engine will.
+    /// own. Two thirds of the shipped brushes are. The ones whose mark
+    /// is a shape now stamp it — `shape` names it — and what is left,
+    /// `stamp` without a `shape`, is the icon promising a grain the ink
+    /// cannot yet make: a texture nib, or the canvas's own paper.
     pub stamp: bool,
+    /// The nib image it stamps, by the name the sheet gives it, or
+    /// `None` for a plain round nib. Not part of the body: no slider
+    /// addresses it, and `reset` has nothing to take back.
+    pub shape: Option<String>,
     factory: Brush,
 }
 
 impl Preset {
+    /// What this brush lays: its body, stamping the nib it carries.
+    pub fn tip(&self) -> Tip {
+        self.brush.tip(self.shape.as_deref())
+    }
 
     /// Whether it has been moved off what it shipped as. The properties
     /// bar says so, and offers to take it back.
@@ -560,6 +573,11 @@ pub struct Set {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Library {
     sets: Vec<Set>,
+    /// The nib shapes the sheet carries, in its own order: a name's
+    /// place here is the cell it is in.
+    shapes: Vec<String>,
+    /// How many cells the sheet stands across, as the asset was built.
+    shape_cols: u16,
     /// The brush in the hand: which set, and which brush of it.
     selected: (usize, usize),
 }
@@ -605,6 +623,32 @@ impl Library {
         &mut self.preset_mut().brush
     }
 
+    /// What the brush in the hand lays.
+    pub fn tip(&self) -> Tip {
+        self.preset().tip()
+    }
+
+    /// Where each nib shape sits on the sheet, once the renderer has
+    /// said which slot the sheet was uploaded to. The one place that
+    /// says how the sheet is cut up: a name's place in the shipped list
+    /// is its cell, and the asset says how many cells stand across.
+    pub fn sheet(&self, slot: u32) -> Shapes {
+        Shapes {
+            slot,
+            cols: self.shape_cols,
+            rows: match self.shape_cols {
+                0 => 0,
+                cols => (self.shapes.len() as u16).div_ceil(cols),
+            },
+            cells: self
+                .shapes
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i as u16))
+                .collect(),
+        }
+    }
+
     pub fn edited(&self) -> bool {
         self.preset().edited()
     }
@@ -632,6 +676,11 @@ pub const ICONS: u16 = 211;
 #[derive(Deserialize)]
 struct LibraryOnDisk {
     icons: u16,
+    /// The nib shapes the sheet carries, in its own order.
+    #[serde(default)]
+    shapes: Vec<String>,
+    #[serde(default)]
+    shape_cols: u16,
     sets: Vec<SetOnDisk>,
 }
 
@@ -652,6 +701,9 @@ struct PresetOnDisk {
     factory: Option<Brush>,
     #[serde(default)]
     stamp: bool,
+    /// The nib image, by name, when the brush stamps one of its own.
+    #[serde(default)]
+    shape: Option<String>,
 }
 
 /// Holds every property inside the band its slider runs over, so what
@@ -696,6 +748,10 @@ impl Default for Library {
                             brush,
                             icon: p.icon.min(disk.icons.saturating_sub(1)),
                             stamp: p.stamp,
+                            // A shape the sheet does not carry is no
+                            // shape: an asset built wrong must not seat
+                            // a nib the renderer cannot find.
+                            shape: p.shape.filter(|n| disk.shapes.contains(n)),
                         }
                     })
                     .collect(),
@@ -707,6 +763,8 @@ impl Default for Library {
         }
         Library {
             sets,
+            shapes: disk.shapes,
+            shape_cols: disk.shape_cols,
             selected: (0, 0),
         }
     }
@@ -725,8 +783,11 @@ impl Library {
                     factory: Brush::default(),
                     icon: 0,
                     stamp: false,
+                    shape: None,
                 }],
             }],
+            shapes: Vec::new(),
+            shape_cols: 0,
             selected: (0, 0),
         }
     }
@@ -842,27 +903,27 @@ mod tests {
             }
         );
         assert!(Tip::PENCIL.is_direct(), "the pencil needs no compositing");
-        let soft = Brush::default().tip();
+        let soft = Brush::default().tip(None);
         assert_eq!((soft.width, soft.opacity, soft.hardness), (16.0, 1.0, 0.5));
         assert!(!soft.is_direct(), "a soft edge has to be composited");
         let hard = Brush {
             hardness: 1.0,
             ..Brush::default()
         };
-        assert!(hard.tip().is_direct());
+        assert!(hard.tip(None).is_direct());
         let faint = Brush {
             hardness: 1.0,
             opacity: 0.5,
             ..Brush::default()
         };
-        assert!(!faint.tip().is_direct(), "so does translucency");
+        assert!(!faint.tip(None).is_direct(), "so does translucency");
         let dry = Brush {
             hardness: 1.0,
             flow: 0.5,
             ..Brush::default()
         };
         assert!(
-            !dry.tip().is_direct(),
+            !dry.tip(None).is_direct(),
             "a nib that does not cover on its own has to build up offscreen"
         );
     }
@@ -877,8 +938,9 @@ mod tests {
             ..Brush::default()
         };
         assert_eq!(
-            b.tip().stamp,
+            b.tip(None).stamp,
             Some(Stamp {
+                shape: None,
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,
@@ -887,6 +949,57 @@ mod tests {
             }),
             "every brush is a nib stamped at a spacing"
         );
+    }
+
+    #[test]
+    fn a_brush_that_stamps_a_shape_names_one_the_sheet_has() {
+        let lib = Library::default();
+        let sheet = lib.sheet(3);
+        let mut named = 0;
+        for set in lib.sets() {
+            for p in &set.presets {
+                let Some(shape) = p.shape.as_deref() else {
+                    continue;
+                };
+                named += 1;
+                assert!(
+                    sheet.nib(shape).is_some(),
+                    "{} names {shape}, which is not on the sheet",
+                    p.name
+                );
+            }
+        }
+        assert_eq!(named, 103, "the shipped brushes that stamp a nib of their own");
+        assert!(
+            lib.sets()
+                .iter()
+                .flat_map(|s| &s.presets)
+                .any(|p| p.shape.is_none()),
+            "and the rest stamp a plain round nib"
+        );
+        assert!(sheet.nib("no such nib").is_none());
+        assert_eq!(sheet.rows, 8, "90 nibs, 12 across");
+    }
+
+    #[test]
+    fn the_brush_in_the_hand_hands_its_shape_to_the_tip() {
+        let mut lib = Library::default();
+        let (set, index) = lib
+            .sets()
+            .iter()
+            .enumerate()
+            .find_map(|(s, st)| {
+                st.presets
+                    .iter()
+                    .position(|p| p.shape.is_some())
+                    .map(|i| (s, i))
+            })
+            .expect("a shipped brush stamps a shape");
+        lib.select(set, index);
+        let want = lib.sets()[set].presets[index].shape.clone();
+        let nib = lib.tip().stamp.expect("a brush stamps");
+        assert_eq!(nib.shape, want, "the tip carries the nib the preset names");
+        assert_eq!(nib.spacing, lib.brush().spacing, "and the body with it");
     }
 
     #[test]
@@ -901,7 +1014,7 @@ mod tests {
             },
             ..Brush::default()
         };
-        let nib = b.tip().stamp.expect("a brush stamps");
+        let nib = b.tip(None).stamp.expect("a brush stamps");
         assert_eq!(
             nib.scatter,
             Scatter {
@@ -1156,14 +1269,19 @@ mod tests {
     }
 
     #[test]
-    fn most_of_the_acquired_brushes_want_a_stamp_the_engine_owes_them() {
+    fn half_the_acquired_brushes_stamp_a_nib_and_the_rest_want_a_grain() {
         let lib = Library::default();
         let all: Vec<&Preset> = lib.sets().iter().flat_map(|s| s.presets.iter()).collect();
-        let stamped = all.iter().filter(|p| p.stamp).count();
-        assert!(stamped > all.len() / 2, "{stamped} of {}", all.len());
+        let shaped = all.iter().filter(|p| p.shape.is_some()).count();
+        let owed = all.iter().filter(|p| p.stamp && p.shape.is_none()).count();
+        assert!(shaped > all.len() / 3, "{shaped} of {} stamp a nib", all.len());
+        assert!(
+            owed > 0,
+            "and the rest are told apart by a grain the engine still owes"
+        );
         assert!(
             all.iter().any(|p| !p.stamp),
-            "and some paint with what there is"
+            "some are the plain round nib they look like"
         );
     }
 
@@ -1208,25 +1326,20 @@ mod tests {
 
     #[test]
     fn no_two_brushes_on_a_shelf_lay_the_same_ink_today() {
-        // A brush that carries a shape is told apart by the shape, which
-        // the canvas does not stamp yet — two of those may well paint
-        // alike for now. The ones that do not are the shelf's own, and
-        // picking one over its neighbour has to change something.
+        // Left out: a brush told apart by a grain — a texture nib, or
+        // the canvas's own paper — which is the mark the engine still
+        // owes. A brush with a shape is told apart by the shape, and
+        // the shape is stamped, so it counts like any other.
         let lib = Library::default();
         for s in lib.sets() {
-            let mut tips: Vec<Tip> = s
+            let mut tips: Vec<String> = s
                 .presets
                 .iter()
-                .filter(|p| !p.stamp)
-                .map(|p| p.brush.tip())
+                .filter(|p| p.shape.is_some() || !p.stamp)
+                .map(|p| format!("{:?}", p.tip()))
                 .collect();
             let all = tips.len();
-            tips.sort_by(|a, b| {
-                a.width
-                    .total_cmp(&b.width)
-                    .then(a.opacity.total_cmp(&b.opacity))
-                    .then(a.hardness.total_cmp(&b.hardness))
-            });
+            tips.sort();
             tips.dedup();
             assert_eq!(tips.len(), all, "{} has two brushes painting alike", s.name);
         }

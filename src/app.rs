@@ -33,7 +33,7 @@ use crate::layers::{self, Panel, PanelHit};
 use crate::palette::{self, Palette};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
-use crate::scene::{self, Frame, ImageSlots, View, Viewport, with_alpha};
+use crate::scene::{self, Frame, ImageSlots, Shapes, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
@@ -129,6 +129,10 @@ struct App {
     grab: Option<usize>,
     /// Where the brush icon sheet was uploaded, once it has been.
     icon_slot: u32,
+    /// Where each nib shape sits on the shape sheet, once it has been
+    /// uploaded. Empty until then, and a stroke that names a shape lays
+    /// a plain round nib meanwhile.
+    shapes: Shapes,
     /// The brush the palette last brought into sight. A change of hand
     /// glides the list to it; scrolling away from it does not snap back.
     shown_brush: Option<(usize, usize)>,
@@ -849,21 +853,48 @@ impl App {
 
     /// The brush icon sheet, built into the binary. Uploaded once: it is
     /// raster art, the same at every scale, unlike the glyph atlas.
-    fn ensure_icons(&mut self) {
-        if self.icon_slot != 0 {
-            return;
+    /// The two sheets the binary ships: the brush icons the palette
+    /// draws its grid with, and the nib shapes the canvas stamps. Both
+    /// are raster art, the same at every scale, so each is uploaded
+    /// once into a slot of its own and never replaced.
+    fn ensure_sheets(&mut self) {
+        if self.icon_slot == 0 {
+            const ICONS: &[u8] = include_bytes!("../assets/brushes/icons.png");
+            // Without it the palette draws no icons and the grid is
+            // bare; the names and the preview's dab still say what is
+            // what.
+            self.upload_sheet("brush icons", ICONS, Gfx::upload_icons, |app, slot| {
+                app.icon_slot = slot;
+            });
         }
-        const SHEET: &[u8] = include_bytes!("../assets/brushes/icons.png");
-        let bmp = match bitmap::decode(SHEET) {
+        if self.shapes.cells.is_empty() {
+            const SHAPES: &[u8] = include_bytes!("../assets/brushes/shapes.png");
+            // Without it every brush lays a plain round nib, which is
+            // what two thirds of them lay anyway.
+            self.upload_sheet("nib shapes", SHAPES, Gfx::upload_shapes, |app, slot| {
+                app.shapes = app.brushes.sheet(slot);
+            });
+        }
+    }
+
+    /// Decodes one shipped sheet and hands the slot it landed in to
+    /// `kept`. A sheet that will not decode or upload is logged and
+    /// left out: the window is worth more than the art.
+    fn upload_sheet(
+        &mut self,
+        what: &str,
+        bytes: &[u8],
+        upload: fn(&mut Gfx, &Bitmap) -> anyhow::Result<u32>,
+        kept: fn(&mut App, u32),
+    ) {
+        let bmp = match bitmap::decode(bytes) {
             Ok(b) => b,
-            // Without it the palette draws no icons and the grid is bare;
-            // the names and the preview's dab still say what is what.
-            Err(e) => return log::error!("brush icons did not decode: {e}"),
+            Err(e) => return log::error!("{what} did not decode: {e}"),
         };
         let Some(gfx) = &mut self.gfx else { return };
-        match gfx.upload_icons(&bmp) {
-            Ok(slot) => self.icon_slot = slot,
-            Err(e) => log::error!("brush icons did not upload: {e}"),
+        match upload(gfx, &bmp) {
+            Ok(slot) => kept(self, slot),
+            Err(e) => log::error!("{what} did not upload: {e}"),
         }
     }
 
@@ -898,10 +929,16 @@ impl App {
         let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
         let mut frame = Frame::new();
         frame.extend(grid::prims(view, self.theme.dot));
-        frame.append(scene::document_prims(self.doc(), view, images));
+        frame.append(scene::document_prims(self.doc(), view, images, &self.shapes));
         if let Some(stroke) = self.editor().stroke() {
-            let prims = scene::stroke_prims(&stroke.points, stroke.tip, self.theme.ink, view);
-            frame.stroke(prims, stroke.tip);
+            let prims = scene::stroke_prims(
+                &stroke.points,
+                &stroke.tip,
+                self.theme.ink,
+                view,
+                &self.shapes,
+            );
+            frame.stroke(prims, &stroke.tip);
         }
         if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
@@ -1069,9 +1106,9 @@ impl App {
             }
             Some(Hit::Panel) => {}
             None => {
-                let brush = *self.brushes.brush();
+                let tip = self.brushes.tip();
                 let (editor, doc) = self.active();
-                let change = editor.press(button, &view, (x, y), doc, &brush);
+                let change = editor.press(button, &view, (x, y), doc, &tip);
                 self.apply(change);
             }
         }
@@ -1406,7 +1443,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }));
                 self.window = Some(window);
                 self.ensure_atlas();
-                self.ensure_icons();
+                self.ensure_sheets();
                 self.load_images();
                 self.redraw();
             }
@@ -1443,7 +1480,7 @@ impl App {
                 // The chrome is sized in logical px: a new scale factor
                 // asks for glyphs at a new size.
                 self.ensure_atlas();
-                self.ensure_icons();
+                self.ensure_sheets();
                 self.redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1626,6 +1663,7 @@ pub fn run(
         props_open: false,
         grab: None,
         icon_slot: 0,
+        shapes: Shapes::default(),
         shown_brush: None,
         carry: None,
         slides: layers::Slides::default(),

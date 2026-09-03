@@ -247,6 +247,49 @@ pub type ImageSlots = std::collections::HashMap<String, u32>;
 /// Multiplies the sampled texel: an image passes through untouched.
 const NO_TINT: Rgba = [1.0, 1.0, 1.0, 1.0];
 
+/// Where the nib shapes are: the sheet's texture slot, how it is cut up,
+/// and which cell each shape is in by the name a stroke calls it. What
+/// [`ImageSlots`] is for a board's images — a stroke names its nib, the
+/// renderer says where it is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shapes {
+    pub slot: u32,
+    pub cols: u16,
+    pub rows: u16,
+    pub cells: std::collections::HashMap<String, u16>,
+}
+
+/// One nib's own art: its cell of the shape sheet, and the slot the
+/// sheet is in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Nib {
+    pub uv: [f32; 4],
+    pub slot: u32,
+}
+
+impl Shapes {
+    /// The nib a stroke names, or `None` when this build's sheet does
+    /// not carry it — the stroke then lays a plain round nib, because a
+    /// board painted somewhere else must still open.
+    pub fn nib(&self, name: &str) -> Option<Nib> {
+        let cell = *self.cells.get(name)?;
+        if self.cols == 0 || self.rows == 0 || cell >= self.cols * self.rows {
+            return None;
+        }
+        let (col, row) = (cell % self.cols, cell / self.cols);
+        let (w, h) = (f32::from(self.cols), f32::from(self.rows));
+        Some(Nib {
+            uv: [
+                f32::from(col) / w,
+                f32::from(row) / h,
+                f32::from(col + 1) / w,
+                f32::from(row + 1) / h,
+            ],
+            slot: self.slot,
+        })
+    }
+}
+
 /// GPU-ready primitive. Layout mirrors the shader's instance input.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -418,6 +461,29 @@ impl Prim {
         Prim {
             angle,
             ..Prim::soft(r, half.0.min(half.1), feather, color)
+        }
+    }
+
+    /// A dab that stamps a nib's own shape: the cell `nib` names of the
+    /// sheet it lives on, over the box a round dab would have filled and
+    /// turned the same way. The sheet is full gray under its coverage,
+    /// so `color` is the ink — the glyph atlas over again, and the shape
+    /// is its own edge, with no ramp of the box's to add.
+    pub fn shaped_dab(
+        center: (f32, f32),
+        half: (f32, f32),
+        angle: f32,
+        nib: Nib,
+        color: Rgba,
+    ) -> Prim {
+        Prim {
+            kind: KIND_IMAGE,
+            uv: nib.uv,
+            slot: nib.slot,
+            // Square corners: the shape's own alpha is the only edge,
+            // and a rounded box would bite into it.
+            radius: 0.0,
+            ..Prim::dab(center, half, 0.0, angle, color)
         }
     }
 
@@ -679,11 +745,12 @@ fn seed_at(start: [f64; 2]) -> u64 {
 /// `seed` so the same stroke lands the same way every frame.
 pub fn stamp_prims(
     points: &[(f32, f32)],
-    stamp: Stamp,
+    stamp: &Stamp,
     seed: u64,
     radius: f32,
     feather: f32,
     px_per_world: f32,
+    nib: Option<Nib>,
     color: Rgba,
 ) -> Vec<Prim> {
     let Some(&first) = points.first() else {
@@ -707,20 +774,22 @@ pub fn stamp_prims(
 
     // `n` is the dab's place in the stroke: what the dice are rolled
     // against, so a dab keeps its own throw however the walk arrives.
+    let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32| match nib {
+        Some(nib) => Prim::shaped_dab(at, half, turn, nib, ink),
+        None => Prim::dab(at, half, feather, turn, ink),
+    };
     let dab = |at: (f32, f32), n: u32| {
         if true_nib {
-            let half = (radius, radius * squish);
-            return Prim::dab(at, half, feather, angle.to_radians(), ink);
+            return lay(at, (radius, radius * squish), feather, angle.to_radians());
         }
         let r = (radius + size_throw * dice(seed, n, SALT_SIZE) as f32).max(NIB_MIN_PX);
         let softness = r / radius.max(NIB_MIN_PX);
         let turn = angle + scatter.rotation as f32 * dice(seed, n, SALT_ANGLE) as f32;
-        Prim::dab(
+        lay(
             at,
             (r, (r * squish).max(NIB_MIN_PX)),
             feather * softness,
             turn.to_radians(),
-            ink,
         )
     };
     // The gap before dab `n`, thrown by the scatter and never shorter
@@ -768,9 +837,16 @@ const SALT_GAP: u64 = 0x14057B7EF767814F;
 /// What a tip lays along a screen polyline: a row of dabs if it stamps,
 /// one swept span per segment if it does not. The pencil sweeps; every
 /// brush stamps.
-fn tip_prims(screen: &[(f32, f32)], tip: Tip, seed: u64, color: Rgba, view: &View) -> Vec<Prim> {
+fn tip_prims(
+    screen: &[(f32, f32)],
+    tip: &Tip,
+    seed: u64,
+    color: Rgba,
+    view: &View,
+    shapes: &Shapes,
+) -> Vec<Prim> {
     let (radius, feather) = soft_radius(tip.width, tip.hardness, view);
-    match tip.stamp {
+    match &tip.stamp {
         Some(stamp) => stamp_prims(
             screen,
             stamp,
@@ -778,6 +854,7 @@ fn tip_prims(screen: &[(f32, f32)], tip: Tip, seed: u64, color: Rgba, view: &Vie
             radius,
             feather,
             view.px_per_world() as f32,
+            stamp.shape.as_deref().and_then(|n| shapes.nib(n)),
             color,
         ),
         None => soft_polyline_prims(screen, radius, feather, color),
@@ -785,7 +862,13 @@ fn tip_prims(screen: &[(f32, f32)], tip: Tip, seed: u64, color: Rgba, view: &Vie
 }
 
 /// Stroke in progress (a raw polyline in world units) → screen prims.
-pub fn stroke_prims(points: &[[f64; 2]], tip: Tip, color: Rgba, view: &View) -> Vec<Prim> {
+pub fn stroke_prims(
+    points: &[[f64; 2]],
+    tip: &Tip,
+    color: Rgba,
+    view: &View,
+    shapes: &Shapes,
+) -> Vec<Prim> {
     let screen: Vec<(f32, f32)> = points
         .iter()
         .map(|[x, y]| {
@@ -794,7 +877,7 @@ pub fn stroke_prims(points: &[[f64; 2]], tip: Tip, color: Rgba, view: &View) -> 
         })
         .collect();
     let seed = points.first().copied().map_or(0, seed_at);
-    tip_prims(&screen, tip, seed, color, view)
+    tip_prims(&screen, tip, seed, color, view, shapes)
 }
 
 /// How far the flattened polyline may stray from the curve, in px.
@@ -803,7 +886,13 @@ const FLATTEN_TOLERANCE_PX: f64 = 0.25;
 /// Committed `path` (cubics in world units) → screen prims. The control
 /// points are projected first — Béziers are affine-invariant — so the
 /// flattening tolerance is in pixels whatever the zoom.
-pub fn path_prims(curves: &[Cubic], tip: Tip, color: Rgba, view: &View) -> Vec<Prim> {
+pub fn path_prims(
+    curves: &[Cubic],
+    tip: &Tip,
+    color: Rgba,
+    view: &View,
+    shapes: &Shapes,
+) -> Vec<Prim> {
     let mut screen: Vec<(f32, f32)> = Vec::new();
     for c in curves {
         let projected = c.map(|[x, y]| {
@@ -817,7 +906,7 @@ pub fn path_prims(curves: &[Cubic], tip: Tip, color: Rgba, view: &View) -> Vec<P
         );
     }
     let seed = curves.first().map_or(0, |c| seed_at(c[0]));
-    tip_prims(&screen, tip, seed, color, view)
+    tip_prims(&screen, tip, seed, color, view, shapes)
 }
 
 /// How a group's prims meet each other in the scratch texture.
@@ -888,7 +977,7 @@ impl Frame {
 
     /// A stroke's prims, direct or grouped as its tip demands. A
     /// stamped stroke builds; a swept one unions.
-    pub fn stroke(&mut self, prims: Vec<Prim>, tip: Tip) {
+    pub fn stroke(&mut self, prims: Vec<Prim>, tip: &Tip) {
         if tip.is_direct() {
             self.extend(prims);
         } else {
@@ -986,7 +1075,12 @@ pub fn passes(frame: &Frame, viewport: Viewport, scratch: u32) -> (Vec<Prim>, Ve
 /// thickness, aligned inwards), all turned about the rect center by its
 /// rotation; paths become strokes, direct or composited as their tip
 /// demands; images become one textured box each, from `images`.
-pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame {
+pub fn document_prims(
+    doc: &Document,
+    view: &View,
+    images: &ImageSlots,
+    shapes: &Shapes,
+) -> Frame {
     let mut frame = Frame::new();
     for (_, element) in doc.painted() {
         let mut out = Vec::new();
@@ -1033,7 +1127,10 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame
             }
             Element::Path(p) => {
                 let tip = Tip::of(p);
-                frame.stroke(path_prims(&p.curves, tip, parse_color(&p.stroke), view), tip);
+                frame.stroke(
+                    path_prims(&p.curves, &tip, parse_color(&p.stroke), view, shapes),
+                    &tip,
+                );
                 continue;
             }
             // A paint is one object made of many strokes: each is drawn
@@ -1042,7 +1139,10 @@ pub fn document_prims(doc: &Document, view: &View, images: &ImageSlots) -> Frame
             Element::Paint(p) => {
                 for s in &p.strokes {
                     let tip = Tip::of_stroke(s);
-                    frame.stroke(path_prims(&s.curves, tip, parse_color(&s.stroke), view), tip);
+                    frame.stroke(
+                        path_prims(&s.curves, &tip, parse_color(&s.stroke), view, shapes),
+                        &tip,
+                    );
                 }
                 continue;
             }
@@ -1076,6 +1176,11 @@ mod tests {
     use crate::doc::{Camera, Kind, Layer, Paint, Path, Rect, Scatter, Stroke};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
+
+    /// No shapes uploaded: every nib is a plain round one.
+    fn no_sheet() -> Shapes {
+        Shapes::default()
+    }
 
     #[test]
     fn a_prim_carries_its_clip_and_nothing_else_changes() {
@@ -1191,12 +1296,12 @@ mod tests {
     #[test]
     fn soft_stroke_prims_carry_the_feather() {
         let v = view(0.0, 0.0, 1.0);
-        let got = stroke_prims(&[[0.0, 0.0], [10.0, 0.0]], tip(8.0, 1.0, 0.5), WHITE, &v);
+        let got = stroke_prims(&[[0.0, 0.0], [10.0, 0.0]], &tip(8.0, 1.0, 0.5), WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].kind, KIND_SEGMENT);
         assert_eq!((got[0].radius, got[0].feather), (3.0, 2.0));
         // A tap is a dot, and a dot can be soft too.
-        let dot = stroke_prims(&[[0.0, 0.0]], tip(8.0, 1.0, 0.0), WHITE, &v);
+        let dot = stroke_prims(&[[0.0, 0.0]], &tip(8.0, 1.0, 0.0), WHITE, &v, &no_sheet());
         assert_eq!(dot.len(), 1);
         assert_eq!(dot[0].kind, KIND_BOX);
         assert_eq!((dot[0].radius, dot[0].feather), (2.0, 4.0));
@@ -1205,6 +1310,7 @@ mod tests {
 
     /// A round nib, dabbed half a width apart.
     const ROUND: Stamp = Stamp {
+        shape: None,
         spacing: 0.5,
         roundness: 1.0,
         rotation: 0.0,
@@ -1230,7 +1336,7 @@ mod tests {
         let v = view(0.0, 0.0, 1.0);
         // A 40-px line with an 8-wide nib half a width apart: a dab
         // where the press was and one every 4 px along it.
-        let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], stamped(8.0, ROUND), WHITE, &v);
+        let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], &stamped(8.0, ROUND), WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 11, "40 px at a 4 px step, the ends counted");
         for p in &got {
             assert_eq!(p.kind, KIND_BOX, "a dab is a nib, not a swept segment");
@@ -1258,7 +1364,7 @@ mod tests {
             flow: 1.0,
             ..ROUND
         };
-        let got = stroke_prims(&[[0.0, 0.0]], stamped(8.0, flat), WHITE, &v);
+        let got = stroke_prims(&[[0.0, 0.0]], &stamped(8.0, flat.clone()), WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 1, "a tap is one dab");
         let d = got[0];
         assert_eq!([d.geom[2], d.geom[3]], [8.0, 2.0], "squished across its own y");
@@ -1269,9 +1375,9 @@ mod tests {
         // However flat it is squished, a nib still marks the paper.
         let hair = Stamp {
             roundness: 0.0,
-            ..flat
+            ..flat.clone()
         };
-        let got = stroke_prims(&[[0.0, 0.0]], stamped(8.0, hair), WHITE, &v);
+        let got = stroke_prims(&[[0.0, 0.0]], &stamped(8.0, hair), WHITE, &v, &no_sheet());
         assert_eq!(got[0].geom[3], 1.0, "a nib is never let vanish");
     }
 
@@ -1310,16 +1416,17 @@ mod tests {
         let paint = Element::Paint(Paint {
             id: "pt".into(),
             layer: String::new(),
-            strokes: vec![laid(a.clone(), Tip::PENCIL), laid(b.clone(), soft)],
+            strokes: vec![laid(a.clone(), Tip::PENCIL), laid(b.clone(), soft.clone())],
             rotation: 0.0,
         });
-        let together = document_prims(&doc_with(vec![paint], &v), &v, &none);
+        let together = document_prims(&doc_with(vec![paint], &v), &v, &none, &no_sheet());
         // Two strokes in one paint draw what two paths draw: nothing
         // joins them, and the soft one is still composited on its own.
         let apart = document_prims(
             &doc_with(vec![path_of(a, Tip::PENCIL), path_of(b, soft)], &v),
             &v,
             &none,
+            &no_sheet(),
         );
         assert_eq!(together.prims, apart.prims);
         assert_eq!(together.groups.len(), 1, "one group, for the soft stroke");
@@ -1330,17 +1437,27 @@ mod tests {
     fn a_hard_opaque_path_is_direct_and_a_soft_one_is_a_group() {
         let v = view(0.0, 0.0, 1.0);
         let none = ImageSlots::new();
-        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none);
+        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none, &no_sheet());
         assert_eq!(direct.prims.len(), 1);
         assert!(direct.groups.is_empty(), "the pencil needs no compositing");
 
-        let soft = document_prims(&doc_with(vec![path_with(tip(8.0, 1.0, 0.5))], &v), &v, &none);
+        let soft = document_prims(
+            &doc_with(vec![path_with(tip(8.0, 1.0, 0.5))], &v),
+            &v,
+            &none,
+            &no_sheet(),
+        );
         assert_eq!(soft.prims.len(), 1);
         assert_eq!(soft.groups.len(), 1);
         assert_eq!((soft.groups[0].start, soft.groups[0].end), (0, 1));
         assert_eq!(soft.groups[0].opacity, 1.0);
 
-        let faint = document_prims(&doc_with(vec![path_with(tip(2.0, 0.5, 1.0))], &v), &v, &none);
+        let faint = document_prims(
+            &doc_with(vec![path_with(tip(2.0, 0.5, 1.0))], &v),
+            &v,
+            &none,
+            &no_sheet(),
+        );
         assert_eq!(faint.groups.len(), 1);
         assert_eq!(faint.groups[0].opacity, 0.5);
     }
@@ -1373,12 +1490,51 @@ mod tests {
     fn frame_stroke_goes_direct_or_grouped_by_the_tip() {
         let prims = vec![Prim::segment((0.0, 0.0), (1.0, 0.0), 1.0, WHITE)];
         let mut f = Frame::new();
-        f.stroke(prims.clone(), Tip::PENCIL);
+        f.stroke(prims.clone(), &Tip::PENCIL);
         assert!(f.groups.is_empty());
-        f.stroke(prims, tip(2.0, 0.25, 1.0));
+        f.stroke(prims, &tip(2.0, 0.25, 1.0));
         assert_eq!(f.groups.len(), 1);
         assert_eq!((f.groups[0].start, f.groups[0].end), (1, 2));
         assert_eq!(f.groups[0].opacity, 0.25);
+    }
+
+    #[test]
+    fn a_nib_with_a_shape_stamps_its_cell_of_the_sheet() {
+        let v = view(0.0, 0.0, 1.0);
+        let sheet = Shapes {
+            slot: 7,
+            cols: 4,
+            rows: 2,
+            cells: [("bristle".to_owned(), 5u16)].into_iter().collect(),
+        };
+        let nib = stamped(
+            8.0,
+            Stamp {
+                shape: Some("bristle".to_owned()),
+                ..ROUND
+            },
+        );
+        let got = stroke_prims(&[[0.0, 0.0]], &nib, WHITE, &v, &sheet);
+        assert_eq!(got.len(), 1, "a tap is one dab");
+        let d = got[0];
+        assert_eq!(d.kind, KIND_IMAGE, "the nib is the sheet's own art");
+        assert_eq!(d.slot, 7);
+        assert_eq!(d.uv, [0.25, 0.5, 0.5, 1.0], "cell 5 of a sheet 4 across, 2 down");
+        assert_eq!([d.geom[2], d.geom[3]], [8.0, 8.0], "as wide as the brush");
+        assert_eq!((d.radius, d.feather), (0.0, 0.0), "the shape is its own edge");
+        assert_eq!(d.color, WHITE, "and the ink tints it, as a glyph is tinted");
+
+        // A shape this build does not carry lays a plain round nib. A
+        // board painted on another one must still open.
+        let lost = stamped(
+            8.0,
+            Stamp {
+                shape: Some("gone".to_owned()),
+                ..ROUND
+            },
+        );
+        let got = stroke_prims(&[[0.0, 0.0]], &lost, WHITE, &v, &sheet);
+        assert_eq!(got[0].kind, KIND_BOX);
     }
 
     #[test]
@@ -1393,7 +1549,7 @@ mod tests {
             ..ROUND
         };
         let pts = [[-40.0, 0.0], [40.0, 0.0]];
-        let got = stroke_prims(&pts, stamped(8.0, wild), WHITE, &v);
+        let got = stroke_prims(&pts, &stamped(8.0, wild.clone()), WHITE, &v, &no_sheet());
         assert!(got.len() > 4);
 
         // No two dabs alike: the radius, the angle and the gap are all
@@ -1421,9 +1577,15 @@ mod tests {
 
         // The throw belongs to the stroke, not to the frame it is drawn
         // in: drawing it again lands every dab where it was.
-        assert_eq!(stroke_prims(&pts, stamped(8.0, wild), WHITE, &v), got);
+        assert_eq!(stroke_prims(&pts, &stamped(8.0, wild.clone()), WHITE, &v, &no_sheet()), got);
         // Panning must not re-roll it either — the same dabs, moved.
-        let moved = stroke_prims(&pts, stamped(8.0, wild), WHITE, &view(10.0, 0.0, 1.0));
+        let moved = stroke_prims(
+            &pts,
+            &stamped(8.0, wild),
+            WHITE,
+            &view(10.0, 0.0, 1.0),
+            &no_sheet(),
+        );
         assert_eq!(moved.len(), got.len());
         for (a, b) in moved.iter().zip(&got) {
             assert_eq!((a.radius, a.angle), (b.radius, b.angle));
@@ -1438,7 +1600,7 @@ mod tests {
     fn a_flowing_nib_lays_each_dab_at_its_flow_and_the_dabs_pile_up() {
         let v = view(0.0, 0.0, 1.0);
         let nib = stamped(8.0, Stamp { flow: 0.25, ..ROUND });
-        let got = stroke_prims(&[[-8.0, 0.0], [8.0, 0.0]], nib, WHITE, &v);
+        let got = stroke_prims(&[[-8.0, 0.0], [8.0, 0.0]], &nib, WHITE, &v, &no_sheet());
         assert!(got.len() > 1);
         for d in &got {
             assert_eq!(d.color[3], 0.25, "a dab lays its flow; opacity is the ceiling");
@@ -1448,7 +1610,7 @@ mod tests {
         // cross: a union would cap every crossing at one dab's worth,
         // and flow would be a second opacity.
         let mut f = Frame::new();
-        f.stroke(got, nib);
+        f.stroke(got, &nib);
         assert_eq!(f.groups[0].blend, Blend::Build);
 
         // A swept stroke still unions — its spans overlap at every
@@ -1456,7 +1618,7 @@ mod tests {
         let mut f = Frame::new();
         f.stroke(
             vec![Prim::segment((0.0, 0.0), (1.0, 0.0), 1.0, WHITE)],
-            tip(2.0, 0.25, 1.0),
+            &tip(2.0, 0.25, 1.0),
         );
         assert_eq!(f.groups[0].blend, Blend::Union);
     }
@@ -1666,12 +1828,12 @@ mod tests {
         });
         // The white rect is first in `elements` but on the top layer.
         doc.elements[0].set_layer("top");
-        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].color, [0.0, 0.0, 0.0, 1.0], "the lower layer paints first");
         assert_eq!(got[1].color, WHITE);
         doc.layers[1].visible = false;
-        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
         assert_eq!(got.len(), 1, "a hidden layer paints nothing");
     }
     const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -1914,7 +2076,7 @@ mod tests {
         if let Element::Rect(r) = &mut el {
             r.rotation = 90.0;
         }
-        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new()).prims;
+        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new(), &no_sheet()).prims;
         assert_eq!(got.len(), 5);
         let a = std::f32::consts::FRAC_PI_2;
         // The fill is the unturned box, turned in place.
@@ -1934,7 +2096,7 @@ mod tests {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))], &v);
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new()).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims,
             vec![Prim::rect(sr(50.0, 50.0, 10.0, 10.0), WHITE)]
         );
     }
@@ -1945,7 +2107,7 @@ mod tests {
         let doc = doc_with(vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)], &v);
         let t = STROKE_PX;
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new()).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims,
             vec![
                 // top, bottom, left, right — aligned inwards.
                 Prim::rect(sr(60.0, 60.0, 20.0, t), WHITE),
@@ -1963,7 +2125,7 @@ mod tests {
             vec![rect(0.0, 0.0, 10.0, 10.0, Some("#000"), Some("#fff"))],
             &v,
         );
-        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
         assert_eq!(got.len(), 5);
         assert_eq!(got[0].color, WHITE, "fill first");
         assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke after");
@@ -1973,7 +2135,7 @@ mod tests {
     fn zoom_scales_rect_position_and_size() {
         let v = view(0.0, 0.0, 2.0);
         let doc = doc_with(vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
         assert_eq!(got[0].geom, [52.0, 50.0, 10.0, 10.0]);
     }
 
@@ -1981,7 +2143,7 @@ mod tests {
     fn rect_without_any_color_still_paints_with_fallback() {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 4.0, 4.0, None, None)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].color, FALLBACK_COLOR);
     }
@@ -2051,7 +2213,7 @@ mod tests {
         );
         // Width is in world units: 2 * zoom 2 = 4px wide → half-width 2.
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new()).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims,
             vec![Prim::segment(
                 (50.0, 50.0),
                 (68.0, 50.0),
@@ -2064,14 +2226,14 @@ mod tests {
     #[test]
     fn path_prims_flatten_curves_in_screen_pixels() {
         let c = [[0.0, 0.0], [0.0, 55.0], [45.0, 100.0], [100.0, 100.0]];
-        let at_1x = path_prims(&[c], Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0));
+        let at_1x = path_prims(&[c], &Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0), &no_sheet());
         assert!(at_1x.len() > 1, "a curve is more than one segment");
         let first = at_1x[0].geom;
         let last = at_1x[at_1x.len() - 1].geom;
         assert_eq!((first[0], first[1]), (50.0, 50.0));
         assert_eq!((last[2], last[3]), (150.0, 150.0));
         // Flattening tolerance is in pixels, so zooming in adds segments.
-        let at_4x = path_prims(&[c], Tip::PENCIL, WHITE, &view(0.0, 0.0, 4.0));
+        let at_4x = path_prims(&[c], &Tip::PENCIL, WHITE, &view(0.0, 0.0, 4.0), &no_sheet());
         assert!(
             at_4x.len() > at_1x.len(),
             "{} vs {}",
@@ -2084,7 +2246,7 @@ mod tests {
     fn path_prims_join_consecutive_cubics_without_a_gap() {
         let a = [[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]];
         let b = [[9.0, 0.0], [12.0, 0.0], [15.0, 0.0], [18.0, 0.0]];
-        let got = path_prims(&[a, b], Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0));
+        let got = path_prims(&[a, b], &Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0), &no_sheet());
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0].geom, [50.0, 50.0, 59.0, 50.0]);
         assert_eq!(got[1].geom, [59.0, 50.0, 68.0, 50.0]);
@@ -2093,7 +2255,7 @@ mod tests {
     #[test]
     fn stroke_width_never_drops_below_one_pixel() {
         let v = view(0.0, 0.0, 0.1);
-        let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], Tip::PENCIL, WHITE, &v);
+        let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], &Tip::PENCIL, WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].radius, 0.5);
     }
@@ -2116,7 +2278,7 @@ mod tests {
         let v = view(0.0, 0.0, 2.0);
         let slots = ImageSlots::from([(BLOB.to_owned(), 7)]);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 90.0)], &v);
-        let got = document_prims(&doc, &v, &slots).prims;
+        let got = document_prims(&doc, &v, &slots, &no_sheet()).prims;
         // One instance: the SDF box carries the texture, so the turn, the
         // rounded corners and the antialiasing come from the same field.
         assert_eq!(got.len(), 1, "{got:?}");
@@ -2160,7 +2322,7 @@ mod tests {
         // element still has to occupy its box.
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 0.0)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].kind, KIND_BOX);
         assert_eq!(got[0].color, PLACEHOLDER_COLOR);
