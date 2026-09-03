@@ -9,10 +9,14 @@ the body `brush.rs` keeps, and writes:
     assets/brushes/icons.png      every icon @2x, one grid cell each
     assets/brushes/shapes.png     every nib shape, one grid cell each
 
-A brush with a nib of its own names a TIFF in the same zip — white on
-black, the nib's own coverage. Those become the nib sheet: gray + alpha,
-the gray full and the alpha the coverage, exactly as the glyph atlas is
-read. Sketchbook has two kinds and the sheet carries both: a `shape` is
+A brush with a nib of its own names a TIFF in the same zip, and the
+image says its coverage in one of two places. The sets use both: a nib
+drawn white on opaque black says it in its gray, and one drawn on
+transparency says it in its alpha — the colour there is whatever it
+happened to be drawn in, and eleven of the 114 are drawn in black, so
+reading the gray would take them for empty. Either way what comes out is
+the nib sheet: gray + alpha, the gray full and the alpha the coverage,
+exactly as the glyph atlas is read. Sketchbook has two kinds and the sheet carries both: a `shape` is
 a silhouette stamped in place of a round dab, a `texture` is a grain
 worn over one, and the library says which a brush names. A
 `paperTexture` is neither — it belongs to the canvas, not to the nib —
@@ -49,6 +53,13 @@ ICON_PX = 80  # the @2x icon; the 1x copy is 40x40
 # — the whole sheet is half a megabyte at it.
 SHAPE_PX = 128
 SHAPE_COLS = 12
+# Where an image keeps its coverage. The two ways the sets are drawn do
+# not blur into each other: every TIFF they ship is either opaque to
+# within a hair — the alpha averages 0.998 and up, which is antialiasing
+# at the border and nothing else — or plainly transparent, at 0.54 and
+# down. So an image this opaque is read for its gray, and any other for
+# its alpha.
+OPAQUE = 0.99
 
 
 def attrs(tag_body):
@@ -225,14 +236,18 @@ def png_grid(cells, px, cols, channels):
 
 
 def shape_cell(data):
-    """One nib TIFF into a `SHAPE_PX` square of gray + alpha. The
-    originals are white on black — the nib's own coverage — so the gray
-    goes in the alpha and the color stays full, which is what makes
-    `texel * ink` the mark. A shape and a grain are read the same way;
-    what differs is whether the dab is the image or wears it."""
+    """One nib TIFF into a `SHAPE_PX` square of gray + alpha: whichever
+    channel the image keeps its coverage in goes into the alpha, and the
+    color stays full, which is what makes `texel * ink` the mark. A shape
+    and a grain are read the same way; what differs is whether the dab is
+    the image or wears it."""
     import subprocess
+    opaque = float(subprocess.run(
+        ["magick", "identify", "-format", "%[fx:mean.a]", "tif:-"],
+        input=data, capture_output=True, check=True).stdout) >= OPAQUE
+    read = ["-alpha", "off", "-colorspace", "gray"] if opaque else ["-alpha", "extract"]
     out = subprocess.run(
-        ["magick", "tif:-", "-colorspace", "gray",
+        ["magick", "tif:-", *read,
          "-resize", f"{SHAPE_PX}x{SHAPE_PX}!", "-depth", "8", "gray:-"],
         input=data, capture_output=True, check=True).stdout
     want = SHAPE_PX * SHAPE_PX
