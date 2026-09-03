@@ -749,9 +749,23 @@ impl Prim {
     }
 
     /// The painted area plus the edge ramp: what the shader rasterizes,
-    /// and so what a wipe has to cover.
+    /// and so what a wipe has to cover. A prim that is cut answers only
+    /// the part the cut lets through — a stroke mostly outside a frame
+    /// does not make the compositor pay for ink nobody sees — and one
+    /// cut away entirely answers an empty box.
     pub fn painted_bounds(&self) -> ScreenRect {
-        self.bounds().inset(-(self.feather.max(1.0) * 0.5 + 1.0))
+        let painted = self.bounds().inset(-(self.feather.max(1.0) * 0.5 + 1.0));
+        if self.clip == NO_CLIP {
+            return painted;
+        }
+        let [x, y, w, h] = self.clip;
+        let cut = ScreenRect { x, y, w, h };
+        painted.intersect(&cut).unwrap_or(ScreenRect {
+            x: painted.x,
+            y: painted.y,
+            w: 0.0,
+            h: 0.0,
+        })
     }
 
     /// Painted area, ignoring the antialiasing ramp.
@@ -3808,5 +3822,39 @@ mod tests {
         assert_eq!(to_hex([1.0, 1.0, 1.0, 1.0]), "#ffffff");
         let c = parse_color("#3b82f6");
         assert_eq!(parse_color(&to_hex(c)), c, "a colour survives the round trip");
+    }
+
+    #[test]
+    fn a_clipped_prim_is_only_painted_where_the_clip_lets_it() {
+        let r = ScreenRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let cut = ScreenRect { x: 0.0, y: 0.0, w: 40.0, h: 100.0 };
+        let whole = Prim::rect(r, [0.0, 0.0, 0.0, 1.0]);
+        let clipped = whole.clipped(cut);
+        assert!(whole.painted_bounds().w > 100.0, "the ramp grows it");
+        assert!(
+            clipped.painted_bounds().w < whole.painted_bounds().w,
+            "the cut shrinks it"
+        );
+        assert!(
+            cut.contains_rect(&clipped.painted_bounds()),
+            "and never reaches past the cut"
+        );
+    }
+
+    #[test]
+    fn a_prim_cut_away_entirely_paints_nothing() {
+        let r = ScreenRect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 };
+        let elsewhere = ScreenRect { x: 500.0, y: 500.0, w: 10.0, h: 10.0 };
+        let p = Prim::rect(r, [0.0, 0.0, 0.0, 1.0]).clipped(elsewhere);
+        let b = p.painted_bounds();
+        assert_eq!((b.w, b.h), (0.0, 0.0));
+    }
+
+    #[test]
+    fn an_uncut_prim_is_painted_as_it_always_was() {
+        let r = ScreenRect { x: 3.0, y: 4.0, w: 10.0, h: 10.0 };
+        let p = Prim::rect(r, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(p.clip, NO_CLIP);
+        assert_eq!(p.painted_bounds(), r.inset(-1.5));
     }
 }
