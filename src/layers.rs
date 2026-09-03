@@ -617,6 +617,7 @@ impl Panel {
         let holds = match layer.kind {
             Kind::Raster => PIXELS,
             Kind::Vector => CURVE,
+            Kind::Frame => AREA,
         };
         out.extend(icon_prims(
             holds,
@@ -871,6 +872,14 @@ const CURVE: &[&[(f32, f32)]] = &[&[
     (18.0, 13.0),
     (20.0, 8.0),
 ]];
+
+/// What a frame layer holds: an area, and the two marks that say it
+/// crops rather than draws.
+const AREA: &[&[(f32, f32)]] = &[
+    &[(6.0, 6.0), (18.0, 6.0), (18.0, 18.0), (6.0, 18.0), (6.0, 6.0)],
+    &[(10.0, 3.5), (10.0, 20.5)],
+    &[(3.5, 10.0), (20.5, 10.0)],
+];
 
 #[cfg(test)]
 mod tests {

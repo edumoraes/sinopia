@@ -46,6 +46,7 @@ pub fn frame(el: &Element) -> Option<Frame> {
             p.strokes.iter().map(|s| (s.curves.as_slice(), s.width)),
             p.rotation,
         ),
+        Element::Frame(_) => None,
     }
 }
 
@@ -113,6 +114,7 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
         // Any one of its strokes is the object: the gaps between them
         // are not.
+        Element::Frame(_) => false,
         Element::Paint(paint) => paint
             .strokes
             .iter()
@@ -215,6 +217,7 @@ pub fn transform(el: &mut Element, m: &Affine) {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
         }
+        Element::Frame(_) => {}
     }
 }
 

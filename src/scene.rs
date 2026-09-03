@@ -1697,6 +1697,7 @@ pub fn document_prims(
                 }
                 continue;
             }
+            Element::Frame(_) => {}
             Element::Image(i) => {
                 let (sx, sy) = view.world_to_screen(i.x, i.y);
                 let r = ScreenRect {

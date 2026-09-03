@@ -37,6 +37,9 @@ pub enum Kind {
     #[default]
     Raster,
     Vector,
+    /// The layer a frame is the object of. It never appears inside a
+    /// frame's own stack: a frame does not nest.
+    Frame,
 }
 
 impl Kind {
@@ -116,6 +119,7 @@ pub enum Element {
     Path(Path),
     Paint(Paint),
     Image(Image),
+    Frame(Frame),
 }
 
 impl Element {
@@ -125,6 +129,7 @@ impl Element {
             Element::Path(p) => &p.id,
             Element::Paint(p) => &p.id,
             Element::Image(i) => &i.id,
+            Element::Frame(f) => &f.id,
         }
     }
 
@@ -135,6 +140,7 @@ impl Element {
             Element::Path(p) => &p.layer,
             Element::Paint(p) => &p.layer,
             Element::Image(i) => &i.layer,
+            Element::Frame(f) => &f.layer,
         }
     }
 
@@ -144,6 +150,7 @@ impl Element {
             Element::Path(p) => &mut p.layer,
             Element::Paint(p) => &mut p.layer,
             Element::Image(i) => &mut i.layer,
+            Element::Frame(f) => &mut f.layer,
         };
         id.clone_into(layer);
     }
@@ -167,6 +174,35 @@ pub struct Rect {
     pub stroke: Option<String>,
     pub fill: Option<String>,
     pub text: Option<String>,
+}
+
+/// An area that holds objects, with a stack of its own. `x, y, w, h` is
+/// the boundary in world units; it does not turn, because the cut that
+/// makes it a frame is an axis-aligned box in the shader. `background`
+/// is the colour under everything inside it — an unvalidated hex, as a
+/// rect's `fill` is — absent on disk when the frame is clear. `layers`
+/// is its own stack, bottom to top: never empty once parsed, and never
+/// holding a frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub id: String,
+    #[serde(default)]
+    pub layer: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub layers: Vec<Layer>,
+}
+
+impl Frame {
+    /// Whether the area holds `p`, its edges included.
+    pub fn contains(&self, p: [f64; 2]) -> bool {
+        p[0] >= self.x && p[0] <= self.x + self.w && p[1] >= self.y && p[1] <= self.y + self.h
+    }
 }
 
 fn is_false(v: &bool) -> bool {
@@ -2016,5 +2052,63 @@ mod tests {
             let err = Document::from_json(&json).unwrap_err().to_string();
             assert!(err.contains("blob"), "{blob:?} should be rejected: {err}");
         }
+    }
+
+    /// A frame carries its area, its background and a stack of its own,
+    /// and comes back the same.
+    #[test]
+    fn a_frame_round_trips() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [
+                { "id": "fr", "type": "frame", "layer": "fl",
+                  "x": -100, "y": -50, "w": 200, "h": 100,
+                  "background": "#fbfbfa",
+                  "layers": [ { "id": "in", "name": "Layer 1" } ] }
+            ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        assert_eq!(doc.layers[0].kind, Kind::Frame);
+        let Element::Frame(f) = &doc.elements[0] else {
+            panic!("not a frame");
+        };
+        assert_eq!((f.x, f.y, f.w, f.h), (-100.0, -50.0, 200.0, 100.0));
+        assert_eq!(f.background.as_deref(), Some("#fbfbfa"));
+        assert_eq!(f.layers.len(), 1);
+        assert_eq!(f.layers[0].name, "Layer 1");
+        let back = Document::from_json(&doc.to_json().unwrap()).unwrap();
+        assert_eq!(back, doc);
+    }
+
+    /// The area is the boundary, edges included.
+    #[test]
+    fn a_frame_holds_the_points_inside_its_area() {
+        let f = Frame {
+            id: "fr".into(),
+            layer: "fl".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            background: None,
+            layers: Vec::new(),
+        };
+        assert!(f.contains([5.0, 5.0]));
+        assert!(f.contains([0.0, 0.0]));
+        assert!(f.contains([10.0, 10.0]));
+        assert!(!f.contains([10.1, 5.0]));
+        assert!(!f.contains([5.0, -0.1]));
+    }
+
+    /// A board written before frames existed keeps its shape: no `kind`
+    /// is still raster, and nothing it holds is a frame.
+    #[test]
+    fn a_board_without_frames_is_unchanged() {
+        let doc = sample_doc();
+        let back = Document::from_json(&doc.to_json().unwrap()).unwrap();
+        assert_eq!(back, doc);
+        assert!(!doc.to_json().unwrap().contains("\"kind\""));
     }
 }

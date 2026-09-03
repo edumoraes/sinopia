@@ -881,7 +881,10 @@ impl Editor {
         let hand = curve::simplify(points, tolerance);
         match kind {
             Kind::Vector => curve::fit(&hand, tolerance),
-            Kind::Raster => curve::polyline(&hand),
+            // A stroke is a pencil's or a brush's. A frame layer holds
+            // an area and never asks for curves, so it can only mean
+            // the brush's answer here.
+            Kind::Raster | Kind::Frame => curve::polyline(&hand),
         }
     }
 
