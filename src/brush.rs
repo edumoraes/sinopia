@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::doc::{Path, Pressure, Scatter, Stamp, Stroke};
+use crate::doc::{Path, Pressure, Profile, Scatter, Stamp, Stroke};
 use crate::editor::PEN_WIDTH;
 use crate::scene::{Prim, Rgba, Shapes, polyline_prims};
 
@@ -30,37 +30,6 @@ pub const HARDNESS_STEP: f64 = 0.25;
 /// spacing units — the numbers its help names, 0.1 to 10.
 pub const SPACING_MIN: f64 = 0.1;
 pub const SPACING_MAX: f64 = 10.0;
-
-/// The shape of the tip's own falloff, from its middle to its edge.
-/// Sketchbook picks one of four for every brush, and it is not the same
-/// question as hardness: hardness says how much of the radius the ramp
-/// takes, the profile says what the ramp does over it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum Profile {
-    /// The default: a plain ramp.
-    #[default]
-    #[serde(rename = "regularSolid")]
-    RegularSolid,
-    /// Falls away from the middle the whole way: the airbrush's cloud.
-    #[serde(rename = "airbrush")]
-    Airbrush,
-    /// Comes to a point.
-    #[serde(rename = "sharp")]
-    Sharp,
-    /// Flat to the edge, then over.
-    #[serde(rename = "hardSolid")]
-    HardSolid,
-}
-
-impl Profile {
-    #[allow(dead_code)] // the tests hold every shipped brush to it
-    pub const ALL: [Profile; 4] = [
-        Profile::RegularSolid,
-        Profile::Airbrush,
-        Profile::Sharp,
-        Profile::HardSolid,
-    ];
-}
 
 /// What turns a stamp as the stroke goes. Sketchbook's Rotation Dynamics:
 /// a pattern either keeps its angle, follows the stroke, or is turned by
@@ -445,6 +414,7 @@ impl Brush {
                 spacing: self.spacing,
                 roundness: self.roundness,
                 rotation: self.rotation,
+                profile: self.profile,
                 // One of Sketchbook's four rotation dynamics is the
                 // stroke's own doing and belongs on the nib; the other
                 // two are the stylus's, and what they turn the nib by
@@ -956,6 +926,7 @@ mod tests {
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,
+                profile: Profile::RegularSolid,
                 flow: 1.0,
                 scatter: Scatter::default(),
                 pressure: Brush::default().pressure,

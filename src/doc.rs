@@ -210,6 +210,62 @@ impl Scatter {
     }
 }
 
+/// The shape of the tip's own falloff, from its middle to its edge.
+/// Sketchbook picks one of four for every brush, and it is not the same
+/// question as hardness: hardness says how much of the radius the ramp
+/// takes, the profile says what the ramp does over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Profile {
+    /// The default: a plain ramp.
+    #[default]
+    #[serde(rename = "regularSolid")]
+    RegularSolid,
+    /// Falls away from the middle the whole way: the airbrush's cloud.
+    #[serde(rename = "airbrush")]
+    Airbrush,
+    /// Comes to a point.
+    #[serde(rename = "sharp")]
+    Sharp,
+    /// Flat to the edge, then over.
+    #[serde(rename = "hardSolid")]
+    HardSolid,
+}
+
+impl Profile {
+    #[allow(dead_code)] // the tests hold every shipped brush to it
+    pub const ALL: [Profile; 4] = [
+        Profile::RegularSolid,
+        Profile::Airbrush,
+        Profile::Sharp,
+        Profile::HardSolid,
+    ];
+
+    /// How it bends the ramp the Edge spends, as an exponent on the
+    /// coverage across it: below one the nib stays full almost to its
+    /// own edge, above one it fades over the whole band.
+    ///
+    /// Sketchbook does not say what its four curves are. Its own sets
+    /// do: every brush ships an Edge to go with its profile, and the
+    /// two move together — airbrush never above 0.28, regularSolid up
+    /// to 0.75, hardSolid at 0.88 to a brush, sharp from 0.89 up. So
+    /// the profile is read in the order the sets themselves put it in,
+    /// and it shapes the ramp whose width the Edge sets.
+    pub fn falloff(self) -> f32 {
+        match self {
+            Profile::Sharp => 0.5,
+            Profile::HardSolid => 0.7,
+            Profile::RegularSolid => 1.0,
+            Profile::Airbrush => 2.0,
+        }
+    }
+
+    /// A plain ramp: absent on disk, and what a board that never named
+    /// one means.
+    fn is_regular(&self) -> bool {
+        *self == Profile::RegularSolid
+    }
+}
+
 /// How much of each property the pen's pressure drives, 0–1: 0 is one
 /// pressure never touches, 1 one it drives from nothing up to the value
 /// the brush names. A light touch gives `v * (1 − amount)`, a heavy one
@@ -360,6 +416,9 @@ pub struct Stamp {
     pub roundness: f64,
     /// The nib's own angle, in degrees, clockwise.
     pub rotation: f64,
+    /// What its edge does over the ramp the hardness leaves it.
+    #[serde(default, skip_serializing_if = "Profile::is_regular")]
+    pub profile: Profile,
     /// Whether the nib turns with the stroke, its own angle added to
     /// the heading. Sketchbook's Rotation Dynamics, less the two the
     /// stylus drives: a pattern that has to run along the stroke says
@@ -1054,6 +1113,68 @@ mod tests {
     }
 
     #[test]
+    fn the_profiles_bend_the_ramp_in_the_order_the_sets_put_them_in() {
+        // Sketchbook ships an Edge to go with every profile, and the two
+        // move together: the sharper the profile, the crisper the Edge
+        // it comes with. The falloff follows the same order — below one
+        // is a fuller nib, above one a fainter.
+        let order: Vec<f32> = [
+            Profile::Sharp,
+            Profile::HardSolid,
+            Profile::RegularSolid,
+            Profile::Airbrush,
+        ]
+        .map(Profile::falloff)
+        .to_vec();
+        for pair in order.windows(2) {
+            assert!(pair[0] < pair[1], "{order:?} is not in order");
+        }
+        assert_eq!(
+            Profile::RegularSolid.falloff(),
+            1.0,
+            "the default is the plain ramp, and bends nothing"
+        );
+    }
+
+    #[test]
+    fn a_stroke_keeps_the_profile_of_the_nib_that_laid_it() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": [ { "id": "pt1", "type": "paint", "layer": "l1", "strokes": [
+                { "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]], "stroke": "#000", "width": 8,
+                  "stamp": { "spacing": 1, "roundness": 1, "rotation": 0,
+                             "profile": "airbrush" } },
+                { "curves": [[[0, 9], [3, 9], [7, 9], [10, 9]]], "stroke": "#000", "width": 3,
+                  "stamp": { "spacing": 1, "roundness": 1, "rotation": 0 } }
+            ] } ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Paint(p) = &doc.elements[0] else {
+            panic!("expected a paint");
+        };
+        let profile = |i: usize| p.strokes[i].stamp.as_ref().unwrap().profile;
+        assert_eq!(profile(0), Profile::Airbrush);
+        assert_eq!(
+            profile(1),
+            Profile::RegularSolid,
+            "a board that never named one means the plain ramp"
+        );
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["elements"][0]["strokes"][0]["stamp"]["profile"].as_str(),
+            Some("airbrush")
+        );
+        assert!(
+            v["elements"][0]["strokes"][1]["stamp"].get("profile").is_none(),
+            "and keeps saying nothing: {v}"
+        );
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
     fn a_reading_is_asked_for_by_how_far_along_the_stroke_it_is() {
         let e = Envelope {
             pressure: vec![0.0, 1.0, 0.0],
@@ -1190,6 +1311,7 @@ mod tests {
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,
+                profile: Profile::RegularSolid,
                 flow: 1.0,
                 scatter: Scatter::default(),
                 pressure: Pressure::NONE,

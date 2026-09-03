@@ -35,6 +35,7 @@ struct Inst {
     @location(5) angle: f32,
     @location(6) uv: vec4<f32>,
     @location(7) clip: vec4<f32>,
+    @location(8) falloff: f32,
 };
 
 struct VsOut {
@@ -47,6 +48,7 @@ struct VsOut {
     @location(5) @interpolate(flat) angle: f32,
     @location(6) @interpolate(flat) uv: vec4<f32>,
     @location(7) @interpolate(flat) cut: vec4<f32>,
+    @location(8) @interpolate(flat) falloff: f32,
 };
 
 const KIND_SEGMENT: u32 = 1u;
@@ -100,6 +102,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.angle = inst.angle;
     out.uv = inst.uv;
     out.cut = inst.clip;
+    out.falloff = inst.falloff;
     return out;
 }
 
@@ -164,9 +167,12 @@ fn shade(in: VsOut) -> vec4<f32> {
         }
     }
     let ramp = max(in.params.y, 1.0);
-    // The prim ramps over its own feather; the cut always over one
-    // pixel, so a soft shadow is still cut by a hard edge.
-    let coverage = clamp(0.5 - d / ramp, 0.0, 1.0) * clamp(0.5 - cut, 0.0, 1.0);
+    // The prim ramps over its own feather, bent by the nib's profile —
+    // an exponent of 1 is the plain ramp everything else is drawn with.
+    // The cut always ramps over one pixel and is never bent, so a soft
+    // shadow is still cut by a hard edge.
+    let edge = pow(clamp(0.5 - d / ramp, 0.0, 1.0), in.falloff);
+    let coverage = edge * clamp(0.5 - cut, 0.0, 1.0);
     return vec4<f32>(rgba.rgb, rgba.a * coverage);
 }
 "#;
@@ -700,6 +706,7 @@ fn pipeline(
                     5 => Float32,   // angle
                     6 => Float32x4, // uv
                     7 => Float32x4, // clip
+                    8 => Float32,   // falloff
                     // `slot` stays on the CPU: it picks the bind group.
                 ],
             })],

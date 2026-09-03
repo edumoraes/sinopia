@@ -279,6 +279,8 @@ pub struct Nib {
     /// World units into px: what a scatter stated in world units is
     /// thrown by.
     pub px_per_world: f32,
+    /// What its edge does over the ramp: [`Profile::falloff`].
+    pub falloff: f32,
     /// Where its own shape is, when it stamps one.
     pub art: Option<Art>,
 }
@@ -328,6 +330,10 @@ pub struct Prim {
     /// What the prim is cut to: `x, y, w, h` in screen px. A zero width
     /// or height is no cut at all, which is what [`NO_CLIP`] says.
     pub clip: [f32; 4],
+    /// What the edge ramp does over its own width: an exponent on the
+    /// coverage, 1 for the plain ramp everything but a nib is drawn
+    /// with. See [`Profile::falloff`].
+    pub falloff: f32,
     /// [`KIND_IMAGE`] only: which texture to sample. Read on the CPU, to
     /// pick the bind group — the shader never sees it.
     pub slot: u32,
@@ -339,6 +345,10 @@ pub const NO_CLIP: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 
 /// The whole texture: what anything that is not a glyph samples.
 const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// An edge that ramps straight across its width: everything on screen
+/// but a nib whose brush names another profile.
+const PLAIN_RAMP: f32 = 1.0;
 
 impl Prim {
     pub fn rect(r: ScreenRect, color: Rgba) -> Prim {
@@ -359,6 +369,7 @@ impl Prim {
             angle: 0.0,
             uv: WHOLE,
             clip: NO_CLIP,
+            falloff: PLAIN_RAMP,
             slot: 0,
         }
     }
@@ -534,6 +545,7 @@ impl Prim {
             angle: 0.0,
             uv: WHOLE,
             clip: NO_CLIP,
+            falloff: PLAIN_RAMP,
             slot: 0,
         }
     }
@@ -792,6 +804,7 @@ pub fn stamp_prims(
         radius,
         feather,
         px_per_world,
+        falloff,
         art,
     } = nib;
     let squish = (stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX / radius.max(NIB_MIN_PX));
@@ -806,7 +819,10 @@ pub fn stamp_prims(
 
     let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32, ink: Rgba| match art {
         Some(art) => Prim::shaped_dab(at, half, turn, art, ink),
-        None => Prim::dab(at, half, feather, turn, ink),
+        None => Prim {
+            falloff,
+            ..Prim::dab(at, half, feather, turn, ink)
+        },
     };
     // The way the stroke is going where the dab lands, in radians, when
     // the nib runs along it — a nib that stands still has none.
@@ -918,6 +934,7 @@ fn tip_prims(
                 radius,
                 feather,
                 px_per_world: view.px_per_world() as f32,
+                falloff: stamp.profile.falloff(),
                 art: stamp.shape.as_deref().and_then(|n| shapes.art(n)),
             },
             color,
@@ -1242,7 +1259,7 @@ pub fn document_prims(
 mod tests {
     use super::*;
     use crate::brush::{Brush, Dynamics, Tip};
-    use crate::doc::{Camera, Kind, Layer, Paint, Path, Rect, Scatter, Stroke};
+    use crate::doc::{Camera, Kind, Layer, Paint, Path, Profile, Rect, Scatter, Stroke};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
 
@@ -1279,7 +1296,7 @@ mod tests {
         // clipped prim still measures as the whole thing.
         assert_eq!(cut.bounds(), plain.bounds());
         // The instance layout the shader is fed mirrors the struct.
-        assert_eq!(std::mem::size_of::<Prim>(), 84);
+        assert_eq!(std::mem::size_of::<Prim>(), 88);
     }
 
     #[test]
@@ -1391,6 +1408,7 @@ mod tests {
         spacing: 0.5,
         roundness: 1.0,
         rotation: 0.0,
+        profile: Profile::RegularSolid,
         flow: 1.0,
         scatter: Scatter {
             size: 0.0,
@@ -1415,6 +1433,26 @@ mod tests {
             pressure: readings.to_vec(),
             twist: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_dab_carries_the_bend_its_profile_asks_for() {
+        let v = view(0.0, 0.0, 1.0);
+        let soft = stamped(
+            20.0,
+            Stamp {
+                profile: Profile::Airbrush,
+                ..ROUND
+            },
+        );
+        let got = stroke_prims(&[[0.0, 0.0]], &soft, &no_pen(), WHITE, &v, &no_sheet());
+        assert_eq!(got[0].falloff, Profile::Airbrush.falloff());
+        // Everything that is not a nib ramps straight across.
+        let plain = stroke_prims(&[[0.0, 0.0]], &stamped(20.0, ROUND), &no_pen(), WHITE, &v, &no_sheet());
+        assert_eq!(plain[0].falloff, 1.0);
+        assert_eq!(Prim::rect(plain[0].bounds(), WHITE).falloff, 1.0);
+        let swept = stroke_prims(&[[0.0, 0.0], [20.0, 0.0]], &tip(8.0, 1.0, 0.5), &no_pen(), WHITE, &v, &no_sheet());
+        assert_eq!(swept[0].falloff, 1.0, "a swept stroke has no nib to bend");
     }
 
     #[test]
@@ -1630,6 +1668,7 @@ mod tests {
             spacing: 0.5,
             roundness: 0.25,
             rotation: 90.0,
+            profile: Profile::RegularSolid,
             flow: 1.0,
             ..ROUND
         };

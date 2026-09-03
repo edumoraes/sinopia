@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 469 tests.
+- `cargo build` clean, `cargo test` with 472 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -59,9 +59,13 @@ selection, navigation, pasted images, and projects in tabs:
   seventeen of the thirty brushes that throw the *gap* name an amount
   larger than the gap itself — a throw either side of it would land
   negative more often than not. The canvas does not guess at any of the
-  three. The rest of the body is read off
-  the real sets and described truthfully while the engine grows into it
-  — the tip's profile, and how deep the paper bites into it. What is
+  three. The **tip's profile** paints too: Sketchbook picks one of four
+  falloffs per brush — 61 airbrush, 40 sharp, 26 hard solid, the rest
+  the plain ramp — and it is what the edge does over the width the
+  Edge slider gives it, so an airbrush fades over its whole band
+  instead of ramping straight across. The rest of the body is read off
+  the real sets and described truthfully while the engine grows into
+  it — how deep the paper bites into the nib. What is
   left promising a mark the ink cannot make is the brush told apart by
   a *grain* — a texture nib, or the canvas's own paper — and the
   library says so per brush. A ring the size of the brush follows the
