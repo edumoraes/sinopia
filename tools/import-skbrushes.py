@@ -15,8 +15,10 @@ the gray full and the alpha the coverage, exactly as the glyph atlas is
 read. Sketchbook has two kinds and the sheet carries both: a `shape` is
 a silhouette stamped in place of a round dab, a `texture` is a grain
 worn over one, and the library says which a brush names. A
-`paperTexture` is neither — it belongs to the canvas, not to the nib,
-and Sketchbook ships no image for it here.
+`paperTexture` is neither — it belongs to the canvas, not to the nib —
+and this passes over it, though its art is here too: 49 brushes turn a
+paper on, they name 30 TIFFs between them, and every one of those is in
+the sets.
 
 The originals are 34 MB and 438 MB of shape/texture TIFFs once opened, so
 they stay out of the repo: only what this writes is committed. Run it
@@ -152,9 +154,9 @@ def art_of(body):
 def wants_stamp(body):
     """Whether the brush is told apart by a nib or a paper of its own.
     It describes the brush, not its body: with a `shape` or a `grain`
-    beside it, it is the paper — which belongs to the canvas and which
-    Sketchbook ships no image for — that says the icon promises a mark
-    the ink cannot make."""
+    beside it, it is the paper — which belongs to the canvas, and which
+    nothing here reads yet — that says the icon promises a mark the ink
+    cannot make."""
     custom = tag(body, "customBrush")
     paper = tag(body, "paperTexture")
     return (custom.get("type", "off") != "off"

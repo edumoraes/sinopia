@@ -74,9 +74,11 @@ selection, navigation, pasted images, and projects in tabs:
   the real sets and described truthfully while the engine grows into
   it — how deep the paper bites into the nib. What is
   left promising a mark the ink cannot make is the brush told apart by
-  the canvas's own *paper* — 22 of them, and Sketchbook ships no image
-  for one — and the library says so per brush. A ring the size of the
-  brush follows the pointer.
+  the canvas's own *paper* — 22 of them — and the library says so per
+  brush. The art for it is not missing: 49 of the 211 turn a paper on,
+  they name 30 images between them, and every one of those TIFFs ships
+  in the sets. What is owed is the reading, not the finding. A ring the
+  size of the brush follows the pointer.
   **The eight erasers erase.** Sketchbook gives every brush a stamp
   blend style and 91 of the 211 name something other than plain ink;
   the erasers used to paint. A raster layer is now built on a sheet of
@@ -268,11 +270,9 @@ selection, navigation, pasted images, and projects in tabs:
 - CLI: `--new`, `--open <id>`, `--export <dir>`, `--shutdown`,
   `--socket <path>`.
 
-Not yet: eraser, the text tool, shapes, undo, export, Omarchy plugin,
-thumbnails, layer opacity and renaming, brush colour and pressure, a
-library that outlives the process, and the grain the muted sliders that
-are left still wait on — a texture nib, the canvas's own paper, and the
-tip profile that shapes a round nib's falloff.
+Not yet: the text tool, shapes, undo, export, Omarchy plugin,
+thumbnails, layer opacity and renaming, and the canvas's own paper —
+the grain the one muted slider in the Nib section still waits on.
 
 ## Controls
 
