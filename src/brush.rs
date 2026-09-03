@@ -455,6 +455,10 @@ impl Brush {
                 spacing: self.spacing,
                 roundness: self.roundness,
                 rotation: self.rotation,
+                // Only one of Sketchbook's four rotation dynamics is
+                // the canvas's to honour: the other two are the
+                // stylus's tilt and roll, which nothing reports yet.
+                follow: self.dynamics == Dynamics::ToStroke,
                 flow: self.flow,
                 scatter: Scatter {
                     size: self.jitter.size,
@@ -941,6 +945,7 @@ mod tests {
             b.tip(None).stamp,
             Some(Stamp {
                 shape: None,
+                follow: false,
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,

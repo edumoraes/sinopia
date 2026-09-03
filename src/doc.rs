@@ -169,6 +169,10 @@ pub struct Rect {
     pub text: Option<String>,
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
@@ -228,6 +232,12 @@ pub struct Stamp {
     pub roundness: f64,
     /// The nib's own angle, in degrees, clockwise.
     pub rotation: f64,
+    /// Whether the nib turns with the stroke, its own angle added to
+    /// the heading. Sketchbook's Rotation Dynamics, less the two the
+    /// stylus drives: a pattern that has to run along the stroke says
+    /// so, and the rest stand still.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub follow: bool,
     /// What one dab lays, 0–1. The stroke builds toward its opacity
     /// where the dabs cross; 1 is a dab that covers on its own.
     #[serde(default = "one", skip_serializing_if = "is_one")]
@@ -916,6 +926,7 @@ mod tests {
             p.strokes[0].stamp,
             Some(Stamp {
                 shape: None,
+                follow: false,
                 spacing: 0.4,
                 roundness: 0.5,
                 rotation: 30.0,

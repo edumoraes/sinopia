@@ -778,9 +778,17 @@ pub fn stamp_prims(
         Some(nib) => Prim::shaped_dab(at, half, turn, nib, ink),
         None => Prim::dab(at, half, feather, turn, ink),
     };
-    let dab = |at: (f32, f32), n: u32| {
+    // The way the stroke is going where the dab lands, in radians, when
+    // the nib runs along it — a nib that stands still has none.
+    let heading = |h: f32| if stamp.follow { h } else { 0.0 };
+    let dab = |at: (f32, f32), n: u32, h: f32| {
         if true_nib {
-            return lay(at, (radius, radius * squish), feather, angle.to_radians());
+            return lay(
+                at,
+                (radius, radius * squish),
+                feather,
+                heading(h) + angle.to_radians(),
+            );
         }
         let r = (radius + size_throw * dice(seed, n, SALT_SIZE) as f32).max(NIB_MIN_PX);
         let softness = r / radius.max(NIB_MIN_PX);
@@ -789,7 +797,7 @@ pub fn stamp_prims(
             at,
             (r, (r * squish).max(NIB_MIN_PX)),
             feather * softness,
-            turn.to_radians(),
+            heading(h) + turn.to_radians(),
         )
     };
     // The gap before dab `n`, thrown by the scatter and never shorter
@@ -802,7 +810,14 @@ pub fn stamp_prims(
         (thrown * width).max(STAMP_STEP_MIN)
     };
 
-    let mut out = vec![dab(first, 0)];
+    // The first dab lies along the span it starts on, which the walk
+    // has not reached yet.
+    let start = points
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0, w[1].1 - w[0].1))
+        .find(|&(dx, dy)| dx != 0.0 || dy != 0.0)
+        .map_or(0.0, |(dx, dy)| dy.atan2(dx));
+    let mut out = vec![dab(first, 0, start)];
     let mut n = 1u32;
     // How far the walk has come since the last dab, carried across the
     // polyline's corners so the spacing is of the stroke, not of a span.
@@ -815,10 +830,11 @@ pub fn stamp_prims(
         if span <= 0.0 {
             continue;
         }
+        let along = dy.atan2(dx);
         let mut at = next - carry;
         while at <= span {
             let k = at / span;
-            out.push(dab((prev.0 + dx * k, prev.1 + dy * k), n));
+            out.push(dab((prev.0 + dx * k, prev.1 + dy * k), n, along));
             n += 1;
             next = gap(n);
             at += next;
@@ -1311,6 +1327,7 @@ mod tests {
     /// A round nib, dabbed half a width apart.
     const ROUND: Stamp = Stamp {
         shape: None,
+        follow: false,
         spacing: 0.5,
         roundness: 1.0,
         rotation: 0.0,
@@ -1496,6 +1513,53 @@ mod tests {
         assert_eq!(f.groups.len(), 1);
         assert_eq!((f.groups[0].start, f.groups[0].end), (1, 2));
         assert_eq!(f.groups[0].opacity, 0.25);
+    }
+
+    #[test]
+    fn a_nib_that_follows_the_stroke_turns_with_it() {
+        use std::f32::consts::FRAC_PI_2;
+        let v = view(0.0, 0.0, 1.0);
+        // Right, then down: the nib turns a quarter at the corner.
+        let corner = [[-20.0, -20.0], [20.0, -20.0], [20.0, 20.0]];
+        let flat = Stamp {
+            roundness: 0.3,
+            ..ROUND
+        };
+        let nib = stamped(
+            8.0,
+            Stamp {
+                follow: true,
+                ..flat.clone()
+            },
+        );
+        let got = stroke_prims(&corner, &nib, WHITE, &v, &no_sheet());
+        assert!(got.len() > 4);
+        assert!(
+            got[0].angle.abs() < 1e-4,
+            "the first dab lies along the span it starts on"
+        );
+        assert!(
+            (got.last().unwrap().angle - FRAC_PI_2).abs() < 1e-4,
+            "and the last one down the span it ends on"
+        );
+
+        // Its own angle is added to the heading, never replaced by it.
+        let turned = stamped(
+            8.0,
+            Stamp {
+                follow: true,
+                rotation: 90.0,
+                ..flat.clone()
+            },
+        );
+        let got = stroke_prims(&corner, &turned, WHITE, &v, &no_sheet());
+        assert!((got[0].angle - FRAC_PI_2).abs() < 1e-4);
+
+        // A nib that does not follow keeps its angle, whatever the
+        // stroke does around it.
+        let fixed = stamped(8.0, flat);
+        let got = stroke_prims(&corner, &fixed, WHITE, &v, &no_sheet());
+        assert!(got.iter().all(|d| d.angle == 0.0), "the nib stands still");
     }
 
     #[test]

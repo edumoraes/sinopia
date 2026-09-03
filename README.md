@@ -43,9 +43,13 @@ selection, navigation, pasted images, and projects in tabs:
   three, and `flow` with them — what one dab lays. **103 of the 211
   stamp a nib of their own**: Sketchbook's own shape images, converted
   into one sheet of 90 that the binary carries, and a stroke names the
-  nib it was laid with. A nib is also thrown off true dab by dab: its
-  radius, its angle and the gap before it, each by an amount in its own
-  unit, which is how Sketchbook states randomness. The other two
+  nib it was laid with, and **turns with the stroke** when the brush
+  says it should — 67 of them do, and 59 of those stamp a shape, so a
+  bristle nib runs along the curve instead of pointing one way through
+  it. The other three Rotation Dynamics are the stylus's tilt and roll,
+  which nothing reports yet. A nib is also thrown off true dab by dab:
+  its radius, its angle and the gap before it, each by an amount in its
+  own unit, which is how Sketchbook states randomness. The other two
   amounts it states — on opacity and flow — are not in those
   properties' own unit (a fraction thrown by five, or by twenty), so
   the canvas does not guess at them. The rest of the body is read off
