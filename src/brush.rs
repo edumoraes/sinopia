@@ -544,6 +544,23 @@ pub struct Tip {
     pub stamp: Option<Stamp>,
 }
 
+/// How much of the pencil's width the pen takes away at no pressure.
+/// A brush says this on its own nib, where a slider reaches it; the
+/// pencil has no sliders at all, so its answer is the build's — and the
+/// document is none the poorer for it, since it records what the person
+/// can vary and there is nothing here to vary.
+///
+/// The number is off the shipped sets rather than out of the air: not
+/// one of Sketchbook's 211 brushes drives its size fully, and its own
+/// Fine Art pencils sit between a quarter and two thirds. Half is the
+/// middle of that, and a pencil at half is still a pencil at the
+/// lightest touch instead of a stroke that vanishes.
+pub const PENCIL_DRIVE: Pressure = Pressure {
+    size: 0.5,
+    opacity: 0.0,
+    flow: 0.0,
+};
+
 impl Tip {
     pub const PENCIL: Tip = Tip {
         width: PEN_WIDTH,
@@ -605,6 +622,16 @@ impl Tip {
         match self.stamp.as_ref().is_some_and(|s| s.mark.erases()) {
             true => Blend::Erase,
             false => Blend::Over,
+        }
+    }
+
+    /// How much of the nib the pen's pressure drives. A stamped tip
+    /// says so on its own nib; a swept one is the pencil, and thins
+    /// with the hand by [`PENCIL_DRIVE`].
+    pub fn drive(&self) -> Pressure {
+        match &self.stamp {
+            Some(stamp) => stamp.pressure,
+            None => PENCIL_DRIVE,
         }
     }
 

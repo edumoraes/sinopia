@@ -95,6 +95,13 @@ selection, navigation, pasted images, and projects in tabs:
   pointer, and it is the outline of the nib the next press would lay:
   a circle when the nib is round, the same flattened capsule when it
   is squished, leaning the way the ink will.
+  **The pencil thins with the hand too.** A swept stroke used to have
+  one width end to end whatever the pen said; it is now laid as a run
+  of capsules, cut fine enough that the outline is as true to the hand
+  as the flattened line is to the curve. How much a lighter touch takes
+  away is the build's, since the pencil has no sliders to record — half
+  the width, which is the middle of what Sketchbook's own Fine Art
+  pencils ask for, none of its 211 brushes driving size fully.
   **The eight erasers erase.** Sketchbook gives every brush a stamp
   blend style and 91 of the 211 name something other than plain ink;
   the erasers used to paint. A raster layer is now built on a sheet of

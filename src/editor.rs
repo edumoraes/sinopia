@@ -246,12 +246,9 @@ impl Stroke {
     /// presses all the way from end to end — leaves an empty envelope,
     /// and the board says nothing about a pen that was not there.
     pub fn envelope(&self) -> Envelope {
-        let driven = self
-            .tip
-            .stamp
-            .as_ref()
-            .is_some_and(|s| !s.pressure.is_none());
-        let pressure = self.readings(driven, |s| s.pressure, 1.0);
+        // The pencil sweeps and has no nib to ask, so `Tip::drive` is
+        // what answers for it: it thins with the hand like anything else.
+        let pressure = self.readings(!self.tip.drive().is_none(), |s| s.pressure, 1.0);
         let twist = self.readings(true, |s| s.twist(self.tip.dynamics), 0.0);
         Envelope { pressure, twist }
     }

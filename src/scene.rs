@@ -943,6 +943,77 @@ fn seed_at(start: [f64; 2]) -> u64 {
         ^ start[1].to_bits()
 }
 
+/// How far a swept stroke's outline may stray from the taper the pen
+/// asked for, in px: the same quarter pixel the curve is flattened to,
+/// so the width is as true to the hand as the line is to the curve.
+const TAPER_TOLERANCE_PX: f32 = 0.25;
+
+/// The spans a swept nib lays along `points` (screen px). The pencil is
+/// the only nib that sweeps, and it thins with the hand: `drive` is how
+/// much of its width a lighter touch takes away and `pen` is what the
+/// hand did, read by how far along the span falls — the same question
+/// a dab is asked.
+///
+/// A span is a capsule of one width, so a taper is laid as a run of
+/// them: each span is cut into as many as it takes for the radius to
+/// move less than [`TAPER_TOLERANCE_PX`] across one. A stroke the pen
+/// never touched is one capsule a span, as it always was.
+fn swept_prims(
+    points: &[(f32, f32)],
+    radius: f32,
+    feather: f32,
+    drive: Pressure,
+    pen: &Envelope,
+    color: Rgba,
+) -> Vec<Prim> {
+    if drive.size == 0.0 || pen.pressure.is_empty() {
+        return soft_polyline_prims(points, radius, feather, color);
+    }
+    let Some(&first) = points.first() else {
+        return Vec::new();
+    };
+    let spans: Vec<f32> = points
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .collect();
+    let total: f32 = spans.iter().sum();
+    // What the nib is worth `u` of the way along. The ramp is a share
+    // of the radius, so it thins with it, exactly as a dab's does.
+    let nib = |u: f32| {
+        let press = pen.pressure_at(u);
+        let narrow = Pressure::scale(drive.size, f64::from(press)) as f32;
+        ((radius * narrow).max(NIB_MIN_PX), feather * narrow)
+    };
+    if total <= 0.0 {
+        let (r, f) = nib(0.0);
+        return soft_polyline_prims(&[first], r, f, color);
+    }
+    let mut out = Vec::new();
+    let mut walked = 0.0f32;
+    for (i, &span) in spans.iter().enumerate() {
+        let (a, b) = (points[i], points[i + 1]);
+        if span <= 0.0 {
+            continue;
+        }
+        let (u0, u1) = (walked / total, (walked + span) / total);
+        // How many capsules this span needs for its own change of
+        // width to stay under the tolerance.
+        let cuts = (((nib(u0).0 - nib(u1).0).abs() / TAPER_TOLERANCE_PX).ceil() as usize).max(1);
+        for k in 0..cuts {
+            let (s, e) = (k as f32 / cuts as f32, (k + 1) as f32 / cuts as f32);
+            let at = |k: f32| (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k);
+            let (r, f) = nib(u0 + (u1 - u0) * (s + e) / 2.0);
+            out.push(Prim::soft_segment(at(s), at(e), r, f, color));
+        }
+        walked += span;
+    }
+    if out.is_empty() {
+        let (r, f) = nib(0.0);
+        return soft_polyline_prims(&[first], r, f, color);
+    }
+    out
+}
+
 /// The dabs a stamped nib lays along `points` (screen px): one where
 /// the press was, then one every `spacing` units of arc length after
 /// it. The tail left over past the last dab is not stamped — a stroke
@@ -1132,7 +1203,7 @@ fn tip_prims(
             },
             color,
         ),
-        None => soft_polyline_prims(screen, radius, feather, color),
+        None => swept_prims(screen, radius, feather, tip.drive(), pen, color),
     }
 }
 
@@ -1672,6 +1743,54 @@ mod tests {
     /// A stroke drawn with no pen: pressed all the way, end to end.
     fn no_pen() -> Envelope {
         Envelope::default()
+    }
+
+    #[test]
+    fn a_swept_stroke_thins_with_the_hand_and_stays_true_to_the_taper() {
+        let v = view(0.0, 0.0, 1.0);
+        let line = [[0.0, 0.0], [400.0, 0.0]];
+        let pencil = tip(20.0, 1.0, 1.0);
+        // A stroke the pen never touched is one capsule a span, as it
+        // always was: the taper costs nothing when there is none.
+        let flat = stroke_prims(&line, &pencil, &no_pen(), WHITE, &v, &no_sheet());
+        assert_eq!(flat.len(), 1, "one span, one capsule");
+        assert_eq!(flat[0].radius, 10.0);
+
+        // Leaned on at the start and let go by the end, it tapers.
+        let leaned = pressed(&[1.0, 0.0]);
+        let taper = stroke_prims(&line, &pencil, &leaned, WHITE, &v, &no_sheet());
+        assert!(taper.len() > 8, "cut into {} capsules", taper.len());
+        let radii: Vec<f32> = taper.iter().map(|p| p.radius).collect();
+        assert!(
+            radii.windows(2).all(|w| w[1] <= w[0]),
+            "the width only falls: {radii:?}"
+        );
+        // Full pressure is the whole width; none of it is what
+        // `PENCIL_DRIVE` leaves, and never nothing at all.
+        assert!((radii[0] - 10.0).abs() < 0.5, "{}", radii[0]);
+        let least = radii[radii.len() - 1];
+        assert!(least > NIB_MIN_PX, "{least} is a hairline, not a gap");
+        assert!((least - 5.0).abs() < 0.5, "half the width at no pressure: {least}");
+        // No step in the outline is wider than the tolerance, so the
+        // taper is as true as the flattened line under it.
+        assert!(
+            radii.windows(2).all(|w| (w[0] - w[1]).abs() <= TAPER_TOLERANCE_PX + 1e-3),
+            "{radii:?}"
+        );
+        // And the capsules still cover the whole line, end to end.
+        let (first, last) = (taper[0].geom, taper[taper.len() - 1].geom);
+        assert_eq!((first[0], first[1]), (flat[0].geom[0], flat[0].geom[1]));
+        assert!((last[2] - flat[0].geom[2]).abs() < 1e-3, "{}", last[2]);
+    }
+
+    #[test]
+    fn only_the_pencil_sweeps_so_only_it_carries_the_builds_own_drive() {
+        // A brush says how much the pen drives it on its own nib, where
+        // a slider reaches; the pencil has no sliders, so the build
+        // answers for it.
+        assert_eq!(Tip::PENCIL.drive(), crate::brush::PENCIL_DRIVE);
+        let nib = stamped(20.0, ROUND);
+        assert_eq!(nib.drive(), ROUND.pressure);
     }
 
     #[test]
