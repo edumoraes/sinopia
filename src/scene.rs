@@ -145,6 +145,24 @@ pub fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
     ]
 }
 
+/// A colour as `#rrggbb` — the form a document holds. The inverse of
+/// [`parse_color`] for everything a theme derives, which is opaque: the
+/// channels go back through the gamma they came in by, since a document
+/// speaks sRGB and the renderer speaks linear. A round trip is exact to
+/// the byte, which is all a hex can carry.
+pub fn to_hex(c: Rgba) -> String {
+    let byte = |v: f32| (linear_to_srgb(v).clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(c[0]), byte(c[1]), byte(c[2]))
+}
+
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 pub fn with_alpha(c: Rgba, alpha: f32) -> Rgba {
     [c[0], c[1], c[2], alpha]
 }
@@ -3782,5 +3800,13 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn to_hex_is_the_inverse_of_parse_color() {
+        assert_eq!(to_hex([0.0, 0.0, 0.0, 1.0]), "#000000");
+        assert_eq!(to_hex([1.0, 1.0, 1.0, 1.0]), "#ffffff");
+        let c = parse_color("#3b82f6");
+        assert_eq!(parse_color(&to_hex(c)), c, "a colour survives the round trip");
     }
 }

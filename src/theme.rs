@@ -2,7 +2,7 @@
 //! dot grid, near-black ink, white dock — and re-derived from the three
 //! colors the plugin sends with `op: theme` (§5).
 
-use crate::scene::{Rgba, mix, parse_color, try_parse_color, with_alpha};
+use crate::scene::{Rgba, mix, parse_color, to_hex, try_parse_color, with_alpha};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
@@ -12,6 +12,9 @@ pub struct Theme {
     /// Ink as written into new path elements (always a valid hex).
     pub ink_hex: String,
     pub panel: Rgba,
+    /// The panel colour as a document can hold it — what a new frame's
+    /// background is set to (always a valid hex).
+    pub panel_hex: String,
     pub border: Rgba,
     pub shadow: Rgba,
     pub icon: Rgba,
@@ -74,6 +77,7 @@ impl Theme {
             ink,
             ink_hex,
             panel,
+            panel_hex: to_hex(panel),
             border: mix(panel, ink, 0.12),
             shadow: with_alpha(BLACK, if light { 0.16 } else { 0.5 }),
             icon: mix(ink, bg_c, 0.15),
@@ -175,6 +179,26 @@ mod tests {
                 try_parse_color(hex).is_some(),
                 "{hex} is written into documents"
             );
+        }
+    }
+
+    /// The panel is a mix, and a hex carries eight bits a channel, so
+    /// the round trip lands on the nearest byte rather than exactly
+    /// where it started. What has to hold is that it is the same colour
+    /// to the eye, and that it parses at all — a frame's background is
+    /// written into a document.
+    #[test]
+    fn panel_hex_is_the_panel_a_document_can_hold() {
+        for t in [Theme::light(), Theme::from_hex("#1a1a1a", "#eee", "#7aa")] {
+            assert!(try_parse_color(&t.panel_hex).is_some(), "{:?}", t.panel_hex);
+            let back = parse_color(&t.panel_hex);
+            for ch in 0..3 {
+                assert!(
+                    (back[ch] - t.panel[ch]).abs() < 0.01,
+                    "{:?} came back as {back:?}",
+                    t.panel
+                );
+            }
         }
     }
 }
