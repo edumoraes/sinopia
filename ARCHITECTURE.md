@@ -276,6 +276,30 @@ elements join it. A `layer` no layer carries, or a duplicate layer id, is
 an error — the parse stays closed. The active layer is session state
 (§6.2), not a field.
 
+Landed — frames, and the stack one carries:
+
+```json
+{ "layers": [ { "id": "01J…", "name": "Layer 1" },
+              { "id": "01J…", "name": "Frame 1", "kind": "frame" } ],
+  "elements": [
+    { "id": "el_05", "type": "frame", "layer": "01J…",
+      "x": -200, "y": -140, "w": 400, "h": 300, "background": "#fbfbfa",
+      "layers": [ { "id": "01J…", "name": "Layer 1" } ] } ] }
+```
+
+A frame is an area that holds objects, and the layer of `kind: frame` it
+sits on is the layer it *is*: the two go together, and the parse refuses
+either half alone. `layers` on a frame is a stack of its own, bottom to
+top, never empty once parsed and never holding a frame — frames do not
+nest. `elements` stays flat: an object inside a frame simply names one of
+that frame's layers, and since layer ids are unique across every stack,
+the `layer` an element already carried says where it is. `background` is
+an unvalidated hex, as a rect's `fill` is; there is no `rotation`,
+because the cut that makes a frame a frame is an axis-aligned box in the
+shader, and a field that cannot be honoured is worse than no field. A
+board written before frames existed parses unchanged: `kind` still
+defaults to raster, and nothing it holds is a frame.
+
 Landed — `opacity` and `hardness` on `path` (the brush): fractions,
 absent when 1. `opacity` is the stroke's as one shape — where it crosses
 itself it does not darken — and `hardness` is how much of the radius is

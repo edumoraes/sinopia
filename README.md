@@ -231,6 +231,21 @@ selection, navigation, pasted images, and projects in tabs:
   load, and their elements join it. A layer written before kinds
   existed is a stack that accumulates, so it reads back as raster —
   the kind is on disk only when it is `vector`.
+- Frames: an area that holds objects, drawn with the Frame tool (`F`) by
+  dragging it out. What is inside it is cut to its boundary — ink that
+  runs past the edge stops there, and stops being clickable there too. It
+  has a layer stack of its own, and it is itself a layer on the board:
+  its card ends in a chevron that goes in, and inside it the panel's
+  header says the frame's name and leads back out. It is born the
+  theme's surface, and clicking an ink with a frame selected paints its
+  ground. What is inside is decided by geometry rather than by the panel:
+  a stroke belongs to the frame the press landed in, whatever it does
+  afterwards, and an object let go of inside a frame joins it while one
+  dragged out leaves — its layer moves with it, because a layer is the
+  object it holds. A frame drawn over things claims what its area
+  covers. Moving it carries what it holds; resizing it moves the
+  boundary and shows more or less of them. It does not turn — the cut is
+  an axis-aligned box in the shader — and it does not nest.
 - Select: click picks the topmost element, `Shift`+click toggles one in
   or out, dragging on empty canvas draws a marquee that selects whatever
   it overlaps (`Shift` adds to the selection). The selection shows its
@@ -247,7 +262,7 @@ selection, navigation, pasted images, and projects in tabs:
   degrees since it was created; paths still bake transforms into their
   curves, the field only turns their box and anchors the snap.
 - Tool dock centered at the bottom — Select `V`, Hand `H`, Pencil `P`,
-  Brush `B`, Zoom `Z`; `Esc` cancels the stroke, gesture or drag in
+  Brush `B`, Frame `F`, Zoom `Z`; `Esc` cancels the stroke, gesture or drag in
   progress.
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
   wheel and two-finger scroll pan (Shift: horizontally); a three-finger
@@ -326,7 +341,8 @@ selection, navigation, pasted images, and projects in tabs:
   one nobody meant.
 
 Not yet: the text tool, shapes, undo, export,
-thumbnails, layer opacity and renaming, and the six sliders that stay
+thumbnails, layer opacity and renaming, frames that nest or turn or come
+in more than the one basic kind, and the six sliders that stay
 muted — three randomness amounts whose scale the sets contradict, and
 the whole of Paint, which asks the canvas to read back the ink it has
 already laid.
@@ -335,7 +351,7 @@ already laid.
 
 | Input | Effect |
 |---|---|
-| `V` / `H` / `P` / `B` / `Z` | Select / Hand / Pencil / Brush / Zoom tool (also clickable in the dock) |
+| `V` / `H` / `P` / `B` / `F` / `Z` | Select / Hand / Pencil / Brush / Frame / Zoom tool (also clickable in the dock) |
 | `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
 | Left drag (Brush) | Paint with the brush; the stroke is fitted to Béziers on release |
 | `Shift` + `B` | Show / hide the brush palette |
@@ -348,6 +364,9 @@ already laid.
 | `{` / `}` (Brush selected) | Brush softer / harder |
 | `1`–`9`, `0` (Brush selected) | Brush opacity 10%–90%, 100% |
 | `Shift` + `L` | Show / hide the layers panel |
+| Left drag (Frame) | Drag out a frame; what its area covers joins it |
+| Click a frame card's `›` / the panel's title | Work inside that frame / back out to the board |
+| Click an ink with a frame selected | Paint the frame's ground |
 | Click a layer row / its eye | Make it the active layer / show or hide it |
 | Panel `▲` `▼` `+` `🗑` | Move the active layer up / down, add a layer above it, remove it |
 | Click (Select) | Select the topmost element under the pointer; empty canvas clears |
@@ -395,7 +414,7 @@ XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- \
 ```
 src/main.rs      CLI dispatch → forward to the live instance, or become it
 src/cli.rs       flags (clap), mutually exclusive actions
-src/doc.rs       document §6.1 (pure data, serde): layers, rect, path, image
+src/doc.rs       document §6.1 (pure data, serde): layers and frames, rect, path, image
 src/store.rs     ~/.local/share/omawhite: boards/, blobs/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
