@@ -292,8 +292,21 @@ selection, navigation, pasted images, and projects in tabs:
 - IPC protocol §5 (closed schema) + single instance via socket.
 - CLI: `--new`, `--open <id>`, `--export <dir>`, `--shutdown`,
   `--socket <path>`.
+- Omarchy plugin (`plugin/`, §10.2): a bar widget whose popout holds the
+  two ways in — `n` for a new board, `o` for the list of those already
+  saved, newest first, opened by `Enter` or a click. It is a shell and
+  nothing more: it reads `index.json`, which is the one file it is
+  allowed to read, drops any entry naming an id the engine would refuse,
+  and launches the binary detached, so the board owns its own window and
+  killing it cannot take the shell down. The engine is looked for on the
+  `PATH`, in `~/.local/bin`, at an `enginePath` set in `shell.json`, and
+  finally in `target/` beside a checkout — and when none of them answers
+  the popout says so instead of swallowing the click. Enter and Space act
+  only once the arrows have raised a cursor that can be seen: the two
+  menu rows carry their own letters, and a selection nobody is shown is
+  one nobody meant.
 
-Not yet: the text tool, shapes, undo, export, Omarchy plugin,
+Not yet: the text tool, shapes, undo, export,
 thumbnails, layer opacity and renaming, and the six sliders that stay
 muted — three randomness amounts whose scale the sets contradict, and
 the whole of Paint, which asks the canvas to read back the ink it has
@@ -391,6 +404,7 @@ src/tablet.rs    the tablet's pen (zwp_tablet_v2) → event loop bridge; its fra
 src/clipboard.rs selection reads (wl_data_device) → event loop bridge
 src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
 assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
+plugin/          the Omarchy bar widget (QML): manifest, BarWidget, install notes
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay +

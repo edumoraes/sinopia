@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "edu.omawhite",
+  "name": "Omawhite",
+  "version": "0.1.0",
+  "author": "Eduardo de Moraes",
+  "license": "MIT",
+  "description": "Lança o quadro branco Omawhite: um board novo, ou um dos que já estão salvos.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omawhite",
+    "description": "Clique abre o popout: n para um board novo, o para a lista dos salvos.",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
