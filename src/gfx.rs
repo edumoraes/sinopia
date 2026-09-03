@@ -17,7 +17,7 @@ use anyhow::Context as _;
 use wgpu::util::DeviceExt as _;
 
 use crate::bitmap::Bitmap;
-use crate::scene::{self, Blend, Frame, ImageSlots, Pass, Prim, Rgba, Viewport};
+use crate::scene::{self, Blend, Frame, ImageSlots, Onto, Prim, Rgba, Viewport};
 
 const SHADER: &str = r#"
 struct Globals {
@@ -182,16 +182,19 @@ pub struct Gfx {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    /// The five ways a prim reaches a target, all from the one shader:
-    /// `direct` onto the window (straight alpha over); `composite` onto
-    /// the window from the scratch's premultiplied pixels; `union` onto
-    /// the scratch, every channel a max, so a swept stroke's spans
-    /// cover without adding up; `build` onto the scratch one over the
-    /// next, so a stamped stroke's dabs pile up toward its opacity;
-    /// `wipe` onto the scratch with no blending at all, which is how a
-    /// box clears it.
+    /// The six ways a prim reaches a target, all from the one shader:
+    /// `direct` onto the window (straight alpha over); `composite`
+    /// lays an offscreen surface's premultiplied pixels on whatever is
+    /// under them; `erase` lays them the other way round, taking their
+    /// coverage out of what is there, which is what an eraser does to
+    /// its own layer's sheet; `union` onto the scratch, every channel a
+    /// max, so a swept stroke's spans cover without adding up; `build`
+    /// one over the next, so a stamped stroke's dabs pile up toward its
+    /// opacity and a stroke lands on the sheet it is painting; `wipe`
+    /// with no blending at all, which is how a box clears a surface.
     direct: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
+    erase: wgpu::RenderPipeline,
     union: wgpu::RenderPipeline,
     build: wgpu::RenderPipeline,
     wipe: wgpu::RenderPipeline,
@@ -217,13 +220,24 @@ pub struct Gfx {
     /// The window-sized texture a group is composited in, once a frame
     /// has needed one. Rebuilt when the window changes size; like the
     /// atlas, a slot of its own and never an entry in `slots`.
-    scratch: Option<Scratch>,
+    scratch: Option<Surface>,
+    /// The second one, on the same terms: what a raster layer's paint
+    /// is built on when one of its strokes rubs the others out.
+    sheet: Option<Surface>,
 }
 
-struct Scratch {
+/// A window-sized texture a frame composites in.
+struct Surface {
     slot: u32,
     view: wgpu::TextureView,
     size: (u32, u32),
+}
+
+/// Which of the two a call is about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Which {
+    Scratch,
+    Sheet,
 }
 
 impl Gfx {
@@ -352,6 +366,21 @@ impl Gfx {
             "fs_premul",
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
+        // Coverage out of the destination instead of into it: what is
+        // left of the sheet is what the eraser did not cover.
+        let out = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let erase = pipeline(
+            "erase",
+            "fs_main",
+            Some(wgpu::BlendState {
+                color: out,
+                alpha: out,
+            }),
+        );
         let wipe = pipeline("wipe", "fs_premul", None);
 
         // Slot 0: what the runs with no image bind. White and opaque, so
@@ -376,6 +405,7 @@ impl Gfx {
             config,
             direct,
             composite,
+            erase,
             union,
             build,
             wipe,
@@ -389,20 +419,31 @@ impl Gfx {
             shapes: None,
             atlas: None,
             scratch: None,
+            sheet: None,
         })
     }
 
-    /// The scratch texture at the window's current size, made or remade
-    /// as needed, and its slot.
-    fn ensure_scratch(&mut self) -> u32 {
+    /// One of the two offscreen surfaces at the window's current size,
+    /// made or remade as needed, and its slot.
+    fn ensure_surface(&mut self, which: Which) -> u32 {
         let size = (self.config.width, self.config.height);
-        if let Some(s) = &self.scratch
-            && s.size == size
-        {
-            return s.slot;
-        }
+        let held = match which {
+            Which::Scratch => self.scratch.as_ref(),
+            Which::Sheet => self.sheet.as_ref(),
+        };
+        // A surface of the right size is already there; one of the
+        // wrong size keeps its slot and gives up its texture.
+        let held = match held {
+            Some(s) if s.size == size => return s.slot,
+            Some(s) => Some(s.slot),
+            None => None,
+        };
+        let label = match which {
+            Which::Scratch => "scratch",
+            Which::Sheet => "sheet",
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("scratch"),
+            label: Some(label),
             size: wgpu::Extent3d {
                 width: size.0,
                 height: size.1,
@@ -417,17 +458,21 @@ impl Gfx {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let group = bind_group(&self.device, &self.tex_bgl, &self.sampler, &view);
-        let slot = match &self.scratch {
-            Some(s) => {
-                self.textures[s.slot as usize] = group;
-                s.slot
+        let slot = match held {
+            Some(slot) => {
+                self.textures[slot as usize] = group;
+                slot
             }
             None => {
                 self.textures.push(group);
                 (self.textures.len() - 1) as u32
             }
         };
-        self.scratch = Some(Scratch { slot, view, size });
+        let surface = Some(Surface { slot, view, size });
+        match which {
+            Which::Scratch => self.scratch = surface,
+            Which::Sheet => self.sheet = surface,
+        }
         slot
     }
 
@@ -544,7 +589,8 @@ impl Gfx {
     /// `Ok(false)` = frame skipped (surface occluded or temporarily lost);
     /// the caller may try again later.
     pub fn render(&mut self, background: Rgba, frame: &Frame) -> anyhow::Result<bool> {
-        let scratch = self.ensure_scratch();
+        let scratch = self.ensure_surface(Which::Scratch);
+        let sheet = self.ensure_surface(Which::Sheet);
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -571,7 +617,7 @@ impl Gfx {
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::cast_slice(&globals));
 
-        let (prims, passes) = scene::passes(frame, viewport, scratch);
+        let (prims, passes) = scene::passes(frame, viewport, scratch, sheet);
         // A buffer per frame is the simplest thing that works; reuse and
         // per-element caching come with real profiling (§3).
         let instance_buf = self
@@ -582,6 +628,7 @@ impl Gfx {
                 usage: wgpu::BufferUsages::VERTEX,
             });
         let scratch_view = &self.scratch.as_ref().expect("scratch was ensured").view;
+        let sheet_view = &self.sheet.as_ref().expect("sheet was ensured").view;
         let [r, g, b, a] = background;
         let clear = wgpu::LoadOp::Clear(wgpu::Color {
             r: f64::from(r),
@@ -595,35 +642,27 @@ impl Gfx {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame"),
             });
-        let mut first = true;
+        // The window is cleared by the first pass onto it; everything
+        // else loads what is already there, since a wipe box is what
+        // opens an offscreen surface over the part that is being used.
+        let mut cleared = false;
         for pass in passes {
-            let (label, target, load, wipe, composite, range, pipeline) = match pass {
-                Pass::Direct {
-                    composite,
-                    start,
-                    end,
-                } => {
-                    let load = if first { clear } else { wgpu::LoadOp::Load };
-                    first = false;
-                    ("window", &view, load, None, composite, start..end, &self.direct)
+            let (label, target, load) = match pass.onto {
+                Onto::Window => {
+                    let load = if cleared { wgpu::LoadOp::Load } else { clear };
+                    cleared = true;
+                    ("window", &view, load)
                 }
-                Pass::Offscreen {
-                    wipe,
-                    start,
-                    end,
-                    blend,
-                } => (
-                    "scratch",
-                    scratch_view,
-                    wgpu::LoadOp::Load,
-                    Some(wipe),
-                    None,
-                    start..end,
-                    match blend {
-                        Blend::Union => &self.union,
-                        Blend::Build => &self.build,
-                    },
-                ),
+                Onto::Sheet => ("sheet", sheet_view, wgpu::LoadOp::Load),
+                Onto::Scratch => ("scratch", scratch_view, wgpu::LoadOp::Load),
+            };
+            let pipeline = match (pass.onto, pass.blend) {
+                // The window takes straight alpha; an offscreen surface
+                // holds premultiplied color, so a prim drawn onto one
+                // lands the way a composite does.
+                (Onto::Window, _) => &self.direct,
+                (Onto::Scratch, Blend::Union) => &self.union,
+                (Onto::Sheet | Onto::Scratch, _) => &self.build,
             };
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(label),
@@ -646,16 +685,22 @@ impl Gfx {
             }
             rp.set_bind_group(0, &self.bind_group, &[]);
             rp.set_vertex_buffer(0, instance_buf.slice(..));
-            if let Some(wipe) = wipe {
+            if let Some(wipe) = pass.wipe {
                 rp.set_pipeline(&self.wipe);
                 rp.set_bind_group(1, &self.textures[0], &[]);
                 rp.draw(0..6, wipe..wipe + 1);
             }
-            if let Some(composite) = composite {
-                rp.set_pipeline(&self.composite);
-                rp.set_bind_group(1, &self.textures[scratch as usize], &[]);
-                rp.draw(0..6, composite..composite + 1);
+            if let Some(lay) = pass.lay {
+                rp.set_pipeline(match lay.blend {
+                    Blend::Erase => &self.erase,
+                    _ => &self.composite,
+                });
+                // The box says which surface it samples.
+                let from = prims[lay.prim as usize].slot as usize;
+                rp.set_bind_group(1, self.textures.get(from).unwrap_or(&self.textures[0]), &[]);
+                rp.draw(0..6, lay.prim..lay.prim + 1);
             }
+            let range = pass.start..pass.end;
             if range.is_empty() {
                 continue;
             }

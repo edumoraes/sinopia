@@ -266,6 +266,60 @@ impl Profile {
     }
 }
 
+/// What a dab does to what is already on the sheet. Sketchbook's stamp
+/// blend style, which 91 of its 211 brushes name something other than
+/// `normal`: most lay ink over it, an eraser takes ink away, and the
+/// rest mix with the paint underneath — reading the sheet as well as
+/// writing it, which is another engine. Until it is written they lay
+/// ink like the rest, and [`Mark::painted`] is what says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Mark {
+    /// Ink over what is there: 120 of the brushes, and the pencil.
+    #[default]
+    #[serde(rename = "normal")]
+    Ink,
+    /// Ink taken away: the eight erasers.
+    #[serde(rename = "eraser")]
+    Erase,
+    #[serde(rename = "acrylic")]
+    Acrylic,
+    #[serde(rename = "marker")]
+    Marker,
+    #[serde(rename = "pastel")]
+    Pastel,
+    #[serde(rename = "smudge")]
+    Smudge,
+    #[serde(rename = "makerColorless")]
+    Colorless,
+    #[serde(rename = "glowBrush")]
+    Glow,
+}
+
+impl Mark {
+    /// Whether the canvas does what it says. Ink and the eraser, so
+    /// far: the other six read the paint under the dab, which is a
+    /// different engine, and a brush naming one of them lays plain ink
+    /// rather than promising a mixture it cannot make.
+    #[allow(dead_code)] // the library is held to it, brush by brush
+    pub fn painted(self) -> bool {
+        matches!(self, Mark::Ink | Mark::Erase)
+    }
+
+    /// Whether it takes ink away instead of laying it. An erasing
+    /// stroke is never drawn straight onto the board: it is composited
+    /// out of the sheet its own layer is built on, so it rubs out that
+    /// layer and nothing under it.
+    pub fn erases(self) -> bool {
+        self == Mark::Erase
+    }
+
+    /// Plain ink: absent on disk, and what a board that never named one
+    /// means.
+    fn is_ink(&self) -> bool {
+        *self == Mark::Ink
+    }
+}
+
 /// How much of each property the pen's pressure drives, 0–1: 0 is one
 /// pressure never touches, 1 one it drives from nothing up to the value
 /// the brush names. A light touch gives `v * (1 − amount)`, a heavy one
@@ -419,6 +473,9 @@ pub struct Stamp {
     /// What its edge does over the ramp the hardness leaves it.
     #[serde(default, skip_serializing_if = "Profile::is_regular")]
     pub profile: Profile,
+    /// What one dab does to the ink already on the sheet.
+    #[serde(default, skip_serializing_if = "Mark::is_ink")]
+    pub mark: Mark,
     /// Whether the nib turns with the stroke, its own angle added to
     /// the heading. Sketchbook's Rotation Dynamics, less the two the
     /// stylus drives: a pattern that has to run along the stroke says
@@ -1312,6 +1369,7 @@ mod tests {
                 roundness: 0.5,
                 rotation: 30.0,
                 profile: Profile::RegularSolid,
+                mark: Mark::Ink,
                 flow: 1.0,
                 scatter: Scatter::default(),
                 pressure: Pressure::NONE,

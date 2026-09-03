@@ -995,39 +995,63 @@ pub fn path_prims(
     tip_prims(&screen, tip, pen, seed, color, view, shapes)
 }
 
-/// How a group's prims meet each other in the scratch texture.
+/// How prims meet what is already on the surface they are drawn onto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Blend {
+    /// One over the next, straight alpha: what the window is painted
+    /// with, and what a finished stroke does to the sheet it lands on.
+    Over,
     /// Every channel a max: the union of their coverage, and no more.
     /// What a swept stroke needs — its spans overlap at every joint,
     /// and a soft edge would bead there if they added up.
     Union,
-    /// One over the next: coverage builds where they cross. What a
-    /// stamped stroke needs — flow is what one dab lays, and a stroke
-    /// crossing itself is darker for it, as paint is.
+    /// One over the next, premultiplied: coverage builds where they
+    /// cross. What a stamped stroke needs — flow is what one dab lays,
+    /// and a stroke crossing itself is darker for it, as paint is.
     Build,
+    /// Coverage taken away instead of added: what an eraser does to the
+    /// sheet its own layer is built on.
+    Erase,
 }
 
 /// A stretch of a frame's prims that is composited as one shape: drawn
 /// into the scratch texture, meeting each other as `blend` says, then
-/// laid on the frame once at `opacity`. `bounds` is what the shader
-/// rasterizes for them, ramp included.
+/// laid on what is under them once at `opacity`, meeting *that* as
+/// `lands` says. `bounds` is what the shader rasterizes for them, ramp
+/// included.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Group {
     pub start: u32,
     pub end: u32,
     pub opacity: f32,
     pub blend: Blend,
+    /// How the finished shape meets what it is laid on: ink over it, or
+    /// ink taken out of it.
+    pub lands: Blend,
     pub bounds: ScreenRect,
 }
 
-/// Everything on screen: the prims in paint order, and which stretches
-/// of them are composited as groups. Groups never overlap and come in
-/// order.
+/// A stretch of a frame's prims built on a sheet of its own before it
+/// is laid on the window: one raster layer's paint, whose strokes have
+/// to be able to take ink out of each other without touching the board
+/// under them. A paint with nothing to rub out needs no sheet and does
+/// not get one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sheet {
+    pub start: u32,
+    pub end: u32,
+    pub bounds: ScreenRect,
+}
+
+/// Everything on screen: the prims in paint order, which stretches of
+/// them are composited as groups, and which are built on a sheet.
+/// Neither groups nor sheets overlap their own kind, both come in
+/// order, and a group lies wholly inside a sheet or wholly outside one.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Frame {
     pub prims: Vec<Prim>,
     pub groups: Vec<Group>,
+    pub sheets: Vec<Sheet>,
 }
 
 impl Frame {
@@ -1035,14 +1059,15 @@ impl Frame {
         Frame::default()
     }
 
-    /// Prims drawn straight onto the frame.
+    /// Prims drawn straight onto whatever they are inside.
     pub fn extend(&mut self, prims: impl IntoIterator<Item = Prim>) {
         self.prims.extend(prims);
     }
 
-    /// Prims composited as one shape at `opacity`, meeting each other
-    /// as `blend` says. Nothing to draw makes no group.
-    pub fn group(&mut self, prims: Vec<Prim>, opacity: f32, blend: Blend) {
+    /// Prims composited as one shape at `opacity`, meeting each other as
+    /// `blend` says and what they land on as `lands` says. Nothing to
+    /// draw makes no group.
+    pub fn group(&mut self, prims: Vec<Prim>, opacity: f32, blend: Blend, lands: Blend) {
         let Some(bounds) = prims
             .iter()
             .map(Prim::painted_bounds)
@@ -1057,12 +1082,30 @@ impl Frame {
             end: self.prims.len() as u32,
             opacity,
             blend,
+            lands,
             bounds,
         });
     }
 
+    /// Whatever `build` puts in the frame, built on a sheet of its own
+    /// and laid on the window as one. Nothing drawn makes no sheet.
+    pub fn sheet(&mut self, build: impl FnOnce(&mut Frame)) {
+        let start = self.prims.len() as u32;
+        build(self);
+        let end = self.prims.len() as u32;
+        let Some(bounds) = self.prims[start as usize..end as usize]
+            .iter()
+            .map(Prim::painted_bounds)
+            .reduce(|a, b| a.union(&b))
+        else {
+            return;
+        };
+        self.sheets.push(Sheet { start, end, bounds });
+    }
+
     /// A stroke's prims, direct or grouped as its tip demands. A
-    /// stamped stroke builds; a swept one unions.
+    /// stamped stroke builds; a swept one unions; an eraser is taken
+    /// back out of what it is laid on.
     pub fn stroke(&mut self, prims: Vec<Prim>, tip: &Tip) {
         if tip.is_direct() {
             self.extend(prims);
@@ -1071,7 +1114,7 @@ impl Frame {
                 Some(_) => Blend::Build,
                 None => Blend::Union,
             };
-            self.group(prims, tip.opacity as f32, blend);
+            self.group(prims, tip.opacity as f32, blend, tip.lands());
         }
     }
 
@@ -1084,75 +1127,183 @@ impl Frame {
             end: g.end + offset,
             ..g
         }));
+        self.sheets.extend(other.sheets.into_iter().map(|s| Sheet {
+            start: s.start + offset,
+            end: s.end + offset,
+            ..s
+        }));
     }
 }
 
-/// One render pass of a frame, over the prims [`passes`] hands back.
+/// What a pass draws onto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pass {
-    /// Onto the window: `composite` first, if there is one — the group
-    /// the previous pass drew offscreen — then `start..end` in order.
-    /// The first pass of a frame clears the window; the rest load it.
-    Direct {
-        composite: Option<u32>,
-        start: u32,
-        end: u32,
-    },
-    /// Onto the scratch texture: the `wipe` box first, which clears the
-    /// group's bounds, then `start..end` meeting each other as `blend`
-    /// says.
-    Offscreen {
-        wipe: u32,
-        start: u32,
-        end: u32,
-        blend: Blend,
-    },
+pub enum Onto {
+    /// The window itself.
+    Window,
+    /// The sheet one raster layer's paint is built on.
+    Sheet,
+    /// The scratch one stroke is composited in.
+    Scratch,
+}
+
+/// What a previous pass drew offscreen, laid down now: which prim
+/// samples it, and how it meets what is already there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lay {
+    pub prim: u32,
+    pub blend: Blend,
+}
+
+/// One render pass of a frame, over the prims [`passes`] hands back:
+/// what it draws onto, the box it clears first (where a surface is
+/// opened), what it lays down before anything else, and the prims it
+/// then draws in order, meeting each other as `blend` says. The first
+/// pass of a frame is always onto the window, and is the one that
+/// clears it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pass {
+    pub onto: Onto,
+    pub wipe: Option<u32>,
+    pub lay: Option<Lay>,
+    pub start: u32,
+    pub end: u32,
+    pub blend: Blend,
+}
+
+/// The compositing plan being built: the prims with the wipe and
+/// composite boxes the passes need appended, and the passes themselves.
+struct Plan {
+    prims: Vec<Prim>,
+    passes: Vec<Pass>,
+    viewport: Viewport,
+    window: ScreenRect,
+    scratch: u32,
+    /// Where the prims that have not been drawn yet begin.
+    cursor: u32,
+    /// What the next pass has to lay down before anything else.
+    pending: Option<Lay>,
+    /// A box that clears the surface the next pass draws onto.
+    wipe: Option<u32>,
+}
+
+impl Plan {
+    /// A box appended to the prims, and its index.
+    fn box_at(&mut self, prim: Prim) -> u32 {
+        self.prims.push(prim);
+        self.prims.len() as u32 - 1
+    }
+
+    /// Draws everything up to `end` onto `onto`. A pass with nothing to
+    /// draw, clear or lay down is not one — except the first onto the
+    /// window, which is what clears it.
+    fn run(&mut self, onto: Onto, end: u32) {
+        let first = self.passes.is_empty() && onto == Onto::Window;
+        if first || self.wipe.is_some() || self.pending.is_some() || end > self.cursor {
+            self.passes.push(Pass {
+                onto,
+                wipe: self.wipe.take(),
+                lay: self.pending.take(),
+                start: self.cursor,
+                end,
+                blend: Blend::Over,
+            });
+        }
+        self.cursor = end;
+    }
+
+    /// The groups that begin before `limit`, each drawn offscreen and
+    /// left waiting to be laid on `onto`. A group whose bounds miss the
+    /// viewport is dropped, prims and all.
+    fn groups(&mut self, onto: Onto, groups: &mut std::iter::Peekable<std::slice::Iter<Group>>, limit: u32) {
+        while let Some(g) = groups.peek().filter(|g| g.start < limit).copied() {
+            groups.next();
+            self.run(onto, g.start);
+            let Some(bounds) = g.bounds.intersect(&self.window) else {
+                self.cursor = g.end;
+                continue;
+            };
+            let bounds = bounds.snapped();
+            let wipe = self.box_at(Prim::rect(bounds, [0.0; 4]));
+            self.passes.push(Pass {
+                onto: Onto::Scratch,
+                wipe: Some(wipe),
+                lay: None,
+                start: g.start,
+                end: g.end,
+                blend: g.blend,
+            });
+            let prim = Prim::composite(bounds, self.viewport, self.scratch, g.opacity);
+            let prim = self.box_at(prim);
+            self.pending = Some(Lay {
+                prim,
+                blend: g.lands,
+            });
+            self.cursor = g.end;
+        }
+    }
 }
 
 /// The compositing plan for `frame`: its prims with one wipe and one
-/// composite box appended per group, and the passes to draw them in. A
-/// group whose bounds miss the viewport is dropped, prims and all — no
-/// pass covers them. Always begins with a `Direct` pass, so there is
-/// one to clear the window with.
-pub fn passes(frame: &Frame, viewport: Viewport, scratch: u32) -> (Vec<Prim>, Vec<Pass>) {
+/// composite box appended per group and per sheet, and the passes to
+/// draw them in. A group or a sheet whose bounds miss the viewport is
+/// dropped, prims and all — no pass covers them. Always begins with a
+/// pass onto the window, so there is one to clear it with.
+pub fn passes(frame: &Frame, viewport: Viewport, scratch: u32, sheet: u32) -> (Vec<Prim>, Vec<Pass>) {
     let window = ScreenRect {
         x: 0.0,
         y: 0.0,
         w: viewport.w as f32,
         h: viewport.h as f32,
     };
-    let mut prims = frame.prims.clone();
-    let mut passes = Vec::new();
-    let mut cursor = 0u32;
-    let mut pending: Option<u32> = None;
-    let direct = |passes: &mut Vec<Pass>, composite: Option<u32>, start: u32, end: u32| {
-        if passes.is_empty() || composite.is_some() || end > start {
-            passes.push(Pass::Direct {
-                composite,
-                start,
-                end,
-            });
-        }
+    let mut plan = Plan {
+        prims: frame.prims.clone(),
+        passes: Vec::new(),
+        viewport,
+        window,
+        scratch,
+        cursor: 0,
+        pending: None,
+        wipe: None,
     };
-    for g in &frame.groups {
-        direct(&mut passes, pending.take(), cursor, g.start);
-        if let Some(bounds) = g.bounds.intersect(&window) {
-            let bounds = bounds.snapped();
-            let wipe = prims.len() as u32;
-            prims.push(Prim::rect(bounds, [0.0; 4]));
-            passes.push(Pass::Offscreen {
-                wipe,
-                start: g.start,
-                end: g.end,
-                blend: g.blend,
-            });
-            pending = Some(prims.len() as u32);
-            prims.push(Prim::composite(bounds, viewport, scratch, g.opacity));
-        }
-        cursor = g.end;
+    let mut groups = frame.groups.iter().peekable();
+    for s in &frame.sheets {
+        plan.groups(Onto::Window, &mut groups, s.start);
+        plan.run(Onto::Window, s.start);
+        let Some(bounds) = s.bounds.intersect(&window) else {
+            // Nothing of it is on screen: its groups go with it.
+            while groups.peek().is_some_and(|g| g.start < s.end) {
+                groups.next();
+            }
+            plan.cursor = s.end;
+            continue;
+        };
+        let bounds = bounds.snapped();
+        // The sheet is opened by the first pass drawn onto it, whether
+        // that is its own prims or the first stroke composited into it.
+        plan.wipe = Some(plan.box_at(Prim::rect(bounds, [0.0; 4])));
+        plan.groups(Onto::Sheet, &mut groups, s.end);
+        plan.run(Onto::Sheet, s.end);
+        let prim = Prim::composite(bounds, viewport, sheet, 1.0);
+        let prim = plan.box_at(prim);
+        plan.pending = Some(Lay {
+            prim,
+            blend: Blend::Over,
+        });
     }
-    direct(&mut passes, pending.take(), cursor, frame.prims.len() as u32);
-    (prims, passes)
+    plan.groups(Onto::Window, &mut groups, frame.prims.len() as u32);
+    plan.run(Onto::Window, frame.prims.len() as u32);
+    (plan.prims, plan.passes)
+}
+
+/// The stroke being drawn, and the layer it is going to land on:
+/// painted with that layer's paint so it meets the ink already there
+/// the way it will once it is let go of — which is the only way an
+/// eraser can show what it is doing, since it rubs out its own layer's
+/// sheet and nothing under it.
+pub struct Live<'a> {
+    pub layer: &'a str,
+    pub prims: Vec<Prim>,
+    pub tip: &'a Tip,
 }
 
 /// Flattens the document into a frame in paint order — the layers'
@@ -1166,8 +1317,10 @@ pub fn document_prims(
     view: &View,
     images: &ImageSlots,
     shapes: &Shapes,
+    live: Option<Live>,
 ) -> Frame {
     let mut frame = Frame::new();
+    let mut live = live;
     for (_, element) in doc.painted() {
         let mut out = Vec::new();
         match element {
@@ -1222,13 +1375,37 @@ pub fn document_prims(
             // A paint is one object made of many strokes: each is drawn
             // with the ink it was laid with, and composited on its own —
             // painting twice over the same place darkens it, as pixels do.
+            // The stroke being drawn joins them where it is going to
+            // land, so it meets them now the way it will at the release.
             Element::Paint(p) => {
-                for s in &p.strokes {
-                    let tip = Tip::of_stroke(s);
-                    frame.stroke(
-                        path_prims(&s.curves, &tip, &s.pen, parse_color(&s.stroke), view, shapes),
-                        &tip,
-                    );
+                let mut strokes: Vec<(Vec<Prim>, Tip)> = p
+                    .strokes
+                    .iter()
+                    .map(|s| {
+                        let tip = Tip::of_stroke(s);
+                        let prims =
+                            path_prims(&s.curves, &tip, &s.pen, parse_color(&s.stroke), view, shapes);
+                        (prims, tip)
+                    })
+                    .collect();
+                if live.as_ref().is_some_and(|l| l.layer == p.layer)
+                    && let Some(l) = live.take()
+                {
+                    strokes.push((l.prims, l.tip.clone()));
+                }
+                // One stroke rubbing the others out is what asks for a
+                // sheet: without one there would be nothing to rub but
+                // the board itself.
+                if strokes.iter().any(|(_, tip)| tip.erases()) {
+                    frame.sheet(|f| {
+                        for (prims, tip) in strokes {
+                            f.stroke(prims, &tip);
+                        }
+                    });
+                } else {
+                    for (prims, tip) in strokes {
+                        frame.stroke(prims, &tip);
+                    }
                 }
                 continue;
             }
@@ -1252,6 +1429,13 @@ pub fn document_prims(
         }
         frame.extend(out);
     }
+    // A stroke on a layer that holds no paint yet has nothing to join:
+    // it is painted last, over everything, until it lands. An eraser
+    // there has nothing to rub out and paints nothing at all, which is
+    // exactly what it will do when it is let go of.
+    if let Some(l) = live.filter(|l| !l.tip.erases()) {
+        frame.stroke(l.prims, l.tip);
+    }
     frame
 }
 
@@ -1259,7 +1443,7 @@ pub fn document_prims(
 mod tests {
     use super::*;
     use crate::brush::{Brush, Dynamics, Tip};
-    use crate::doc::{Camera, Kind, Layer, Paint, Path, Profile, Rect, Scatter, Stroke};
+    use crate::doc::{Camera, Kind, Layer, Mark, Paint, Path, Profile, Rect, Scatter, Stroke};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
 
@@ -1409,6 +1593,7 @@ mod tests {
         roundness: 1.0,
         rotation: 0.0,
         profile: Profile::RegularSolid,
+        mark: Mark::Ink,
         flow: 1.0,
         scatter: Scatter {
             size: 0.0,
@@ -1669,6 +1854,7 @@ mod tests {
             roundness: 0.25,
             rotation: 90.0,
             profile: Profile::RegularSolid,
+            mark: Mark::Ink,
             flow: 1.0,
             ..ROUND
         };
@@ -1704,6 +1890,21 @@ mod tests {
         })
     }
 
+    /// One curve, ten world units long.
+    fn cubic() -> Cubic {
+        [[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]]
+    }
+
+    /// A paint on the one layer a test document has.
+    fn paint_of(strokes: Vec<Stroke>) -> Element {
+        Element::Paint(Paint {
+            id: "pt".into(),
+            layer: String::new(),
+            strokes,
+            rotation: 0.0,
+        })
+    }
+
     fn laid(curves: Vec<Cubic>, tip: Tip) -> Stroke {
         Stroke {
             curves,
@@ -1729,7 +1930,7 @@ mod tests {
             strokes: vec![laid(a.clone(), Tip::PENCIL), laid(b.clone(), soft.clone())],
             rotation: 0.0,
         });
-        let together = document_prims(&doc_with(vec![paint], &v), &v, &none, &no_sheet());
+        let together = document_prims(&doc_with(vec![paint], &v), &v, &none, &no_sheet(), None);
         // Two strokes in one paint draw what two paths draw: nothing
         // joins them, and the soft one is still composited on its own.
         let apart = document_prims(
@@ -1737,6 +1938,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            None,
         );
         assert_eq!(together.prims, apart.prims);
         assert_eq!(together.groups.len(), 1, "one group, for the soft stroke");
@@ -1747,7 +1949,7 @@ mod tests {
     fn a_hard_opaque_path_is_direct_and_a_soft_one_is_a_group() {
         let v = view(0.0, 0.0, 1.0);
         let none = ImageSlots::new();
-        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none, &no_sheet());
+        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none, &no_sheet(), None);
         assert_eq!(direct.prims.len(), 1);
         assert!(direct.groups.is_empty(), "the pencil needs no compositing");
 
@@ -1756,6 +1958,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            None,
         );
         assert_eq!(soft.prims.len(), 1);
         assert_eq!(soft.groups.len(), 1);
@@ -1767,6 +1970,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            None,
         );
         assert_eq!(faint.groups.len(), 1);
         assert_eq!(faint.groups[0].opacity, 0.5);
@@ -1785,6 +1989,7 @@ mod tests {
             ],
             0.5,
             Blend::Union,
+            Blend::Over,
         );
         assert_eq!(f.prims.len(), 3);
         assert_eq!(f.groups.len(), 1);
@@ -1792,7 +1997,7 @@ mod tests {
         assert_eq!((g.start, g.end, g.opacity), (1, 3, 0.5));
         assert_eq!(g.bounds, sr(-5.0, -5.0, 20.0, 15.0));
         // Nothing to draw makes no group.
-        f.group(vec![], 0.5, Blend::Union);
+        f.group(vec![], 0.5, Blend::Union, Blend::Over);
         assert_eq!(f.groups.len(), 1);
     }
 
@@ -1987,7 +2192,7 @@ mod tests {
         let mut a = Frame::new();
         a.extend([Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE); 3]);
         let mut b = Frame::new();
-        b.group(vec![Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)], 0.5, Blend::Union);
+        b.group(vec![Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)], 0.5, Blend::Union, Blend::Over);
         b.extend([Prim::rect(sr(0.0, 0.0, 1.0, 1.0), WHITE)]);
         a.append(b);
         assert_eq!(a.prims.len(), 5);
@@ -2019,33 +2224,233 @@ mod tests {
             ],
             opacity,
             Blend::Union,
+            Blend::Over,
         );
         f.extend([flat()]);
         f
     }
 
+    /// A tip that rubs out instead of painting.
+    fn rubber(width: f64) -> Tip {
+        stamped(
+            width,
+            Stamp {
+                mark: Mark::Erase,
+                ..ROUND
+            },
+        )
+    }
+
+    #[test]
+    fn the_stroke_being_drawn_joins_the_paint_it_is_going_to_land_on() {
+        let v = view(0.0, 0.0, 1.0);
+        let live_tip = stamped(8.0, ROUND);
+        let prims = stroke_prims(&[[0.0, 0.0], [20.0, 0.0]], &live_tip, &no_pen(), WHITE, &v, &no_sheet());
+        let n = prims.len();
+        let paint = paint_of(vec![laid(vec![cubic()], stamped(8.0, ROUND))]);
+        let mut doc = doc_with(vec![paint], &v);
+        // An image on a layer above it: the stroke goes under it, which
+        // is where it will be once it is let go of.
+        doc.layers.push(Layer {
+            id: "top".into(),
+            name: "Layer 2".into(),
+            visible: true,
+            kind: Kind::Raster,
+        });
+        let layer = doc.layers[0].id.clone();
+        let f = document_prims(
+            &doc,
+            &v,
+            &ImageSlots::new(),
+            &no_sheet(),
+            Some(Live {
+                layer: &layer,
+                prims: prims.clone(),
+                tip: &live_tip,
+            }),
+        );
+        assert_eq!(f.prims[f.prims.len() - n..], prims[..], "it is on the layer");
+
+        // On a layer that holds no paint, it is drawn last all the same.
+        let f = document_prims(
+            &doc,
+            &v,
+            &ImageSlots::new(),
+            &no_sheet(),
+            Some(Live {
+                layer: "top",
+                prims: prims.clone(),
+                tip: &live_tip,
+            }),
+        );
+        assert_eq!(f.prims[f.prims.len() - n..], prims[..]);
+    }
+
+    #[test]
+    fn an_eraser_over_a_layer_with_no_ink_paints_nothing() {
+        let v = view(0.0, 0.0, 1.0);
+        let rubber = rubber(8.0);
+        let prims = stroke_prims(&[[0.0, 0.0], [20.0, 0.0]], &rubber, &no_pen(), WHITE, &v, &no_sheet());
+        assert!(!prims.is_empty(), "it does lay dabs");
+        let doc = doc_with(vec![], &v);
+        let f = document_prims(
+            &doc,
+            &v,
+            &ImageSlots::new(),
+            &no_sheet(),
+            Some(Live {
+                layer: "nothing",
+                prims,
+                tip: &rubber,
+            }),
+        );
+        assert!(
+            f.prims.is_empty() && f.groups.is_empty(),
+            "there is nothing to rub out, and the board is not it"
+        );
+    }
+
+    #[test]
+    fn an_eraser_joins_the_sheet_while_it_is_still_being_drawn() {
+        let v = view(0.0, 0.0, 1.0);
+        let rubber = rubber(8.0);
+        let prims = stroke_prims(&[[0.0, 0.0], [20.0, 0.0]], &rubber, &no_pen(), WHITE, &v, &no_sheet());
+        let paint = paint_of(vec![laid(vec![cubic()], stamped(8.0, ROUND))]);
+        let doc = doc_with(vec![paint], &v);
+        let layer = doc.layers[0].id.clone();
+        let f = document_prims(
+            &doc,
+            &v,
+            &ImageSlots::new(),
+            &no_sheet(),
+            Some(Live {
+                layer: &layer,
+                prims,
+                tip: &rubber,
+            }),
+        );
+        assert_eq!(f.sheets.len(), 1, "the layer is put on a sheet for it");
+        assert_eq!(f.groups.len(), 1);
+        assert_eq!(f.groups[0].lands, Blend::Erase, "and rubbed as it goes");
+    }
+
+    #[test]
+    fn a_paint_with_nothing_to_rub_out_is_drawn_as_it_always_was() {
+        let v = view(0.0, 0.0, 1.0);
+        let paint = paint_of(vec![laid(vec![cubic()], tip(8.0, 1.0, 0.5))]);
+        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), None);
+        assert!(f.sheets.is_empty(), "no sheet is opened for ink alone");
+        assert_eq!(f.groups.len(), 1);
+    }
+
+    #[test]
+    fn a_paint_that_rubs_itself_out_is_built_on_a_sheet() {
+        let v = view(0.0, 0.0, 1.0);
+        let paint = paint_of(vec![
+            laid(vec![cubic()], stamped(8.0, ROUND)),
+            laid(vec![cubic()], rubber(8.0)),
+        ]);
+        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), None);
+        assert_eq!(f.sheets.len(), 1, "the layer gets a surface of its own");
+        let sheet = f.sheets[0];
+        assert_eq!((sheet.start, sheet.end), (0, f.prims.len() as u32));
+        // The plain stroke covers on its own and goes straight onto the
+        // sheet; the eraser never covers anything, so it is composited
+        // and taken back out.
+        assert_eq!(f.groups.len(), 1);
+        assert_eq!(f.groups[0].lands, Blend::Erase);
+        let g = f.groups[0];
+        assert!(g.start >= sheet.start && g.end <= sheet.end, "inside the sheet");
+    }
+
+    #[test]
+    fn the_sheet_is_opened_wiped_and_laid_on_the_window_once() {
+        let mut f = Frame::new();
+        f.extend([flat()]);
+        f.sheet(|f| {
+            f.extend([flat()]);
+            f.group(
+                vec![Prim::segment((10.0, 10.0), (20.0, 10.0), 2.0, WHITE)],
+                0.5,
+                Blend::Build,
+                Blend::Erase,
+            );
+        });
+        f.extend([flat()]);
+        let (prims, plan) = passes(&f, VP, 9, 8);
+        let onto: Vec<Onto> = plan.iter().map(|p| p.onto).collect();
+        assert_eq!(
+            onto,
+            vec![Onto::Window, Onto::Sheet, Onto::Scratch, Onto::Sheet, Onto::Window],
+            "the window, then the sheet is opened and rubbed, then the window"
+        );
+        // The sheet is cleared by the first pass drawn onto it.
+        let open = plan[1];
+        assert_eq!(open.wipe.map(|w| prims[w as usize].color), Some([0.0; 4]));
+        assert_eq!((open.start, open.end), (1, 2), "the plain prim on it");
+        // The eraser is built in the scratch and taken out of the sheet.
+        assert_eq!(plan[2].blend, Blend::Build);
+        let out = plan[3].lay.expect("the eraser lands on the sheet");
+        assert_eq!(out.blend, Blend::Erase);
+        assert_eq!(prims[out.prim as usize].slot, 9, "out of the scratch");
+        // And the sheet lands on the window whole, at full strength: a
+        // stroke's own opacity was spent on the way in.
+        let laid = plan[4].lay.expect("the sheet is laid down");
+        assert_eq!(laid.blend, Blend::Over);
+        assert_eq!(prims[laid.prim as usize].slot, 8, "the sheet itself");
+        assert_eq!(prims[laid.prim as usize].color, [1.0; 4]);
+        assert_eq!((plan[4].start, plan[4].end), (3, 4), "and the last prim over it");
+    }
+
+    #[test]
+    fn a_sheet_outside_the_viewport_goes_with_everything_on_it() {
+        let mut f = Frame::new();
+        f.extend([flat()]);
+        f.sheet(|f| {
+            f.group(
+                vec![Prim::segment((900.0, 10.0), (920.0, 10.0), 2.0, WHITE)],
+                0.5,
+                Blend::Build,
+                Blend::Erase,
+            );
+        });
+        let (prims, plan) = passes(&f, VP, 9, 8);
+        assert_eq!(prims.len(), 2, "no wipe and no composite for either");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].onto, Onto::Window);
+        assert_eq!((plan[0].start, plan[0].end), (0, 1));
+    }
+
     #[test]
     fn passes_split_around_a_group() {
         let f = framed(20.0, 0.5);
-        let (prims, plan) = passes(&f, VP, 9);
+        let (prims, plan) = passes(&f, VP, 9, 8);
         assert_eq!(
             plan,
             vec![
-                Pass::Direct {
-                    composite: None,
+                Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: None,
                     start: 0,
-                    end: 2
+                    end: 2,
+                    blend: Blend::Over,
                 },
-                Pass::Offscreen {
-                    wipe: 5,
+                Pass {
+                    onto: Onto::Scratch,
+                    wipe: Some(5),
+                    lay: None,
                     start: 2,
                     end: 4,
                     blend: Blend::Union,
                 },
-                Pass::Direct {
-                    composite: Some(6),
+                Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: Some(Lay { prim: 6, blend: Blend::Over }),
                     start: 4,
-                    end: 5
+                    end: 5,
+                    blend: Blend::Over,
                 },
             ]
         );
@@ -2069,20 +2474,26 @@ mod tests {
     #[test]
     fn a_group_outside_the_viewport_is_dropped_with_its_prims() {
         let f = framed(200.0, 0.5);
-        let (prims, plan) = passes(&f, VP, 9);
+        let (prims, plan) = passes(&f, VP, 9, 8);
         assert_eq!(prims.len(), 5, "no wipe, no composite");
         assert_eq!(
             plan,
             vec![
-                Pass::Direct {
-                    composite: None,
+                Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: None,
                     start: 0,
-                    end: 2
+                    end: 2,
+                    blend: Blend::Over,
                 },
-                Pass::Direct {
-                    composite: None,
+                Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: None,
                     start: 4,
-                    end: 5
+                    end: 5,
+                    blend: Blend::Over,
                 },
             ]
         );
@@ -2091,7 +2502,7 @@ mod tests {
     #[test]
     fn a_group_half_outside_is_clipped_to_the_viewport() {
         let f = framed(95.0, 1.0);
-        let (prims, plan) = passes(&f, VP, 9);
+        let (prims, plan) = passes(&f, VP, 9, 8);
         assert_eq!(plan.len(), 3);
         assert_eq!(prims[5].geom, [91.0, 16.0, 9.0, 18.0]);
         assert_eq!(prims[6].uv, [0.91, 0.16, 1.0, 0.34]);
@@ -2101,27 +2512,27 @@ mod tests {
     fn a_frame_without_groups_is_one_direct_pass() {
         let mut f = Frame::new();
         f.extend([flat(), flat()]);
-        let (prims, plan) = passes(&f, VP, 9);
+        let (prims, plan) = passes(&f, VP, 9, 8);
         assert_eq!(prims.len(), 2);
-        assert_eq!(
-            plan,
-            vec![Pass::Direct {
-                composite: None,
-                start: 0,
-                end: 2
-            }]
-        );
+        assert_eq!(plan, vec![Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: None,
+                    start: 0,
+                    end: 2,
+                    blend: Blend::Over,
+                }]);
         // Even an empty frame is one pass: it is what clears the window.
-        let (prims, plan) = passes(&Frame::new(), VP, 9);
+        let (prims, plan) = passes(&Frame::new(), VP, 9, 8);
         assert!(prims.is_empty());
-        assert_eq!(
-            plan,
-            vec![Pass::Direct {
-                composite: None,
-                start: 0,
-                end: 0
-            }]
-        );
+        assert_eq!(plan, vec![Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: None,
+                    start: 0,
+                    end: 0,
+                    blend: Blend::Over,
+                }]);
     }
 
     #[test]
@@ -2131,26 +2542,35 @@ mod tests {
             vec![Prim::segment((10.0, 10.0), (20.0, 10.0), 2.0, WHITE)],
             0.5,
             Blend::Union,
+            Blend::Over,
         );
-        let (_, plan) = passes(&f, VP, 9);
+        let (_, plan) = passes(&f, VP, 9, 8);
         assert_eq!(
             plan,
             vec![
-                Pass::Direct {
-                    composite: None,
+                Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: None,
                     start: 0,
-                    end: 0
+                    end: 0,
+                    blend: Blend::Over,
                 },
-                Pass::Offscreen {
-                    wipe: 1,
+                Pass {
+                    onto: Onto::Scratch,
+                    wipe: Some(1),
+                    lay: None,
                     start: 0,
                     end: 1,
                     blend: Blend::Union,
                 },
-                Pass::Direct {
-                    composite: Some(2),
+                Pass {
+                    onto: Onto::Window,
+                    wipe: None,
+                    lay: Some(Lay { prim: 2, blend: Blend::Over }),
                     start: 1,
-                    end: 1
+                    end: 1,
+                    blend: Blend::Over,
                 },
             ]
         );
@@ -2187,12 +2607,12 @@ mod tests {
         });
         // The white rect is first in `elements` but on the top layer.
         doc.elements[0].set_layer("top");
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].color, [0.0, 0.0, 0.0, 1.0], "the lower layer paints first");
         assert_eq!(got[1].color, WHITE);
         doc.layers[1].visible = false;
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
         assert_eq!(got.len(), 1, "a hidden layer paints nothing");
     }
     const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -2435,7 +2855,7 @@ mod tests {
         if let Element::Rect(r) = &mut el {
             r.rotation = 90.0;
         }
-        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new(), &no_sheet()).prims;
+        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new(), &no_sheet(), None).prims;
         assert_eq!(got.len(), 5);
         let a = std::f32::consts::FRAC_PI_2;
         // The fill is the unturned box, turned in place.
@@ -2455,7 +2875,7 @@ mod tests {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))], &v);
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims,
             vec![Prim::rect(sr(50.0, 50.0, 10.0, 10.0), WHITE)]
         );
     }
@@ -2466,7 +2886,7 @@ mod tests {
         let doc = doc_with(vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)], &v);
         let t = STROKE_PX;
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims,
             vec![
                 // top, bottom, left, right — aligned inwards.
                 Prim::rect(sr(60.0, 60.0, 20.0, t), WHITE),
@@ -2484,7 +2904,7 @@ mod tests {
             vec![rect(0.0, 0.0, 10.0, 10.0, Some("#000"), Some("#fff"))],
             &v,
         );
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
         assert_eq!(got.len(), 5);
         assert_eq!(got[0].color, WHITE, "fill first");
         assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke after");
@@ -2494,7 +2914,7 @@ mod tests {
     fn zoom_scales_rect_position_and_size() {
         let v = view(0.0, 0.0, 2.0);
         let doc = doc_with(vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
         assert_eq!(got[0].geom, [52.0, 50.0, 10.0, 10.0]);
     }
 
@@ -2502,7 +2922,7 @@ mod tests {
     fn rect_without_any_color_still_paints_with_fallback() {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 4.0, 4.0, None, None)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].color, FALLBACK_COLOR);
     }
@@ -2573,7 +2993,7 @@ mod tests {
         );
         // Width is in world units: 2 * zoom 2 = 4px wide → half-width 2.
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims,
             vec![Prim::segment(
                 (50.0, 50.0),
                 (68.0, 50.0),
@@ -2638,7 +3058,7 @@ mod tests {
         let v = view(0.0, 0.0, 2.0);
         let slots = ImageSlots::from([(BLOB.to_owned(), 7)]);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 90.0)], &v);
-        let got = document_prims(&doc, &v, &slots, &no_sheet()).prims;
+        let got = document_prims(&doc, &v, &slots, &no_sheet(), None).prims;
         // One instance: the SDF box carries the texture, so the turn, the
         // rounded corners and the antialiasing come from the same field.
         assert_eq!(got.len(), 1, "{got:?}");
@@ -2682,7 +3102,7 @@ mod tests {
         // element still has to occupy its box.
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 0.0)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet()).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].kind, KIND_BOX);
         assert_eq!(got[0].color, PLACEHOLDER_COLOR);

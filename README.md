@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 472 tests.
+- `cargo build` clean, `cargo test` with 482 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -70,6 +70,17 @@ selection, navigation, pasted images, and projects in tabs:
   a *grain* — a texture nib, or the canvas's own paper — and the
   library says so per brush. A ring the size of the brush follows the
   pointer.
+  **The eight erasers erase.** Sketchbook gives every brush a stamp
+  blend style and 91 of the 211 name something other than plain ink;
+  the erasers used to paint. A raster layer is now built on a sheet of
+  its own whenever one of its strokes rubs the others out, and the
+  eraser's dabs are taken back out of that sheet — so it clears the
+  layer it is on and leaves the board, the grid and every other layer
+  alone. It rubs while it is still being drawn, because the stroke in
+  progress is painted where it is going to land rather than over
+  everything. The other six styles read the paint underneath, which is
+  a different engine: those brushes lay plain ink, and the library says
+  which they are rather than promising a mixture.
   **The pen's pressure drives the ink.** 126 of the brushes narrow
   with a lighter touch, 143 lay less, 33 fade — Sketchbook names the
   two ends of each and the gap between them is how much the hand is

@@ -103,6 +103,12 @@ def read_brush(body):
         "dynamics": dynamics(stroke),
         "hardness": round(f(stroke, "hardness", 1.0), 4),
         "profile": stroke.get("profile", "regularSolid"),
+        # What one dab does to the ink already down. Ninety-one of the
+        # 211 name something other than `normal`; only the eight
+        # erasers are a thing the canvas can do without reading the
+        # sheet back, and the rest are carried so the library can say
+        # what it is not painting.
+        "mark": stroke.get("stampBlendStyle", "normal"),
         "texture_depth": round(f(paper, "paperTextureDepthMax", 0.0), 3) if textured else 0.0,
         "jitter": {
             "size": round(f(stroke, "radiusJitter"), 3),

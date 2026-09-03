@@ -419,6 +419,21 @@ impl Editor {
     /// one above it when it does not, as Photoshop does when you paint on
     /// a shape. Vector does not accumulate: every object gets a layer of
     /// its own.
+    /// The layer the stroke in progress would join, if there is one to
+    /// join: the active layer when it takes pixels and the stroke is a
+    /// brush's. A pencil opens a layer of its own and a brush over a
+    /// vector layer opens one above it, so neither has anywhere to be
+    /// painted yet — they are drawn over everything until they land.
+    pub fn live_layer<'a>(&self, doc: &'a Document) -> Option<&'a str> {
+        if self.tool == Tool::Pencil {
+            return None;
+        }
+        doc.layers
+            .get(self.active_layer(doc))
+            .filter(|l| l.kind == Kind::Raster)
+            .map(|l| l.id.as_str())
+    }
+
     fn ink_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
         if kind == Kind::Raster
             && let Some(layer) = doc.layers.get(self.active_layer(doc))
@@ -1092,6 +1107,25 @@ mod tests {
             pressure: p,
             ..Stylus::MOUSE
         }
+    }
+
+    #[test]
+    fn the_layer_a_live_stroke_would_join_is_the_one_it_is_painted_on() {
+        let mut doc = board();
+        let e = tool(Tool::Brush);
+        assert_eq!(
+            e.live_layer(&doc),
+            Some(doc.layers[0].id.as_str()),
+            "a brush joins the raster layer under it"
+        );
+        // A pencil opens a layer of its own, and a brush over a vector
+        // layer opens one above it: neither has anywhere to be painted
+        // until it lands.
+        let mut e_pencil = tool(Tool::Pencil);
+        assert_eq!(e_pencil.live_layer(&doc), None);
+        let _ = e_pencil.escape(&mut doc);
+        doc.layers[0].kind = Kind::Vector;
+        assert_eq!(e.live_layer(&doc), None);
     }
 
     #[test]

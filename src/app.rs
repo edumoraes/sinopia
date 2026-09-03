@@ -929,18 +929,29 @@ impl App {
         let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
         let mut frame = Frame::new();
         frame.extend(grid::prims(view, self.theme.dot));
-        frame.append(scene::document_prims(self.doc(), view, images, &self.shapes));
-        if let Some(stroke) = self.editor().stroke() {
-            let prims = scene::stroke_prims(
+        // The stroke in progress goes into the document's own frame,
+        // on the layer it is going to land on: that is where it meets
+        // the ink already there, and the only place an eraser has
+        // anything to rub out.
+        let live = self.editor().stroke().map(|stroke| scene::Live {
+            layer: self.editor().live_layer(self.doc()).unwrap_or_default(),
+            prims: scene::stroke_prims(
                 &stroke.points,
                 &stroke.tip,
                 &stroke.envelope(),
                 self.theme.ink,
                 view,
                 &self.shapes,
-            );
-            frame.stroke(prims, &stroke.tip);
-        }
+            ),
+            tip: &stroke.tip,
+        });
+        frame.append(scene::document_prims(
+            self.doc(),
+            view,
+            images,
+            &self.shapes,
+            live,
+        ));
         if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
         }

@@ -15,9 +15,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::doc::{Path, Pressure, Profile, Scatter, Stamp, Stroke};
+use crate::doc::{Mark, Path, Pressure, Profile, Scatter, Stamp, Stroke};
 use crate::editor::PEN_WIDTH;
-use crate::scene::{Prim, Rgba, Shapes, polyline_prims};
+use crate::scene::{Blend, Prim, Rgba, Shapes, polyline_prims};
 
 /// Brush size in world units (logical px at zoom 1): the diameter. The
 /// top is the widest brush Sketchbook's own sets carry — a 350-unit
@@ -82,6 +82,8 @@ pub struct Brush {
     pub rotation: f64,
     pub dynamics: Dynamics,
     pub profile: Profile,
+    /// What one dab does to the ink already down.
+    pub mark: Mark,
     /// How much of the radius is crisp, 0–1: 1 is a pencil's edge, 0
     /// fades from the center out. Sketchbook's Edge.
     pub hardness: f64,
@@ -102,6 +104,7 @@ impl Default for Brush {
             rotation: 0.0,
             dynamics: Dynamics::None,
             profile: Profile::RegularSolid,
+            mark: Mark::Ink,
             hardness: 0.5,
             texture_depth: 0.0,
             jitter: Jitter::default(),
@@ -415,6 +418,7 @@ impl Brush {
                 roundness: self.roundness,
                 rotation: self.rotation,
                 profile: self.profile,
+                mark: self.mark,
                 // One of Sketchbook's four rotation dynamics is the
                 // stroke's own doing and belongs on the nib; the other
                 // two are the stylus's, and what they turn the nib by
@@ -492,10 +496,31 @@ impl Tip {
         self.opacity >= 1.0
             && self.hardness >= 1.0
             && self.stamp.as_ref().is_none_or(|s| {
+                // An eraser never covers anything: it has to be taken
+                // back out of the sheet, which means going through the
+                // scratch like any other composited stroke.
+                !s.mark.erases()
                 // A nib the pen thins the ink of lays dabs that do not
                 // cover either, however full the brush's own flow is.
-                s.flow >= 1.0 && s.pressure.opacity == 0.0 && s.pressure.flow == 0.0
+                    && s.flow >= 1.0
+                    && s.pressure.opacity == 0.0
+                    && s.pressure.flow == 0.0
             })
+    }
+
+    /// How the finished stroke meets what it is laid on: ink over it,
+    /// or ink taken out of it.
+    pub fn lands(&self) -> Blend {
+        match self.stamp.as_ref().is_some_and(|s| s.mark.erases()) {
+            true => Blend::Erase,
+            false => Blend::Over,
+        }
+    }
+
+    /// Whether it rubs out instead of painting. A paint holding one of
+    /// these has to be built on a sheet of its own.
+    pub fn erases(&self) -> bool {
+        self.stamp.as_ref().is_some_and(|s| s.mark.erases())
     }
 }
 
@@ -927,6 +952,7 @@ mod tests {
                 roundness: 0.5,
                 rotation: 30.0,
                 profile: Profile::RegularSolid,
+                mark: Mark::Ink,
                 flow: 1.0,
                 scatter: Scatter::default(),
                 pressure: Brush::default().pressure,
@@ -1023,6 +1049,52 @@ mod tests {
         assert!(
             noisier > 10,
             "{noisier} brushes name a gap noise larger than their gap"
+        );
+    }
+
+    #[test]
+    fn an_eraser_is_never_laid_straight_onto_the_board() {
+        let rubber = Brush {
+            opacity: 1.0,
+            hardness: 1.0,
+            flow: 1.0,
+            pressure: Pressure::NONE,
+            mark: Mark::Erase,
+            ..Brush::default()
+        };
+        let tip = rubber.tip(None);
+        assert!(
+            !tip.is_direct(),
+            "it covers nothing: it has to come out of a sheet"
+        );
+        assert!(tip.erases());
+        assert_eq!(tip.lands(), Blend::Erase);
+        // And a brush that paints is laid over what is there.
+        let ink = Brush {
+            mark: Mark::Ink,
+            ..rubber
+        };
+        assert!(!ink.tip(None).erases());
+        assert_eq!(ink.tip(None).lands(), Blend::Over);
+        assert!(!Tip::PENCIL.erases(), "a pencil has no nib to rub with");
+    }
+
+    #[test]
+    fn the_eight_erasers_erase_and_the_rest_of_the_marks_are_named() {
+        let lib = Library::default();
+        let all: Vec<&Preset> = lib.sets.iter().flat_map(|s| &s.presets).collect();
+        assert_eq!(all.len(), 211);
+        let erasers = all.iter().filter(|p| p.tip().erases()).count();
+        assert_eq!(erasers, 8, "Sketchbook's own eight");
+        // The rest of its stamp blend styles read the paint underneath,
+        // which the canvas cannot do: those brushes lay plain ink and
+        // the library says as much rather than promising a mixture.
+        let owed = all.iter().filter(|p| !p.brush.mark.painted()).count();
+        assert_eq!(owed, 83, "acrylic, marker, pastel, smudge, colorless, glow");
+        assert_eq!(
+            all.iter().filter(|p| p.brush.mark == Mark::Ink).count(),
+            120,
+            "and the rest lay ink over what is there"
         );
     }
 
