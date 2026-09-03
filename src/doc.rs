@@ -457,11 +457,18 @@ fn read_at(readings: &[f32], u: f32) -> Option<f32> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Stamp {
     /// The nib's own shape, by the name the brush library gives it, or
-    /// `None` for a plain round nib. A name and not a cell of the
-    /// sheet: a board outlives the sheet it was painted from, and an
-    /// index would move the day a set is added.
+    /// `None` for a nib with no silhouette of its own. A name and not a
+    /// cell of the sheet: a board outlives the sheet it was painted
+    /// from, and an index would move the day a set is added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
+    /// The grain the nib wears, by the same kind of name. Sketchbook's
+    /// other kind of nib image, and not the same thing at all: a shape
+    /// is stamped in place of the round dab, a grain is worn over one,
+    /// so the dab keeps its own edge and the grain eats into it. A nib
+    /// carries one or the other, never both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grain: Option<String>,
     /// The gap between two dabs, in Sketchbook's own spacing units:
     /// 0.1 to 10, its Pencil's default 1.2, each unit a quarter of the
     /// nib's width (`scene::SPACING_UNIT`).
@@ -501,8 +508,13 @@ impl Stamp {
     /// A board is not trusted to hold a turn of four hundred degrees or
     /// a gap of nothing, whatever wrote it.
     fn checked(self) -> Result<Stamp, String> {
-        if self.shape.as_ref().is_some_and(|s| s.is_empty()) {
-            return Err("a nib's shape is named or absent, never empty".into());
+        for (what, name) in [("shape", &self.shape), ("grain", &self.grain)] {
+            if name.as_ref().is_some_and(|s| s.is_empty()) {
+                return Err(format!("a nib's {what} is named or absent, never empty"));
+            }
+        }
+        if self.shape.is_some() && self.grain.is_some() {
+            return Err("a nib stamps a shape or wears a grain, never both".into());
         }
         if !is_unit(self.roundness) {
             return Err(format!("roundness {} is not between 0 and 1", self.roundness));
@@ -1194,6 +1206,43 @@ mod tests {
     }
 
     #[test]
+    fn a_nib_stamps_a_shape_or_wears_a_grain_but_never_both() {
+        let board = |nib: &str| {
+            format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "layers": [ {{ "id": "l1", "name": "Layer 1" }} ],
+                    "elements": [ {{ "id": "p1", "type": "path", "layer": "l1",
+                        "curves": [[[0, 0], [1, 0], [2, 0], [3, 0]]],
+                        "stroke": "#000", "width": 8,
+                        "stamp": {{ "spacing": 1, "roundness": 1, "rotation": 0, {nib} }} }} ]
+                }}"##
+            )
+        };
+        let doc = Document::from_json(&board(r#""grain": "fine grain""#)).unwrap();
+        let Element::Path(p) = &doc.elements[0] else {
+            panic!("expected a path");
+        };
+        let nib = p.stamp.as_ref().unwrap();
+        assert_eq!(nib.grain.as_deref(), Some("fine grain"));
+        assert_eq!(nib.shape, None);
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][0]["stamp"]["grain"].as_str(), Some("fine grain"));
+        assert!(v["elements"][0]["stamp"].get("shape").is_none());
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+
+        for (nib, want) in [
+            (r#""shape": "a", "grain": "b""#, "never both"),
+            (r#""grain": """#, "named or absent"),
+        ] {
+            let err = Document::from_json(&board(nib)).unwrap_err().to_string();
+            assert!(err.contains(want), "{err}");
+        }
+    }
+
+    #[test]
     fn a_stroke_keeps_the_profile_of_the_nib_that_laid_it() {
         let json = r##"{
             "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
@@ -1364,6 +1413,7 @@ mod tests {
             p.strokes[0].stamp,
             Some(Stamp {
                 shape: None,
+                grain: None,
                 follow: false,
                 spacing: 0.4,
                 roundness: 0.5,

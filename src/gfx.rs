@@ -53,6 +53,7 @@ struct VsOut {
 
 const KIND_SEGMENT: u32 = 1u;
 const KIND_IMAGE: u32 = 2u;
+const KIND_GRAIN: u32 = 3u;
 
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
@@ -154,7 +155,7 @@ fn shade(in: VsOut) -> vec4<f32> {
         let s = sin(in.angle);
         let local = vec2<f32>(c * p.x + s * p.y, c * p.y - s * p.x);
         d = sd_box(local, half, r);
-        if (in.kind == KIND_IMAGE) {
+        if (in.kind == KIND_IMAGE || in.kind == KIND_GRAIN) {
             // The box's own axes are already the texture's: the corner at
             // -half is (0, 0). An image maps onto the whole sheet, a
             // glyph onto its cell of the atlas. There is no mip chain to
@@ -163,7 +164,15 @@ fn shade(in: VsOut) -> vec4<f32> {
             // otherwise break.
             let t = (local + half) / max(in.geom.zw, vec2<f32>(1e-6));
             let uv = mix(in.uv.xy, in.uv.zw, t);
-            rgba = textureSampleLevel(tex, samp, uv, 0.0) * in.color;
+            let texel = textureSampleLevel(tex, samp, uv, 0.0);
+            if (in.kind == KIND_GRAIN) {
+                // A grain is worn, not stamped: the box keeps its own
+                // edge and its own ramp, and the grain eats into what
+                // that edge covers.
+                rgba = vec4<f32>(in.color.rgb, in.color.a * texel.a);
+            } else {
+                rgba = texel * in.color;
+            }
         }
     }
     let ramp = max(in.params.y, 1.0);

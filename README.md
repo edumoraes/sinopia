@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 482 tests.
+- `cargo build` clean, `cargo test` with 486 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -45,13 +45,18 @@ selection, navigation, pasted images, and projects in tabs:
   all
   three, and `flow` with them — what one dab lays. **103 of the 211
   stamp a nib of their own**: Sketchbook's own shape images, converted
-  into one sheet of 90 that the binary carries, and a stroke names the
+  into one sheet that the binary carries, and a stroke names the
   nib it was laid with, and **turns with the stroke** when the brush
   says it should — 67 of them do, and 59 of those stamp a shape, so a
   bristle nib runs along the curve instead of pointing one way through
   it. Two more of them are the stylus's own — 101 brushes turn the nib
   by the way the pen is held and 34 of those by its roll on top of the
-  lean. A nib is also thrown off true dab by dab:
+  lean. **42 more wear a grain** rather than stamping a shape:
+  Sketchbook's other kind of nib image, and the opposite thing — the
+  dab stays round and keeps its own edge, and the grain eats into what
+  that edge covers, which is what breaks up a hard watercolour edge.
+  Both kinds ride on the one sheet the binary carries, now 114 nibs.
+  A nib is also thrown off true dab by dab:
   its radius and its angle, each by an amount in its own unit, which is
   how Sketchbook states randomness. Three of its five amounts stay out,
   because its own sets contradict their scale: opacity and flow are
@@ -67,9 +72,9 @@ selection, navigation, pasted images, and projects in tabs:
   the real sets and described truthfully while the engine grows into
   it — how deep the paper bites into the nib. What is
   left promising a mark the ink cannot make is the brush told apart by
-  a *grain* — a texture nib, or the canvas's own paper — and the
-  library says so per brush. A ring the size of the brush follows the
-  pointer.
+  the canvas's own *paper* — 22 of them, and Sketchbook ships no image
+  for one — and the library says so per brush. A ring the size of the
+  brush follows the pointer.
   **The eight erasers erase.** Sketchbook gives every brush a stamp
   blend style and 91 of the 211 name something other than plain ink;
   the erasers used to paint. A raster layer is now built on a sheet of

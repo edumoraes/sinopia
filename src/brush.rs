@@ -403,17 +403,18 @@ impl Brush {
         };
     }
 
-    /// What this body lays, stamping `shape` — the nib image the
-    /// preset carries, which is not part of the body a slider can
-    /// reach. [`Preset::tip`] is the one that knows both.
-    pub fn tip(&self, shape: Option<&str>) -> Tip {
+    /// What this body lays, wearing `face` — the nib image the preset
+    /// carries, which is not part of the body a slider can reach.
+    /// [`Preset::tip`] is the one that knows both.
+    pub fn tip(&self, face: Face) -> Tip {
         Tip {
             width: self.size,
             opacity: self.opacity,
             hardness: self.hardness,
             dynamics: self.dynamics,
             stamp: Some(Stamp {
-                shape: shape.map(str::to_owned),
+                shape: face.shape().map(str::to_owned),
+                grain: face.grain().map(str::to_owned),
                 spacing: self.spacing,
                 roundness: self.roundness,
                 rotation: self.rotation,
@@ -431,6 +432,35 @@ impl Brush {
                 },
                 pressure: self.pressure,
             }),
+        }
+    }
+}
+
+/// The nib image a brush carries, which is not part of the body a
+/// slider can reach: Sketchbook's two kinds, which do quite different
+/// things. A shape is stamped in place of the round dab; a grain is
+/// worn over one, so the dab keeps its own edge and the grain eats
+/// into it. Most nibs are neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Face<'a> {
+    #[default]
+    Round,
+    Shape(&'a str),
+    Grain(&'a str),
+}
+
+impl<'a> Face<'a> {
+    fn shape(self) -> Option<&'a str> {
+        match self {
+            Face::Shape(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn grain(self) -> Option<&'a str> {
+        match self {
+            Face::Grain(name) => Some(name),
+            _ => None,
         }
     }
 }
@@ -532,23 +562,37 @@ pub struct Preset {
     pub brush: Brush,
     /// Its cell of the icon sheet: the art Sketchbook draws it with.
     pub icon: u16,
-    /// Whether the brush is told apart by a shape or a texture of its
-    /// own. Two thirds of the shipped brushes are. The ones whose mark
-    /// is a shape now stamp it — `shape` names it — and what is left,
-    /// `stamp` without a `shape`, is the icon promising a grain the ink
-    /// cannot yet make: a texture nib, or the canvas's own paper.
+    /// Whether the brush is told apart by a nib or a paper of its own.
+    /// Two thirds of the shipped brushes are. The ones whose mark is a
+    /// nib now lay it — `shape` or `grain` names it — and what is
+    /// left, `stamp` with neither, is the icon promising the canvas's
+    /// own paper, which Sketchbook ships no image for and this board
+    /// has no notion of.
     pub stamp: bool,
-    /// The nib image it stamps, by the name the sheet gives it, or
-    /// `None` for a plain round nib. Not part of the body: no slider
-    /// addresses it, and `reset` has nothing to take back.
+    /// The nib image it carries, by the name the sheet gives it: a
+    /// shape it stamps in place of a round dab, or a grain it wears
+    /// over one. Not part of the body: no slider addresses it, and
+    /// `reset` has nothing to take back.
     pub shape: Option<String>,
+    pub grain: Option<String>,
     factory: Brush,
 }
 
 impl Preset {
-    /// What this brush lays: its body, stamping the nib it carries.
+    /// What this brush lays: its body, wearing the nib it carries.
     pub fn tip(&self) -> Tip {
-        self.brush.tip(self.shape.as_deref())
+        self.brush.tip(self.face())
+    }
+
+    /// The nib image it carries, if it carries one. A brush names a
+    /// shape or a grain, never both — the asset is built that way, and
+    /// the document refuses a stroke that says otherwise.
+    pub fn face(&self) -> Face<'_> {
+        match (self.shape.as_deref(), self.grain.as_deref()) {
+            (Some(name), _) => Face::Shape(name),
+            (None, Some(name)) => Face::Grain(name),
+            (None, None) => Face::Round,
+        }
     }
 
     /// Whether it has been moved off what it shipped as. The properties
@@ -706,9 +750,12 @@ struct PresetOnDisk {
     factory: Option<Brush>,
     #[serde(default)]
     stamp: bool,
-    /// The nib image, by name, when the brush stamps one of its own.
+    /// The nib image, by name, when the brush carries one of its own:
+    /// a shape it stamps, or a grain it wears.
     #[serde(default)]
     shape: Option<String>,
+    #[serde(default)]
+    grain: Option<String>,
 }
 
 /// Holds every property inside the band its slider runs over, so what
@@ -753,10 +800,11 @@ impl Default for Library {
                             brush,
                             icon: p.icon.min(disk.icons.saturating_sub(1)),
                             stamp: p.stamp,
-                            // A shape the sheet does not carry is no
-                            // shape: an asset built wrong must not seat
-                            // a nib the renderer cannot find.
+                            // A nib the sheet does not carry is no nib:
+                            // an asset built wrong must not seat one
+                            // the renderer cannot find.
                             shape: p.shape.filter(|n| disk.shapes.contains(n)),
+                            grain: p.grain.filter(|n| disk.shapes.contains(n)),
                         }
                     })
                     .collect(),
@@ -789,6 +837,7 @@ impl Library {
                     icon: 0,
                     stamp: false,
                     shape: None,
+                    grain: None,
                 }],
             }],
             shapes: Vec::new(),
@@ -909,27 +958,27 @@ mod tests {
             }
         );
         assert!(Tip::PENCIL.is_direct(), "the pencil needs no compositing");
-        let soft = Brush::default().tip(None);
+        let soft = Brush::default().tip(Face::Round);
         assert_eq!((soft.width, soft.opacity, soft.hardness), (16.0, 1.0, 0.5));
         assert!(!soft.is_direct(), "a soft edge has to be composited");
         let hard = Brush {
             hardness: 1.0,
             ..Brush::default()
         };
-        assert!(hard.tip(None).is_direct());
+        assert!(hard.tip(Face::Round).is_direct());
         let faint = Brush {
             hardness: 1.0,
             opacity: 0.5,
             ..Brush::default()
         };
-        assert!(!faint.tip(None).is_direct(), "so does translucency");
+        assert!(!faint.tip(Face::Round).is_direct(), "so does translucency");
         let dry = Brush {
             hardness: 1.0,
             flow: 0.5,
             ..Brush::default()
         };
         assert!(
-            !dry.tip(None).is_direct(),
+            !dry.tip(Face::Round).is_direct(),
             "a nib that does not cover on its own has to build up offscreen"
         );
     }
@@ -944,9 +993,10 @@ mod tests {
             ..Brush::default()
         };
         assert_eq!(
-            b.tip(None).stamp,
+            b.tip(Face::Round).stamp,
             Some(Stamp {
                 shape: None,
+                grain: None,
                 follow: false,
                 spacing: 0.4,
                 roundness: 0.5,
@@ -962,33 +1012,46 @@ mod tests {
     }
 
     #[test]
-    fn a_brush_that_stamps_a_shape_names_one_the_sheet_has() {
+    fn a_brush_with_a_nib_of_its_own_names_one_the_sheet_has() {
         let lib = Library::default();
         let sheet = lib.sheet(3);
-        let mut named = 0;
+        let (mut shapes, mut grains) = (0, 0);
         for set in lib.sets() {
             for p in &set.presets {
-                let Some(shape) = p.shape.as_deref() else {
-                    continue;
+                let name = match p.face() {
+                    Face::Shape(name) => {
+                        shapes += 1;
+                        name
+                    }
+                    Face::Grain(name) => {
+                        grains += 1;
+                        name
+                    }
+                    Face::Round => continue,
                 };
-                named += 1;
                 assert!(
-                    sheet.art(shape).is_some(),
-                    "{} names {shape}, which is not on the sheet",
+                    sheet.cell(name).is_some(),
+                    "{} names {name}, which is not on the sheet",
+                    p.name
+                );
+                assert!(
+                    !(p.shape.is_some() && p.grain.is_some()),
+                    "{} would be a shape and a grain at once",
                     p.name
                 );
             }
         }
-        assert_eq!(named, 103, "the shipped brushes that stamp a nib of their own");
+        assert_eq!(shapes, 103, "the shipped brushes that stamp a nib of their own");
+        assert_eq!(grains, 42, "and those that wear a grain over a round one");
         assert!(
             lib.sets()
                 .iter()
                 .flat_map(|s| &s.presets)
-                .any(|p| p.shape.is_none()),
-            "and the rest stamp a plain round nib"
+                .any(|p| p.face() == Face::Round),
+            "and the rest lay a plain round nib"
         );
-        assert!(sheet.art("no such nib").is_none());
-        assert_eq!(sheet.rows, 8, "90 nibs, 12 across");
+        assert!(sheet.cell("no such nib").is_none());
+        assert_eq!(sheet.rows, 10, "114 nibs, 12 across");
     }
 
     #[test]
@@ -1024,7 +1087,7 @@ mod tests {
             },
             ..Brush::default()
         };
-        let nib = b.tip(None).stamp.expect("a brush stamps");
+        let nib = b.tip(Face::Round).stamp.expect("a brush stamps");
         assert_eq!(
             nib.scatter,
             Scatter {
@@ -1062,7 +1125,7 @@ mod tests {
             mark: Mark::Erase,
             ..Brush::default()
         };
-        let tip = rubber.tip(None);
+        let tip = rubber.tip(Face::Round);
         assert!(
             !tip.is_direct(),
             "it covers nothing: it has to come out of a sheet"
@@ -1074,8 +1137,8 @@ mod tests {
             mark: Mark::Ink,
             ..rubber
         };
-        assert!(!ink.tip(None).erases());
-        assert_eq!(ink.tip(None).lands(), Blend::Over);
+        assert!(!ink.tip(Face::Round).erases());
+        assert_eq!(ink.tip(Face::Round).lands(), Blend::Over);
         assert!(!Tip::PENCIL.erases(), "a pencil has no nib to rub with");
     }
 
@@ -1108,7 +1171,7 @@ mod tests {
             ..Brush::default()
         };
         assert!(
-            solid.tip(None).is_direct(),
+            solid.tip(Face::Round).is_direct(),
             "a dab that covers on its own goes straight onto the board"
         );
         // The pen driving the width changes nothing: every dab still
@@ -1120,7 +1183,7 @@ mod tests {
             },
             ..solid
         };
-        assert!(thin.tip(None).is_direct());
+        assert!(thin.tip(Face::Round).is_direct());
         for driven in [
             Pressure {
                 flow: 0.5,
@@ -1136,7 +1199,7 @@ mod tests {
                 ..solid
             };
             assert!(
-                !b.tip(None).is_direct(),
+                !b.tip(Face::Round).is_direct(),
                 "a lighter dab must build in the scratch, not on the board"
             );
         }
@@ -1389,16 +1452,18 @@ mod tests {
     }
 
     #[test]
-    fn half_the_acquired_brushes_stamp_a_nib_and_the_rest_want_a_grain() {
+    fn two_thirds_of_the_acquired_brushes_lay_a_nib_and_the_rest_want_a_paper() {
         let lib = Library::default();
         let all: Vec<&Preset> = lib.sets().iter().flat_map(|s| s.presets.iter()).collect();
-        let shaped = all.iter().filter(|p| p.shape.is_some()).count();
-        let owed = all.iter().filter(|p| p.stamp && p.shape.is_none()).count();
-        assert!(shaped > all.len() / 3, "{shaped} of {} stamp a nib", all.len());
-        assert!(
-            owed > 0,
-            "and the rest are told apart by a grain the engine still owes"
-        );
+        let nibbed = all.iter().filter(|p| p.face() != Face::Round).count();
+        assert!(nibbed > all.len() / 2, "{nibbed} of {} lay a nib", all.len());
+        // What is left is the canvas's own paper: Sketchbook ships no
+        // image for it here, and the board has no notion of one.
+        let owed = all
+            .iter()
+            .filter(|p| p.stamp && p.face() == Face::Round)
+            .count();
+        assert_eq!(owed, 22, "told apart by a paper the canvas still owes");
         assert!(
             all.iter().any(|p| !p.stamp),
             "some are the plain round nib they look like"

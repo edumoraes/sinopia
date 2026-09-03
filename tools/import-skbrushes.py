@@ -9,12 +9,14 @@ the body `brush.rs` keeps, and writes:
     assets/brushes/icons.png      every icon @2x, one grid cell each
     assets/brushes/shapes.png     every nib shape, one grid cell each
 
-A brush that stamps a shape of its own names a TIFF in the same zip —
-white on black, the nib's own coverage. Those become the shape sheet:
-gray + alpha, the gray full and the alpha the coverage, exactly as the
-glyph atlas is read. A nib named with `textureImageType="texture"` is a
-round nib wearing a grain rather than a shape of its own, and is not one
-of these; nor is a `paperTexture`, which belongs to the canvas.
+A brush with a nib of its own names a TIFF in the same zip — white on
+black, the nib's own coverage. Those become the nib sheet: gray + alpha,
+the gray full and the alpha the coverage, exactly as the glyph atlas is
+read. Sketchbook has two kinds and the sheet carries both: a `shape` is
+a silhouette stamped in place of a round dab, a `texture` is a grain
+worn over one, and the library says which a brush names. A
+`paperTexture` is neither — it belongs to the canvas, not to the nib,
+and Sketchbook ships no image for it here.
 
 The originals are 34 MB and 438 MB of shape/texture TIFFs once opened, so
 they stay out of the repo: only what this writes is committed. Run it
@@ -127,22 +129,25 @@ def read_brush(body):
     }
 
 
-def shape_of(body):
-    """The nib image a brush stamps, by name without its extension, or
-    None. Only `textureImageType="shape"` is one: a `texture` nib is a
-    round nib wearing a grain, which the canvas does not stamp yet."""
+def art_of(body):
+    """The nib image a brush carries: `("shape", name)` for a silhouette
+    it stamps in place of a round dab, `("grain", name)` for one it
+    wears over one, or None. The name is the TIFF's, without its
+    extension, which is what the sheet and a saved board call it."""
     custom = tag(body, "customBrush")
-    if custom.get("type", "off") == "off" or custom.get("textureImageType") != "shape":
+    if custom.get("type", "off") == "off":
         return None
+    kind = {"shape": "shape", "texture": "grain"}.get(custom.get("textureImageType"))
     name = custom.get("name")
-    return name.rsplit(".", 1)[0] if name else None
+    return (kind, name.rsplit(".", 1)[0]) if kind and name else None
 
 
 def wants_stamp(body):
-    """Whether the brush is told apart by a shape or a texture of its
-    own. It describes the brush, not its body: the canvas cannot stamp
-    yet, so this is what says the icon promises a mark the ink cannot
-    make."""
+    """Whether the brush is told apart by a nib or a paper of its own.
+    It describes the brush, not its body: with a `shape` or a `grain`
+    beside it, it is the paper — which belongs to the canvas and which
+    Sketchbook ships no image for — that says the icon promises a mark
+    the ink cannot make."""
     custom = tag(body, "customBrush")
     paper = tag(body, "paperTexture")
     return (custom.get("type", "off") != "off"
@@ -169,9 +174,9 @@ def read_set(zf, xml_name):
             "stamp": wants_stamp(live),
             "brush": brush,
         }
-        shape = shape_of(live)
-        if shape:
-            entry["shape"] = shape
+        art = art_of(live)
+        if art:
+            entry[art[0]] = art[1]
         # Every set ships its brushes at their factory settings, so the
         # copy is only written when one of them does not — half the file
         # otherwise, saying the same thing twice.
@@ -211,10 +216,11 @@ def png_grid(cells, px, cols, channels):
 
 
 def shape_cell(data):
-    """One shape TIFF into a `SHAPE_PX` square of gray + alpha. The
+    """One nib TIFF into a `SHAPE_PX` square of gray + alpha. The
     originals are white on black — the nib's own coverage — so the gray
     goes in the alpha and the color stays full, which is what makes
-    `texel * ink` the mark."""
+    `texel * ink` the mark. A shape and a grain are read the same way;
+    what differs is whether the dab is the image or wears it."""
     import subprocess
     out = subprocess.run(
         ["magick", "tif:-", "-colorspace", "gray",
@@ -268,7 +274,7 @@ def main():
                 else:
                     missing.append(f"{title}/{b['name']}")
                     b["icon"] = None
-                shape = b.get("shape")
+                shape = b.get("shape") or b.get("grain")
                 if shape and shape not in shapes:
                     # By stem, and only among the TIFFs: one set ships a
                     # shape named after the set itself, and its `.xml`
@@ -278,7 +284,8 @@ def main():
                                 and n.rsplit(".", 1)[0] == shape), None)
                     if tif is None:
                         no_shape.append(f"{title}/{b['name']}")
-                        del b["shape"]
+                        b.pop("shape", None)
+                        b.pop("grain", None)
                     else:
                         shapes[shape] = shape_cell(zf.read(tif))
             sets.append({"name": title.replace("+", " "), "brushes": brushes})
@@ -297,7 +304,9 @@ def main():
 
     total = sum(len(s["brushes"]) for s in sets)
     stamping = sum(1 for s in sets for b in s["brushes"] if b.get("shape"))
-    print(f"\n{total} brushes in {len(sets)} sets, {stamping} stamping a shape")
+    grained = sum(1 for s in sets for b in s["brushes"] if b.get("grain"))
+    print(f"\n{total} brushes in {len(sets)} sets, "
+          f"{stamping} stamping a shape and {grained} wearing a grain")
     print(f"  library.json  {(dst / 'library.json').stat().st_size / 1024:.0f} KB")
     print(f"  icons.png     {(dst / 'icons.png').stat().st_size / 1024:.0f} KB  ({w}x{h})")
     print(f"  shapes.png    {(dst / 'shapes.png').stat().st_size / 1024:.0f} KB  "

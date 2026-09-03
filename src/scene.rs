@@ -239,6 +239,9 @@ pub const KIND_BOX: u32 = 0;
 pub const KIND_SEGMENT: u32 = 1;
 /// A box that samples the texture in its slot instead of a flat color.
 pub const KIND_IMAGE: u32 = 2;
+/// A box whose own coverage is eaten into by the texture in its slot:
+/// a round nib wearing a grain, which is not the same as being one.
+pub const KIND_GRAIN: u32 = 3;
 
 /// Which texture slot the renderer has uploaded for each blob hash. An
 /// image the renderer has not caught up with yet is missing from the map.
@@ -259,12 +262,24 @@ pub struct Shapes {
     pub cells: std::collections::HashMap<String, u16>,
 }
 
-/// One nib's own art: its cell of the shape sheet, and the slot the
-/// sheet is in.
+/// One nib image's place: its cell of the sheet, and the slot the sheet
+/// is in.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Art {
+pub struct Cell {
     pub uv: [f32; 4],
     pub slot: u32,
+}
+
+/// A nib's own art, once the sheet has been asked where it is:
+/// Sketchbook's two kinds, which do quite different things. A shape is
+/// stamped in place of the round dab and is its own edge; a grain is
+/// worn over one, which keeps its edge and its ramp and is eaten into.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum Art {
+    #[default]
+    Round,
+    Shape(Cell),
+    Grain(Cell),
 }
 
 /// A nib measured for the screen: what a tip and a view make of it,
@@ -281,22 +296,22 @@ pub struct Nib {
     pub px_per_world: f32,
     /// What its edge does over the ramp: [`Profile::falloff`].
     pub falloff: f32,
-    /// Where its own shape is, when it stamps one.
-    pub art: Option<Art>,
+    /// Its own art, when it carries any.
+    pub art: Art,
 }
 
 impl Shapes {
-    /// The nib a stroke names, or `None` when this build's sheet does
-    /// not carry it — the stroke then lays a plain round nib, because a
-    /// board painted somewhere else must still open.
-    pub fn art(&self, name: &str) -> Option<Art> {
+    /// Where the nib a stroke names is, or `None` when this build's
+    /// sheet does not carry it — the stroke then lays a plain round
+    /// nib, because a board painted somewhere else must still open.
+    pub fn cell(&self, name: &str) -> Option<Cell> {
         let cell = *self.cells.get(name)?;
         if self.cols == 0 || self.rows == 0 || cell >= self.cols * self.rows {
             return None;
         }
         let (col, row) = (cell % self.cols, cell / self.cols);
         let (w, h) = (f32::from(self.cols), f32::from(self.rows));
-        Some(Art {
+        Some(Cell {
             uv: [
                 f32::from(col) / w,
                 f32::from(row) / h,
@@ -500,17 +515,38 @@ impl Prim {
         center: (f32, f32),
         half: (f32, f32),
         angle: f32,
-        art: Art,
+        cell: Cell,
         color: Rgba,
     ) -> Prim {
         Prim {
             kind: KIND_IMAGE,
-            uv: art.uv,
-            slot: art.slot,
+            uv: cell.uv,
+            slot: cell.slot,
             // Square corners: the shape's own alpha is the only edge,
             // and a rounded box would bite into it.
             radius: 0.0,
             ..Prim::dab(center, half, 0.0, angle, color)
+        }
+    }
+
+    /// A round dab wearing a grain: the same box the plain dab fills,
+    /// with its own edge and its own ramp, and the cell `cell` names
+    /// eating into its coverage. The grain turns with the nib, being
+    /// the nib's own — unlike the canvas's paper, which would stand
+    /// still under it.
+    pub fn grained_dab(
+        center: (f32, f32),
+        half: (f32, f32),
+        feather: f32,
+        angle: f32,
+        cell: Cell,
+        color: Rgba,
+    ) -> Prim {
+        Prim {
+            kind: KIND_GRAIN,
+            uv: cell.uv,
+            slot: cell.slot,
+            ..Prim::dab(center, half, feather, angle, color)
         }
     }
 
@@ -614,7 +650,7 @@ pub fn runs(prims: &[Prim]) -> Vec<Run> {
     let mut start = 0u32;
     let mut slot: Option<u32> = None;
     for (i, p) in prims.iter().enumerate() {
-        if p.kind != KIND_IMAGE {
+        if p.kind != KIND_IMAGE && p.kind != KIND_GRAIN {
             continue;
         }
         match slot {
@@ -818,8 +854,13 @@ pub fn stamp_prims(
     let leaning = !pen.twist.is_empty();
 
     let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32, ink: Rgba| match art {
-        Some(art) => Prim::shaped_dab(at, half, turn, art, ink),
-        None => Prim {
+        // A shape is its own edge, with no ramp of the box's to bend.
+        Art::Shape(cell) => Prim::shaped_dab(at, half, turn, cell, ink),
+        Art::Grain(cell) => Prim {
+            falloff,
+            ..Prim::grained_dab(at, half, feather, turn, cell, ink)
+        },
+        Art::Round => Prim {
             falloff,
             ..Prim::dab(at, half, feather, turn, ink)
         },
@@ -935,7 +976,14 @@ fn tip_prims(
                 feather,
                 px_per_world: view.px_per_world() as f32,
                 falloff: stamp.profile.falloff(),
-                art: stamp.shape.as_deref().and_then(|n| shapes.art(n)),
+                // A nib whose art this build's sheet does not carry
+                // lays a plain round dab: a board painted elsewhere
+                // still opens, rather than opening blank.
+                art: match (stamp.shape.as_deref(), stamp.grain.as_deref()) {
+                    (Some(n), _) => shapes.cell(n).map_or(Art::Round, Art::Shape),
+                    (None, Some(n)) => shapes.cell(n).map_or(Art::Round, Art::Grain),
+                    (None, None) => Art::Round,
+                },
             },
             color,
         ),
@@ -1588,6 +1636,7 @@ mod tests {
     /// A round nib, dabbed half a width apart.
     const ROUND: Stamp = Stamp {
         shape: None,
+        grain: None,
         follow: false,
         spacing: 0.5,
         roundness: 1.0,
@@ -1618,6 +1667,91 @@ mod tests {
             pressure: readings.to_vec(),
             twist: Vec::new(),
         }
+    }
+
+    /// A sheet of one nib, called `name`.
+    fn one_nib(name: &str) -> Shapes {
+        Shapes {
+            slot: 5,
+            cols: 1,
+            rows: 1,
+            cells: std::iter::once((name.to_owned(), 0)).collect(),
+        }
+    }
+
+    #[test]
+    fn a_grain_is_worn_over_a_round_dab_and_a_shape_stands_in_for_one() {
+        let v = view(0.0, 0.0, 1.0);
+        let sheet = one_nib("bristle");
+        let grained = stamped(
+            20.0,
+            Stamp {
+                grain: Some("bristle".into()),
+                profile: Profile::Airbrush,
+                ..ROUND
+            },
+        );
+        let got = stroke_prims(&[[0.0, 0.0]], &grained, &no_pen(), WHITE, &v, &sheet);
+        let dab = got[0];
+        assert_eq!(dab.kind, KIND_GRAIN);
+        assert_eq!(dab.slot, 5);
+        assert_eq!(dab.uv, [0.0, 0.0, 1.0, 1.0], "its own cell of the sheet");
+        // It keeps everything a round dab has: the corner, the ramp and
+        // the profile's bend. Only its coverage is eaten into.
+        let plain = stroke_prims(&[[0.0, 0.0]], &stamped(20.0, ROUND), &no_pen(), WHITE, &v, &no_sheet());
+        assert_eq!((dab.geom, dab.radius), (plain[0].geom, plain[0].radius));
+        assert_eq!(dab.feather, plain[0].feather);
+        assert_eq!(dab.falloff, Profile::Airbrush.falloff());
+
+        // A shape is the dab: square corners, no ramp, no bend, since
+        // its own alpha is the only edge there is.
+        let shaped = stamped(
+            20.0,
+            Stamp {
+                shape: Some("bristle".into()),
+                profile: Profile::Airbrush,
+                ..ROUND
+            },
+        );
+        let got = stroke_prims(&[[0.0, 0.0]], &shaped, &no_pen(), WHITE, &v, &sheet);
+        assert_eq!(got[0].kind, KIND_IMAGE);
+        assert_eq!((got[0].radius, got[0].feather, got[0].falloff), (0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn a_nib_the_sheet_does_not_carry_lays_a_plain_round_one() {
+        let v = view(0.0, 0.0, 1.0);
+        let sheet = one_nib("bristle");
+        for lost in [
+            Stamp {
+                grain: Some("gone".into()),
+                ..ROUND
+            },
+            Stamp {
+                shape: Some("gone".into()),
+                ..ROUND
+            },
+        ] {
+            let got = stroke_prims(&[[0.0, 0.0]], &stamped(20.0, lost), &no_pen(), WHITE, &v, &sheet);
+            assert_eq!(got[0].kind, KIND_BOX, "a board painted elsewhere still opens");
+        }
+    }
+
+    #[test]
+    fn a_grained_run_binds_its_sheet_like_any_other_textured_prim() {
+        let v = view(0.0, 0.0, 1.0);
+        let sheet = one_nib("bristle");
+        let grained = stamped(
+            20.0,
+            Stamp {
+                grain: Some("bristle".into()),
+                ..ROUND
+            },
+        );
+        let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], &grained, &no_pen(), WHITE, &v, &sheet);
+        let runs = runs(&got);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].slot, 5, "the dabs are drawn against their sheet");
     }
 
     #[test]
@@ -2073,6 +2207,7 @@ mod tests {
             8.0,
             Stamp {
                 shape: Some("bristle".to_owned()),
+                grain: None,
                 ..ROUND
             },
         );
@@ -2092,6 +2227,7 @@ mod tests {
             8.0,
             Stamp {
                 shape: Some("gone".to_owned()),
+                grain: None,
                 ..ROUND
             },
         );
