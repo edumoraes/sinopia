@@ -887,6 +887,8 @@ impl App {
             '0'..='9' => self.brushes.brush_mut().set_opacity_digit(c as u8 - b'0'),
             _ => return false,
         }
+        // A key is a whole gesture on its own: it is kept at once.
+        self.brushes_dirty = true;
         self.keep_brushes();
         true
     }
