@@ -259,6 +259,19 @@ fn icon(tool: Tool) -> &'static [&'static [(f32, f32)]] {
                 (10.0, 11.0),
             ],
         ],
+        // Frame: a square area, and the two marks that say it crops
+        // rather than draws.
+        Tool::Frame => &[
+            &[
+                (5.0, 5.0),
+                (19.0, 5.0),
+                (19.0, 19.0),
+                (5.0, 19.0),
+                (5.0, 5.0),
+            ],
+            &[(9.5, 2.0), (9.5, 22.0)],
+            &[(2.0, 9.5), (22.0, 9.5)],
+        ],
         // Magnifier: 12-gon lens, handle, plus sign.
         Tool::Zoom => &[
             &[

@@ -19,16 +19,18 @@ pub enum Tool {
     Hand,
     Pencil,
     Brush,
+    Frame,
     Zoom,
 }
 
 impl Tool {
     /// Dock order.
-    pub const ALL: [Tool; 5] = [
+    pub const ALL: [Tool; 6] = [
         Tool::Select,
         Tool::Hand,
         Tool::Pencil,
         Tool::Brush,
+        Tool::Frame,
         Tool::Zoom,
     ];
 
@@ -38,6 +40,7 @@ impl Tool {
             Tool::Hand => 'h',
             Tool::Pencil => 'p',
             Tool::Brush => 'b',
+            Tool::Frame => 'f',
             Tool::Zoom => 'z',
         }
     }
@@ -292,6 +295,12 @@ pub struct Editor {
     /// The layer new ink lands on, by id; `None` is the topmost. Kept as
     /// an id, not an index, so it survives the layers being reordered.
     layer: Option<String>,
+    /// The area the Frame tool is dragging out: where the press was and
+    /// where the pointer is, in world units.
+    framing: Option<(Point, Point)>,
+    /// What a new frame's background is set to — the theme's surface,
+    /// handed over by `app` so the editor never sees a `Theme`.
+    surface: String,
     /// The frame whose stack is being worked in, by id; `None` is the
     /// board's own. Session state like the active layer and the
     /// selection: it belongs to a tab, and every use of it goes
@@ -300,9 +309,31 @@ pub struct Editor {
     inside: Option<String>,
 }
 
+/// What a new frame is born with until `app` says otherwise: white, the
+/// colour a sheet of paper is.
+const DEFAULT_SURFACE: &str = "#ffffff";
+
+/// The smallest drag that is an area rather than a click, in screen px.
+/// What it refuses is a hand that did not mean to drag, and that is the
+/// same few pixels at every zoom.
+const MIN_FRAME_PX: f64 = 8.0;
+
 impl Editor {
     pub fn new() -> Editor {
-        Editor::default()
+        Editor {
+            surface: DEFAULT_SURFACE.to_owned(),
+            ..Editor::default()
+        }
+    }
+
+    /// The colour a new frame's ground is laid in.
+    pub fn set_surface(&mut self, hex: &str) {
+        hex.clone_into(&mut self.surface);
+    }
+
+    /// The area being dragged out, while there is one.
+    pub fn framing(&self) -> Option<(Point, Point)> {
+        self.framing
     }
 
     /// The tool the dock shows.
@@ -645,7 +676,7 @@ impl Editor {
     }
 
     pub fn is_drawing(&self) -> bool {
-        self.stroke.is_some()
+        self.stroke.is_some() || self.framing.is_some()
     }
 
     pub fn is_panning(&self) -> bool {
@@ -666,7 +697,11 @@ impl Editor {
         // shape, which only the library knows both halves of.
         brush: &Tip,
     ) -> Change {
-        if self.stroke.is_some() || self.nav.is_some() || self.drag.is_some() {
+        if self.stroke.is_some()
+            || self.nav.is_some()
+            || self.drag.is_some()
+            || self.framing.is_some()
+        {
             return Change::None;
         }
         let world = view.screen_to_world(screen.0, screen.1);
@@ -687,6 +722,10 @@ impl Editor {
             (Button::Left, Tool::Brush) => {
                 let born = doc.frame_at([world.0, world.1]).map(str::to_owned);
                 self.start_stroke(world, brush.clone(), born)
+            }
+            (Button::Left, Tool::Frame) => {
+                self.framing = Some(([world.0, world.1], [world.0, world.1]));
+                Change::Selection
             }
             (Button::Left, Tool::Zoom) => {
                 self.nav = Some(Nav::Zoom {
@@ -797,6 +836,55 @@ impl Editor {
         Change::Selection
     }
 
+    /// Lays a frame over the area dragged from `from` to `to`, and
+    /// claims what that area covers. A frame drawn over things takes
+    /// them: an object visibly inside an area, uncut, would contradict
+    /// the boundary the moment it appeared. The centre decides, as it
+    /// does on a move.
+    fn lay_frame(&mut self, doc: &mut Document, view: &View, from: Point, to: Point) -> Change {
+        let lo = [from[0].min(to[0]), from[1].min(to[1])];
+        let hi = [from[0].max(to[0]), from[1].max(to[1])];
+        let px = view.px_per_world();
+        if (hi[0] - lo[0]) * px < MIN_FRAME_PX || (hi[1] - lo[1]) * px < MIN_FRAME_PX {
+            return Change::Selection;
+        }
+        // A frame is always the board's: it does not nest.
+        let above = doc
+            .layer_index(None, self.layer.as_deref().unwrap_or_default())
+            .unwrap_or(doc.layers.len().saturating_sub(1));
+        let Some(at) = doc.add_layer(None, above, Kind::Frame) else {
+            return Change::None;
+        };
+        let layer = doc.layers[at].id.clone();
+        let id = new_id();
+        doc.elements.push(Element::Frame(crate::doc::Frame {
+            id: id.clone(),
+            layer: layer.clone(),
+            x: lo[0],
+            y: lo[1],
+            w: hi[0] - lo[0],
+            h: hi[1] - lo[1],
+            background: Some(self.surface.clone()),
+            layers: vec![crate::doc::Layer::new("Layer 1")],
+        }));
+        let claimed: Vec<String> = doc
+            .painted()
+            .filter(|p| p.within.is_none() && !matches!(p.element, Element::Frame(_)))
+            .filter_map(|p| {
+                let c = select::frame(p.element)?.center;
+                (c[0] >= lo[0] && c[0] <= hi[0] && c[1] >= lo[1] && c[1] <= hi[1])
+                    .then(|| p.element.layer().to_owned())
+            })
+            .collect();
+        for l in claimed {
+            doc.rehome_layer(&l, Some(&id));
+        }
+        self.selection = vec![id];
+        self.inside = None;
+        self.layer = Some(layer);
+        Change::Scene
+    }
+
     /// Where the moved objects live now. An object's centre names its
     /// home — a frame's area, or the open board — and what moves is the
     /// object's **layer**, since a layer holds one object and the two go
@@ -870,6 +958,11 @@ impl Editor {
     /// physical px to the last one are dropped so jitter does not bloat the
     /// path.
     pub fn moved(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
+        if let Some((_, to)) = &mut self.framing {
+            let world = view.screen_to_world(screen.0, screen.1);
+            *to = [world.0, world.1];
+            return Change::Selection;
+        }
         if let Some(Stroke { points, stylus, .. }) = &mut self.stroke {
             let world = view.screen_to_world(screen.0, screen.1);
             let last = points[points.len() - 1];
@@ -1104,6 +1197,11 @@ impl Editor {
     ) -> Change {
         let _ = screen;
         if button == Button::Left
+            && let Some((from, to)) = self.framing.take()
+        {
+            return self.lay_frame(doc, view, from, to);
+        }
+        if button == Button::Left
             && let Some(live) = self.stroke.take()
         {
             let pen = live.envelope();
@@ -1238,6 +1336,7 @@ impl Editor {
     /// selection stays.
     pub fn cancel(&mut self, doc: &mut Document) -> bool {
         let had_stroke = self.stroke.take().is_some();
+        let had_area = self.framing.take().is_some();
         let had_nav = self.nav.take().is_some();
         let had_drag = match self.drag.take() {
             Some(
@@ -1258,7 +1357,7 @@ impl Editor {
             }
             None => false,
         };
-        had_stroke || had_nav || had_drag
+        had_stroke || had_area || had_nav || had_drag
     }
 
     /// Esc: cancels what is in progress, or else clears the selection.
@@ -2456,10 +2555,17 @@ mod tests {
     }
 
     #[test]
-    fn dock_order_is_select_hand_pencil_brush_zoom() {
+    fn dock_order_is_select_hand_pencil_brush_frame_zoom() {
         assert_eq!(
             Tool::ALL,
-            [Tool::Select, Tool::Hand, Tool::Pencil, Tool::Brush, Tool::Zoom]
+            [
+                Tool::Select,
+                Tool::Hand,
+                Tool::Pencil,
+                Tool::Brush,
+                Tool::Frame,
+                Tool::Zoom
+            ]
         );
     }
 
@@ -3373,5 +3479,153 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 505.0, 505.0), &mut doc, &brush().tip(Face::Round));
         assert_eq!(e.inside(), None);
         assert_eq!(doc.stack(None)[e.active_layer(&doc)].id, layer);
+    }
+
+    #[test]
+    fn the_frame_tool_is_in_the_dock_and_answers_to_f() {
+        assert_eq!(Tool::from_hotkey('f'), Some(Tool::Frame));
+        assert_eq!(Tool::from_hotkey('F'), Some(Tool::Frame));
+        assert!(Tool::ALL.contains(&Tool::Frame));
+    }
+
+    fn the_frame(doc: &Document) -> &crate::doc::Frame {
+        doc.elements
+            .iter()
+            .find_map(|el| match el {
+                Element::Frame(f) => Some(f),
+                _ => None,
+            })
+            .expect("a frame landed")
+    }
+
+    #[test]
+    fn dragging_the_frame_tool_makes_a_frame_with_its_own_stack() {
+        let mut doc = Document::new("t");
+        let mut e = Editor::new();
+        e.set_surface("#fbfbfa");
+        e.set_tool(Tool::Frame, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 200.0, 150.0), &mut doc);
+        assert!(e.framing().is_some(), "the area shows while it is dragged");
+        let _ = e.release(Button::Left, &v, at(&v, 200.0, 150.0), &mut doc, "#111");
+
+        let f = the_frame(&doc);
+        assert_eq!((f.x, f.y, f.w, f.h), (0.0, 0.0, 200.0, 150.0));
+        assert_eq!(f.background.as_deref(), Some("#fbfbfa"));
+        assert_eq!(f.layers.len(), 1, "with a stack of its own");
+        assert_eq!(doc.layers.last().unwrap().kind, Kind::Frame);
+        assert_eq!(e.selection(), std::slice::from_ref(&f.id), "and it is selected");
+        assert!(e.framing().is_none());
+    }
+
+    /// Dragged the other way, it is the same area.
+    #[test]
+    fn a_frame_dragged_up_and_left_spans_the_same_area() {
+        let mut doc = Document::new("t");
+        let mut e = Editor::new();
+        e.set_tool(Tool::Frame, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 200.0, 150.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 0.0, 0.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, "#111");
+        let f = the_frame(&doc);
+        assert_eq!((f.x, f.y, f.w, f.h), (0.0, 0.0, 200.0, 150.0));
+    }
+
+    #[test]
+    fn a_click_with_the_frame_tool_makes_nothing() {
+        let mut doc = Document::new("t");
+        let mut e = Editor::new();
+        e.set_tool(Tool::Frame, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.release(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, "#111");
+        assert!(
+            !doc.elements.iter().any(|el| matches!(el, Element::Frame(_))),
+            "a click is not an area"
+        );
+    }
+
+    #[test]
+    fn a_new_frame_claims_what_its_area_covers() {
+        let mut doc = Document::new("t");
+        let board = doc.layers[0].id.clone();
+        doc.elements.push(Element::Rect(Rect {
+            id: "under".into(),
+            layer: board.clone(),
+            x: 40.0,
+            y: 40.0,
+            w: 20.0,
+            h: 20.0,
+            rotation: 0.0,
+            stroke: None,
+            fill: None,
+            text: None,
+        }));
+        let mut e = Editor::new();
+        e.set_tool(Tool::Frame, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 200.0, 150.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 200.0, 150.0), &mut doc, "#111");
+        let id = the_frame(&doc).id.clone();
+        assert_eq!(
+            doc.locate(&board).and_then(|(f, _)| f),
+            Some(id.as_str()),
+            "an object visibly inside the area is in it"
+        );
+    }
+
+    #[test]
+    fn a_new_frame_leaves_what_is_outside_it_alone() {
+        let mut doc = Document::new("t");
+        let board = doc.layers[0].id.clone();
+        doc.elements.push(Element::Rect(Rect {
+            id: "away".into(),
+            layer: board.clone(),
+            x: 900.0,
+            y: 900.0,
+            w: 20.0,
+            h: 20.0,
+            rotation: 0.0,
+            stroke: None,
+            fill: None,
+            text: None,
+        }));
+        let mut e = Editor::new();
+        e.set_tool(Tool::Frame, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 200.0, 150.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 200.0, 150.0), &mut doc, "#111");
+        assert_eq!(doc.locate(&board).and_then(|(f, _)| f), None);
+    }
+
+    #[test]
+    fn escape_drops_the_area_being_dragged() {
+        let mut doc = Document::new("t");
+        let mut e = Editor::new();
+        e.set_tool(Tool::Frame, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 200.0, 150.0), &mut doc);
+        assert!(e.escape(&mut doc));
+        assert!(e.framing().is_none());
+        assert!(!doc.elements.iter().any(|el| matches!(el, Element::Frame(_))));
+    }
+
+    /// Switching tools cancels what is in progress, as it does a stroke.
+    #[test]
+    fn taking_another_tool_drops_the_area_being_dragged() {
+        let mut doc = Document::new("t");
+        let mut e = Editor::new();
+        e.set_tool(Tool::Frame, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 200.0, 150.0), &mut doc);
+        e.set_tool(Tool::Select, &mut doc);
+        assert!(e.framing().is_none());
+        assert!(!doc.elements.iter().any(|el| matches!(el, Element::Frame(_))));
     }
 }

@@ -1519,7 +1519,7 @@ impl App {
                 (Tool::Select, Some(Handle::Rotate(_))) => CursorIcon::Crosshair,
                 (Tool::Select, None) => CursorIcon::Default,
                 (Tool::Hand, _) => CursorIcon::Grab,
-                (Tool::Pencil | Tool::Brush, _) => CursorIcon::Crosshair,
+                (Tool::Pencil | Tool::Brush | Tool::Frame, _) => CursorIcon::Crosshair,
                 (Tool::Zoom, _) => CursorIcon::ZoomIn,
             }
         };
