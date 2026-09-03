@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
+use crate::brush::Edits;
 use crate::doc::Document;
 
 /// Schema version of index.json (the surface between plugin and binary).
@@ -104,6 +105,37 @@ impl Store {
         let s =
             std::fs::read_to_string(&path).with_context(|| format!("reading board {path:?}"))?;
         Document::from_json(&s)
+    }
+
+    /// What the person has changed about their brushes, or nothing at
+    /// all when the file is absent or will not parse. A brush library
+    /// is a convenience, never a board: it must not stop the window
+    /// opening, so a bad file is logged and passed over.
+    pub fn brushes(&self) -> Edits {
+        let path = self.brushes_path();
+        let Ok(s) = std::fs::read_to_string(&path) else {
+            return Edits::default();
+        };
+        match serde_json::from_str(&s) {
+            Ok(edits) => edits,
+            Err(e) => {
+                log::warn!("ignoring {path:?}: {e}");
+                Edits::default()
+            }
+        }
+    }
+
+    /// Writes them back, atomically and at 0600 like everything else
+    /// here.
+    pub fn save_brushes(&self, edits: &Edits) -> anyhow::Result<()> {
+        write_private_atomic(
+            &self.brushes_path(),
+            serde_json::to_string_pretty(edits)?.as_bytes(),
+        )
+    }
+
+    fn brushes_path(&self) -> PathBuf {
+        self.root.join("brushes.json")
     }
 
     /// Index entries, most recent first.
@@ -323,6 +355,43 @@ mod tests {
         let doc = doc_with_title("auth flow");
         store.save(&doc).unwrap();
         assert_eq!(store.load(&doc.id).unwrap(), doc);
+    }
+
+    #[test]
+    fn the_brushes_are_kept_beside_the_boards_and_just_as_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        assert_eq!(store.brushes(), Edits::default(), "nothing kept yet");
+
+        let edits = Edits {
+            held: Some(crate::brush::Held {
+                set: "Basic".into(),
+                name: "Airbrush".into(),
+            }),
+            brushes: vec![crate::brush::Edit {
+                set: "Basic".into(),
+                name: "Airbrush".into(),
+                brush: crate::brush::Brush {
+                    size: 42.0,
+                    ..crate::brush::Brush::default()
+                },
+            }],
+        };
+        store.save_brushes(&edits).unwrap();
+        assert_eq!(mode_of(&store.root().join("brushes.json")), 0o600);
+        assert_eq!(store.brushes(), edits);
+    }
+
+    #[test]
+    fn a_brush_file_that_will_not_parse_does_not_stop_the_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        std::fs::write(store.root().join("brushes.json"), "{ not json").unwrap();
+        assert_eq!(
+            store.brushes(),
+            Edits::default(),
+            "the brushes are a convenience, never a board"
+        );
     }
 
     #[test]

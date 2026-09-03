@@ -5,9 +5,11 @@
 //! A brush is Sketchbook's, not Photoshop's: it is a thing in a library
 //! with a name, and an edit belongs to it — `[` and the bar's slider both
 //! write into the brush in the hand, and `reset` takes it back to what it
-//! shipped as. The library is session state (§6.2), global to the window
-//! and never on disk yet: a brush belongs to the person drawing, not to
-//! the board.
+//! shipped as. The library is the window's, not any board's: a brush
+//! belongs to the person drawing. What they changed about it outlives
+//! the process as [`Edits`] — a list of exceptions, named rather than
+//! numbered, so the shipped sets stay the source of truth for every
+//! brush nobody touched.
 //!
 //! Its body is the whole of Brush Properties. Three of it reach the
 //! canvas — [`Property::honored`] is the list — and the rest are the
@@ -554,6 +556,40 @@ impl Tip {
     }
 }
 
+/// What the person has changed about their brushes, and nothing else:
+/// the brushes moved off what they shipped as, and the one in the hand.
+/// A file of exceptions, so the sets stay the source of truth for every
+/// brush nobody touched — an asset rebuilt with a new brush in it opens
+/// with that brush, not without it.
+///
+/// A brush is named, never numbered: a set added to `brushes/` moves
+/// every index after it, and a file written last week would then dress
+/// the wrong brush.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Edits {
+    /// The set and the brush in the hand.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<Held>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub brushes: Vec<Edit>,
+}
+
+/// Which brush was in the hand, by name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Held {
+    pub set: String,
+    pub name: String,
+}
+
+/// One brush the person moved off its factory settings, and where it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Edit {
+    pub set: String,
+    pub name: String,
+    pub brush: Brush,
+}
+
 /// One named brush in the library, and what it shipped as — so an edit
 /// can always be taken back without knowing which brush it was.
 #[derive(Debug, Clone, PartialEq)]
@@ -704,6 +740,61 @@ impl Library {
 
     pub fn reset(&mut self) {
         self.preset_mut().reset();
+    }
+
+    /// What the person has changed, and nothing else: the brushes off
+    /// their factory settings, and the one in the hand. What goes on
+    /// disk — the brushes belong to the person, not to any board.
+    pub fn edits(&self) -> Edits {
+        Edits {
+            held: self.sets.get(self.selected.0).map(|set| Held {
+                set: set.name.clone(),
+                name: self.name().to_owned(),
+            }),
+            brushes: self
+                .sets
+                .iter()
+                .flat_map(|set| {
+                    set.presets.iter().filter(|p| p.edited()).map(|p| Edit {
+                        set: set.name.clone(),
+                        name: p.name.clone(),
+                        brush: p.brush,
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// Dresses the shipped brushes in what was kept of them. A name this
+    /// build no longer carries is passed over rather than refused: sets
+    /// are rebuilt from the assets, and a brush that has gone is one the
+    /// person can no longer be holding either. Every value goes through
+    /// its own `Property::set`, as `library.json` does — a file edited
+    /// by hand must not seat a number the sliders could never reach.
+    pub fn apply(&mut self, edits: &Edits) {
+        for edit in &edits.brushes {
+            if let Some(p) = self.find_mut(&edit.set, &edit.name) {
+                p.brush = settled(edit.brush);
+            }
+        }
+        if let Some(held) = &edits.held
+            && let Some(at) = self.seat(&held.set, &held.name)
+        {
+            self.selected = at;
+        }
+    }
+
+    /// Where a brush sits, by the names it and its set carry. The first
+    /// of a name, should a set ever ship two.
+    fn seat(&self, set: &str, name: &str) -> Option<(usize, usize)> {
+        let s = self.sets.iter().position(|x| x.name == set)?;
+        let i = self.sets[s].presets.iter().position(|p| p.name == name)?;
+        Some((s, i))
+    }
+
+    fn find_mut(&mut self, set: &str, name: &str) -> Option<&mut Preset> {
+        let (s, i) = self.seat(set, name)?;
+        Some(&mut self.sets[s].presets[i])
     }
 }
 
@@ -1113,6 +1204,76 @@ mod tests {
             noisier > 10,
             "{noisier} brushes name a gap noise larger than their gap"
         );
+    }
+
+    #[test]
+    fn only_what_the_person_changed_is_kept() {
+        let mut lib = Library::default();
+        assert_eq!(lib.edits().brushes, vec![], "a library nobody touched");
+        let held = lib.edits().held.expect("a brush is always in the hand");
+
+        lib.select(2, 3);
+        lib.brush_mut().size = 42.0;
+        let edits = lib.edits();
+        assert_eq!(edits.brushes.len(), 1, "one brush moved, one brush kept");
+        assert_eq!(edits.brushes[0].brush.size, 42.0);
+        assert_eq!(edits.brushes[0].name, lib.name());
+        assert_ne!(edits.held, Some(held), "and the hand moved too");
+
+        // The shipped sets, dressed in what was kept: same brush in the
+        // hand, same size on it, and nothing else touched.
+        let mut opened = Library::default();
+        opened.apply(&edits);
+        assert_eq!(opened.selected(), (2, 3));
+        assert_eq!(opened.brush().size, 42.0);
+        assert_eq!(opened.edits(), edits, "and it keeps the same thing again");
+    }
+
+    #[test]
+    fn a_brush_the_assets_no_longer_carry_is_passed_over() {
+        let mut lib = Library::default();
+        let held = lib.edits().held.expect("a brush in the hand");
+        lib.apply(&Edits {
+            held: Some(Held {
+                set: "Gone".into(),
+                name: "Gone".into(),
+            }),
+            brushes: vec![Edit {
+                set: "Gone".into(),
+                name: "Gone".into(),
+                brush: Brush {
+                    size: 300.0,
+                    ..Brush::default()
+                },
+            }],
+        });
+        assert_eq!(lib.edits().held, Some(held), "the hand does not move");
+        assert!(lib.edits().brushes.is_empty(), "and nothing is dressed");
+    }
+
+    #[test]
+    fn a_kept_brush_is_held_inside_the_bands_its_sliders_run_over() {
+        let mut lib = Library::default();
+        let (set, name) = {
+            let s = &lib.sets()[0];
+            (s.name.clone(), s.presets[0].name.clone())
+        };
+        // A file edited by hand, saying something no slider could.
+        lib.apply(&Edits {
+            held: None,
+            brushes: vec![Edit {
+                set,
+                name,
+                brush: Brush {
+                    size: 5_000.0,
+                    opacity: -3.0,
+                    ..Brush::default()
+                },
+            }],
+        });
+        let b = lib.sets()[0].presets[0].brush;
+        assert_eq!(b.size, SIZE_MAX);
+        assert_eq!(b.opacity, 0.0);
     }
 
     #[test]

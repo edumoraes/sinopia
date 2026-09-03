@@ -123,6 +123,11 @@ struct App {
     palette_scroll: f32,
     /// Brush Properties' Advanced layout is dropped under the bar.
     props_open: bool,
+    /// Whether the brush library has been changed since it was last
+    /// written back. The brushes are the person's, not a board's: they
+    /// are kept as soon as a gesture that changed them ends, and never
+    /// asked about.
+    brushes_dirty: bool,
     /// The properties bar's slider the pointer took, if any. It keeps the
     /// pointer until the button comes up, so a drag off the track still
     /// moves it — as every slider does.
@@ -791,7 +796,20 @@ impl App {
             palette::Hit::Brush(set, index) => self.brushes.select(set, index),
             palette::Hit::Properties => self.props_open = !self.props_open,
             palette::Hit::Reset => self.brushes.reset(),
-            palette::Hit::Panel => {}
+            palette::Hit::Panel => return,
+        }
+        self.brushes_dirty = true;
+    }
+
+    /// Writes the brushes back if anything about them changed. Called
+    /// when a gesture ends, not while one is running: a slider drag
+    /// would otherwise write the file on every frame of it.
+    fn keep_brushes(&mut self) {
+        if !std::mem::take(&mut self.brushes_dirty) {
+            return;
+        }
+        if let Err(e) = self.store.save_brushes(&self.brushes.edits()) {
+            log::warn!("keeping the brushes: {e:#}");
         }
     }
 
@@ -816,6 +834,7 @@ impl App {
         };
         let f = bar.fraction(field, x);
         property.set_fraction(self.brushes.brush_mut(), f);
+        self.brushes_dirty = true;
     }
 
     /// A click on the layers panel, handed to the editor.
@@ -848,6 +867,7 @@ impl App {
             '0'..='9' => self.brushes.brush_mut().set_opacity_digit(c as u8 - b'0'),
             _ => return false,
         }
+        self.keep_brushes();
         true
     }
 
@@ -1128,6 +1148,8 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        // A brush edit is over when the pointer that made it comes up.
+        self.keep_brushes();
         // A slider let go of is just let go of: the canvas never saw the
         // press, so there is nothing under it to end.
         if button == Button::Left && self.grab.take().is_some() {
@@ -1473,6 +1495,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    /// The loop is over: whatever the last gesture changed about the
+    /// brushes is kept, in case it was the one that closed the window.
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.keep_brushes();
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         self.handle_window_event(event_loop, event);
         if self.closing {
@@ -1667,6 +1695,7 @@ pub fn run(
     // first tab is a board, never an untitled one.
     let id = doc.id.clone();
     let first = Project::opened(doc, Origin::Board(id));
+    let store_brushes = store.brushes();
     let mut app = App {
         store,
         open: vec![Open {
@@ -1680,11 +1709,19 @@ pub fn run(
         gfx: None,
         theme: Theme::light(),
         font: Font::bundled(),
-        brushes: Library::default(),
+        brushes: {
+            // The shipped sets, dressed in whatever the person kept of
+            // them: a library file is a list of exceptions, so a brush
+            // nobody touched is still whatever the assets now say.
+            let mut lib = Library::default();
+            lib.apply(&store_brushes);
+            lib
+        },
         layers_shown: false,
         palette_shown: true,
         palette_scroll: 0.0,
         props_open: false,
+        brushes_dirty: false,
         grab: None,
         icon_slot: 0,
         shapes: Shapes::default(),

@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 486 tests.
+- `cargo build` clean, `cargo test` with 491 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -37,7 +37,9 @@ selection, navigation, pasted images, and projects in tabs:
   units), `{` `}` the hardness by a quarter, `1`–`9` and `0` set the
   opacity to 10%–90% and 100% — all of them writing into the brush that
   is painting, which keeps the change when another is picked up and
-  put down again. A brush is a **nib stamped along the stroke**, never
+  put down again — and which outlives the window: what was changed is
+  kept in `brushes.json` beside the boards, as a list of exceptions, so
+  a brush nobody touched is still whatever the shipped sets say. A brush is a **nib stamped along the stroke**, never
   a swept line: its `spacing`, `roundness` and `rotation` are what one
   dab is and how far apart they sit — the gap in Sketchbook's own
   spacing units, each a quarter of the nib's width, which is what makes
