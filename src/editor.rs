@@ -286,6 +286,12 @@ pub struct Editor {
     /// The layer new ink lands on, by id; `None` is the topmost. Kept as
     /// an id, not an index, so it survives the layers being reordered.
     layer: Option<String>,
+    /// The frame whose stack is being worked in, by id; `None` is the
+    /// board's own. Session state like the active layer and the
+    /// selection: it belongs to a tab, and every use of it goes
+    /// through [`Editor::inside_in`], so a frame that has been deleted
+    /// cannot leave the editor pointing into it.
+    inside: Option<String>,
 }
 
 impl Editor {
@@ -392,23 +398,61 @@ impl Editor {
         self.stroke.as_ref()
     }
 
-    /// Index of the layer new ink lands on: the one chosen, or the top
-    /// one when none was, or when the chosen one is gone.
+    /// The frame being worked in, as last recorded. `app` reads this to
+    /// notice a change between frames; everything with a document in
+    /// hand asks [`Editor::inside_in`] instead.
+    pub fn inside(&self) -> Option<&str> {
+        self.inside.as_deref()
+    }
+
+    /// The frame being worked in, checked against `doc`: none once that
+    /// frame is gone, which is what makes the field self-clearing.
+    fn inside_in(&self, doc: &Document) -> Option<&str> {
+        self.inside.as_deref().filter(|id| doc.frame(id).is_some())
+    }
+
+    /// Works inside `frame` from now on: the panel shows its stack and
+    /// new ink lands there. The top of that stack becomes active.
+    pub fn enter_frame(&mut self, doc: &Document, frame: &str) -> Change {
+        if doc.frame(frame).is_none() {
+            return Change::None;
+        }
+        self.inside = Some(frame.to_owned());
+        self.layer = doc.stack(Some(frame)).last().map(|l| l.id.clone());
+        Change::Selection
+    }
+
+    /// Back out to the board, with the frame's own layer active — the
+    /// card the pointer came from.
+    pub fn leave_frame(&mut self, doc: &Document) -> Change {
+        let Some(frame) = self.inside.take() else {
+            return Change::None;
+        };
+        self.layer = doc.frame(&frame).map(|f| f.layer.clone());
+        Change::Selection
+    }
+
+    /// Index of the layer new ink lands on, in the stack being worked
+    /// in: the one chosen, or the top one when none was, when the chosen
+    /// one is gone, or when it is on another stack.
     pub fn active_layer(&self, doc: &Document) -> usize {
+        let stack = self.inside_in(doc);
         self.layer
             .as_deref()
-            .and_then(|id| doc.layer_index(None, id))
-            .unwrap_or(doc.layers.len().saturating_sub(1))
+            .and_then(|id| doc.layer_index(stack, id))
+            .unwrap_or(doc.stack(stack).len().saturating_sub(1))
     }
 
     /// Opens a layer of `kind` above the active one, makes it active and
     /// answers its id — what an element that comes with its own layer is
     /// stamped with.
     fn fresh_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
+        let stack = self.inside_in(doc).map(str::to_owned);
+        let above = self.active_layer(doc);
         let at = doc
-            .add_layer(None, self.active_layer(doc), kind)
+            .add_layer(stack.as_deref(), above, kind)
             .unwrap_or_default();
-        let id = doc.layers[at].id.clone();
+        let id = doc.stack(stack.as_deref())[at].id.clone();
         self.layer = Some(id.clone());
         id
     }
@@ -427,7 +471,8 @@ impl Editor {
         if self.tool == Tool::Pencil {
             return None;
         }
-        doc.layers
+        let stack = self.inside_in(doc);
+        doc.stack(stack)
             .get(self.active_layer(doc))
             .filter(|l| l.kind == Kind::Raster)
             .map(|l| l.id.as_str())
@@ -435,7 +480,7 @@ impl Editor {
 
     fn ink_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
         if kind == Kind::Raster
-            && let Some(layer) = doc.layers.get(self.active_layer(doc))
+            && let Some(layer) = doc.stack(self.inside_in(doc)).get(self.active_layer(doc))
             && layer.kind == Kind::Raster
         {
             return layer.id.clone();
@@ -445,7 +490,7 @@ impl Editor {
 
     /// Makes layer `index` the one new ink lands on.
     pub fn select_layer(&mut self, doc: &Document, index: usize) -> Change {
-        match doc.layers.get(index) {
+        match doc.stack(self.inside_in(doc)).get(index) {
             Some(layer) => {
                 self.layer = Some(layer.id.clone());
                 Change::Selection
@@ -456,10 +501,12 @@ impl Editor {
 
     /// Adds a layer above the active one and makes it active.
     pub fn add_layer(&mut self, doc: &mut Document) -> Change {
+        let stack = self.inside_in(doc).map(str::to_owned);
+        let above = self.active_layer(doc);
         let at = doc
-            .add_layer(None, self.active_layer(doc), Kind::Raster)
+            .add_layer(stack.as_deref(), above, Kind::Raster)
             .unwrap_or_default();
-        self.layer = Some(doc.layers[at].id.clone());
+        self.layer = Some(doc.stack(stack.as_deref())[at].id.clone());
         Change::Scene
     }
 
@@ -469,9 +516,17 @@ impl Editor {
     /// it holds does not: a layer is its object, so the trash takes the
     /// object either way.
     pub fn remove_layer(&mut self, doc: &mut Document) -> Change {
+        let stack = self.inside_in(doc).map(str::to_owned);
         let index = self.active_layer(doc);
-        if !doc.remove_layer(None, index) {
-            let Some(layer) = doc.layers.get(index) else {
+        // A frame layer takes its frame with it, and the panel cannot go
+        // on standing in a stack that is gone.
+        let leaving = doc
+            .stack(stack.as_deref())
+            .get(index)
+            .and_then(|l| doc.frame_on(&l.id))
+            .map(|f| f.id.clone());
+        if !doc.remove_layer(stack.as_deref(), index) {
+            let Some(layer) = doc.stack(stack.as_deref()).get(index) else {
                 return Change::None;
             };
             let last = layer.id.clone();
@@ -484,18 +539,26 @@ impl Editor {
                 .retain(|id| doc.elements.iter().any(|el| el.id() == id));
             return Change::Scene;
         }
+        if self.inside.as_deref() == leaving.as_deref() {
+            self.inside = None;
+        }
         self.drag = None;
         self.selection
             .retain(|id| doc.elements.iter().any(|el| el.id() == id));
-        let next = index.min(doc.layers.len() - 1);
-        self.layer = Some(doc.layers[next].id.clone());
+        let stack = self.inside_in(doc).map(str::to_owned);
+        let next = index.min(doc.stack(stack.as_deref()).len() - 1);
+        self.layer = Some(doc.stack(stack.as_deref())[next].id.clone());
         Change::Scene
     }
 
     /// Shows or hides layer `index`. What is hidden cannot be seen, so
     /// it cannot stay selected either.
     pub fn toggle_layer(&mut self, doc: &mut Document, index: usize) -> Change {
-        let Some(layer) = doc.layers.get_mut(index) else {
+        let stack = self.inside_in(doc).map(str::to_owned);
+        let Some(layer) = doc
+            .stack_mut(stack.as_deref())
+            .and_then(|layers| layers.get_mut(index))
+        else {
             return Change::None;
         };
         layer.visible = !layer.visible;
@@ -514,7 +577,9 @@ impl Editor {
     /// Moves the active layer one step up or down. It keeps its id, so
     /// it stays active.
     pub fn move_layer(&mut self, doc: &mut Document, up: bool) -> Change {
-        match doc.move_layer(None, self.active_layer(doc), up) {
+        let stack = self.inside_in(doc).map(str::to_owned);
+        let index = self.active_layer(doc);
+        match doc.move_layer(stack.as_deref(), index, up) {
             Some(_) => Change::Scene,
             None => Change::None,
         }
@@ -524,7 +589,9 @@ impl Editor {
     /// row dragged in the panel does. It keeps its id, so it stays
     /// active wherever it lands.
     pub fn move_layer_to(&mut self, doc: &mut Document, index: usize) -> Change {
-        match doc.reorder_layer(None, self.active_layer(doc), index) {
+        let stack = self.inside_in(doc).map(str::to_owned);
+        let from = self.active_layer(doc);
+        match doc.reorder_layer(stack.as_deref(), from, index) {
             true => Change::Scene,
             false => Change::None,
         }
@@ -855,9 +922,10 @@ impl Editor {
             .retain(|el| !self.selection.iter().any(|id| id == el.id()));
         for id in emptied {
             if !doc.elements.iter().any(|el| el.layer() == id)
-                && let Some(i) = doc.layer_index(None, &id)
+                && let Some((stack, i)) = doc.locate(&id)
             {
-                doc.remove_layer(None, i);
+                let stack = stack.map(str::to_owned);
+                doc.remove_layer(stack.as_deref(), i);
             }
         }
         self.selection.clear();
@@ -2723,5 +2791,126 @@ mod tests {
         let _ = e.paste_image(&mut doc, &view(), None, BLOB.into(), (10, 10));
         assert_eq!(e.tool(), Tool::Select);
         assert_eq!(e.selection().len(), 1);
+    }
+
+    /// A board whose only layer is a frame's: the frame `fr` spans
+    /// (0,0)–(100,100) and holds one layer, `in`.
+    fn framed_editor_doc() -> Document {
+        Document::from_json(
+            r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [
+                { "id": "fr", "type": "frame", "layer": "fl",
+                  "x": 0, "y": 0, "w": 100, "h": 100, "background": "#fff",
+                  "layers": [ { "id": "in", "name": "Layer 1" } ] }
+            ]
+        }"##,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_editor_starts_on_the_board_and_can_enter_a_frame() {
+        let doc = framed_editor_doc();
+        let mut e = Editor::new();
+        assert_eq!(e.inside(), None);
+        let _ = e.enter_frame(&doc, "fr");
+        assert_eq!(e.inside(), Some("fr"));
+        assert_eq!(e.active_layer(&doc), 0, "the top of the frame's stack");
+        assert_eq!(doc.stack(e.inside())[e.active_layer(&doc)].id, "in");
+        let _ = e.leave_frame(&doc);
+        assert_eq!(e.inside(), None);
+    }
+
+    #[test]
+    fn entering_a_frame_that_is_not_there_does_nothing() {
+        let doc = framed_editor_doc();
+        let mut e = Editor::new();
+        let _ = e.enter_frame(&doc, "nobody");
+        assert_eq!(e.inside(), None);
+    }
+
+    #[test]
+    fn a_layer_added_while_inside_a_frame_lands_in_the_frames_stack() {
+        let mut doc = framed_editor_doc();
+        let mut e = Editor::new();
+        let _ = e.enter_frame(&doc, "fr");
+        let _ = e.add_layer(&mut doc);
+        assert_eq!(doc.stack(Some("fr")).len(), 2);
+        assert_eq!(doc.layers.len(), 1, "the board's stack did not grow");
+    }
+
+    #[test]
+    fn leaving_a_frame_makes_its_own_layer_active() {
+        let doc = framed_editor_doc();
+        let mut e = Editor::new();
+        let _ = e.enter_frame(&doc, "fr");
+        let _ = e.leave_frame(&doc);
+        assert_eq!(
+            doc.stack(None)[e.active_layer(&doc)].id,
+            "fl",
+            "the card the pointer came from"
+        );
+    }
+
+    #[test]
+    fn inside_lets_go_when_its_frame_is_gone() {
+        let mut doc = framed_editor_doc();
+        let mut e = Editor::new();
+        let _ = e.enter_frame(&doc, "fr");
+        doc.elements.retain(|el| el.id() != "fr");
+        doc.layers.clear();
+        doc.layers.push(crate::doc::Layer::new("Layer 1"));
+        assert_eq!(
+            e.active_layer(&doc),
+            0,
+            "it falls back to the board's top layer"
+        );
+    }
+
+    /// A layer picked inside a frame is read against that frame's stack,
+    /// not the board's.
+    #[test]
+    fn select_layer_reads_the_stack_being_worked_in() {
+        let mut doc = framed_editor_doc();
+        let mut e = Editor::new();
+        let _ = e.enter_frame(&doc, "fr");
+        doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
+        let _ = e.select_layer(&doc, 0);
+        assert_eq!(doc.stack(Some("fr"))[e.active_layer(&doc)].id, "in");
+        let _ = e.select_layer(&doc, 1);
+        assert_eq!(e.active_layer(&doc), 1);
+    }
+
+    /// Deleting the frame's own layer from the board takes the frame,
+    /// its stack and everything on it — and the panel stops standing in
+    /// a stack that is gone.
+    #[test]
+    fn removing_a_frame_layer_lets_go_of_the_frame() {
+        let mut doc = framed_editor_doc();
+        doc.layers.insert(0, crate::doc::Layer::new("Layer 1"));
+        let mut e = Editor::new();
+        let _ = e.enter_frame(&doc, "fr");
+        let _ = e.leave_frame(&doc);
+        let _ = e.enter_frame(&doc, "fr");
+        // Stand on the board, on the frame's own card, and take it out.
+        e.inside = None;
+        e.layer = Some("fl".into());
+        let _ = e.remove_layer(&mut doc);
+        assert!(!doc.elements.iter().any(|el| el.id() == "fr"));
+        assert_eq!(e.inside(), None, "and the panel came back out");
+    }
+
+    /// A layer hidden inside a frame is the frame's, not the board's.
+    #[test]
+    fn toggling_a_layer_inside_a_frame_hides_that_one() {
+        let mut doc = framed_editor_doc();
+        let mut e = Editor::new();
+        let _ = e.enter_frame(&doc, "fr");
+        let _ = e.toggle_layer(&mut doc, 0);
+        assert!(!doc.stack(Some("fr"))[0].visible);
+        assert!(doc.layers[0].visible, "the frame's own card is untouched");
     }
 }
