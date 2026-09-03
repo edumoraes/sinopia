@@ -91,8 +91,10 @@ selection, navigation, pasted images, and projects in tabs:
   canvas will not read is Sketchbook's brightness and contrast on a
   paper — nothing says what those numbers mean, and the one band they
   could plainly be turns eight of the 49 papers solid black, one of
-  them under a brush named Textured Pencil. A ring the size of the
-  brush follows the pointer.
+  them under a brush named Textured Pencil. A ring follows the
+  pointer, and it is the outline of the nib the next press would lay:
+  a circle when the nib is round, the same flattened capsule when it
+  is squished, leaning the way the ink will.
   **The eight erasers erase.** Sketchbook gives every brush a stamp
   blend style and 91 of the 211 name something other than plain ink;
   the erasers used to paint. A raster layer is now built on a sheet of

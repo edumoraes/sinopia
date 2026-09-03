@@ -1006,11 +1006,12 @@ impl App {
             && !self.over_chrome(view, (x, y))
             && self.editor().pointer_tool(self.doc(), view, (x, y)) == Tool::Brush
         {
-            let radius = (self.brushes.brush().size / 2.0 * view.px_per_world()) as f32;
+            let (half, angle) = brush::ring_of(self.brushes.brush(), view.px_per_world());
             let ink = with_alpha(self.ink_rgba(), RING_ALPHA);
             frame.extend(brush::ring_prims(
                 (x as f32, y as f32),
-                radius,
+                half,
+                angle,
                 view.scale as f32,
                 ink,
             ));

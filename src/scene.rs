@@ -912,7 +912,7 @@ const SPACING_UNIT: f32 = 0.25;
 const STAMP_STEP_MIN: f32 = 1.0;
 
 /// A nib is never let vanish, however flat it is squished.
-const NIB_MIN_PX: f32 = 0.5;
+pub const NIB_MIN_PX: f32 = 0.5;
 
 /// One throw of the dice, in `-1..1`: splitmix64 over the stroke's own
 /// seed, the dab's place in it and a salt that keeps one property's

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::{Mark, Path, Pressure, Profile, Scatter, Stamp, Stroke};
 use crate::editor::PEN_WIDTH;
-use crate::scene::{Blend, Prim, Rgba, Shapes, polyline_prims};
+use crate::scene::{Blend, NIB_MIN_PX, Prim, Rgba, Shapes, polyline_prims};
 
 /// Brush size in world units (logical px at zoom 1): the diameter. The
 /// top is the widest brush Sketchbook's own sets carry — a 350-unit
@@ -1049,19 +1049,68 @@ impl Library {
     }
 }
 
-/// Points around the ring.
+/// Points around the ring, and so a multiple of the four corners it is
+/// walked by.
 const RING_POINTS: usize = 48;
 
-/// The pointer's ring: a one-logical-pixel circle of `radius` px around
-/// `center`, so the brush's size shows before it paints.
-pub fn ring_prims(center: (f32, f32), radius: f32, scale: f32, color: Rgba) -> Vec<Prim> {
-    let points: Vec<(f32, f32)> = (0..=RING_POINTS)
+/// The pointer's ring: the outline of the nib the next press would lay,
+/// one logical pixel wide, around `center`. `half` is how far it
+/// reaches each way in px and `angle` how far the nib is turned — so a
+/// round nib is a circle, a squished one the same flattened capsule
+/// `Prim::dab` makes, and a turned one leans the way the ink will.
+///
+/// It traces the nib's shape and not its art. A brush that stamps a
+/// silhouette shows the box the silhouette is stamped into, which is
+/// where the ink lands even though it is not the outline of it: the
+/// alternative is tracing an alpha mask every frame, and the ring is
+/// there to say how big and which way round, not to draw the stamp.
+pub fn ring_prims(
+    center: (f32, f32),
+    half: (f32, f32),
+    angle: f32,
+    scale: f32,
+    color: Rgba,
+) -> Vec<Prim> {
+    let (hx, hy) = (half.0.max(0.0), half.1.max(0.0));
+    // The same corner the dab is cut with: the smaller of the two, so
+    // the ends stay round however flat the nib is squished.
+    let r = hx.min(hy);
+    let (ix, iy) = (hx - r, hy - r);
+    let quarter = RING_POINTS / 4;
+    let (sin, cos) = angle.sin_cos();
+    // Four arcs about the corners' own centres, joined by the straights
+    // between them — which is the whole outline when the nib is flat,
+    // and nothing at all when it is round and the centres collapse.
+    let mut points: Vec<(f32, f32)> = (0..RING_POINTS)
         .map(|i| {
+            let (sx, sy) = match i / quarter {
+                0 => (1.0, 1.0),
+                1 => (-1.0, 1.0),
+                2 => (-1.0, -1.0),
+                _ => (1.0, -1.0),
+            };
             let a = i as f32 / RING_POINTS as f32 * std::f32::consts::TAU;
-            (center.0 + radius * a.cos(), center.1 + radius * a.sin())
+            let (x, y) = (sx * ix + r * a.cos(), sy * iy + r * a.sin());
+            (
+                center.0 + cos * x - sin * y,
+                center.1 + sin * x + cos * y,
+            )
         })
         .collect();
+    points.push(points[0]);
     polyline_prims(&points, 0.5 * scale, color)
+}
+
+/// The ring a brush's body asks for: how far the nib reaches each way
+/// on the screen, and how far it is turned. `px_per_world` is what the
+/// view makes of a world unit — the nib is world-sized, like the ink.
+pub fn ring_of(brush: &Brush, px_per_world: f64) -> ((f32, f32), f32) {
+    let half = (brush.size / 2.0 * px_per_world) as f32;
+    let squish = (brush.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX / half.max(NIB_MIN_PX));
+    (
+        (half.max(NIB_MIN_PX), (half * squish).max(NIB_MIN_PX)),
+        (brush.rotation as f32).to_radians(),
+    )
 }
 
 #[cfg(test)]
@@ -1539,7 +1588,7 @@ mod tests {
     #[test]
     fn ring_is_a_closed_polyline_around_the_centre() {
         let (cx, cy, r) = (100.0, 50.0, 12.0);
-        let prims = ring_prims((cx, cy), r, 2.0, [0.0, 0.0, 0.0, 1.0]);
+        let prims = ring_prims((cx, cy), (r, r), 0.0, 2.0, [0.0, 0.0, 0.0, 1.0]);
         assert!(prims.len() >= 24, "smooth enough to read as a circle");
         for p in &prims {
             assert_eq!(p.kind, KIND_SEGMENT);
@@ -1555,6 +1604,51 @@ mod tests {
             (first[0] - last[2]).abs() < 1e-3 && (first[1] - last[3]).abs() < 1e-3,
             "the ring closes"
         );
+    }
+
+    #[test]
+    fn the_ring_is_the_shape_the_nib_will_lay_and_leans_with_it() {
+        let (cx, cy) = (100.0, 50.0);
+        let ends = |prims: &[Prim]| {
+            let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+            for p in prims {
+                for (x, y) in [(p.geom[0], p.geom[1]), (p.geom[2], p.geom[3])] {
+                    lo = (lo.0.min(x), lo.1.min(y));
+                    hi = (hi.0.max(x), hi.1.max(y));
+                }
+            }
+            (hi.0 - lo.0, hi.1 - lo.1)
+        };
+        // Squished, the ring is as flat as the dab: it reaches 40 px
+        // across and 10 down, which is the box `Prim::dab` would fill.
+        let flat = ring_prims((cx, cy), (20.0, 5.0), 0.0, 1.0, [0.0; 4]);
+        let (w, h) = ends(&flat);
+        assert!((w - 40.0).abs() < 1e-3 && (h - 10.0).abs() < 1e-3, "{w}x{h}");
+        // Turned a quarter, the same nib stands on end.
+        let turned = ring_prims((cx, cy), (20.0, 5.0), std::f32::consts::FRAC_PI_2, 1.0, [0.0; 4]);
+        let (w, h) = ends(&turned);
+        assert!((w - 10.0).abs() < 1e-3 && (h - 40.0).abs() < 1e-3, "{w}x{h}");
+        // And the body is what asks for it: a round brush at zoom 1 is
+        // its own size across, a squished one flatter.
+        let round = Brush {
+            size: 30.0,
+            roundness: 1.0,
+            rotation: 90.0,
+            ..Brush::default()
+        };
+        assert_eq!(ring_of(&round, 1.0), ((15.0, 15.0), std::f32::consts::FRAC_PI_2));
+        let squished = Brush {
+            roundness: 0.25,
+            ..round
+        };
+        assert_eq!(ring_of(&squished, 1.0).0, (15.0, 3.75));
+        // However flat it is squished, the ring is never let vanish —
+        // the ink is not, either.
+        let hair = Brush {
+            roundness: 0.0,
+            ..round
+        };
+        assert_eq!(ring_of(&hair, 1.0).0, (15.0, NIB_MIN_PX));
     }
 
     #[test]
