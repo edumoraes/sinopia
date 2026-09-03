@@ -210,6 +210,137 @@ impl Scatter {
     }
 }
 
+/// How much of each property the pen's pressure drives, 0–1: 0 is one
+/// pressure never touches, 1 one it drives from nothing up to the value
+/// the brush names. A light touch gives `v * (1 − amount)`, a heavy one
+/// all of `v`, which is how Sketchbook states it — a brush names the
+/// two ends and the amount is the gap between them.
+///
+/// All zero is a nib the pen cannot lean on, which is what a board
+/// written before the pen was read means, and what a mouse makes of
+/// any brush.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pressure {
+    pub size: f64,
+    pub opacity: f64,
+    pub flow: f64,
+}
+
+impl Default for Pressure {
+    fn default() -> Pressure {
+        Pressure::NONE
+    }
+}
+
+impl Pressure {
+    /// A nib the pen cannot lean on: what a board says by saying
+    /// nothing, and what a brush with no dynamics of its own lays.
+    pub const NONE: Pressure = Pressure {
+        size: 0.0,
+        opacity: 0.0,
+        flow: 0.0,
+    };
+
+    /// Nothing driven at all: absent on disk, and the walk lays every
+    /// dab the same.
+    pub fn is_none(&self) -> bool {
+        *self == Pressure::NONE
+    }
+
+    /// What `v` is worth at pressure `p`: all of it under a full press,
+    /// `1 − amount` of it under none.
+    pub fn scale(amount: f64, p: f64) -> f64 {
+        1.0 - amount.clamp(0.0, 1.0) * (1.0 - p.clamp(0.0, 1.0))
+    }
+
+    /// The same amounts if the canvas could drive by them, or why not.
+    fn checked(self) -> Result<Pressure, String> {
+        for (what, amount) in [
+            ("size", self.size),
+            ("opacity", self.opacity),
+            ("flow", self.flow),
+        ] {
+            if !is_unit(amount) {
+                return Err(format!("{what} pressure {amount} is not between 0 and 1"));
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// What the pen did along a stroke: readings taken from its first sample
+/// to its last, evenly spaced in the stroke's own arc length. The walk
+/// asks for a reading at a fraction of the way along and gets the two
+/// nearest mixed, so the same envelope reads the same whether the stroke
+/// is still a polyline or has been fitted into curves.
+///
+/// Empty is a stroke drawn with no pen at all — pressed all the way,
+/// the nib standing where the brush put it — which is what a mouse says
+/// and what every board written before the pen was read means.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Envelope {
+    /// How hard the tip was pressed, 0–1.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pressure: Vec<f32>,
+    /// The turn the stylus's own lean gave the nib, in degrees.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub twist: Vec<f32>,
+}
+
+impl Envelope {
+    /// Nothing the pen said: absent on disk, and the walk skips the
+    /// lookup for it.
+    pub fn is_empty(&self) -> bool {
+        self.pressure.is_empty() && self.twist.is_empty()
+    }
+
+    /// How hard the tip was pressed `u` of the way along, 0 to 1. A
+    /// stroke with no readings was pressed all the way.
+    pub fn pressure_at(&self, u: f32) -> f32 {
+        read_at(&self.pressure, u).unwrap_or(1.0)
+    }
+
+    /// The turn the stylus gave the nib there, in degrees; none when it
+    /// never leaned on it.
+    pub fn twist_at(&self, u: f32) -> f32 {
+        read_at(&self.twist, u).unwrap_or(0.0)
+    }
+
+    /// The same envelope if the canvas could lay it, or why not. A
+    /// pressure is a fraction and a twist is an angle; neither may be
+    /// a number that is not one.
+    fn checked(self) -> Result<Envelope, String> {
+        for p in &self.pressure {
+            if !(p.is_finite() && (0.0..=1.0).contains(p)) {
+                return Err(format!("pressure {p} is not between 0 and 1"));
+            }
+        }
+        for t in &self.twist {
+            if !t.is_finite() {
+                return Err(format!("twist {t} is not an angle"));
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// One reading `u` of the way along a row of them, the two nearest
+/// mixed. `None` when there are none to read.
+fn read_at(readings: &[f32], u: f32) -> Option<f32> {
+    match readings.len() {
+        0 => None,
+        1 => Some(readings[0]),
+        n => {
+            let at = u.clamp(0.0, 1.0) * (n - 1) as f32;
+            let i = (at.floor() as usize).min(n - 2);
+            let t = at - i as f32;
+            Some(readings[i] + (readings[i + 1] - readings[i]) * t)
+        }
+    }
+}
+
 /// The nib a stroke was stamped with: what one dab is, beyond the
 /// width, opacity and hardness the stroke already names. A stroke
 /// carrying none was swept, not stamped — the pencil's.
@@ -242,6 +373,11 @@ pub struct Stamp {
     /// How far each dab is thrown off it.
     #[serde(default, skip_serializing_if = "Scatter::is_true")]
     pub scatter: Scatter,
+    /// How much of the nib the pen's pressure drives. The readings
+    /// themselves are the stroke's, in its [`Envelope`]: this is only
+    /// how much they are worth.
+    #[serde(default, skip_serializing_if = "Pressure::is_none")]
+    pub pressure: Pressure,
 }
 
 impl Stamp {
@@ -265,6 +401,7 @@ impl Stamp {
             return Err(format!("flow {} is not between 0 and 1", self.flow));
         }
         self.scatter.checked()?;
+        self.pressure.checked()?;
         Ok(self)
     }
 }
@@ -298,6 +435,9 @@ pub struct Path {
     /// The nib it was stamped with, if it was stamped at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stamp: Option<Stamp>,
+    /// What the pen said while it was drawn.
+    #[serde(default, skip_serializing_if = "Envelope::is_empty")]
+    pub pen: Envelope,
 }
 
 /// What a `path` may look like on disk: `curves` today, or the raw
@@ -321,6 +461,8 @@ struct PathOnDisk {
     rotation: f64,
     #[serde(default)]
     stamp: Option<Stamp>,
+    #[serde(default)]
+    pen: Envelope,
 }
 
 /// Fit tolerance for legacy polylines, in world units (one pixel at
@@ -355,6 +497,7 @@ impl TryFrom<PathOnDisk> for Path {
             hardness: p.hardness,
             rotation: p.rotation,
             stamp: p.stamp.map(Stamp::checked).transpose()?,
+            pen: p.pen.checked()?,
         })
     }
 }
@@ -391,6 +534,9 @@ pub struct Stroke {
     /// The nib it was stamped with, if it was stamped at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stamp: Option<Stamp>,
+    /// What the pen said while it was drawn.
+    #[serde(default, skip_serializing_if = "Envelope::is_empty")]
+    pub pen: Envelope,
 }
 
 /// What a stroke may look like on disk. Checked on the way in, like a
@@ -406,6 +552,8 @@ struct StrokeOnDisk {
     hardness: f64,
     #[serde(default)]
     stamp: Option<Stamp>,
+    #[serde(default)]
+    pen: Envelope,
 }
 
 impl TryFrom<StrokeOnDisk> for Stroke {
@@ -425,6 +573,7 @@ impl TryFrom<StrokeOnDisk> for Stroke {
             opacity: s.opacity,
             hardness: s.hardness,
             stamp: s.stamp.map(Stamp::checked).transpose()?,
+            pen: s.pen.checked()?,
         })
     }
 }
@@ -703,6 +852,7 @@ mod tests {
                     hardness: 1.0,
                     rotation: 0.0,
                     stamp: None,
+                    pen: Envelope::default(),
                 }),
                 Element::Image(Image {
                     id: "el_03".into(),
@@ -904,6 +1054,119 @@ mod tests {
     }
 
     #[test]
+    fn a_reading_is_asked_for_by_how_far_along_the_stroke_it_is() {
+        let e = Envelope {
+            pressure: vec![0.0, 1.0, 0.0],
+            twist: Vec::new(),
+        };
+        assert_eq!(e.pressure_at(0.0), 0.0);
+        assert_eq!(e.pressure_at(0.5), 1.0, "the middle station");
+        assert_eq!(e.pressure_at(1.0), 0.0);
+        assert_eq!(e.pressure_at(0.25), 0.5, "halfway between two of them");
+        // Past either end is the end: a walk that overruns by a rounding
+        // error still reads a pressure and not a nonsense.
+        assert_eq!(e.pressure_at(-1.0), 0.0);
+        assert_eq!(e.pressure_at(2.0), 0.0);
+    }
+
+    #[test]
+    fn a_stroke_with_no_readings_was_pressed_all_the_way() {
+        let none = Envelope::default();
+        assert!(none.is_empty());
+        assert_eq!(none.pressure_at(0.5), 1.0, "what a mouse says");
+        assert_eq!(none.twist_at(0.5), 0.0, "and it turns nothing");
+        // One reading is that reading the whole way.
+        let flat = Envelope {
+            pressure: vec![0.4],
+            twist: Vec::new(),
+        };
+        assert_eq!((flat.pressure_at(0.0), flat.pressure_at(1.0)), (0.4, 0.4));
+    }
+
+    #[test]
+    fn a_light_touch_is_worth_what_the_amount_says() {
+        // Nothing driven: the value stands whatever the hand does.
+        assert_eq!(Pressure::scale(0.0, 0.0), 1.0);
+        // Driven the whole way: no press is nothing at all.
+        assert_eq!(Pressure::scale(1.0, 0.0), 0.0);
+        assert_eq!(Pressure::scale(1.0, 1.0), 1.0);
+        // Half driven: a light touch keeps the other half.
+        assert_eq!(Pressure::scale(0.5, 0.0), 0.5);
+        assert_eq!(Pressure::scale(0.5, 0.5), 0.75);
+    }
+
+    #[test]
+    fn a_stroke_keeps_what_the_pen_said_along_it() {
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": [ { "id": "pt1", "type": "paint", "layer": "l1", "strokes": [
+                { "curves": [[[0, 0], [3, 0], [7, 5], [10, 5]]], "stroke": "#000", "width": 8,
+                  "stamp": { "spacing": 0.4, "roundness": 1, "rotation": 0,
+                             "pressure": { "size": 0.5, "flow": 0.25 } },
+                  "pen": { "pressure": [0.2, 1, 0.2], "twist": [0, 45] } },
+                { "curves": [[[0, 9], [3, 9], [7, 9], [10, 9]]], "stroke": "#000", "width": 3 }
+            ] } ]
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let Element::Paint(p) = &doc.elements[0] else {
+            panic!("expected a paint");
+        };
+        assert_eq!(
+            p.strokes[0].stamp.as_ref().unwrap().pressure,
+            Pressure {
+                size: 0.5,
+                opacity: 0.0,
+                flow: 0.25,
+            },
+            "how much of the nib the hand drives"
+        );
+        assert_eq!(p.strokes[0].pen.pressure, vec![0.2, 1.0, 0.2]);
+        assert_eq!(p.strokes[0].pen.twist, vec![0.0, 45.0]);
+        assert!(p.strokes[1].pen.is_empty(), "a stroke drawn with no pen");
+
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["elements"][0]["strokes"][0]["pen"]["pressure"][1].as_f64(), Some(1.0));
+        assert!(
+            v["elements"][0]["strokes"][1].get("pen").is_none(),
+            "a board no pen touched keeps saying nothing: {v}"
+        );
+        assert!(
+            v["elements"][0]["strokes"][1]["stamp"].get("pressure").is_none(),
+            "and neither does a nib the pen cannot lean on"
+        );
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_board_cannot_say_the_pen_pressed_harder_than_it_can() {
+        for (pen, want) in [
+            (r#""pen": { "pressure": [0.5, 1.5] }"#, "not between 0 and 1"),
+            (r#""pen": { "twist": [0, 1e39] }"#, "not an angle"),
+            (
+                r#""stamp": { "spacing": 1, "roundness": 1, "rotation": 0,
+                             "pressure": { "size": 2 } }"#,
+                "not between 0 and 1",
+            ),
+        ] {
+            let json = format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "layers": [ {{ "id": "l1", "name": "Layer 1" }} ],
+                    "elements": [ {{ "id": "p1", "type": "path", "layer": "l1",
+                        "curves": [[[0, 0], [1, 0], [2, 0], [3, 0]]],
+                        "stroke": "#000", "width": 8, {pen} }} ]
+                }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains(want), "{err}");
+        }
+    }
+
+    #[test]
     fn a_stroke_keeps_the_nib_it_was_stamped_with() {
         let json = r##"{
             "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
@@ -929,6 +1192,7 @@ mod tests {
                 rotation: 30.0,
                 flow: 1.0,
                 scatter: Scatter::default(),
+                pressure: Pressure::NONE,
             }),
             "a brush stroke says which nib laid it"
         );

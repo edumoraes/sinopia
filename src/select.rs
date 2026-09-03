@@ -403,7 +403,7 @@ pub fn marquee_prims(a: (f64, f64), b: (f64, f64), theme: &Theme) -> Vec<Prim> {
 mod tests {
     use super::*;
     use crate::curve::Cubic;
-    use crate::doc::{Camera, Image, Kind, Layer, Paint, Path, Rect, Stroke};
+    use crate::doc::{Camera, Envelope, Image, Kind, Layer, Paint, Path, Rect, Stroke};
     use crate::scene::{KIND_BOX, KIND_SEGMENT, Viewport};
     use crate::theme::Theme;
 
@@ -453,6 +453,7 @@ mod tests {
             hardness: 1.0,
             rotation: 0.0,
             stamp: None,
+            pen: Envelope::default(),
         })
     }
 
@@ -469,6 +470,7 @@ mod tests {
                     opacity: 1.0,
                     hardness: 1.0,
                     stamp: None,
+                    pen: Envelope::default(),
                 })
                 .collect(),
             rotation: 0.0,

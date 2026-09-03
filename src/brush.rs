@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::doc::{Path, Scatter, Stamp, Stroke};
+use crate::doc::{Path, Pressure, Scatter, Stamp, Stroke};
 use crate::editor::PEN_WIDTH;
 use crate::scene::{Prim, Rgba, Shapes, polyline_prims};
 
@@ -88,27 +88,6 @@ pub struct Jitter {
     pub spacing: f64,
 }
 
-/// How much of each property the pen's pressure drives, 0–1: 0 is a
-/// property pressure never touches, 1 one it drives from nothing to the
-/// value the brush names.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Pressure {
-    pub size: f64,
-    pub opacity: f64,
-    pub flow: f64,
-}
-
-impl Default for Pressure {
-    fn default() -> Pressure {
-        Pressure {
-            size: 1.0,
-            opacity: 0.0,
-            flow: 0.0,
-        }
-    }
-}
-
 /// A brush's whole body, as Sketchbook's Brush Properties lays it out.
 ///
 /// Three of these reach the canvas today — `size`, `opacity` and
@@ -157,7 +136,13 @@ impl Default for Brush {
             hardness: 0.5,
             texture_depth: 0.0,
             jitter: Jitter::default(),
-            pressure: Pressure::default(),
+            // What Sketchbook's own sets do almost to a brush: the pen
+            // drives the width and leaves the ink alone.
+            pressure: Pressure {
+                size: 1.0,
+                opacity: 0.0,
+                flow: 0.0,
+            },
         }
     }
 }
@@ -454,20 +439,23 @@ impl Brush {
             width: self.size,
             opacity: self.opacity,
             hardness: self.hardness,
+            dynamics: self.dynamics,
             stamp: Some(Stamp {
                 shape: shape.map(str::to_owned),
                 spacing: self.spacing,
                 roundness: self.roundness,
                 rotation: self.rotation,
-                // Only one of Sketchbook's four rotation dynamics is
-                // the canvas's to honour: the other two are the
-                // stylus's tilt and roll, which nothing reports yet.
+                // One of Sketchbook's four rotation dynamics is the
+                // stroke's own doing and belongs on the nib; the other
+                // two are the stylus's, and what they turn the nib by
+                // is written into the stroke reading by reading.
                 follow: self.dynamics == Dynamics::ToStroke,
                 flow: self.flow,
                 scatter: Scatter {
                     size: self.jitter.size,
                     rotation: self.jitter.rotation,
                 },
+                pressure: self.pressure,
             }),
         }
     }
@@ -481,6 +469,11 @@ pub struct Tip {
     pub width: f64,
     pub opacity: f64,
     pub hardness: f64,
+    /// What turns the nib as the stroke goes. Only the stylus's half of
+    /// it is read here — the stroke's own is the nib's `follow`, and
+    /// the tilt and the roll have to be asked of the pen sample by
+    /// sample, which is why the tip still carries the whole answer.
+    pub dynamics: Dynamics,
     /// The nib, when the stroke is stamped. A pencil sweeps and has
     /// none.
     pub stamp: Option<Stamp>,
@@ -491,14 +484,19 @@ impl Tip {
         width: PEN_WIDTH,
         opacity: 1.0,
         hardness: 1.0,
+        dynamics: Dynamics::None,
         stamp: None,
     };
 
+    /// The tip a committed stroke was laid with. Its dynamics are spent:
+    /// what the stylus turned the nib by is already written down, dab
+    /// by dab, in the stroke's own envelope.
     pub fn of(path: &Path) -> Tip {
         Tip {
             width: path.width,
             opacity: path.opacity,
             hardness: path.hardness,
+            dynamics: Dynamics::None,
             stamp: path.stamp.clone(),
         }
     }
@@ -510,6 +508,7 @@ impl Tip {
             width: s.width,
             opacity: s.opacity,
             hardness: s.hardness,
+            dynamics: Dynamics::None,
             stamp: s.stamp.clone(),
         }
     }
@@ -522,7 +521,11 @@ impl Tip {
     pub fn is_direct(&self) -> bool {
         self.opacity >= 1.0
             && self.hardness >= 1.0
-            && self.stamp.as_ref().is_none_or(|s| s.flow >= 1.0)
+            && self.stamp.as_ref().is_none_or(|s| {
+                // A nib the pen thins the ink of lays dabs that do not
+                // cover either, however full the brush's own flow is.
+                s.flow >= 1.0 && s.pressure.opacity == 0.0 && s.pressure.flow == 0.0
+            })
     }
 }
 
@@ -818,7 +821,7 @@ pub fn ring_prims(center: (f32, f32), radius: f32, scale: f32, color: Rgba) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::Path;
+    use crate::doc::{Envelope, Path};
     use crate::editor::PEN_WIDTH;
     use crate::scene::KIND_SEGMENT;
 
@@ -906,6 +909,7 @@ mod tests {
                 width: PEN_WIDTH,
                 opacity: 1.0,
                 hardness: 1.0,
+                dynamics: Dynamics::None,
                 stamp: None,
             }
         );
@@ -954,6 +958,7 @@ mod tests {
                 rotation: 30.0,
                 flow: 1.0,
                 scatter: Scatter::default(),
+                pressure: Brush::default().pressure,
             }),
             "every brush is a nib stamped at a spacing"
         );
@@ -1051,6 +1056,50 @@ mod tests {
     }
 
     #[test]
+    fn a_nib_the_pen_thins_the_ink_of_has_to_be_composited() {
+        let solid = Brush {
+            opacity: 1.0,
+            hardness: 1.0,
+            flow: 1.0,
+            pressure: Pressure::NONE,
+            ..Brush::default()
+        };
+        assert!(
+            solid.tip(None).is_direct(),
+            "a dab that covers on its own goes straight onto the board"
+        );
+        // The pen driving the width changes nothing: every dab still
+        // covers, whatever it is wide.
+        let thin = Brush {
+            pressure: Pressure {
+                size: 1.0,
+                ..Pressure::NONE
+            },
+            ..solid
+        };
+        assert!(thin.tip(None).is_direct());
+        for driven in [
+            Pressure {
+                flow: 0.5,
+                ..Pressure::NONE
+            },
+            Pressure {
+                opacity: 0.5,
+                ..Pressure::NONE
+            },
+        ] {
+            let b = Brush {
+                pressure: driven,
+                ..solid
+            };
+            assert!(
+                !b.tip(None).is_direct(),
+                "a lighter dab must build in the scratch, not on the board"
+            );
+        }
+    }
+
+    #[test]
     fn tip_of_a_path_reads_its_fields() {
         let p = Path {
             id: "p".into(),
@@ -1062,6 +1111,7 @@ mod tests {
             hardness: 0.75,
             rotation: 0.0,
             stamp: None,
+            pen: Envelope::default(),
         };
         assert_eq!(
             Tip::of(&p),
@@ -1069,6 +1119,7 @@ mod tests {
                 width: 7.0,
                 opacity: 0.25,
                 hardness: 0.75,
+                dynamics: Dynamics::None,
                 stamp: None,
             }
         );
@@ -1106,7 +1157,15 @@ mod tests {
         assert_eq!(b.dynamics, Dynamics::None);
         assert_eq!(b.texture_depth, 0.0, "no texture over the nib");
         assert_eq!(b.jitter, Jitter::default(), "nothing random");
-        assert_eq!(b.pressure, Pressure::default());
+        assert_eq!(
+            b.pressure,
+            Pressure {
+                size: 1.0,
+                opacity: 0.0,
+                flow: 0.0,
+            },
+            "the pen's pressure drives the size, as every drawing app does"
+        );
     }
 
     #[test]
@@ -1124,11 +1183,11 @@ mod tests {
         assert_eq!(
             Pressure::default(),
             Pressure {
-                size: 1.0,
+                size: 0.0,
                 opacity: 0.0,
                 flow: 0.0,
             },
-            "the pen's pressure drives the size, as every drawing app does"
+            "a nib the pen cannot lean on: what a board says by saying nothing"
         );
     }
 

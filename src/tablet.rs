@@ -26,9 +26,18 @@ use wayland_protocols::wp::tablet::zv2::client::{
 };
 use winit::window::Window;
 
+use crate::editor::Stylus;
+
+/// What the protocol calls a full press.
+const PRESSURE_MAX: f64 = 65535.0;
+
 /// One hardware event from the tool, as the event loop reads it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Pen {
+    /// How hard the tool presses and which way it is held, as this
+    /// frame leaves them. First out of a frame: a sample has to be
+    /// taken with the axes that came with it, not with the ones before.
+    Axes(Stylus),
     /// Where the tool is, surface-local and in logical px — the units
     /// `wl_surface` speaks, which is not what winit hands the loop.
     Motion { x: f64, y: f64 },
@@ -36,17 +45,43 @@ pub enum Pen {
     Down,
     /// And left it.
     Up,
+    /// The tool left the tablet's reach. Whatever it was last saying
+    /// stops being true, and the mouse takes the pointer back.
+    Away,
 }
 
 /// The axis and button updates of one `frame`, held until it closes.
 /// The protocol sends them one at a time and calls the whole set a single
 /// hardware event, so nothing leaves until the `frame` arrives: a press
 /// has to land on the position that came with it, not on the one before.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+///
+/// The axes are the exception to the clean slate: the protocol sends
+/// only the ones that changed, so they stand as they were until the
+/// tool moves them, and a frame that says nothing about the pressure
+/// means the pressure it already had.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pending {
     motion: Option<(f64, f64)>,
     /// Contact, if it changed this frame.
     tip: Option<bool>,
+    /// The axes as they stand, carried from frame to frame.
+    stylus: Stylus,
+    /// Whether any of them moved this frame.
+    leaned: bool,
+}
+
+impl Default for Pending {
+    fn default() -> Pending {
+        Pending {
+            motion: None,
+            tip: None,
+            // A tool that has said nothing yet presses all the way: a
+            // pen that never reports pressure draws as a mouse does,
+            // rather than not at all.
+            stylus: Stylus::MOUSE,
+            leaned: false,
+        }
+    }
 }
 
 impl Pending {
@@ -60,10 +95,33 @@ impl Pending {
         self.tip = Some(down);
     }
 
-    /// The frame closed: what it has to say, movement before contact, and
-    /// a clean slate for the next one.
+    /// How hard the tip presses, as the protocol counts it: 0 to 65535.
+    pub fn pressure(&mut self, pressure: u32) {
+        self.stylus.pressure = (f64::from(pressure) / PRESSURE_MAX).clamp(0.0, 1.0);
+        self.leaned = true;
+    }
+
+    /// Which way the barrel leans, in degrees off the tablet's z axis.
+    pub fn tilt(&mut self, x: f64, y: f64) {
+        self.stylus.tilt = (x, y);
+        self.leaned = true;
+    }
+
+    /// How far the barrel is rolled, in degrees clockwise. Only an art
+    /// pen reports one.
+    pub fn roll(&mut self, degrees: f64) {
+        self.stylus.roll = degrees;
+        self.leaned = true;
+    }
+
+    /// The frame closed: what it has to say, the axes before the
+    /// movement and the movement before the contact, and a clean slate
+    /// for the next one — except for the axes, which stand.
     pub fn flush(&mut self) -> Vec<Pen> {
         let mut out = Vec::new();
+        if std::mem::take(&mut self.leaned) {
+            out.push(Pen::Axes(self.stylus));
+        }
         if let Some((x, y)) = self.motion.take() {
             out.push(Pen::Motion { x, y });
         }
@@ -188,6 +246,15 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
             Event::Motion { x, y } => state.frames.entry(tool.id()).or_default().motion(x, y),
             Event::Down { .. } => state.frames.entry(tool.id()).or_default().tip(true),
             Event::Up => state.frames.entry(tool.id()).or_default().tip(false),
+            Event::Pressure { pressure } => {
+                state.frames.entry(tool.id()).or_default().pressure(pressure);
+            }
+            Event::Tilt { tilt_x, tilt_y } => {
+                state.frames.entry(tool.id()).or_default().tilt(tilt_x, tilt_y);
+            }
+            Event::Rotation { degrees } => {
+                state.frames.entry(tool.id()).or_default().roll(degrees);
+            }
             Event::Frame { .. } => {
                 let Some(frame) = state.frames.get_mut(&tool.id()) else {
                     return;
@@ -196,11 +263,17 @@ impl Dispatch<ZwpTabletToolV2, ()> for State {
                     state.emit(pen);
                 }
             }
-            // Proximity asks nothing of us: the compositor only sends a
-            // tool over our own surface, and the protocol puts the `up`
-            // before the `proximity_out` that follows it. Pressure is
-            // read and dropped until a stroke has somewhere to keep it.
+            // The compositor only sends a tool over our own surface, and
+            // the protocol puts the `up` before the `proximity_out` that
+            // follows it — so there is never a stroke left open here.
+            // What the tool was saying, though, stops being true: the
+            // loop puts the axes back to a mouse's own, or the next
+            // mouse stroke would draw at the pressure the pen left.
             Event::ProximityIn { .. } => log::debug!("tablet: {:?} in reach", tool.id()),
+            Event::ProximityOut => {
+                state.frames.remove(&tool.id());
+                state.emit(Pen::Away);
+            }
             Event::Removed => {
                 state.frames.remove(&tool.id());
             }
@@ -323,6 +396,67 @@ mod tests {
     #[test]
     fn an_empty_frame_says_nothing() {
         assert!(Pending::default().flush().is_empty());
+    }
+
+    #[test]
+    fn the_axes_of_a_frame_come_before_its_movement() {
+        let mut f = Pending::default();
+        f.motion(10.0, 20.0);
+        f.pressure(32768);
+        f.tip(true);
+        let out = f.flush();
+        assert!(
+            matches!(out[0], Pen::Axes(_)),
+            "a sample is taken with the axes that came with it"
+        );
+        assert_eq!(out[1], Pen::Motion { x: 10.0, y: 20.0 });
+        assert_eq!(out[2], Pen::Down);
+    }
+
+    #[test]
+    fn a_full_press_is_what_the_protocol_calls_one() {
+        let mut f = Pending::default();
+        f.pressure(65535);
+        assert_eq!(f.flush(), vec![Pen::Axes(Stylus::MOUSE)]);
+        f.pressure(0);
+        let Some(Pen::Axes(s)) = f.flush().first().copied() else {
+            panic!("no axes")
+        };
+        assert_eq!(s.pressure, 0.0, "and nothing is nothing");
+    }
+
+    #[test]
+    fn the_axes_stand_until_the_tool_moves_them() {
+        let mut f = Pending::default();
+        f.pressure(16384);
+        f.tilt(30.0, 40.0);
+        f.flush();
+        // A frame that says nothing about them says they have not moved.
+        f.motion(1.0, 2.0);
+        assert_eq!(
+            f.flush(),
+            vec![Pen::Motion { x: 1.0, y: 2.0 }],
+            "unchanged axes are not news"
+        );
+        // And one that moves only the tilt still carries the pressure.
+        f.tilt(0.0, 10.0);
+        let Some(Pen::Axes(s)) = f.flush().first().copied() else {
+            panic!("no axes")
+        };
+        assert_eq!(s.tilt, (0.0, 10.0));
+        assert!((s.pressure - 0.25).abs() < 1e-3, "the press it already had");
+    }
+
+    #[test]
+    fn a_tool_that_never_reports_a_pressure_presses_all_the_way() {
+        let mut f = Pending::default();
+        f.motion(1.0, 2.0);
+        f.tip(true);
+        assert_eq!(
+            f.flush(),
+            vec![Pen::Motion { x: 1.0, y: 2.0 }, Pen::Down],
+            "no axes to report, and a mouse's own until there are"
+        );
     }
 
     #[test]

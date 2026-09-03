@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 431 tests.
+- `cargo build` clean, `cargo test` with 469 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -49,8 +49,9 @@ selection, navigation, pasted images, and projects in tabs:
   nib it was laid with, and **turns with the stroke** when the brush
   says it should — 67 of them do, and 59 of those stamp a shape, so a
   bristle nib runs along the curve instead of pointing one way through
-  it. The other three Rotation Dynamics are the stylus's tilt and roll,
-  which nothing reports yet. A nib is also thrown off true dab by dab:
+  it. Two more of them are the stylus's own — 101 brushes turn the nib
+  by the way the pen is held and 34 of those by its roll on top of the
+  lean. A nib is also thrown off true dab by dab:
   its radius and its angle, each by an amount in its own unit, which is
   how Sketchbook states randomness. Three of its five amounts stay out,
   because its own sets contradict their scale: opacity and flow are
@@ -60,11 +61,23 @@ selection, navigation, pasted images, and projects in tabs:
   negative more often than not. The canvas does not guess at any of the
   three. The rest of the body is read off
   the real sets and described truthfully while the engine grows into it
-  — dynamics, the tip's profile, texture depth, and what the pen's
-  pressure drives. What is left promising a mark the ink cannot make is
-  the brush told apart by a *grain* — a texture nib, or the canvas's
-  own paper — and the library says so per brush. A ring the size of the
-  brush follows the pointer.
+  — the tip's profile, and how deep the paper bites into it. What is
+  left promising a mark the ink cannot make is the brush told apart by
+  a *grain* — a texture nib, or the canvas's own paper — and the
+  library says so per brush. A ring the size of the brush follows the
+  pointer.
+  **The pen's pressure drives the ink.** 126 of the brushes narrow
+  with a lighter touch, 143 lay less, 33 fade — Sketchbook names the
+  two ends of each and the gap between them is how much the hand is
+  worth, which is what the importer reads. A dab is that much narrower
+  and that much thinner where the press was lighter, and the gap after
+  it closes with the nib, since the spacing is a share of its width —
+  so a stroke tapers instead of ending flat, and stays as solid as it
+  was. What the hand did is kept with the stroke: readings from end to
+  end, evenly spaced along its own length, so a saved board reopens as
+  the line that was drawn and not as a line of one width. A brush no
+  pressure drives, and a mouse — which presses all the way — leave the
+  board saying nothing about a pen.
   The stroke joins the `paint` on the layer it lands on — one object
   per raster layer, however many strokes went into it — each stroke
   keeping the ink it was laid with: `stroke`, `width`, and `opacity`
@@ -191,8 +204,12 @@ selection, navigation, pasted images, and projects in tabs:
   draws. The protocol sends the axes and the tip of one hardware event
   one at a time, closed by a `frame`; the bridge holds them and sends the
   movement before the touch, because a press has to land where its own
-  frame put the tool. Pressure arrives and is dropped: a stroke carries
-  one width, and nowhere yet to keep more.
+  frame put the tool. It reads the pen's pressure, the barrel's tilt and
+  the roll of a pen that reports one, and hands them over ahead of the
+  movement they came with — the axes stand from frame to frame, since
+  the protocol only sends the ones that changed. Every mouse event puts
+  them back to a mouse's own, so a pen left on the desk cannot leave the
+  mouse painting nothing.
 - Projects and tabs: several boards open at once, one tab each, with
   the board's name, a dot while it has unsaved changes, a close cross
   and a `+` for a new one. Every tab keeps its own tool, selection and

@@ -14,7 +14,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::brush::Tip;
 use crate::curve::{self, Cubic};
-use crate::doc::{Camera, Document, Element, Stamp};
+use crate::doc::{Camera, Document, Element, Envelope, Pressure, Stamp};
 
 /// Viewport in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -770,9 +770,17 @@ fn seed_at(start: [f64; 2]) -> u64 {
 /// `scatter.size` world units and its angle by `scatter.rotation`
 /// degrees, each from `seed` so the same stroke lands the same way
 /// every frame. The rhythm is not thrown — see [`Property::honored`].
+///
+/// `pen` is what the hand did along the way. Where the brush says
+/// pressure drives it, a dab is that much narrower and lays that much
+/// less ink for a lighter touch, and the gap after it closes with the
+/// nib — the spacing is a share of the nib's width, so a thinner nib
+/// steps shorter. A stylus that turns the nib turns each dab by what it
+/// said there, on top of the nib's own angle.
 pub fn stamp_prims(
     points: &[(f32, f32)],
     stamp: &Stamp,
+    pen: &Envelope,
     seed: u64,
     nib: Nib,
     color: Rgba,
@@ -786,64 +794,76 @@ pub fn stamp_prims(
         px_per_world,
         art,
     } = nib;
-    let width = 2.0 * radius + feather;
-    let step = (stamp.spacing as f32 * SPACING_UNIT * width).max(STAMP_STEP_MIN);
     let squish = (stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX / radius.max(NIB_MIN_PX));
     let angle = stamp.rotation as f32;
-    // Flow is what one dab lays; the stroke's opacity is the ceiling
-    // the composite puts on the pile.
-    let ink = [
-        color[0],
-        color[1],
-        color[2],
-        color[3] * stamp.flow.clamp(0.0, 1.0) as f32,
-    ];
+    let gap = stamp.spacing as f32 * SPACING_UNIT;
+    let flow = stamp.flow.clamp(0.0, 1.0) as f32;
+    let drive = stamp.pressure;
     let scatter = stamp.scatter;
     let true_nib = scatter.is_true();
     let size_throw = scatter.size as f32 * px_per_world;
+    let leaning = !pen.twist.is_empty();
 
-    // `n` is the dab's place in the stroke: what the dice are rolled
-    // against, so a dab keeps its own throw however the walk arrives.
-    let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32| match art {
+    let lay = |at: (f32, f32), half: (f32, f32), feather: f32, turn: f32, ink: Rgba| match art {
         Some(art) => Prim::shaped_dab(at, half, turn, art, ink),
         None => Prim::dab(at, half, feather, turn, ink),
     };
     // The way the stroke is going where the dab lands, in radians, when
     // the nib runs along it — a nib that stands still has none.
     let heading = |h: f32| if stamp.follow { h } else { 0.0 };
-    let dab = |at: (f32, f32), n: u32, h: f32| {
-        if true_nib {
-            return lay(
+    // `n` is the dab's place in the stroke: what the dice are rolled
+    // against, so a dab keeps its own throw however the walk arrives.
+    // `u` is how far along the stroke it lands, which is what the pen
+    // is asked by.
+    let dab = |at: (f32, f32), n: u32, h: f32, u: f32| {
+        // What a lighter touch takes off the nib and off the ink. The
+        // ramp is a share of the radius, so it thins with it.
+        let press = pen.pressure_at(u);
+        let narrow = Pressure::scale(drive.size, f64::from(press)) as f32;
+        let (radius, feather) = ((radius * narrow).max(NIB_MIN_PX), feather * narrow);
+        let lighter = (Pressure::scale(drive.flow, f64::from(press))
+            * Pressure::scale(drive.opacity, f64::from(press))) as f32;
+        // Flow is what one dab lays; the stroke's opacity is the ceiling
+        // the composite puts on the pile.
+        let ink = [color[0], color[1], color[2], color[3] * flow * lighter];
+        let turn = if leaning { pen.twist_at(u) } else { 0.0 };
+        let step = (gap * (2.0 * radius + feather)).max(STAMP_STEP_MIN);
+        let prim = if true_nib {
+            lay(
                 at,
-                (radius, radius * squish),
+                (radius, (radius * squish).max(NIB_MIN_PX)),
                 feather,
-                heading(h) + angle.to_radians(),
-            );
-        }
-        let r = (radius + size_throw * dice(seed, n, SALT_SIZE) as f32).max(NIB_MIN_PX);
-        let softness = r / radius.max(NIB_MIN_PX);
-        let turn = angle + scatter.rotation as f32 * dice(seed, n, SALT_ANGLE) as f32;
-        lay(
-            at,
-            (r, (r * squish).max(NIB_MIN_PX)),
-            feather * softness,
-            heading(h) + turn.to_radians(),
-        )
+                heading(h) + (angle + turn).to_radians(),
+                ink,
+            )
+        } else {
+            let r = (radius + size_throw * dice(seed, n, SALT_SIZE) as f32).max(NIB_MIN_PX);
+            let softness = r / radius.max(NIB_MIN_PX);
+            let turn = angle + turn + scatter.rotation as f32 * dice(seed, n, SALT_ANGLE) as f32;
+            lay(
+                at,
+                (r, (r * squish).max(NIB_MIN_PX)),
+                feather * softness,
+                heading(h) + turn.to_radians(),
+                ink,
+            )
+        };
+        (prim, step)
     };
 
-    // The first dab lies along the span it starts on, which the walk
-    // has not reached yet.
-    let start = points
+    // How long the stroke is, so that a dab knows how far along it
+    // lands: the pen is read by the fraction, never by the pixel.
+    let total: f32 = points
         .windows(2)
-        .map(|w| (w[1].0 - w[0].0, w[1].1 - w[0].1))
-        .find(|&(dx, dy)| dx != 0.0 || dy != 0.0)
-        .map_or(0.0, |(dx, dy)| dy.atan2(dx));
-    let mut out = vec![dab(first, 0, start)];
-    let mut n = 1u32;
-    // How far the walk has come since the last dab, carried across the
-    // polyline's corners so the spacing is of the stroke, not of a span.
-    let mut carry = 0.0f32;
-    let next = step;
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .sum();
+    let mut out = Vec::new();
+    let mut n = 0u32;
+    // Where the walk is, and where the next dab goes, both measured
+    // from the press — so the spacing is of the stroke and not of a
+    // span, and a step that changes with the nib still lands true.
+    let mut walked = 0.0f32;
+    let mut next = 0.0f32;
     let mut prev = first;
     for &p in &points[1..] {
         let (dx, dy) = (p.0 - prev.0, p.1 - prev.1);
@@ -852,15 +872,21 @@ pub fn stamp_prims(
             continue;
         }
         let along = dy.atan2(dx);
-        let mut at = next - carry;
-        while at <= span {
-            let k = at / span;
-            out.push(dab((prev.0 + dx * k, prev.1 + dy * k), n, along));
+        while next <= walked + span {
+            let k = (next - walked) / span;
+            let u = if total > 0.0 { next / total } else { 0.0 };
+            let (prim, step) = dab((prev.0 + dx * k, prev.1 + dy * k), n, along, u);
+            out.push(prim);
             n += 1;
-            at += next;
+            next += step;
         }
-        carry = span - (at - next);
+        walked += span;
         prev = p;
+    }
+    // A stroke that never went anywhere is still a dab: one press, laid
+    // where it was made, with the nib pointing where the brush put it.
+    if out.is_empty() {
+        out.push(dab(first, 0, 0.0, 0.0).0);
     }
     out
 }
@@ -875,6 +901,7 @@ const SALT_ANGLE: u64 = 0x2545_F491_4F6C_DD1D;
 fn tip_prims(
     screen: &[(f32, f32)],
     tip: &Tip,
+    pen: &Envelope,
     seed: u64,
     color: Rgba,
     view: &View,
@@ -885,6 +912,7 @@ fn tip_prims(
         Some(stamp) => stamp_prims(
             screen,
             stamp,
+            pen,
             seed,
             Nib {
                 radius,
@@ -899,9 +927,12 @@ fn tip_prims(
 }
 
 /// Stroke in progress (a raw polyline in world units) → screen prims.
+/// `pen` is what the hand has said so far, evened out the same way the
+/// release will write it down.
 pub fn stroke_prims(
     points: &[[f64; 2]],
     tip: &Tip,
+    pen: &Envelope,
     color: Rgba,
     view: &View,
     shapes: &Shapes,
@@ -914,7 +945,7 @@ pub fn stroke_prims(
         })
         .collect();
     let seed = points.first().copied().map_or(0, seed_at);
-    tip_prims(&screen, tip, seed, color, view, shapes)
+    tip_prims(&screen, tip, pen, seed, color, view, shapes)
 }
 
 /// How far the flattened polyline may stray from the curve, in px.
@@ -926,6 +957,7 @@ const FLATTEN_TOLERANCE_PX: f64 = 0.25;
 pub fn path_prims(
     curves: &[Cubic],
     tip: &Tip,
+    pen: &Envelope,
     color: Rgba,
     view: &View,
     shapes: &Shapes,
@@ -943,7 +975,7 @@ pub fn path_prims(
         );
     }
     let seed = curves.first().map_or(0, |c| seed_at(c[0]));
-    tip_prims(&screen, tip, seed, color, view, shapes)
+    tip_prims(&screen, tip, pen, seed, color, view, shapes)
 }
 
 /// How a group's prims meet each other in the scratch texture.
@@ -1165,7 +1197,7 @@ pub fn document_prims(
             Element::Path(p) => {
                 let tip = Tip::of(p);
                 frame.stroke(
-                    path_prims(&p.curves, &tip, parse_color(&p.stroke), view, shapes),
+                    path_prims(&p.curves, &tip, &p.pen, parse_color(&p.stroke), view, shapes),
                     &tip,
                 );
                 continue;
@@ -1177,7 +1209,7 @@ pub fn document_prims(
                 for s in &p.strokes {
                     let tip = Tip::of_stroke(s);
                     frame.stroke(
-                        path_prims(&s.curves, &tip, parse_color(&s.stroke), view, shapes),
+                        path_prims(&s.curves, &tip, &s.pen, parse_color(&s.stroke), view, shapes),
                         &tip,
                     );
                 }
@@ -1209,7 +1241,7 @@ pub fn document_prims(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brush::{Brush, Tip};
+    use crate::brush::{Brush, Dynamics, Tip};
     use crate::doc::{Camera, Kind, Layer, Paint, Path, Rect, Scatter, Stroke};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
@@ -1217,6 +1249,11 @@ mod tests {
     /// No shapes uploaded: every nib is a plain round one.
     fn no_sheet() -> Shapes {
         Shapes::default()
+    }
+
+    /// A stroke drawn with no pen: pressed all the way, end to end.
+    fn no_pen() -> Envelope {
+        Envelope::default()
     }
 
     #[test]
@@ -1299,6 +1336,7 @@ mod tests {
             width,
             opacity,
             hardness,
+            dynamics: Dynamics::None,
             stamp: None,
         }
     }
@@ -1314,6 +1352,7 @@ mod tests {
             hardness: tip.hardness,
             rotation: 0.0,
             stamp: tip.stamp,
+            pen: Envelope::default(),
         })
     }
 
@@ -1333,12 +1372,12 @@ mod tests {
     #[test]
     fn soft_stroke_prims_carry_the_feather() {
         let v = view(0.0, 0.0, 1.0);
-        let got = stroke_prims(&[[0.0, 0.0], [10.0, 0.0]], &tip(8.0, 1.0, 0.5), WHITE, &v, &no_sheet());
+        let got = stroke_prims(&[[0.0, 0.0], [10.0, 0.0]], &tip(8.0, 1.0, 0.5), &no_pen(), WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].kind, KIND_SEGMENT);
         assert_eq!((got[0].radius, got[0].feather), (3.0, 2.0));
         // A tap is a dot, and a dot can be soft too.
-        let dot = stroke_prims(&[[0.0, 0.0]], &tip(8.0, 1.0, 0.0), WHITE, &v, &no_sheet());
+        let dot = stroke_prims(&[[0.0, 0.0]], &tip(8.0, 1.0, 0.0), &no_pen(), WHITE, &v, &no_sheet());
         assert_eq!(dot.len(), 1);
         assert_eq!(dot[0].kind, KIND_BOX);
         assert_eq!((dot[0].radius, dot[0].feather), (2.0, 4.0));
@@ -1357,6 +1396,7 @@ mod tests {
             size: 0.0,
             rotation: 0.0,
         },
+        pressure: Pressure::NONE,
     };
 
     fn stamped(width: f64, stamp: Stamp) -> Tip {
@@ -1364,8 +1404,144 @@ mod tests {
             width,
             opacity: 1.0,
             hardness: 1.0,
+            dynamics: Dynamics::None,
             stamp: Some(stamp),
         }
+    }
+
+    /// The pen pressed `readings` hard along the stroke, evenly spaced.
+    fn pressed(readings: &[f32]) -> Envelope {
+        Envelope {
+            pressure: readings.to_vec(),
+            twist: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_lighter_touch_lays_a_narrower_dab() {
+        let v = view(0.0, 0.0, 1.0);
+        // A nib the pen drives all of: full press is the brush's own
+        // width, no press at all is nothing.
+        let nib = stamped(
+            40.0,
+            Stamp {
+                pressure: Pressure {
+                    size: 1.0,
+                    ..Pressure::NONE
+                },
+                ..ROUND
+            },
+        );
+        let hard = stroke_prims(&[[-30.0, 0.0], [30.0, 0.0]], &nib, &pressed(&[1.0, 1.0]), WHITE, &v, &no_sheet());
+        let half = stroke_prims(&[[-30.0, 0.0], [30.0, 0.0]], &nib, &pressed(&[0.5, 0.5]), WHITE, &v, &no_sheet());
+        assert!((hard[0].radius - 20.0).abs() < 1e-3, "the brush's own width");
+        assert!(
+            (half[0].radius - 10.0).abs() < 1e-3,
+            "half the press is half the nib: {}",
+            half[0].radius
+        );
+        // The gap is a share of the nib's width, so a thinner nib steps
+        // shorter and the ink stays as solid as it was.
+        assert!(
+            half.len() > hard.len(),
+            "a narrower nib is stamped more often: {} vs {}",
+            half.len(),
+            hard.len()
+        );
+    }
+
+    #[test]
+    fn a_stroke_thins_as_the_hand_lifts() {
+        let v = view(0.0, 0.0, 1.0);
+        let nib = stamped(
+            40.0,
+            Stamp {
+                pressure: Pressure {
+                    size: 1.0,
+                    ..Pressure::NONE
+                },
+                ..ROUND
+            },
+        );
+        // Pressed all the way at one end and let go at the other.
+        let got = stroke_prims(&[[-50.0, 0.0], [50.0, 0.0]], &nib, &pressed(&[1.0, 0.0]), WHITE, &v, &no_sheet());
+        let first = got[0].radius;
+        let last = got[got.len() - 1].radius;
+        assert!((first - 20.0).abs() < 1e-3, "it starts at the full width");
+        assert!(last < 1.0, "and comes to nothing: {last}");
+        for pair in got.windows(2) {
+            assert!(
+                pair[1].radius <= pair[0].radius + 1e-4,
+                "the nib only ever narrows: {} then {}",
+                pair[0].radius,
+                pair[1].radius
+            );
+        }
+    }
+
+    #[test]
+    fn a_lighter_touch_lays_less_ink() {
+        let v = view(0.0, 0.0, 1.0);
+        let nib = stamped(
+            20.0,
+            Stamp {
+                flow: 0.5,
+                pressure: Pressure {
+                    size: 0.0,
+                    opacity: 0.0,
+                    flow: 1.0,
+                },
+                ..ROUND
+            },
+        );
+        let hard = stroke_prims(&[[0.0, 0.0]], &nib, &pressed(&[1.0]), WHITE, &v, &no_sheet());
+        let soft = stroke_prims(&[[0.0, 0.0]], &nib, &pressed(&[0.25]), WHITE, &v, &no_sheet());
+        assert!((hard[0].color[3] - 0.5).abs() < 1e-4, "the brush's own flow");
+        assert!(
+            (soft[0].color[3] - 0.125).abs() < 1e-4,
+            "a quarter of the press lays a quarter of it: {}",
+            soft[0].color[3]
+        );
+        assert_eq!(hard[0].radius, soft[0].radius, "the width is not driven");
+    }
+
+    #[test]
+    fn a_nib_the_stylus_leans_turns_dab_by_dab() {
+        let v = view(0.0, 0.0, 1.0);
+        let nib = stamped(8.0, ROUND);
+        let leaning = Envelope {
+            pressure: Vec::new(),
+            twist: vec![0.0, 90.0],
+        };
+        let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], &nib, &leaning, WHITE, &v, &no_sheet());
+        assert!(got[0].angle.abs() < 1e-4, "it starts where the brush put it");
+        let last = got[got.len() - 1].angle;
+        assert!(
+            (last - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "and ends a quarter turn round: {last}"
+        );
+    }
+
+    #[test]
+    fn a_stroke_with_no_pen_is_stamped_as_it_always_was() {
+        let v = view(0.0, 0.0, 1.0);
+        // The nib says the pen drives all of it; the stroke says no pen
+        // ever touched it, so it lays as if none did.
+        let driven = stamped(
+            8.0,
+            Stamp {
+                pressure: Pressure {
+                    size: 1.0,
+                    opacity: 1.0,
+                    flow: 1.0,
+                },
+                ..ROUND
+            },
+        );
+        let pts = [[-20.0, 0.0], [20.0, 0.0]];
+        let got = stroke_prims(&pts, &driven, &no_pen(), WHITE, &v, &no_sheet());
+        let plain = stroke_prims(&pts, &stamped(8.0, ROUND), &no_pen(), WHITE, &v, &no_sheet());
+        assert_eq!(got, plain, "no readings is a full press the whole way");
     }
 
     #[test]
@@ -1374,7 +1550,7 @@ mod tests {
         // A 40-px line with an 8-wide nib at a spacing of 0.5 — an
         // eighth of its width — so a dab where the press was and one
         // every 1 px along it.
-        let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], &stamped(8.0, ROUND), WHITE, &v, &no_sheet());
+        let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], &stamped(8.0, ROUND), &no_pen(), WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 41, "40 px at a 1 px step, the ends counted");
         for p in &got {
             assert_eq!(p.kind, KIND_BOX, "a dab is a nib, not a swept segment");
@@ -1406,6 +1582,7 @@ mod tests {
         let got = stroke_prims(
             &[[-60.0, 0.0], [60.0, 0.0]],
             &stamped(40.0, nib),
+            &no_pen(),
             WHITE,
             &v,
             &no_sheet(),
@@ -1430,6 +1607,7 @@ mod tests {
         let got = stroke_prims(
             &[[-60.0, 0.0], [60.0, 0.0]],
             &stamped(40.0, ROUND),
+            &no_pen(),
             WHITE,
             &v,
             &no_sheet(),
@@ -1455,7 +1633,7 @@ mod tests {
             flow: 1.0,
             ..ROUND
         };
-        let got = stroke_prims(&[[0.0, 0.0]], &stamped(8.0, flat.clone()), WHITE, &v, &no_sheet());
+        let got = stroke_prims(&[[0.0, 0.0]], &stamped(8.0, flat.clone()), &no_pen(), WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 1, "a tap is one dab");
         let d = got[0];
         assert_eq!([d.geom[2], d.geom[3]], [8.0, 2.0], "squished across its own y");
@@ -1468,7 +1646,7 @@ mod tests {
             roundness: 0.0,
             ..flat.clone()
         };
-        let got = stroke_prims(&[[0.0, 0.0]], &stamped(8.0, hair), WHITE, &v, &no_sheet());
+        let got = stroke_prims(&[[0.0, 0.0]], &stamped(8.0, hair), &no_pen(), WHITE, &v, &no_sheet());
         assert_eq!(got[0].geom[3], 1.0, "a nib is never let vanish");
     }
 
@@ -1483,6 +1661,7 @@ mod tests {
             hardness: tip.hardness,
             rotation: 0.0,
             stamp: tip.stamp,
+            pen: Envelope::default(),
         })
     }
 
@@ -1494,6 +1673,7 @@ mod tests {
             opacity: tip.opacity,
             hardness: tip.hardness,
             stamp: tip.stamp,
+            pen: Envelope::default(),
         }
     }
 
@@ -1606,7 +1786,7 @@ mod tests {
                 ..flat.clone()
             },
         );
-        let got = stroke_prims(&corner, &nib, WHITE, &v, &no_sheet());
+        let got = stroke_prims(&corner, &nib, &no_pen(), WHITE, &v, &no_sheet());
         assert!(got.len() > 4);
         assert!(
             got[0].angle.abs() < 1e-4,
@@ -1626,13 +1806,13 @@ mod tests {
                 ..flat.clone()
             },
         );
-        let got = stroke_prims(&corner, &turned, WHITE, &v, &no_sheet());
+        let got = stroke_prims(&corner, &turned, &no_pen(), WHITE, &v, &no_sheet());
         assert!((got[0].angle - FRAC_PI_2).abs() < 1e-4);
 
         // A nib that does not follow keeps its angle, whatever the
         // stroke does around it.
         let fixed = stamped(8.0, flat);
-        let got = stroke_prims(&corner, &fixed, WHITE, &v, &no_sheet());
+        let got = stroke_prims(&corner, &fixed, &no_pen(), WHITE, &v, &no_sheet());
         assert!(got.iter().all(|d| d.angle == 0.0), "the nib stands still");
     }
 
@@ -1652,7 +1832,7 @@ mod tests {
                 ..ROUND
             },
         );
-        let got = stroke_prims(&[[0.0, 0.0]], &nib, WHITE, &v, &sheet);
+        let got = stroke_prims(&[[0.0, 0.0]], &nib, &no_pen(), WHITE, &v, &sheet);
         assert_eq!(got.len(), 1, "a tap is one dab");
         let d = got[0];
         assert_eq!(d.kind, KIND_IMAGE, "the nib is the sheet's own art");
@@ -1671,7 +1851,7 @@ mod tests {
                 ..ROUND
             },
         );
-        let got = stroke_prims(&[[0.0, 0.0]], &lost, WHITE, &v, &sheet);
+        let got = stroke_prims(&[[0.0, 0.0]], &lost, &no_pen(), WHITE, &v, &sheet);
         assert_eq!(got[0].kind, KIND_BOX);
     }
 
@@ -1686,7 +1866,7 @@ mod tests {
             ..ROUND
         };
         let pts = [[-40.0, 0.0], [40.0, 0.0]];
-        let got = stroke_prims(&pts, &stamped(8.0, wild.clone()), WHITE, &v, &no_sheet());
+        let got = stroke_prims(&pts, &stamped(8.0, wild.clone()), &no_pen(), WHITE, &v, &no_sheet());
         assert!(got.len() > 4);
 
         // No two dabs alike: the radius, the angle and the gap are all
@@ -1716,11 +1896,12 @@ mod tests {
 
         // The throw belongs to the stroke, not to the frame it is drawn
         // in: drawing it again lands every dab where it was.
-        assert_eq!(stroke_prims(&pts, &stamped(8.0, wild.clone()), WHITE, &v, &no_sheet()), got);
+        assert_eq!(stroke_prims(&pts, &stamped(8.0, wild.clone()), &no_pen(), WHITE, &v, &no_sheet()), got);
         // Panning must not re-roll it either — the same dabs, moved.
         let moved = stroke_prims(
             &pts,
             &stamped(8.0, wild),
+            &no_pen(),
             WHITE,
             &view(10.0, 0.0, 1.0),
             &no_sheet(),
@@ -1739,7 +1920,7 @@ mod tests {
     fn a_flowing_nib_lays_each_dab_at_its_flow_and_the_dabs_pile_up() {
         let v = view(0.0, 0.0, 1.0);
         let nib = stamped(8.0, Stamp { flow: 0.25, ..ROUND });
-        let got = stroke_prims(&[[-8.0, 0.0], [8.0, 0.0]], &nib, WHITE, &v, &no_sheet());
+        let got = stroke_prims(&[[-8.0, 0.0], [8.0, 0.0]], &nib, &no_pen(), WHITE, &v, &no_sheet());
         assert!(got.len() > 1);
         for d in &got {
             assert_eq!(d.color[3], 0.25, "a dab lays its flow; opacity is the ceiling");
@@ -2347,6 +2528,7 @@ mod tests {
                 hardness: 1.0,
                 rotation: 0.0,
                 stamp: None,
+                pen: Envelope::default(),
             })],
             &v,
         );
@@ -2365,14 +2547,14 @@ mod tests {
     #[test]
     fn path_prims_flatten_curves_in_screen_pixels() {
         let c = [[0.0, 0.0], [0.0, 55.0], [45.0, 100.0], [100.0, 100.0]];
-        let at_1x = path_prims(&[c], &Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0), &no_sheet());
+        let at_1x = path_prims(&[c], &Tip::PENCIL, &no_pen(), WHITE, &view(0.0, 0.0, 1.0), &no_sheet());
         assert!(at_1x.len() > 1, "a curve is more than one segment");
         let first = at_1x[0].geom;
         let last = at_1x[at_1x.len() - 1].geom;
         assert_eq!((first[0], first[1]), (50.0, 50.0));
         assert_eq!((last[2], last[3]), (150.0, 150.0));
         // Flattening tolerance is in pixels, so zooming in adds segments.
-        let at_4x = path_prims(&[c], &Tip::PENCIL, WHITE, &view(0.0, 0.0, 4.0), &no_sheet());
+        let at_4x = path_prims(&[c], &Tip::PENCIL, &no_pen(), WHITE, &view(0.0, 0.0, 4.0), &no_sheet());
         assert!(
             at_4x.len() > at_1x.len(),
             "{} vs {}",
@@ -2385,7 +2567,7 @@ mod tests {
     fn path_prims_join_consecutive_cubics_without_a_gap() {
         let a = [[0.0, 0.0], [3.0, 0.0], [6.0, 0.0], [9.0, 0.0]];
         let b = [[9.0, 0.0], [12.0, 0.0], [15.0, 0.0], [18.0, 0.0]];
-        let got = path_prims(&[a, b], &Tip::PENCIL, WHITE, &view(0.0, 0.0, 1.0), &no_sheet());
+        let got = path_prims(&[a, b], &Tip::PENCIL, &no_pen(), WHITE, &view(0.0, 0.0, 1.0), &no_sheet());
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[0].geom, [50.0, 50.0, 59.0, 50.0]);
         assert_eq!(got[1].geom, [59.0, 50.0, 68.0, 50.0]);
@@ -2394,7 +2576,7 @@ mod tests {
     #[test]
     fn stroke_width_never_drops_below_one_pixel() {
         let v = view(0.0, 0.0, 0.1);
-        let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], &Tip::PENCIL, WHITE, &v, &no_sheet());
+        let got = stroke_prims(&[[0.0, 0.0], [100.0, 0.0]], &Tip::PENCIL, &no_pen(), WHITE, &v, &no_sheet());
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].radius, 0.5);
     }

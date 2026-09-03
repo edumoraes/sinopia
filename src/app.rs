@@ -22,7 +22,7 @@ use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
-use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Tool};
+use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Stylus, Tool};
 use crate::geom::Corner;
 use crate::gestures;
 use crate::gfx::Gfx;
@@ -934,6 +934,7 @@ impl App {
             let prims = scene::stroke_prims(
                 &stroke.points,
                 &stroke.tip,
+                &stroke.envelope(),
                 self.theme.ink,
                 view,
                 &self.shapes,
@@ -1305,10 +1306,20 @@ impl App {
             return;
         };
         match pen {
+            Pen::Axes(stylus) => self.stylus(stylus),
             Pen::Motion { x, y } => self.pointer_moved(x * scale, y * scale),
             Pen::Down => self.pointer_pressed(Button::Left),
             Pen::Up => self.pointer_released(Button::Left),
+            Pen::Away => self.stylus(Stylus::MOUSE),
         }
+    }
+
+    /// What the pointer presses with from here on. The pen sets it out
+    /// of its own frames; every mouse event puts it back, so a pen
+    /// lifted off the tablet — which reads as no pressure at all —
+    /// cannot leave the mouse painting nothing.
+    fn stylus(&mut self, stylus: Stylus) {
+        self.active().0.set_stylus(stylus);
     }
 
     fn gestured(&mut self, gesture: Gesture) {
@@ -1484,6 +1495,7 @@ impl App {
                 self.redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.stylus(Stylus::MOUSE);
                 self.pointer_moved(position.x, position.y);
             }
             WindowEvent::CursorLeft { .. } => {
@@ -1502,6 +1514,7 @@ impl App {
                     MouseButton::Right => Button::Right,
                     _ => return,
                 };
+                self.stylus(Stylus::MOUSE);
                 match state {
                     ElementState::Pressed => self.pointer_pressed(button),
                     ElementState::Released => self.pointer_released(button),

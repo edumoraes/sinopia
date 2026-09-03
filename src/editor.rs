@@ -5,9 +5,9 @@
 //! current [`View`] and the document, and stores whatever comes back.
 
 use crate::bitmap;
-use crate::brush::Tip;
+use crate::brush::{Dynamics, Tip};
 use crate::curve;
-use crate::doc::{Camera, Document, Element, Image, Kind, Paint, Path, new_id};
+use crate::doc::{Camera, Document, Element, Envelope, Image, Kind, Paint, Path, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
@@ -172,13 +172,103 @@ enum Drag {
     },
 }
 
-/// The stroke being drawn: raw pointer samples in world units, and the
-/// tip they were taken with — the pencil's, or the brush's settings at
-/// the press, so a setting changed mid-stroke does not change the ink.
+/// What the input is doing besides being somewhere: how hard the tip is
+/// pressed, 0–1, and which way it is held — the barrel's own lean, in
+/// the tablet's degrees, and the roll of a pen that reports one. A
+/// mouse is a stylus that presses all the way and stands straight up,
+/// which is what this is until a pen says otherwise.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stylus {
+    pub pressure: f64,
+    pub tilt: (f64, f64),
+    pub roll: f64,
+}
+
+impl Stylus {
+    pub const MOUSE: Stylus = Stylus {
+        pressure: 1.0,
+        tilt: (0.0, 0.0),
+        roll: 0.0,
+    };
+
+    /// The turn the stylus gives the nib, in degrees, under `dynamics`:
+    /// the way the barrel leans, and — on a pen that reports one — the
+    /// roll on top of it. The other two dynamics turn nothing here:
+    /// standing still is a nib the stylus does not touch, and following
+    /// the stroke is the stroke's own doing, not the hand's.
+    pub fn twist(&self, dynamics: Dynamics) -> f64 {
+        match dynamics {
+            Dynamics::Tilt => self.lean(),
+            Dynamics::TiltAndRoll => self.lean() + self.roll,
+            Dynamics::None | Dynamics::ToStroke => 0.0,
+        }
+    }
+
+    /// Which way the barrel leans, in degrees. A pen standing straight
+    /// up leans nowhere.
+    fn lean(&self) -> f64 {
+        let (x, y) = self.tilt;
+        if x == 0.0 && y == 0.0 {
+            0.0
+        } else {
+            y.atan2(x).to_degrees()
+        }
+    }
+}
+
+impl Default for Stylus {
+    fn default() -> Stylus {
+        Stylus::MOUSE
+    }
+}
+
+/// The stroke being drawn: raw pointer samples in world units, what the
+/// stylus said at each of them, and the tip they were taken with — the
+/// pencil's, or the brush's settings at the press, so a setting changed
+/// mid-stroke does not change the ink.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
     pub points: Vec<[f64; 2]>,
+    /// One reading per point, in step with it.
+    pub stylus: Vec<Stylus>,
     pub tip: Tip,
+}
+
+impl Stroke {
+    /// What the pen said along the stroke, evened out onto stations of
+    /// its own arc length: what the walk lays the dabs by while it is
+    /// being drawn, and what the release writes down — the same
+    /// envelope both times, so the ink does not change when the stroke
+    /// is let go of.
+    ///
+    /// Only what the nib actually reads is kept. A brush no pressure
+    /// drives, a nib the stylus does not turn, or a mouse — which
+    /// presses all the way from end to end — leaves an empty envelope,
+    /// and the board says nothing about a pen that was not there.
+    pub fn envelope(&self) -> Envelope {
+        let driven = self
+            .tip
+            .stamp
+            .as_ref()
+            .is_some_and(|s| !s.pressure.is_none());
+        let pressure = self.readings(driven, |s| s.pressure, 1.0);
+        let twist = self.readings(true, |s| s.twist(self.tip.dynamics), 0.0);
+        Envelope { pressure, twist }
+    }
+
+    /// One of the stylus's own numbers along the stroke, or nothing at
+    /// all when the nib does not read it or when it never left `flat` —
+    /// the value a stroke drawn without a pen has the whole way.
+    fn readings(&self, wanted: bool, of: impl Fn(&Stylus) -> f64, flat: f64) -> Vec<f32> {
+        if !wanted {
+            return Vec::new();
+        }
+        let readings: Vec<f32> = self.stylus.iter().map(|s| of(s) as f32).collect();
+        if readings.iter().all(|&r| r == flat as f32) {
+            return Vec::new();
+        }
+        curve::resample(&self.points, &readings)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -187,6 +277,10 @@ pub struct Editor {
     space: bool,
     ctrl: bool,
     shift: bool,
+    /// What the pen last said, or a mouse's own. Physical, like the
+    /// held keys: it belongs to the hand, not to the board, and a tab
+    /// switch does not hand it on.
+    stylus: Stylus,
     stroke: Option<Stroke>,
     nav: Option<Nav>,
     /// Ids of the selected elements, in selection order.
@@ -475,9 +569,18 @@ impl Editor {
     fn start_stroke(&mut self, world: (f64, f64), tip: Tip) -> Change {
         self.stroke = Some(Stroke {
             points: vec![[world.0, world.1]],
+            stylus: vec![self.stylus],
             tip,
         });
         Change::Scene
+    }
+
+    /// What the pen is doing, read from here on. `app` sets it from the
+    /// tablet's own frames and puts it back to [`Stylus::MOUSE`] the
+    /// moment a mouse moves, so a pen lifted off the tablet cannot
+    /// leave the mouse drawing at no pressure at all.
+    pub fn set_stylus(&mut self, stylus: Stylus) {
+        self.stylus = stylus;
     }
 
     /// Select tool, left button: a handle starts a resize or a rotation;
@@ -562,7 +665,7 @@ impl Editor {
     /// physical px to the last one are dropped so jitter does not bloat the
     /// path.
     pub fn moved(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
-        if let Some(Stroke { points, .. }) = &mut self.stroke {
+        if let Some(Stroke { points, stylus, .. }) = &mut self.stroke {
             let world = view.screen_to_world(screen.0, screen.1);
             let last = points[points.len() - 1];
             let (dx, dy) = (world.0 - last[0], world.1 - last[1]);
@@ -571,6 +674,7 @@ impl Editor {
                 return Change::None;
             }
             points.push([world.0, world.1]);
+            stylus.push(self.stylus);
             return Change::Scene;
         }
         match &mut self.nav {
@@ -759,8 +863,10 @@ impl Editor {
     ) -> Change {
         let _ = screen;
         if button == Button::Left
-            && let Some(Stroke { points, tip }) = self.stroke.take()
+            && let Some(live) = self.stroke.take()
         {
+            let pen = live.envelope();
+            let Stroke { points, tip, .. } = live;
             let tolerance = FIT_TOLERANCE_PX / view.px_per_world();
             let curves = curve::fit(&curve::simplify(&points, tolerance), tolerance);
             // The tool that started the stroke: switching tools cancels
@@ -777,6 +883,7 @@ impl Editor {
                 opacity: tip.opacity,
                 hardness: tip.hardness,
                 stamp: tip.stamp,
+                pen,
             };
             if kind == Kind::Vector {
                 doc.elements.push(Element::Path(Path {
@@ -789,6 +896,7 @@ impl Editor {
                     hardness: laid.hardness,
                     rotation: 0.0,
                     stamp: laid.stamp,
+                    pen: laid.pen,
                 }));
                 return Change::Scene;
             }
@@ -938,7 +1046,7 @@ fn apply(doc: &mut Document, snapshot: &Snapshot, m: &Affine) {
 mod tests {
     use super::*;
     use crate::brush::{Brush, Tip};
-    use crate::doc::{Element, Layer, Rect};
+    use crate::doc::{Element, Layer, Pressure, Rect};
     use crate::geom::Corner;
     use crate::scene::Viewport;
     use crate::select::Handle;
@@ -976,6 +1084,117 @@ mod tests {
         });
         doc.elements[1].set_layer("L2");
         doc
+    }
+
+    /// A pen pressing `p` of the way down, held straight up.
+    fn pressing(p: f64) -> Stylus {
+        Stylus {
+            pressure: p,
+            ..Stylus::MOUSE
+        }
+    }
+
+    #[test]
+    fn a_stroke_records_what_the_stylus_said_at_every_sample() {
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        e.set_stylus(pressing(0.25));
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &brush().tip(None));
+        e.set_stylus(pressing(1.0));
+        let _ = e.moved(&v, (40.0, 10.0), &mut doc);
+        let s = e.stroke().unwrap();
+        assert_eq!(s.points.len(), s.stylus.len(), "one reading per sample");
+        assert_eq!(s.stylus[0].pressure, 0.25, "the press took the pen as it was");
+        assert_eq!(s.stylus[1].pressure, 1.0);
+    }
+
+    #[test]
+    fn the_ink_does_not_jump_when_the_stroke_is_let_go_of() {
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        e.set_stylus(pressing(0.2));
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &brush().tip(None));
+        e.set_stylus(pressing(0.9));
+        let _ = e.moved(&v, (60.0, 10.0), &mut doc);
+        let live = e.stroke().unwrap().envelope();
+        let _ = e.release(Button::Left, &v, (60.0, 10.0), &mut doc, "#000");
+        let laid = &paint_of(&doc, 0).strokes[0];
+        assert_eq!(laid.pen, live, "the release writes down what was drawn");
+    }
+
+    #[test]
+    fn a_stroke_keeps_only_the_readings_its_nib_can_use() {
+        let mut doc = Document::new("t");
+        let v = view();
+        // A brush no pressure drives keeps nothing, however the pen was
+        // held: there is nothing on the nib for it to move.
+        let deaf = Brush {
+            pressure: Pressure::NONE,
+            ..brush()
+        };
+        let mut e = tool(Tool::Brush);
+        e.set_stylus(pressing(0.3));
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &deaf.tip(None));
+        let _ = e.moved(&v, (60.0, 10.0), &mut doc);
+        assert!(
+            e.stroke().unwrap().envelope().is_empty(),
+            "a nib the pen cannot lean on"
+        );
+
+        // And a mouse leaves nothing behind on a brush that would have
+        // read it: it pressed all the way from end to end.
+        let mut e = tool(Tool::Brush);
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &brush().tip(None));
+        let _ = e.moved(&v, (60.0, 10.0), &mut doc);
+        assert!(e.stroke().unwrap().envelope().pressure.is_empty());
+    }
+
+    #[test]
+    fn only_a_nib_the_stylus_turns_keeps_the_way_it_was_held() {
+        let mut doc = Document::new("t");
+        let v = view();
+        let leaning = Stylus {
+            tilt: (0.0, 1.0),
+            ..Stylus::MOUSE
+        };
+        for (dynamics, kept) in [
+            (Dynamics::None, false),
+            (Dynamics::ToStroke, false),
+            (Dynamics::Tilt, true),
+            (Dynamics::TiltAndRoll, true),
+        ] {
+            let b = Brush { dynamics, ..brush() };
+            let mut e = tool(Tool::Brush);
+            e.set_stylus(leaning);
+            let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &b.tip(None));
+            let _ = e.moved(&v, (60.0, 10.0), &mut doc);
+            let twist = e.stroke().unwrap().envelope().twist;
+            assert_eq!(
+                !twist.is_empty(),
+                kept,
+                "{dynamics:?} either reads the hand or does not"
+            );
+            if kept {
+                assert!((twist[0] - 90.0).abs() < 1e-3, "leaning down the y axis");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pen_left_on_the_desk_does_not_make_the_mouse_draw_nothing() {
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        e.set_stylus(pressing(0.0));
+        e.set_stylus(Stylus::MOUSE);
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &brush().tip(None));
+        let _ = e.moved(&v, (60.0, 10.0), &mut doc);
+        assert!(
+            e.stroke().unwrap().envelope().pressure.is_empty(),
+            "the mouse presses all the way"
+        );
     }
 
     #[test]

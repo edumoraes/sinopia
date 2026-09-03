@@ -39,6 +39,57 @@ pub fn simplify(points: &[Point], tolerance: f64) -> Vec<Point> {
 }
 
 /// Point on `c` at parameter `t` in `[0, 1]`.
+/// One reading of the pen per this many world units of a stroke: what
+/// its readings are evened out to when the points they were taken at
+/// are given up for curves. Fine enough that a flick of the wrist
+/// survives it, coarse enough that a long stroke does not carry a
+/// thousand numbers.
+pub const READING_STEP: f64 = 4.0;
+
+/// However long the stroke: past this the pen is read no finer.
+pub const READINGS_MAX: usize = 256;
+
+/// `readings` — one per point of `points` — evened out onto stations
+/// spaced equally along the polyline's own arc length, from its first
+/// point to its last. What a stroke keeps of the pen once its own
+/// points are gone: a reading is then asked for by how far along the
+/// stroke it is, which a curve can answer as well as a polyline.
+///
+/// A stroke with nothing to say — no readings, or a single point —
+/// evens out to what it said, which may be nothing at all.
+pub fn resample(points: &[Point], readings: &[f32]) -> Vec<f32> {
+    let n = points.len().min(readings.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    // Where each point sits along the stroke.
+    let mut arc = Vec::with_capacity(n);
+    let mut total = 0.0;
+    arc.push(0.0);
+    for i in 1..n {
+        total += len(sub(points[i], points[i - 1]));
+        arc.push(total);
+    }
+    if total <= 0.0 {
+        return vec![readings[0]];
+    }
+    let stations = ((total / READING_STEP).round() as usize + 1).clamp(2, READINGS_MAX);
+    let mut out = Vec::with_capacity(stations);
+    // The points are in order, so the walk over them never goes back.
+    let mut i = 0;
+    for k in 0..stations {
+        let at = total * k as f64 / (stations - 1) as f64;
+        while i + 2 < n && arc[i + 1] < at {
+            i += 1;
+        }
+        let span = arc[i + 1] - arc[i];
+        let t = if span > 0.0 { (at - arc[i]) / span } else { 0.0 };
+        let (a, b) = (readings[i], readings[i + 1]);
+        out.push(a + (b - a) * t.clamp(0.0, 1.0) as f32);
+    }
+    out
+}
+
 pub fn eval(c: &Cubic, t: f64) -> Point {
     let s = 1.0 - t;
     let w = [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t];
@@ -577,5 +628,44 @@ mod tests {
             simplify(&[[0.0, 0.0], [0.5, 0.0], [0.0, 0.0]], 1.0),
             vec![[0.0, 0.0], [0.0, 0.0]]
         );
+    }
+
+    #[test]
+    fn resampling_evens_readings_out_along_the_stroke() {
+        // Three points, the second nine tenths of the way along: the
+        // readings are stretched onto stations that are not.
+        let points = vec![[0.0, 0.0], [36.0, 0.0], [40.0, 0.0]];
+        let out = resample(&points, &[0.0, 0.9, 1.0]);
+        assert_eq!(out.len(), 11, "40 units at one reading every four");
+        assert!((out[0] - 0.0).abs() < 1e-5, "it starts where the stroke did");
+        assert!((out[10] - 1.0).abs() < 1e-5, "and ends where it ended");
+        // The station halfway along sits halfway between the first two
+        // readings, because the points it lies between are evenly spaced.
+        assert!((out[5] - 0.5).abs() < 1e-5, "{}", out[5]);
+        for pair in out.windows(2) {
+            assert!(pair[1] >= pair[0], "a rising press only rises");
+        }
+    }
+
+    #[test]
+    fn a_stroke_that_went_nowhere_keeps_the_one_reading_it_took() {
+        assert_eq!(resample(&[[3.0, 4.0]], &[0.7]), vec![0.7]);
+        assert_eq!(
+            resample(&[[3.0, 4.0], [3.0, 4.0]], &[0.7, 0.2]),
+            vec![0.7],
+            "no length to spread them over"
+        );
+    }
+
+    #[test]
+    fn nothing_read_evens_out_to_nothing() {
+        assert!(resample(&[[0.0, 0.0], [10.0, 0.0]], &[]).is_empty());
+        assert!(resample(&[], &[1.0]).is_empty());
+    }
+
+    #[test]
+    fn a_long_stroke_is_not_read_past_the_cap() {
+        let points = vec![[0.0, 0.0], [100_000.0, 0.0]];
+        assert_eq!(resample(&points, &[0.0, 1.0]).len(), READINGS_MAX);
     }
 }
