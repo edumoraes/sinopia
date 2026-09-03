@@ -9,7 +9,7 @@ the real architecture emerges from development.
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, and projects in tabs:
 
-- `cargo build` clean, `cargo test` with 495 tests.
+- `cargo build` clean, `cargo test` with 496 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -134,13 +134,21 @@ selection, navigation, pasted images, and projects in tabs:
   Opacity, each a slider lying flat with its number beside it. The
   chevron at its end drops Sketchbook's Advanced layout underneath, in
   two columns: Pressure (Size, Opacity, Flow), Stamp (Spacing,
-  Roundness, Rotation), Nib (Edge, Depth) and Randomness (Size,
-  Opacity, Flow, Rotation, Spacing), each section under its own
-  heading. Closed and open never show the same slider twice, and the
+  Roundness, Rotation), Nib (Edge, Depth), Randomness (Size,
+  Opacity, Flow, Rotation, Spacing) and Paint (Strength, Blending,
+  Dilution), each section under its own heading. Closed and open never show the same slider twice, and the
   line above does not move or change width when the panel drops. The
   ones the canvas actually paints with — Size, Opacity, Flow, Edge, the
   whole Stamp section and two of the five under Randomness — are
-  drawn in ink; every other slider is muted.
+  drawn in ink; every other slider is muted. The whole Paint section is
+  muted, and for a reason worth naming: Strength, Blending and Dilution
+  say what a dab does with the paint *under* it, and every stroke here
+  is redrawn from its curves each frame, so there is nothing to read
+  back. The Smudge and Colorless shelves are made of them. Smearing
+  would mean keeping a raster layer as pixels — on an infinite board
+  that pans, that means tiles in world space and an invalidation story:
+  a different engine rather than a missing line, and the bar says so by
+  not promising.
   It still moves, and it still writes the brush's own value, but the
   muting is the bar saying it does not promise paint yet. The
   palette's `≡` opens the same panel.

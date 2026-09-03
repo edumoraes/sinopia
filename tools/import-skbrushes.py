@@ -112,6 +112,13 @@ def read_brush(body):
         # what it is not painting.
         "mark": stroke.get("stampBlendStyle", "normal"),
         "texture_depth": round(f(paper, "paperTextureDepthMax", 0.0), 3) if textured else 0.0,
+        # What a dab does with the paint under it. Nothing reads the
+        # canvas back yet, so these are carried and not painted — but
+        # they are what the Smudge and Colorless shelves are made of,
+        # and a library that did not say so would be lying.
+        "strength": round(f(params, "strength"), 4),
+        "blending": round(f(params, "blending"), 4),
+        "dilution": round(f(params, "dilution"), 4),
         "jitter": {
             "size": round(f(stroke, "radiusJitter"), 3),
             "opacity": round(f(stroke, "opacityJitter"), 3),

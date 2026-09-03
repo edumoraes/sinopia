@@ -4,7 +4,8 @@
 //! Advanced one. Here it is a bar under the tab strip — the brush's name
 //! and the pair it is usually judged by, Size and Opacity — with a
 //! chevron that drops the Advanced layout underneath: Pressure, Stamp,
-//! Nib and Randomness, every section's sliders under its own heading.
+//! Nib, Randomness and Paint, every section's sliders under its own
+//! heading.
 //! Closed and open never show the same slider twice; opening trades the
 //! basic pair for the whole body.
 //!

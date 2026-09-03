@@ -91,6 +91,14 @@ pub struct Brush {
     pub hardness: f64,
     /// How far the texture bites into the nib, 0–1.
     pub texture_depth: f64,
+    /// How hard a dab pulls at the paint under it, 0–1. Sketchbook's
+    /// Strength: what a smudge brush drags with, and what a colorless
+    /// one is made of.
+    pub strength: f64,
+    /// How much of what it picks up it mixes into its own ink, 0–1.
+    pub blending: f64,
+    /// How much it thins the paint it drags, 0–1.
+    pub dilution: f64,
     pub jitter: Jitter,
     pub pressure: Pressure,
 }
@@ -109,6 +117,9 @@ impl Default for Brush {
             mark: Mark::Ink,
             hardness: 0.5,
             texture_depth: 0.0,
+            strength: 0.0,
+            blending: 0.0,
+            dilution: 0.0,
             jitter: Jitter::default(),
             // What Sketchbook's own sets do almost to a brush: the pen
             // drives the width and leaves the ink alone.
@@ -128,14 +139,19 @@ pub enum Section {
     Stamp,
     Nib,
     Randomness,
+    /// What a dab does with the paint already under it — Sketchbook's
+    /// Strength, Blending and Dilution, which the Smudge and Colorless
+    /// shelves are made of.
+    Paint,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Pressure,
         Section::Stamp,
         Section::Nib,
         Section::Randomness,
+        Section::Paint,
     ];
 
     pub fn label(self) -> &'static str {
@@ -144,6 +160,7 @@ impl Section {
             Section::Stamp => "Stamp",
             Section::Nib => "Nib",
             Section::Randomness => "Randomness",
+            Section::Paint => "Paint",
         }
     }
 }
@@ -165,6 +182,9 @@ pub enum Property {
     JitterFlow,
     JitterRotation,
     JitterSpacing,
+    Strength,
+    Blending,
+    Dilution,
 }
 
 /// How a value is written out under its slider.
@@ -181,7 +201,7 @@ enum Unit {
 }
 
 impl Property {
-    pub const ALL: [Property; 13] = [
+    pub const ALL: [Property; 16] = [
         Property::Size,
         Property::Opacity,
         Property::Flow,
@@ -195,6 +215,9 @@ impl Property {
         Property::JitterFlow,
         Property::JitterRotation,
         Property::JitterSpacing,
+        Property::Strength,
+        Property::Blending,
+        Property::Dilution,
     ];
 
     /// What the bar shows without being opened — the pair a brush is
@@ -211,6 +234,9 @@ impl Property {
             Property::Rotation | Property::JitterRotation => "Rotation",
             Property::Hardness => "Edge",
             Property::TextureDepth => "Depth",
+            Property::Strength => "Strength",
+            Property::Blending => "Blending",
+            Property::Dilution => "Dilution",
         }
     }
 
@@ -224,6 +250,7 @@ impl Property {
             | Property::JitterFlow
             | Property::JitterRotation
             | Property::JitterSpacing => Section::Randomness,
+            Property::Strength | Property::Blending | Property::Dilution => Section::Paint,
         }
     }
 
@@ -252,6 +279,13 @@ impl Property {
     /// larger than the gap itself, so a throw either side of it would
     /// land negative more often than not, and nobody ships that. The
     /// canvas does not guess at any of the three.
+    ///
+    /// Nor does it guess at Strength, Blending and Dilution: those
+    /// describe what a dab does with the paint *under* it, which asks
+    /// the canvas to read back what it has already drawn. Every stroke
+    /// here is redrawn from its curves each frame, so there is nothing
+    /// to read — the layer would have to be kept as pixels, which is a
+    /// different engine and not a missing line.
     pub fn honored(self) -> bool {
         matches!(
             self,
@@ -277,6 +311,9 @@ impl Property {
             Property::Rotation => b.rotation,
             Property::Hardness => b.hardness,
             Property::TextureDepth => b.texture_depth,
+            Property::Strength => b.strength,
+            Property::Blending => b.blending,
+            Property::Dilution => b.dilution,
             Property::JitterSize => b.jitter.size,
             Property::JitterOpacity => b.jitter.opacity,
             Property::JitterFlow => b.jitter.flow,
@@ -300,6 +337,9 @@ impl Property {
             Property::Rotation => b.rotation = v,
             Property::Hardness => b.hardness = v,
             Property::TextureDepth => b.texture_depth = v,
+            Property::Strength => b.strength = v,
+            Property::Blending => b.blending = v,
+            Property::Dilution => b.dilution = v,
             Property::JitterSize => b.jitter.size = v,
             Property::JitterOpacity => b.jitter.opacity = v,
             Property::JitterFlow => b.jitter.flow = v,
@@ -1274,6 +1314,38 @@ mod tests {
         let b = lib.sets()[0].presets[0].brush;
         assert_eq!(b.size, SIZE_MAX);
         assert_eq!(b.opacity, 0.0);
+    }
+
+    #[test]
+    fn the_smudge_and_colorless_shelves_are_made_of_what_the_canvas_cannot_read() {
+        let lib = Library::default();
+        for shelf in ["Smudge", "Colorless"] {
+            let set = lib
+                .sets()
+                .iter()
+                .find(|s| s.name == shelf)
+                .unwrap_or_else(|| panic!("no {shelf} shelf"));
+            for p in &set.presets {
+                assert!(
+                    p.brush.strength > 0.0,
+                    "{} pulls at the paint under it",
+                    p.name
+                );
+                assert!(!p.brush.mark.painted(), "{} is not ink", p.name);
+            }
+        }
+        // And the properties that say so are read off the real sets.
+        let all: Vec<&Preset> = lib.sets().iter().flat_map(|s| &s.presets).collect();
+        assert_eq!(all.iter().filter(|p| p.brush.strength > 0.0).count(), 56);
+        assert_eq!(all.iter().filter(|p| p.brush.blending > 0.0).count(), 50);
+        assert_eq!(all.iter().filter(|p| p.brush.dilution > 0.0).count(), 14);
+        // None of the three is painted: a dab that works on the paint
+        // under it needs the layer kept as pixels, and every stroke here
+        // is redrawn from its curves each frame.
+        for p in [Property::Strength, Property::Blending, Property::Dilution] {
+            assert!(!p.honored(), "{:?} promises a read the canvas cannot do", p);
+            assert_eq!(p.section(), Section::Paint);
+        }
     }
 
     #[test]
