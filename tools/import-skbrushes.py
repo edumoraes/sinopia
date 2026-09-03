@@ -28,6 +28,32 @@ units instead of one dab. Forty-nine brushes turn one on, thirty of
 those wear a nib as well, and a dab wearing both has one sheet to
 sample.
 
+Three things in the files are read and deliberately not carried, so
+that nobody has to derive them twice:
+
+  * `hardnessEdge`, off on 25 brushes and every one of them carrying
+    art, says whether the Edge slider reaches the nib's own image. The
+    flag is plain; what it *does* to a silhouette is stated nowhere,
+    and the sets only hint — the brushes that turn it off park their
+    Edge at one of two values instead of spreading it over the eight
+    the rest use. Reading it wrong would change 96 of the 103 shape
+    brushes on an invention.
+  * `tiltFactor`, off 1.0 on 28 brushes, scales what the barrel's lean
+    does to the nib. What this engine reads from a lean is its
+    *direction* — which way the barrel points, which is what turns the
+    nib — and a factor cannot scale a direction. It would have to
+    multiply an effect that is not here.
+  * `metaParameter`, on the 12 legacy brushes, is the band their size
+    slider ran over. Brush Properties has one band for every brush; a
+    per-brush one is a different control, not a missing number.
+
+And one that is carried but not painted: `stampBlendStyle="glowBrush"`,
+the Glow shelf's five. It is not like the other five styles, which read
+the paint under the dab and so want another engine — an additive lay
+needs no read-back and this one could do it. What stops it is the
+board: ink that adds is invisible on a light one, and the shelf would
+go from painting the wrong thing to painting nothing at all.
+
 The originals are 34 MB and 438 MB of shape/texture TIFFs once opened, so
 they stay out of the repo: only what this writes is committed. Run it
 again with the sets in `brushes/` to rebuild.
