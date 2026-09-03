@@ -232,6 +232,12 @@ pub struct Stroke {
     /// One reading per point, in step with it.
     pub stylus: Vec<Stylus>,
     pub tip: Tip,
+    /// The frame the press was in, if any. Read once, at the press, and
+    /// never again: the stroke is painted from its first sample, so if
+    /// the release read the geometry a second time the ink could be cut
+    /// by one boundary while it was drawn and land under another. The
+    /// tip is taken at the press for the same reason.
+    pub born: Option<String>,
 }
 
 impl Stroke {
@@ -411,6 +417,28 @@ impl Editor {
         self.inside.as_deref().filter(|id| doc.frame(id).is_some())
     }
 
+    /// The stack new ink goes to: the frame the stroke in progress was
+    /// born in, or the one being worked in when no stroke is in flight.
+    /// The panel and the ink can disagree — pressing inside a frame
+    /// while the panel stands on the board paints in the frame — and
+    /// this is where they are told apart.
+    fn ink_stack(&self, doc: &Document) -> Option<&str> {
+        match &self.stroke {
+            Some(s) => s.born.as_deref().filter(|id| doc.frame(id).is_some()),
+            None => self.inside_in(doc),
+        }
+    }
+
+    /// The active layer's index in `stack`, which is not always the one
+    /// the panel is showing: a press inside a frame paints there while
+    /// the panel stands on the board.
+    fn index_in(&self, doc: &Document, stack: Option<&str>) -> usize {
+        self.layer
+            .as_deref()
+            .and_then(|id| doc.layer_index(stack, id))
+            .unwrap_or(doc.stack(stack).len().saturating_sub(1))
+    }
+
     /// Works inside `frame` from now on: the panel shows its stack and
     /// new ink lands there. The top of that stack becomes active.
     pub fn enter_frame(&mut self, doc: &Document, frame: &str) -> Change {
@@ -446,9 +474,9 @@ impl Editor {
     /// Opens a layer of `kind` above the active one, makes it active and
     /// answers its id — what an element that comes with its own layer is
     /// stamped with.
-    fn fresh_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let above = self.active_layer(doc);
+    fn fresh_layer(&mut self, doc: &mut Document, kind: Kind, stack: Option<&str>) -> String {
+        let stack = stack.filter(|id| doc.frame(id).is_some()).map(str::to_owned);
+        let above = self.index_in(doc, stack.as_deref());
         let at = doc
             .add_layer(stack.as_deref(), above, kind)
             .unwrap_or_default();
@@ -471,21 +499,23 @@ impl Editor {
         if self.tool == Tool::Pencil {
             return None;
         }
-        let stack = self.inside_in(doc);
+        let stack = self.ink_stack(doc);
         doc.stack(stack)
-            .get(self.active_layer(doc))
+            .get(self.index_in(doc, stack))
             .filter(|l| l.kind == Kind::Raster)
             .map(|l| l.id.as_str())
     }
 
-    fn ink_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
+    fn ink_layer(&mut self, doc: &mut Document, kind: Kind, stack: Option<&str>) -> String {
+        let stack = stack.filter(|id| doc.frame(id).is_some());
         if kind == Kind::Raster
-            && let Some(layer) = doc.stack(self.inside_in(doc)).get(self.active_layer(doc))
+            && let Some(layer) = doc.stack(stack).get(self.index_in(doc, stack))
             && layer.kind == Kind::Raster
         {
             return layer.id.clone();
         }
-        self.fresh_layer(doc, kind)
+        let stack = stack.map(str::to_owned);
+        self.fresh_layer(doc, kind, stack.as_deref())
     }
 
     /// Makes layer `index` the one new ink lands on.
@@ -633,8 +663,14 @@ impl Editor {
                 });
                 Change::None
             }
-            (Button::Left, Tool::Pencil) => self.start_stroke(world, Tip::PENCIL),
-            (Button::Left, Tool::Brush) => self.start_stroke(world, brush.clone()),
+            (Button::Left, Tool::Pencil) => {
+                let born = doc.frame_at([world.0, world.1]).map(str::to_owned);
+                self.start_stroke(world, Tip::PENCIL, born)
+            }
+            (Button::Left, Tool::Brush) => {
+                let born = doc.frame_at([world.0, world.1]).map(str::to_owned);
+                self.start_stroke(world, brush.clone(), born)
+            }
             (Button::Left, Tool::Zoom) => {
                 self.nav = Some(Nav::Zoom {
                     origin: screen,
@@ -649,11 +685,12 @@ impl Editor {
         }
     }
 
-    fn start_stroke(&mut self, world: (f64, f64), tip: Tip) -> Change {
+    fn start_stroke(&mut self, world: (f64, f64), tip: Tip, born: Option<String>) -> Change {
         self.stroke = Some(Stroke {
             points: vec![[world.0, world.1]],
             stylus: vec![self.stylus],
             tip,
+            born,
         });
         Change::Scene
     }
@@ -890,7 +927,10 @@ impl Editor {
         let id = new_id();
         // Pixels of its own: a paste never joins what is already on a
         // layer, so a stroke after it paints over the image, not beside it.
-        let layer = self.fresh_layer(doc, Kind::Raster);
+        // The pointer names the stack, as a press does: an image pasted
+        // over a frame's area lands in it.
+        let born = doc.frame_at([cx, cy]).map(str::to_owned);
+        let layer = self.fresh_layer(doc, Kind::Raster, born.as_deref());
         doc.elements.push(Element::Image(Image {
             id: id.clone(),
             layer,
@@ -982,7 +1022,9 @@ impl Editor {
             && let Some(live) = self.stroke.take()
         {
             let pen = live.envelope();
-            let Stroke { points, tip, .. } = live;
+            let Stroke {
+                points, tip, born, ..
+            } = live;
             // The tool that started the stroke: switching tools cancels
             // whatever was in progress, so this is still that one.
             let kind = match self.tool {
@@ -990,7 +1032,7 @@ impl Editor {
                 _ => Kind::Raster,
             };
             let curves = Self::laid_curves(&points, kind, view);
-            let layer = self.ink_layer(doc, kind);
+            let layer = self.ink_layer(doc, kind, born.as_deref());
             let laid = crate::doc::Stroke {
                 curves,
                 stroke: ink.to_owned(),
@@ -2912,5 +2954,105 @@ mod tests {
         let _ = e.toggle_layer(&mut doc, 0);
         assert!(!doc.stack(Some("fr"))[0].visible);
         assert!(doc.layers[0].visible, "the frame's own card is untouched");
+    }
+
+    /// A press at a world point, through the view the test is using.
+    fn at(v: &View, x: f64, y: f64) -> (f64, f64) {
+        v.world_to_screen(x, y)
+    }
+
+    /// Where the paint that landed sits: the frame holding its layer.
+    fn paint_stack(doc: &Document) -> Option<String> {
+        let paint = doc
+            .elements
+            .iter()
+            .find(|el| matches!(el, Element::Paint(_)))
+            .expect("a paint landed");
+        doc.locate(paint.layer())
+            .and_then(|(f, _)| f)
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn a_stroke_started_inside_a_frame_lands_in_its_stack() {
+        let mut doc = framed_editor_doc();
+        let mut e = Editor::new();
+        e.set_tool(Tool::Brush, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 20.0, 20.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 40.0, 40.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 40.0, 40.0), &mut doc, "#111");
+        assert_eq!(paint_stack(&doc).as_deref(), Some("fr"));
+    }
+
+    /// The press decides, not the release: a stroke that wanders out of
+    /// the frame it started in belongs to that frame and is cut by it.
+    #[test]
+    fn a_stroke_that_wanders_out_still_belongs_to_the_frame_it_started_in() {
+        let mut doc = framed_editor_doc();
+        let mut e = Editor::new();
+        e.set_tool(Tool::Brush, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 20.0, 20.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 500.0, 500.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 500.0, 500.0), &mut doc, "#111");
+        assert_eq!(paint_stack(&doc).as_deref(), Some("fr"));
+    }
+
+    #[test]
+    fn a_stroke_started_on_the_open_board_lands_on_the_board() {
+        let mut doc = framed_editor_doc();
+        doc.layers.insert(0, Layer::new("Layer 1"));
+        let mut e = Editor::new();
+        e.set_tool(Tool::Brush, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 500.0, 500.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 510.0, 510.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 510.0, 510.0), &mut doc, "#111");
+        assert_eq!(paint_stack(&doc), None);
+    }
+
+    /// The live stroke and the stroke it becomes are under one boundary:
+    /// live_layer answers for the stack the press was in, whatever the
+    /// panel is standing in.
+    #[test]
+    fn the_live_stroke_and_the_landed_stroke_agree_on_the_stack() {
+        let mut doc = framed_editor_doc();
+        doc.layers.insert(0, Layer::new("Layer 1"));
+        let mut e = Editor::new();
+        e.set_tool(Tool::Brush, &mut doc);
+        let v = view();
+        // Standing on the board, but pressing inside the frame.
+        let _ = e.press(Button::Left, &v, at(&v, 20.0, 20.0), &mut doc, &brush().tip(Face::Round));
+        let live = e.live_layer(&doc).map(str::to_owned);
+        assert_eq!(
+            live.as_deref().and_then(|l| doc.locate(l)).and_then(|(f, _)| f),
+            Some("fr"),
+            "the live stroke is painted in the frame the press was in"
+        );
+        let _ = e.moved(&v, at(&v, 40.0, 40.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 40.0, 40.0), &mut doc, "#111");
+        assert_eq!(paint_stack(&doc).as_deref(), Some("fr"));
+    }
+
+    /// A pencil opens a layer of its own, and it opens it in the frame
+    /// the press was in.
+    #[test]
+    fn a_pencil_stroke_inside_a_frame_opens_its_layer_there() {
+        let mut doc = framed_editor_doc();
+        doc.layers.insert(0, Layer::new("Layer 1"));
+        let mut e = Editor::new();
+        e.set_tool(Tool::Pencil, &mut doc);
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 20.0, 20.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 40.0, 40.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 40.0, 40.0), &mut doc, "#111");
+        let path = doc
+            .elements
+            .iter()
+            .find(|el| matches!(el, Element::Path(_)))
+            .expect("a path landed");
+        assert_eq!(doc.locate(path.layer()).and_then(|(f, _)| f), Some("fr"));
+        assert_eq!(doc.stack(Some("fr")).len(), 2, "its own layer, in the frame");
     }
 }
