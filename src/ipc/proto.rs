@@ -22,6 +22,13 @@ pub enum Request {
     Open {
         id: String,
     },
+    /// A project file the user named, by absolute path. Its own op
+    /// rather than a second shape of `open`: the schema is closed, and
+    /// guessing whether a string is an id or a path is exactly the
+    /// best-effort §5 forbids.
+    OpenFile {
+        path: PathBuf,
+    },
     Raise,
     Export {
         dir: PathBuf,
@@ -97,6 +104,9 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         "open" => Request::Open {
             id: take_string(&mut map, "id")?,
         },
+        "open_file" => Request::OpenFile {
+            path: absolute(take_string(&mut map, "path")?)?,
+        },
         "export" => Request::Export {
             dir: PathBuf::from(take_string(&mut map, "dir")?),
             formats: take_formats(&mut map)?,
@@ -124,6 +134,13 @@ pub fn request_line(req: &Request) -> String {
         Request::Open { id } => {
             map.insert("id".into(), id.clone().into());
             "open"
+        }
+        Request::OpenFile { path } => {
+            map.insert(
+                "path".into(),
+                path.to_string_lossy().into_owned().into(),
+            );
+            "open_file"
         }
         Request::Export { dir, formats } => {
             map.insert("dir".into(), dir.to_string_lossy().into_owned().into());
@@ -184,6 +201,27 @@ fn take_string(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<String
         Some(other) => anyhow::bail!("field {key} must be a string, got {other}"),
         None => anyhow::bail!("field {key} missing"),
     }
+}
+
+/// A path arriving on the wire, checked for shape before it is a path.
+///
+/// Not the export allowlist (§8.2): that one guards *destinations*, and
+/// this is a source the user picked in a portal dialog and the recents
+/// merely remembered. What it does refuse is a path that cannot mean the
+/// same thing at both ends — a relative one, since the running instance's
+/// working directory is not the caller's, and one carrying `..`, which
+/// hides where it lands from anyone reading the line. The document behind
+/// it is still parsed through the closed schema, blobs and all.
+fn absolute(path: String) -> anyhow::Result<PathBuf> {
+    let path = PathBuf::from(path);
+    anyhow::ensure!(path.is_absolute(), "path must be absolute: {path:?}");
+    anyhow::ensure!(
+        !path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir),
+        "path may not contain `..`: {path:?}"
+    );
+    Ok(path)
 }
 
 fn take_formats(map: &mut Map<String, Value>) -> anyhow::Result<Vec<ExportFormat>> {
@@ -255,6 +293,45 @@ mod tests {
                 id: "01JABC".into()
             }
         );
+    }
+
+    #[test]
+    fn parses_open_file_with_an_absolute_path() {
+        let got =
+            parse_request(r#"{ "v": 1, "op": "open_file", "path": "/home/you/plan.omawhite" }"#)
+                .unwrap();
+        assert_eq!(
+            got,
+            Request::OpenFile {
+                path: PathBuf::from("/home/you/plan.omawhite")
+            }
+        );
+    }
+
+    #[test]
+    fn open_file_refuses_a_path_that_means_two_things() {
+        // Relative: the live instance's working directory is not the
+        // caller's, so the line would name a different file at each end.
+        // `..`: a line whose destination cannot be read off it.
+        for line in [
+            r#"{ "v": 1, "op": "open_file", "path": "plan.omawhite" }"#,
+            r#"{ "v": 1, "op": "open_file", "path": "./plan.omawhite" }"#,
+            r#"{ "v": 1, "op": "open_file", "path": "/home/you/../etc/shadow" }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "{line} should be refused");
+        }
+    }
+
+    #[test]
+    fn open_file_is_as_closed_as_every_other_op() {
+        for line in [
+            r#"{ "v": 1, "op": "open_file" }"#,
+            r#"{ "v": 1, "op": "open_file", "id": "01JABC" }"#,
+            r#"{ "v": 1, "op": "open_file", "path": "/a/b", "extra": 1 }"#,
+            r#"{ "v": 1, "op": "open_file", "path": 7 }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "{line} should be refused");
+        }
     }
 
     #[test]
@@ -372,6 +449,9 @@ mod tests {
             Request::Shutdown,
             Request::Open {
                 id: "01JABC".into(),
+            },
+            Request::OpenFile {
+                path: PathBuf::from("/home/you/Work/plan.omawhite"),
             },
             Request::Export {
                 dir: PathBuf::from("/home/you/Work/foo"),

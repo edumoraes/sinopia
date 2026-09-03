@@ -29,6 +29,19 @@ pub struct IndexEntry {
     pub updated_at: u64,
     /// Path relative to root (e.g. `thumbs/<id>.png`), when present.
     pub thumb: Option<String>,
+    /// Where the project file the user named lives. Absent for a draft,
+    /// which lives in `boards/<id>.json` and has no name of its own —
+    /// absent on disk the way a raster layer's kind is, so an index
+    /// written before recents existed still opens meaning what it meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+impl IndexEntry {
+    /// A draft: the store is its home, and the id is how it is opened.
+    pub fn is_draft(&self) -> bool {
+        self.path.is_none()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,21 +93,84 @@ impl Store {
     pub fn save_at(&self, doc: &Document, updated_at: u64) -> anyhow::Result<()> {
         validate_id(&doc.id)?;
         write_private_atomic(&self.board_path(&doc.id), doc.to_json()?.as_bytes())?;
-
-        let mut index = self.read_index()?;
-        index.boards.retain(|e| e.id != doc.id);
-        index.boards.push(IndexEntry {
+        self.record(IndexEntry {
             id: doc.id.clone(),
             title: doc.title.clone(),
             updated_at,
             thumb: None,
-        });
+            path: None,
+        })
+    }
+
+    /// Records a project file among the recents. The file itself was
+    /// already written where the user put it, by `save_document_to`: the
+    /// store keeps the memory of it, never a copy — a safety save is a
+    /// draft's privilege, and a named file is written only when asked.
+    pub fn remember_file(&self, doc: &Document, path: &Path) -> anyhow::Result<()> {
+        self.remember_file_at(doc, path, unix_now())
+    }
+
+    /// Like `remember_file`, with an explicit timestamp.
+    pub fn remember_file_at(
+        &self,
+        doc: &Document,
+        path: &Path,
+        updated_at: u64,
+    ) -> anyhow::Result<()> {
+        validate_id(&doc.id)?;
+        self.record(IndexEntry {
+            id: doc.id.clone(),
+            title: doc.title.clone(),
+            updated_at,
+            thumb: None,
+            path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Drops what `id` names from the recents. What a project whose file
+    /// has gone earns once opening it has actually failed — a list that
+    /// forgot it the moment a drive was unmounted would be worse.
+    /// Removing the memory of a draft leaves its board on disk.
+    pub fn forget(&self, id: &str) -> anyhow::Result<()> {
+        self.drop_entries(|e| e.id == id)
+    }
+
+    /// Drops whatever recent points at `path`. What the app has when a
+    /// file refuses to open: it knows where it reached, not which entry
+    /// sent it there.
+    pub fn forget_path(&self, path: &Path) -> anyhow::Result<()> {
+        self.drop_entries(|e| e.path.as_deref() == Some(path))
+    }
+
+    fn drop_entries(&self, doomed: impl Fn(&IndexEntry) -> bool) -> anyhow::Result<()> {
+        let mut index = self.read_index()?;
+        let before = index.boards.len();
+        index.boards.retain(|e| !doomed(e));
+        if index.boards.len() == before {
+            return Ok(());
+        }
+        self.write_index(&index)
+    }
+
+    /// Puts `entry` at the head of the recents, replacing whatever stood
+    /// for the same project. Identity is the document's id *or* the path:
+    /// a draft saved under a name has to stop being two entries, and a
+    /// file overwritten by another document has to stop being one.
+    fn record(&self, entry: IndexEntry) -> anyhow::Result<()> {
+        let mut index = self.read_index()?;
+        index
+            .boards
+            .retain(|e| e.id != entry.id && (e.path.is_none() || e.path != entry.path));
+        index.boards.push(entry);
         index.boards.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        self.write_index(&index)
+    }
+
+    fn write_index(&self, index: &Index) -> anyhow::Result<()> {
         write_private_atomic(
             &self.root.join("index.json"),
-            serde_json::to_string_pretty(&index)?.as_bytes(),
-        )?;
-        Ok(())
+            serde_json::to_string_pretty(index)?.as_bytes(),
+        )
     }
 
     /// Loads a board by id. The id comes from CLI/socket: validated before
@@ -447,6 +523,120 @@ mod tests {
             .map(|e| e.title)
             .collect();
         assert_eq!(titles, ["new", "old"]);
+    }
+
+    #[test]
+    fn a_file_is_remembered_without_the_store_keeping_a_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let doc = doc_with_title("plan");
+        let path = tmp.path().join("plan.omawhite");
+        store.remember_file_at(&doc, &path, 100).unwrap();
+
+        let index = store.index().unwrap();
+        assert_eq!(index.len(), 1);
+        assert_eq!(index[0].path, Some(path));
+        assert!(!index[0].is_draft());
+        // The recents remember where it is; the safety save is a draft's
+        // privilege, so nothing was written under boards/.
+        assert!(
+            !store.board_path(&doc.id).exists(),
+            "remembering a file must not copy it into the store"
+        );
+    }
+
+    #[test]
+    fn a_draft_saved_under_a_name_stops_being_two_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let doc = doc_with_title("plan");
+        store.save_at(&doc, 100).unwrap();
+        let path = tmp.path().join("plan.omawhite");
+        store.remember_file_at(&doc, &path, 200).unwrap();
+
+        let index = store.index().unwrap();
+        assert_eq!(index.len(), 1, "the project moved home, it did not fork");
+        assert_eq!(index[0].path, Some(path));
+        assert_eq!(index[0].updated_at, 200);
+    }
+
+    #[test]
+    fn two_documents_written_to_one_path_leave_one_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let path = tmp.path().join("plan.omawhite");
+        store
+            .remember_file_at(&doc_with_title("first"), &path, 100)
+            .unwrap();
+        store
+            .remember_file_at(&doc_with_title("second"), &path, 200)
+            .unwrap();
+
+        let index = store.index().unwrap();
+        assert_eq!(index.len(), 1, "one file is one recent, whatever wrote it");
+        assert_eq!(index[0].title, "second");
+    }
+
+    #[test]
+    fn two_drafts_are_not_folded_into_one_by_their_missing_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        store.save_at(&doc_with_title("a"), 100).unwrap();
+        store.save_at(&doc_with_title("b"), 200).unwrap();
+        assert_eq!(
+            store.index().unwrap().len(),
+            2,
+            "`path: None` is the absence of a name, not a name they share"
+        );
+    }
+
+    #[test]
+    fn forgetting_drops_the_memory_and_leaves_the_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let doc = doc_with_title("t");
+        store.save(&doc).unwrap();
+        store.forget(&doc.id).unwrap();
+
+        assert!(store.index().unwrap().is_empty());
+        assert!(
+            store.board_path(&doc.id).exists(),
+            "forgetting is about the list, not about the board"
+        );
+        // Forgetting what was never there is not an error.
+        store.forget("01NOTHERE").unwrap();
+    }
+
+    #[test]
+    fn an_index_written_before_recents_still_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        std::fs::write(
+            store.root().join("index.json"),
+            r#"{ "schema": 1, "boards": [
+                 { "id": "01ABC", "title": "old", "updated_at": 7, "thumb": null }
+               ] }"#,
+        )
+        .unwrap();
+
+        let index = store.index().unwrap();
+        assert_eq!(index.len(), 1);
+        assert!(
+            index[0].is_draft(),
+            "no path is what a board has always been"
+        );
+    }
+
+    #[test]
+    fn a_draft_entry_writes_no_path_field_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        store.save(&doc_with_title("t")).unwrap();
+        let raw = std::fs::read_to_string(store.root().join("index.json")).unwrap();
+        assert!(
+            !raw.contains("path"),
+            "absent on disk, so an older build reads it as the board it is"
+        );
     }
 
     #[test]

@@ -49,6 +49,13 @@ const MAX_STEP: f32 = 0.05;
 /// How much of the ink the brush's ring is drawn with.
 const RING_ALPHA: f32 = 0.6;
 
+/// How long a draft's changes wait before reaching disk. A stroke fires
+/// `Change::Scene` on every sample of the hand, so saving on the change
+/// itself would write through the middle of a gesture; waiting for the
+/// hand to stop turns a stroke into one write. Short enough that what is
+/// lost to a crash is the last breath of drawing, not the drawing.
+const SAFETY_DELAY: std::time::Duration = std::time::Duration::from_millis(1200);
+
 /// State the server thread reads (replies to `ping`).
 struct SharedState {
     board_id: String,
@@ -168,6 +175,11 @@ struct App {
     /// Where a portal dialog sends its answer. Absent before the window.
     dialog_sink: Option<dialogs::Sink>,
     pending: Option<Pending>,
+    /// When the drafts owe the disk a safety save. Set by every change
+    /// and pushed back by the next one, so a stroke lands once the hand
+    /// stops rather than on every sample of it; `None` when nothing is
+    /// owed. The loop waits until it rather than sleeping through it.
+    owed: Option<Instant>,
     /// The window is closing, one dirty tab at a time.
     quitting: bool,
     /// Nothing is left to show: the loop ends at the next event boundary.
@@ -246,8 +258,19 @@ impl App {
             return false;
         };
         let written = match &origin {
+            // Saving a draft records it: the store is both its home and
+            // the list it is remembered on.
             Origin::Board(_) => self.store.save(&project.doc),
-            Origin::File(path) => store::save_document_to(path, &project.doc),
+            // A file is written where the user put it, and *then*
+            // remembered. The recents keep the path, never a copy — the
+            // list is a memory of projects, not a second store. Failing
+            // to remember it is not failing to save it, so it is logged
+            // and the save still counts.
+            Origin::File(path) => store::save_document_to(path, &project.doc).inspect(|()| {
+                if let Err(e) = self.store.remember_file(&project.doc, path) {
+                    log::warn!("saved {path:?} but could not remember it: {e:#}");
+                }
+            }),
             Origin::Untitled => return false,
         };
         match written {
@@ -397,12 +420,51 @@ impl App {
         }
     }
 
-    /// The document changed. Nothing reaches disk until the user asks.
+    /// The document changed. A draft owes the disk a safety save; a file
+    /// the user named owes nothing until `Ctrl+S` says so.
     fn touch(&mut self) {
         let was_clean = !self.open[self.active].project.dirty;
         self.open[self.active].project.touch();
         if was_clean {
             self.retitle();
+        }
+        self.owed = Some(Instant::now() + SAFETY_DELAY);
+    }
+
+    /// Writes every dirty draft where the store keeps it, and clears the
+    /// debt. A file the user named is not touched: writing into it behind
+    /// their back would empty `Ctrl+S`, the dot on the tab and the
+    /// question at closing time of all their meaning.
+    ///
+    /// An untitled project is materialised here rather than at the `+`
+    /// that made it — that is what "a draft earns its file the first time
+    /// it is drawn on" means, and it is why an empty board never reaches
+    /// the recents.
+    fn keep_drafts(&mut self) {
+        self.owed = None;
+        for i in 0..self.open.len() {
+            if !self.open[i].project.dirty {
+                continue;
+            }
+            match &self.open[i].project.origin {
+                Origin::File(_) => {}
+                Origin::Board(_) => {
+                    self.save_project(i);
+                }
+                Origin::Untitled => {
+                    let id = self.open[i].project.doc.id.clone();
+                    self.save_project_at(i, Origin::Board(id));
+                }
+            }
+        }
+    }
+
+    /// Whether tab `index` holds work that only the user can decide about.
+    /// A draft never does: it is already on disk.
+    fn owes_an_answer(&self, index: usize) -> bool {
+        match self.open.get(index) {
+            Some(open) => open.project.dirty && matches!(open.project.origin, Origin::File(_)),
+            None => false,
         }
     }
 
@@ -525,13 +587,18 @@ impl App {
         w.set_title(&format!("{mark}Omawhite — {}", project.label()));
     }
 
-    /// Closes tab `index`, asking about unsaved work first.
+    /// Closes tab `index`, asking about unsaved work first. A draft is
+    /// kept on the way out rather than asked about: the question is for
+    /// work that would otherwise be lost, and a draft's never is.
     fn request_close(&mut self, index: usize) {
-        match self.open.get(index) {
-            Some(open) if open.project.dirty => self.ask_about(index, Then::Close),
-            Some(_) => self.close(index),
-            None => {}
+        if index >= self.open.len() {
+            return;
         }
+        if self.owes_an_answer(index) {
+            return self.ask_about(index, Then::Close);
+        }
+        self.keep_drafts();
+        self.close(index);
     }
 
     /// Drops tab `index`, whatever state it is in. The caller has already
@@ -578,7 +645,8 @@ impl App {
         if !self.quitting || self.pending.is_some() {
             return;
         }
-        match self.open.iter().position(|o| o.project.dirty) {
+        self.keep_drafts();
+        match (0..self.open.len()).find(|i| self.owes_an_answer(*i)) {
             Some(i) => self.ask_about(i, Then::Quit),
             None => self.closing = true,
         }
@@ -1543,6 +1611,24 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
         }
     }
+
+    /// The loop is about to sleep, which is where a debt comes due: the
+    /// hand has stopped, so the drafts are written. A loop that sleeps in
+    /// `Wait` would never wake for a deadline of its own, so an unpaid
+    /// debt asks for `WaitUntil` instead — and nothing else here does,
+    /// which is why the sleep goes back to `Wait` once it is paid.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(due) = self.owed else { return };
+        if Instant::now() < due {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+            return;
+        }
+        self.keep_drafts();
+        event_loop.set_control_flow(ControlFlow::Wait);
+        if self.closing {
+            event_loop.exit();
+        }
+    }
 }
 
 impl App {
@@ -1643,18 +1729,10 @@ impl App {
                     w.focus_window();
                 }
             }
-            Request::New => {
-                let doc = Document::new("untitled");
-                // Written before the window sees it: index.json is the
-                // only file the plugin reads (§5), so a board made for
-                // the gallery has to be in it.
-                if let Err(e) = self.store.save(&doc) {
-                    log::error!("creating a new board: {e:#}");
-                    return;
-                }
-                let origin = Origin::Board(doc.id.clone());
-                self.open_project(Project::opened(doc, origin));
-            }
+            // Nothing is written yet. A new board is a draft, and a draft
+            // earns its file the first time it is drawn on — an empty one
+            // has nothing to lose and no business in the recents.
+            Request::New => self.open_project(Project::untitled()),
             Request::Open { id } => {
                 if let Some(i) = self.tab_with_key(&id) {
                     return self.activate(i);
@@ -1664,6 +1742,23 @@ impl App {
                         self.open_project(Project::opened(doc, Origin::Board(id)));
                     }
                     Err(e) => log::error!("opening board {id:?}: {e:#}"),
+                }
+            }
+            Request::OpenFile { path } => {
+                if let Some(i) = self.tab_with_path(&path) {
+                    return self.activate(i);
+                }
+                match store::load_document_from(&path) {
+                    Ok(doc) => self.open_project(Project::opened(doc, Origin::File(path))),
+                    Err(e) => {
+                        // The recents pointed somewhere that is no longer
+                        // there. Reaching for it is what proves that, so
+                        // it is here — and only here — that the entry goes.
+                        log::warn!("dropping {path:?} from the recents: {e:#}");
+                        if let Err(e) = self.store.forget_path(&path) {
+                            log::error!("updating the recents: {e:#}");
+                        }
+                    }
                 }
             }
             Request::Shutdown => self.quit(),
@@ -1681,14 +1776,14 @@ impl App {
 /// smoke test is done).
 pub fn run(
     store: Store,
-    doc: Document,
+    first: Project,
     socket_path: PathBuf,
     smoke_frames: Option<u32>,
 ) -> anyhow::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let shared = Arc::new(Mutex::new(SharedState {
-        board_id: doc.id.clone(),
+        board_id: first.doc.id.clone(),
     }));
 
     let server = Server::bind(&socket_path)?;
@@ -1719,11 +1814,10 @@ pub fn run(
         reply
     });
 
-    // Whatever `main` resolved — `--new`, `--open <id>`, or the most
-    // recent — came out of the store and was written there first, so the
-    // first tab is a board, never an untitled one.
-    let id = doc.id.clone();
-    let first = Project::opened(doc, Origin::Board(id));
+    // `main` resolved which project the window opens on: a draft out of
+    // the store, a file the recents remembered, or — for `--new` and for
+    // a first run with nothing behind it — an untitled one that has not
+    // been written anywhere yet, and will not be until it is drawn on.
     let store_brushes = store.brushes();
     let mut app = App {
         store,
@@ -1767,6 +1861,7 @@ pub fn run(
         clipboard: None,
         dialog_sink: None,
         pending: None,
+        owed: None,
         quitting: false,
         closing: false,
         cursor: None,

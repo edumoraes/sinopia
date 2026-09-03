@@ -21,6 +21,10 @@ pub struct Cli {
     #[arg(long, value_name = "ID", group = "action")]
     pub open: Option<String>,
 
+    /// Open a project file by path
+    #[arg(long = "open-file", value_name = "PATH", group = "action")]
+    pub open_file: Option<PathBuf>,
+
     /// Export the current board to DIR (requires a live instance)
     #[arg(long, value_name = "DIR", group = "action")]
     pub export: Option<PathBuf>,
@@ -45,6 +49,9 @@ pub enum Action {
     Default,
     New,
     Open(String),
+    /// A project file the user named, by path. A recents entry that is
+    /// not a draft is opened this way.
+    OpenFile(PathBuf),
     Export(PathBuf),
     Shutdown,
 }
@@ -55,6 +62,8 @@ impl Cli {
             Action::New
         } else if let Some(id) = &self.open {
             Action::Open(id.clone())
+        } else if let Some(path) = &self.open_file {
+            Action::OpenFile(path.clone())
         } else if let Some(dir) = &self.export {
             Action::Export(dir.clone())
         } else if self.shutdown {
@@ -90,6 +99,12 @@ mod tests {
             Action::Export(PathBuf::from("/tmp/proj"))
         );
         assert_eq!(parse(&["--shutdown"]).unwrap().action(), Action::Shutdown);
+        assert_eq!(
+            parse(&["--open-file", "/home/you/plan.omawhite"])
+                .unwrap()
+                .action(),
+            Action::OpenFile(PathBuf::from("/home/you/plan.omawhite"))
+        );
     }
 
     #[test]
@@ -99,6 +114,8 @@ mod tests {
             &["--new", "--shutdown"][..],
             &["--open", "x", "--export", "/tmp"][..],
             &["--export", "/tmp", "--shutdown"][..],
+            &["--open", "x", "--open-file", "/tmp/a"][..],
+            &["--new", "--open-file", "/tmp/a"][..],
         ] {
             assert!(parse(args).is_err(), "combination {args:?} should fail");
         }

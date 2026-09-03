@@ -34,9 +34,9 @@ use anyhow::Context as _;
 use clap::Parser as _;
 
 use cli::{Action, Cli};
-use doc::Document;
 use ipc::client::try_forward;
 use ipc::proto::{ExportFormat, Request};
+use project::{Origin, Project};
 use store::Store;
 
 fn main() -> anyhow::Result<()> {
@@ -53,6 +53,7 @@ fn main() -> anyhow::Result<()> {
         Action::Default => Request::Raise,
         Action::New => Request::New,
         Action::Open(id) => Request::Open { id: id.clone() },
+        Action::OpenFile(path) => Request::OpenFile { path: path.clone() },
         Action::Export(dir) => Request::Export {
             dir: dir.clone(),
             formats: vec![ExportFormat::Png, ExportFormat::Json, ExportFormat::Md],
@@ -81,27 +82,50 @@ fn main() -> anyhow::Result<()> {
             log::info!("no instance running; nothing to shut down");
             Ok(())
         }
-        Action::Default | Action::New | Action::Open(_) => {
+        Action::Default | Action::New | Action::Open(_) | Action::OpenFile(_) => {
             let store = open_default_store()?;
-            let doc = match &action {
-                Action::New => {
-                    let doc = Document::new("untitled");
-                    store.save(&doc)?;
-                    doc
+            let project = match &action {
+                // Nothing is written for a new board. It is a draft, and
+                // a draft earns its file the first time it is drawn on —
+                // which is what keeps `+` from leaving empty boards in
+                // the recents.
+                Action::New => Project::untitled(),
+                Action::Open(id) => {
+                    Project::opened(store.load(id)?, Origin::Board(id.clone()))
                 }
-                Action::Open(id) => store.load(id)?,
-                // No flags: the most recent board, or a new one if there is none.
-                _ => match store.index()?.first() {
-                    Some(entry) => store.load(&entry.id)?,
-                    None => {
-                        let doc = Document::new("untitled");
-                        store.save(&doc)?;
-                        doc
-                    }
+                Action::OpenFile(path) => {
+                    Project::opened(store::load_document_from(path)?, Origin::File(path.clone()))
+                }
+                // No flags: the most recent project, whichever kind it
+                // is, or an untitled one when there is no history.
+                _ => match store.index()?.into_iter().next() {
+                    Some(entry) => open_recent(&store, entry)?,
+                    None => Project::untitled(),
                 },
             };
-            app::run(store, doc, socket_path, cli.smoke_frames)
+            app::run(store, project, socket_path, cli.smoke_frames)
         }
+    }
+}
+
+/// Opens what a recents entry names. A file whose path has gone is
+/// dropped from the list here, where the failure actually happened —
+/// that is the one thing that removes an entry, so a project on a drive
+/// nobody has mounted keeps its place until someone reaches for it.
+fn open_recent(store: &Store, entry: store::IndexEntry) -> anyhow::Result<Project> {
+    match entry.path {
+        None => Ok(Project::opened(
+            store.load(&entry.id)?,
+            Origin::Board(entry.id),
+        )),
+        Some(path) => match store::load_document_from(&path) {
+            Ok(doc) => Ok(Project::opened(doc, Origin::File(path))),
+            Err(e) => {
+                log::warn!("dropping {path:?} from the recents: {e:#}");
+                store.forget(&entry.id)?;
+                Ok(Project::untitled())
+            }
+        },
     }
 }
 
