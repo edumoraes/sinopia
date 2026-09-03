@@ -6,7 +6,7 @@
 
 use crate::bitmap;
 use crate::brush::{Dynamics, Tip};
-use crate::curve;
+use crate::curve::{self, Cubic};
 use crate::doc::{Camera, Document, Element, Envelope, Image, Kind, Paint, Path, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
@@ -860,11 +860,40 @@ impl Editor {
         Change::Scene
     }
 
-    /// A button came up. The left button commits the stroke — simplified
-    /// and fitted with cubics within [`FIT_TOLERANCE_PX`] — as a `path` in
-    /// `ink` with the stroke's tip, on the active layer — or ends the
+    /// What the stroke's points become on disk, once the jitter under
+    /// [`FIT_TOLERANCE_PX`] is gone.
+    ///
+    /// A pencil line is a vector object, and its curves are what it is:
+    /// they are what a resize scales and what a later editor would take
+    /// hold of, so it is fitted with cubics ([`curve::fit`]).
+    ///
+    /// Paint is pixels, and it owes nothing but the path the hand took.
+    /// Fitting reads a curve into the samples, and a fast stroke leaves
+    /// too few, too far apart, for there to be one: the exit tangent
+    /// comes off the last two of them and carries a handle as long as
+    /// the span, so the ink turns the other way at the end of a stroke
+    /// that only ever turned one way. So a brush keeps the hand's own
+    /// line ([`curve::polyline`]) — which is also what it was already
+    /// painting while the stroke was live, so the ink no longer shifts
+    /// under the pointer at the release.
+    fn laid_curves(points: &[[f64; 2]], kind: Kind, view: &View) -> Vec<Cubic> {
+        let tolerance = FIT_TOLERANCE_PX / view.px_per_world();
+        let hand = curve::simplify(points, tolerance);
+        match kind {
+            Kind::Vector => curve::fit(&hand, tolerance),
+            Kind::Raster => curve::polyline(&hand),
+        }
+    }
+
+    /// A button came up. The left button commits the stroke as a `path`
+    /// in `ink` with the stroke's tip, on the active layer — or ends the
     /// selection drag; the button that started a gesture ends it, and a
     /// zoom click (no drag) zooms one unit in.
+    ///
+    /// Either way the jitter goes first, at [`FIT_TOLERANCE_PX`]: what
+    /// sits under a pixel of the chord it is on is the digitiser's, not
+    /// the hand's. What is left is the hand's line, and what becomes of
+    /// it is the tool's business — see [`Editor::laid_curves`].
     pub fn release(
         &mut self,
         button: Button,
@@ -879,14 +908,13 @@ impl Editor {
         {
             let pen = live.envelope();
             let Stroke { points, tip, .. } = live;
-            let tolerance = FIT_TOLERANCE_PX / view.px_per_world();
-            let curves = curve::fit(&curve::simplify(&points, tolerance), tolerance);
             // The tool that started the stroke: switching tools cancels
             // whatever was in progress, so this is still that one.
             let kind = match self.tool {
                 Tool::Pencil => Kind::Vector,
                 _ => Kind::Raster,
             };
+            let curves = Self::laid_curves(&points, kind, view);
             let layer = self.ink_layer(doc, kind);
             let laid = crate::doc::Stroke {
                 curves,
@@ -1282,6 +1310,109 @@ mod tests {
         // The layer goes away under the editor: back to the top.
         assert!(doc.remove_layer(0));
         assert_eq!(e.active_layer(&doc), 1);
+    }
+
+    /// The samples a fast brush stroke leaves: nine of them over ~450
+    /// world units, each leg turning the same way as the one before.
+    /// Taken off a real stroke — the hand outran the sampler.
+    fn fast_arc() -> Vec<(f64, f64)> {
+        [
+            [-292.0, -170.0],
+            [-223.0, -193.0],
+            [-148.0, -201.0],
+            [-74.0, -193.0],
+            [-5.0, -170.0],
+            [56.0, -132.0],
+            [104.0, -82.0],
+            [136.0, -23.0],
+            [151.0, 40.0],
+        ]
+        .iter()
+        // The test view is at zoom 1 with the camera on the middle of
+        // the viewport, so screen and world coincide.
+        .map(|p| (p[0], p[1]))
+        .collect()
+    }
+
+    /// Which way the line through `pts` turns at each of its corners.
+    fn turns(pts: &[[f64; 2]]) -> Vec<f64> {
+        pts.windows(3)
+            .map(|w| {
+                let (u, v) = (
+                    [w[1][0] - w[0][0], w[1][1] - w[0][1]],
+                    [w[2][0] - w[1][0], w[2][1] - w[1][1]],
+                );
+                u[0] * v[1] - u[1] * v[0]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_brush_stroke_is_laid_where_the_hand_put_it() {
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        let hand = fast_arc();
+        let _ = e.press(Button::Left, &v, hand[0], &mut doc, &brush().tip(Face::Round));
+        for &at in &hand[1..] {
+            let _ = e.moved(&v, at, &mut doc);
+        }
+        let _ = e.release(Button::Left, &v, hand[hand.len() - 1], &mut doc, "#000");
+
+        let laid = &paint_of(&doc, 0).strokes[0];
+        let ends: Vec<[f64; 2]> = std::iter::once(laid.curves[0][0])
+            .chain(laid.curves.iter().map(|c| c[3]))
+            .collect();
+        let world: Vec<[f64; 2]> = hand.iter().map(|&(x, y)| [x, y]).collect();
+        assert_eq!(ends, world, "the ink goes through the samples themselves");
+        // The hand turned one way the whole stroke; so does the ink.
+        assert!(turns(&world).iter().all(|&t| t > 0.0), "the hand turned one way");
+        assert!(
+            turns(&ends).iter().all(|&t| t > 0.0),
+            "and the ink turns with it, right to the end"
+        );
+    }
+
+    #[test]
+    fn a_pencil_line_is_still_fitted_with_curves() {
+        // Paint is pixels and keeps the hand's line; a pencil line is a
+        // vector object, and its curves are what it is.
+        let mut e = pencil();
+        let mut doc = Document::new("t");
+        let v = view();
+        let hand = fast_arc();
+        let _ = e.press(Button::Left, &v, hand[0], &mut doc, &brush().tip(Face::Round));
+        for &at in &hand[1..] {
+            let _ = e.moved(&v, at, &mut doc);
+        }
+        let _ = e.release(Button::Left, &v, hand[hand.len() - 1], &mut doc, "#000");
+        let p = path_of(&doc, 0);
+        assert!(
+            p.curves.len() < hand.len() - 1,
+            "fitted, not leg by leg: {} curves for {} legs",
+            p.curves.len(),
+            hand.len() - 1
+        );
+    }
+
+    #[test]
+    fn a_brush_stroke_still_drops_the_jitter_under_a_pixel() {
+        // Keeping the hand's line is not keeping the digitiser's noise:
+        // what sits under a pixel of its own chord goes, as it always did.
+        let mut e = tool(Tool::Brush);
+        let mut doc = Document::new("t");
+        let v = view();
+        let _ = e.press(Button::Left, &v, (0.0, 10.0), &mut doc, &brush().tip(Face::Round));
+        for i in 1..=10 {
+            let wobble = if i % 2 == 0 { 0.3 } else { -0.3 };
+            let y = if i == 10 { 10.0 } else { 10.0 + wobble };
+            let _ = e.moved(&v, (f64::from(i) * 2.0, y), &mut doc);
+        }
+        let _ = e.release(Button::Left, &v, (20.0, 10.0), &mut doc, "#000");
+        let laid = &paint_of(&doc, 0).strokes[0];
+        assert_eq!(laid.curves.len(), 1, "one straight leg left: {:?}", laid.curves);
+        assert_eq!(laid.curves[0][0], [0.0, 10.0]);
+        assert_eq!(laid.curves[0][3], [20.0, 10.0]);
     }
 
     #[test]

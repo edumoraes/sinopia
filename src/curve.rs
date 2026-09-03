@@ -170,6 +170,39 @@ pub fn fit(points: &[Point], max_error: f64) -> Vec<Cubic> {
     out
 }
 
+/// The hand's own line, leg by leg: one cubic per segment with its
+/// handles at the thirds, which is that segment exactly. What a stroke
+/// keeps when the ink has to land where the hand put it.
+///
+/// [`fit`] reads a curve into the points, and a fast stroke has none to
+/// read: too few samples, too far apart, and the exit tangent it takes
+/// from the last two of them carries a handle as long as the span — so
+/// the ink turns the other way at the end of the stroke, where the hand
+/// only ever turned one way.
+///
+/// Repeats are dropped, as in [`fit`], and a single point is the same
+/// degenerate cubic a tap leaves there.
+pub fn polyline(points: &[Point]) -> Vec<Cubic> {
+    let mut d: Vec<Point> = Vec::with_capacity(points.len());
+    for p in points {
+        if d.last() != Some(p) {
+            d.push(*p);
+        }
+    }
+    match d.len() {
+        0 => Vec::new(),
+        1 => vec![[d[0]; 4]],
+        _ => d
+            .windows(2)
+            .map(|w| {
+                let (a, b) = (w[0], w[1]);
+                let third = scale(sub(b, a), 1.0 / 3.0);
+                [a, add(a, third), sub(b, third), b]
+            })
+            .collect(),
+    }
+}
+
 /// Polyline through `c` that stays within `tolerance` of it, endpoints
 /// exact. Always at least two points.
 pub fn flatten(c: &Cubic, tolerance: f64) -> Vec<Point> {
@@ -529,6 +562,111 @@ mod tests {
         let coarse = flatten(&c, 1.0).len();
         assert!(coarse > 2, "a curve needs more than a chord: {coarse}");
         assert!(fine > coarse, "{fine} vs {coarse}");
+    }
+
+    #[test]
+    fn polyline_is_the_points_themselves_and_bends_nowhere() {
+        // A fast arc: few samples, far apart, turning one way throughout.
+        let pts: Vec<Point> = (0..7)
+            .map(|i| {
+                let a = f64::from(i) * 0.25;
+                [100.0 * a.sin(), 100.0 * (1.0 - a.cos())]
+            })
+            .collect();
+        let cs = polyline(&pts);
+        assert_eq!(cs.len(), pts.len() - 1, "one cubic a leg");
+        for (c, w) in cs.iter().zip(pts.windows(2)) {
+            assert_eq!([c[0], c[3]], [w[0], w[1]], "the leg's own ends");
+            // Handles at the thirds: the cubic *is* the segment, so
+            // flattening it gives the two points back and nothing else.
+            assert_eq!(flatten(c, 0.01), vec![w[0], w[1]]);
+        }
+        // Every leg is straight, so the chain turns exactly as the hand
+        // did — the sign never changes, which is what fitting could not
+        // promise at the end of a fast stroke.
+        let turn = |a: Point, b: Point, c: Point| {
+            let (u, v) = (sub(b, a), sub(c, b));
+            u[0] * v[1] - u[1] * v[0]
+        };
+        assert!(
+            pts.windows(3).all(|w| turn(w[0], w[1], w[2]) > 0.0),
+            "the hand turned one way"
+        );
+        let ink: Vec<Point> = cs.iter().flat_map(|c| flatten(c, 0.01)).collect();
+        let mut dedup: Vec<Point> = Vec::new();
+        for p in ink {
+            if dedup.last() != Some(&p) {
+                dedup.push(p);
+            }
+        }
+        assert!(
+            dedup.windows(3).all(|w| turn(w[0], w[1], w[2]) > 0.0),
+            "and so does the ink"
+        );
+    }
+
+    #[test]
+    fn polyline_handles_the_degenerate_inputs_as_fit_does() {
+        assert!(polyline(&[]).is_empty());
+        assert_eq!(polyline(&[[3.0, 4.0]]), vec![[[3.0, 4.0]; 4]]);
+        // A tap that never moved is a dot, not an empty chain.
+        assert_eq!(polyline(&[[3.0, 4.0]; 5]), vec![[[3.0, 4.0]; 4]]);
+        // Repeats between real legs are dropped, so no leg is degenerate.
+        let cs = polyline(&[[0.0, 0.0], [0.0, 0.0], [6.0, 0.0], [6.0, 0.0], [6.0, 9.0]]);
+        assert_eq!(
+            cs,
+            vec![
+                [[0.0, 0.0], [2.0, 0.0], [4.0, 0.0], [6.0, 0.0]],
+                [[6.0, 0.0], [6.0, 3.0], [6.0, 6.0], [6.0, 9.0]],
+            ]
+        );
+    }
+
+    #[test]
+    fn fit_hooks_the_other_way_at_the_end_of_a_fast_stroke_and_polyline_does_not() {
+        // The hand's own samples, read off a fast brush stroke: nine
+        // points over ~450 units, each leg turning the same way as the
+        // one before it.
+        let pts: Vec<Point> = vec![
+            [-292.0, -170.0],
+            [-223.0, -193.0],
+            [-148.0, -201.0],
+            [-74.0, -193.0],
+            [-5.0, -170.0],
+            [56.0, -132.0],
+            [104.0, -82.0],
+            [136.0, -23.0],
+            [151.0, 40.0],
+        ];
+        let heading = |a: Point, b: Point| (b[1] - a[1]).atan2(b[0] - a[0]);
+        let turns: Vec<f64> = pts
+            .windows(3)
+            .map(|w| heading(w[1], w[2]) - heading(w[0], w[1]))
+            .collect();
+        assert!(turns.iter().all(|&t| t > 0.0), "the hand only turned one way");
+
+        // The fit puts a bend the other way into the last cubic: its
+        // control polygon turns +40.6° and then -17.7°.
+        let fitted = fit(&simplify(&pts, 1.0), 1.0);
+        let last = fitted[fitted.len() - 1];
+        let poly: Vec<f64> = (0..2)
+            .map(|i| heading(last[i + 1], last[i + 2]) - heading(last[i], last[i + 1]))
+            .collect();
+        assert!(
+            poly[0] > 0.0 && poly[1] < 0.0,
+            "the fitted tail reverses: {poly:?}"
+        );
+
+        // The hand's own line carries no such bend: every leg is
+        // straight, and the turns between them are the hand's.
+        let laid = polyline(&simplify(&pts, 1.0));
+        let ends: Vec<Point> = std::iter::once(laid[0][0]).chain(laid.iter().map(|c| c[3])).collect();
+        assert_eq!(ends, pts, "the ink goes through the samples themselves");
+        assert!(
+            ends.windows(3)
+                .all(|w| heading(w[1], w[2]) - heading(w[0], w[1]) > 0.0),
+            "and turns the way the hand did, all the way to the end"
+        );
     }
 
     #[test]
