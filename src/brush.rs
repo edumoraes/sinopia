@@ -26,7 +26,8 @@ pub const SIZE_MIN: f64 = 1.0;
 pub const SIZE_MAX: f64 = 700.0;
 /// What `{` and `}` change the hardness by.
 pub const HARDNESS_STEP: f64 = 0.25;
-/// Sketchbook's own band for the gap between two stamps, in tip widths.
+/// Sketchbook's own band for the gap between two stamps, in its own
+/// spacing units — the numbers its help names, 0.1 to 10.
 pub const SPACING_MIN: f64 = 0.1;
 pub const SPACING_MAX: f64 = 10.0;
 
@@ -125,7 +126,7 @@ pub struct Brush {
     /// How fast the paint comes out, 0–1: what one stamp lays, which
     /// builds up toward `opacity` where a stroke crosses itself.
     pub flow: f64,
-    /// The gap between two stamps, in tip widths.
+    /// The gap between two stamps, in Sketchbook's spacing units.
     pub spacing: f64,
     /// 1 is a round tip; less flattens it, and only then can it be turned.
     pub roundness: f64,
@@ -214,7 +215,7 @@ enum Unit {
     Px,
     Percent,
     /// A quantity in the property's own unit, to one decimal: the gap
-    /// between two stamps in tip widths, or how far a randomness throws
+    /// between two stamps in spacing units, or how far a randomness throws
     /// the thing it varies.
     Amount,
     Degrees,

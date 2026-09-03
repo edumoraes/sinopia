@@ -39,7 +39,10 @@ selection, navigation, pasted images, and projects in tabs:
   is painting, which keeps the change when another is picked up and
   put down again. A brush is a **nib stamped along the stroke**, never
   a swept line: its `spacing`, `roundness` and `rotation` are what one
-  dab is and how far apart they sit, and the canvas paints with all
+  dab is and how far apart they sit — the gap in Sketchbook's own
+  spacing units, each a quarter of the nib's width, which is what makes
+  its documented default Pencil draw solid — and the canvas paints with
+  all
   three, and `flow` with them — what one dab lays. **103 of the 211
   stamp a nib of their own**: Sketchbook's own shape images, converted
   into one sheet of 90 that the binary carries, and a stroke names the

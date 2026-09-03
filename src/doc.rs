@@ -179,7 +179,8 @@ fn is_zero(v: &f64) -> bool {
 
 /// How far each dab is thrown off the nib, in the unit of the thing it
 /// throws: `size` a radius in world units, `rotation` degrees,
-/// `spacing` tip widths. Sketchbook's Randomness, less the two whose
+/// `spacing` in Sketchbook's spacing units. Sketchbook's Randomness,
+/// less the two whose
 /// amount is not in their property's own unit — see `brush::Jitter`.
 /// All zero is a nib laid true, which is what a board without one says.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -226,7 +227,9 @@ pub struct Stamp {
     /// index would move the day a set is added.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
-    /// The gap between two dabs, in tip widths.
+    /// The gap between two dabs, in Sketchbook's own spacing units:
+    /// 0.1 to 10, its Pencil's default 1.2, each unit a quarter of the
+    /// nib's width (`scene::SPACING_UNIT`).
     pub spacing: f64,
     /// 1 is a round nib; less flattens it across its own y.
     pub roundness: f64,

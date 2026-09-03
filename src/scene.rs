@@ -712,6 +712,17 @@ pub fn soft_radius(width: f64, hardness: f64, view: &View) -> (f32, f32) {
     (r - feather / 2.0, feather)
 }
 
+/// What one unit of Sketchbook's spacing is worth, as a fraction of the
+/// nib's width. Its own help names the band — 0.1 is "a very dense
+/// brush", 10.0 the top — and, decisively, 1.2 as the Pencil's default.
+/// A default pencil has to draw solid, and that is what settles the
+/// unit: at a quarter of a width each, 1.2 is 30% of a diameter, where
+/// every paint program's default spacing sits, and the ink pinches to
+/// 95% of its width between two dabs. Read as whole widths that same
+/// pencil would not touch itself at all, and read as radii it would
+/// pinch to 80% — a beaded stroke, which is not what Sketchbook ships.
+const SPACING_UNIT: f32 = 0.25;
+
 /// The closest two dabs are allowed to sit, in px. Below this they stop
 /// telling apart and only cost: a hair-thin brush at the tightest
 /// spacing would otherwise lay tens of thousands of them per stroke.
@@ -750,14 +761,14 @@ fn seed_at(start: [f64; 2]) -> u64 {
 }
 
 /// The dabs a stamped nib lays along `points` (screen px): one where
-/// the press was, then one every `spacing` widths of arc length after
+/// the press was, then one every `spacing` units of arc length after
 /// it. The tail left over past the last dab is not stamped — a stroke
 /// ends on a dab, as it does in Sketchbook, and the nib's own radius
 /// covers the gap at any spacing anyone paints with.
 ///
 /// A nib with a scatter is thrown off true dab by dab: its radius by
 /// `scatter.size` world units, its angle by `scatter.rotation` degrees
-/// and the gap before it by `scatter.spacing` tip widths, each from
+/// and the gap before it by `scatter.spacing` spacing units, each from
 /// `seed` so the same stroke lands the same way every frame.
 pub fn stamp_prims(
     points: &[(f32, f32)],
@@ -776,7 +787,7 @@ pub fn stamp_prims(
         art,
     } = nib;
     let width = 2.0 * radius + feather;
-    let step = (stamp.spacing as f32 * width).max(STAMP_STEP_MIN);
+    let step = (stamp.spacing as f32 * SPACING_UNIT * width).max(STAMP_STEP_MIN);
     let squish = (stamp.roundness.clamp(0.0, 1.0) as f32).max(NIB_MIN_PX / radius.max(NIB_MIN_PX));
     let angle = stamp.rotation as f32;
     // Flow is what one dab lays; the stroke's opacity is the ceiling
@@ -826,7 +837,7 @@ pub fn stamp_prims(
             return step;
         }
         let thrown = stamp.spacing as f32 + scatter.spacing as f32 * dice(seed, n, SALT_GAP) as f32;
-        (thrown * width).max(STAMP_STEP_MIN)
+        (thrown * SPACING_UNIT * width).max(STAMP_STEP_MIN)
     };
 
     // The first dab lies along the span it starts on, which the walk
@@ -1209,7 +1220,7 @@ pub fn document_prims(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brush::Tip;
+    use crate::brush::{Brush, Tip};
     use crate::doc::{Camera, Kind, Layer, Paint, Path, Rect, Scatter, Stroke};
 
     const VP: Viewport = Viewport { w: 100, h: 100 };
@@ -1372,10 +1383,11 @@ mod tests {
     #[test]
     fn a_stamped_tip_lays_a_nib_every_spacing_instead_of_sweeping() {
         let v = view(0.0, 0.0, 1.0);
-        // A 40-px line with an 8-wide nib half a width apart: a dab
-        // where the press was and one every 4 px along it.
+        // A 40-px line with an 8-wide nib at a spacing of 0.5 — an
+        // eighth of its width — so a dab where the press was and one
+        // every 1 px along it.
         let got = stroke_prims(&[[-20.0, 0.0], [20.0, 0.0]], &stamped(8.0, ROUND), WHITE, &v, &no_sheet());
-        assert_eq!(got.len(), 11, "40 px at a 4 px step, the ends counted");
+        assert_eq!(got.len(), 41, "40 px at a 1 px step, the ends counted");
         for p in &got {
             assert_eq!(p.kind, KIND_BOX, "a dab is a nib, not a swept segment");
             assert_eq!((p.radius, p.feather), (4.0, 0.0));
@@ -1385,11 +1397,64 @@ mod tests {
         assert_eq!(xs.first(), Some(&30.0), "the first dab is at the press");
         assert_eq!(xs.last(), Some(&70.0), "the last one at the release");
         for w in xs.windows(2) {
-            assert!((w[1] - w[0] - 4.0).abs() < 1e-4, "evenly spaced: {xs:?}");
+            assert!((w[1] - w[0] - 1.0).abs() < 1e-4, "evenly spaced: {xs:?}");
         }
         for p in &got {
             assert!((p.geom[1] + p.geom[3] / 2.0 - 50.0).abs() < 1e-4, "on the line");
         }
+    }
+
+    #[test]
+    fn the_pencil_sketchbook_documents_lays_a_solid_stroke() {
+        // Sketchbook's own help names 1.2 as the Pencil's default
+        // spacing, 0.1 as "a very dense brush" and 10.0 as the top. A
+        // default pencil has to come out solid, and that is the anchor
+        // that fixes what one unit of spacing is worth.
+        let v = view(0.0, 0.0, 1.0);
+        let nib = Stamp {
+            spacing: Brush::default().spacing,
+            ..ROUND
+        };
+        let got = stroke_prims(
+            &[[-60.0, 0.0], [60.0, 0.0]],
+            &stamped(40.0, nib),
+            WHITE,
+            &v,
+            &no_sheet(),
+        );
+        let r = got[0].radius;
+        let xs: Vec<f32> = got.iter().map(|d| d.geom[0] + d.geom[2] / 2.0).collect();
+        let waist = (r * r - ((xs[1] - xs[0]) / 2.0).powi(2)).sqrt();
+        assert!(
+            waist > 0.95 * r,
+            "the pencil pinches to {:.0}% of its width between dabs",
+            waist / r * 100.0
+        );
+    }
+
+    #[test]
+    fn a_round_nib_at_the_commonest_spacing_lays_a_solid_stroke() {
+        // Half a radius is the gap most of the shipped brushes name,
+        // and a plain round brush at it has to come out solid. What
+        // gives a beaded stroke away is the waist: the width the ink
+        // pinches to between two dabs.
+        let v = view(0.0, 0.0, 1.0);
+        let got = stroke_prims(
+            &[[-60.0, 0.0], [60.0, 0.0]],
+            &stamped(40.0, ROUND),
+            WHITE,
+            &v,
+            &no_sheet(),
+        );
+        let r = got[0].radius;
+        let xs: Vec<f32> = got.iter().map(|d| d.geom[0] + d.geom[2] / 2.0).collect();
+        let step = xs[1] - xs[0];
+        let waist = (r * r - (step / 2.0).powi(2)).sqrt();
+        assert!(
+            waist > 0.95 * r,
+            "the stroke pinches to {:.0}% of its width between dabs",
+            waist / r * 100.0
+        );
     }
 
     #[test]
