@@ -986,20 +986,73 @@ impl Document {
     }
 }
 
+/// An element in paint order, and the frame whose boundary cuts it.
+/// `index` is into the flat [`Document::elements`], for an element inside
+/// a frame as much as outside — which is what keeps `select` answering
+/// with ids and the editor holding a selection of them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Painted<'a> {
+    pub index: usize,
+    pub element: &'a Element,
+    /// The frame whose boundary cuts it, when it is inside one. A frame
+    /// is never inside itself.
+    pub within: Option<&'a Frame>,
+}
+
 impl Document {
     /// The elements in paint order — bottom layer first, document order
-    /// within a layer — each with its index in `elements`. Hidden layers
-    /// are skipped: what is not painted is not there. Double-ended, so
-    /// the pointer can walk it from the top.
-    pub fn painted(&self) -> impl DoubleEndedIterator<Item = (usize, &Element)> {
-        self.layers
-            .iter()
-            .filter(|layer| layer.visible)
-            .flat_map(move |layer| {
-                self.elements
+    /// within a layer — each with the frame that cuts it. A frame layer
+    /// paints its frame first and then that frame's own stack, so what
+    /// is inside an area is painted over it and under whatever comes
+    /// next. Hidden layers are skipped in either stack: what is not
+    /// painted is not there. Double-ended, so the pointer can walk it
+    /// from the top.
+    pub fn painted(&self) -> impl DoubleEndedIterator<Item = Painted<'_>> {
+        let mut out: Vec<Painted<'_>> = Vec::new();
+        for layer in self.layers.iter().filter(|l| l.visible) {
+            if layer.kind == Kind::Frame {
+                let Some((index, element)) = self
+                    .elements
                     .iter()
                     .enumerate()
-                    .filter(move |(_, el)| el.layer() == layer.id)
+                    .find(|(_, el)| el.layer() == layer.id)
+                else {
+                    continue;
+                };
+                let Element::Frame(frame) = element else {
+                    continue;
+                };
+                out.push(Painted {
+                    index,
+                    element,
+                    within: None,
+                });
+                for inner in frame.layers.iter().filter(|l| l.visible) {
+                    out.extend(self.on_layer(&inner.id, Some(frame)));
+                }
+            } else {
+                out.extend(self.on_layer(&layer.id, None));
+            }
+        }
+        out.into_iter()
+    }
+
+    /// The elements naming `layer`, in document order, each marked with
+    /// the frame that cuts it.
+    fn on_layer<'a>(
+        &'a self,
+        layer: &'a str,
+        within: Option<&'a Frame>,
+    ) -> impl Iterator<Item = Painted<'a>> {
+        self.elements
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, element)| {
+                (element.layer() == layer).then_some(Painted {
+                    index,
+                    element,
+                    within,
+                })
             })
     }
 
@@ -1290,7 +1343,7 @@ mod tests {
     }
 
     fn painted_ids(doc: &Document) -> Vec<(usize, &str)> {
-        doc.painted().map(|(i, el)| (i, el.id())).collect()
+        doc.painted().map(|p| (p.index, p.element.id())).collect()
     }
 
     #[test]
@@ -2561,5 +2614,62 @@ mod tests {
         assert!(!doc.rehome_layer("bottom", None));
         assert!(!doc.rehome_layer("nobody", Some("fr")));
         assert!(!doc.rehome_layer("bottom", Some("nobody")));
+    }
+
+    #[test]
+    fn a_frame_is_painted_before_what_it_holds_and_after_what_is_under_it() {
+        let doc = framed();
+        let ids: Vec<&str> = doc.painted().map(|p| p.element.id()).collect();
+        assert_eq!(ids, ["outside", "fr", "inside"]);
+    }
+
+    #[test]
+    fn painted_names_the_frame_that_cuts_an_element() {
+        let doc = framed();
+        let within: Vec<Option<&str>> = doc
+            .painted()
+            .map(|p| p.within.map(|f| f.id.as_str()))
+            .collect();
+        assert_eq!(
+            within,
+            [None, None, Some("fr")],
+            "the frame is not inside itself"
+        );
+    }
+
+    #[test]
+    fn hiding_a_frame_layer_takes_everything_in_it() {
+        let mut doc = framed();
+        doc.layers[1].visible = false;
+        let ids: Vec<&str> = doc.painted().map(|p| p.element.id()).collect();
+        assert_eq!(ids, ["outside"]);
+    }
+
+    #[test]
+    fn hiding_a_layer_inside_a_frame_takes_only_that_layer() {
+        let mut doc = framed();
+        let Element::Frame(f) = &mut doc.elements[1] else {
+            panic!("not a frame");
+        };
+        f.layers[0].visible = false;
+        let ids: Vec<&str> = doc.painted().map(|p| p.element.id()).collect();
+        assert_eq!(ids, ["outside", "fr"]);
+    }
+
+    #[test]
+    fn painted_still_walks_backwards_from_the_top() {
+        let doc = framed();
+        let ids: Vec<&str> = doc.painted().rev().map(|p| p.element.id()).collect();
+        assert_eq!(ids, ["inside", "fr", "outside"]);
+    }
+
+    /// The index is still into the flat `elements`, inside a frame as
+    /// much as outside.
+    #[test]
+    fn painted_indexes_the_flat_elements() {
+        let doc = framed();
+        for p in doc.painted() {
+            assert_eq!(doc.elements[p.index].id(), p.element.id());
+        }
     }
 }

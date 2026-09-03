@@ -1609,7 +1609,8 @@ pub fn document_prims(
 ) -> Frame {
     let mut frame = Frame::new();
     let mut live = live;
-    for (_, element) in doc.painted() {
+    for painted in doc.painted() {
+        let element = painted.element;
         let mut out = Vec::new();
         match element {
             Element::Rect(r) => {

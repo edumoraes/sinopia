@@ -97,8 +97,8 @@ pub fn frame_of(doc: &Document, ids: &[String]) -> Option<Frame> {
 pub fn element_at(doc: &Document, p: Point, slop: f64) -> Option<&str> {
     doc.painted()
         .rev()
-        .find(|(_, el)| hits(el, p, slop))
-        .map(|(_, el)| el.id())
+        .find(|painted| hits(painted.element, p, slop))
+        .map(|painted| painted.element.id())
 }
 
 fn hits(el: &Element, p: Point, slop: f64) -> bool {
@@ -112,9 +112,9 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
         Element::Rect(_) | Element::Image(_) => true,
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
+        Element::Frame(_) => false,
         // Any one of its strokes is the object: the gaps between them
         // are not.
-        Element::Frame(_) => false,
         Element::Paint(paint) => paint
             .strokes
             .iter()
@@ -176,13 +176,13 @@ pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
     let lo = [a[0].min(b[0]), a[1].min(b[1])];
     let hi = [a[0].max(b[0]), a[1].max(b[1])];
     doc.painted()
-        .filter(|(_, el)| {
-            frame(el).is_some_and(|f| {
+        .filter(|painted| {
+            frame(painted.element).is_some_and(|f| {
                 let (flo, fhi) = f.aabb();
                 flo[0] <= hi[0] && fhi[0] >= lo[0] && flo[1] <= hi[1] && fhi[1] >= lo[1]
             })
         })
-        .map(|(_, el)| el.id().to_owned())
+        .map(|painted| painted.element.id().to_owned())
         .collect()
 }
 
