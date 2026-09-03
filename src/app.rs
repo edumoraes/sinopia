@@ -1055,11 +1055,13 @@ impl App {
             ),
             tip: &stroke.tip,
         });
+        let edge = self.theme.muted;
         frame.append(scene::document_prims(
             self.doc(),
             view,
             images,
             &self.shapes,
+            edge,
             live,
         ));
         if let Some(selection) = self.editor().selection_frame(self.doc()) {

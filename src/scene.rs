@@ -1626,6 +1626,27 @@ pub struct Live<'a> {
     pub tip: &'a Tip,
 }
 
+/// A frame's boundary in screen px — the box its contents are cut to.
+pub fn frame_rect(f: &crate::doc::Frame, view: &View) -> ScreenRect {
+    let (x, y) = view.world_to_screen(f.x, f.y);
+    ScreenRect {
+        x: x as f32,
+        y: y as f32,
+        w: (f.w * view.px_per_world()) as f32,
+        h: (f.h * view.px_per_world()) as f32,
+    }
+}
+
+/// Every prim cut to `to`, or left alone when there is nothing to cut it
+/// to. Nothing a document paints carries a clip of its own, so this sets
+/// rather than intersects; a cut inside a cut would have to intersect.
+fn cut_all(prims: Vec<Prim>, to: Option<ScreenRect>) -> Vec<Prim> {
+    match to {
+        None => prims,
+        Some(r) => prims.into_iter().map(|p| p.clipped(r)).collect(),
+    }
+}
+
 /// Flattens the document into a frame in paint order — the layers'
 /// order, then document order within a layer, hidden layers left out.
 /// Rects paint fill first, then the four outline edges (constant px
@@ -1637,12 +1658,26 @@ pub fn document_prims(
     view: &View,
     images: &ImageSlots,
     shapes: &Shapes,
+    edge: Rgba,
     live: Option<Live>,
 ) -> Frame {
     let mut frame = Frame::new();
     let mut live = live;
+    // The stroke in progress is cut by the frame its layer is in, on
+    // both the paths below: joining a paint on that layer, and drawn
+    // last over everything when that layer holds none. Reading the layer
+    // rather than the pointer is what keeps the live ink and the ink it
+    // becomes agreeing about which boundary they are under.
+    let live_cut = live
+        .as_ref()
+        .and_then(|l| doc.locate(l.layer))
+        .and_then(|(within, _)| within)
+        .and_then(|id| doc.frame(id))
+        .map(|f| frame_rect(f, view));
     for painted in doc.painted() {
         let element = painted.element;
+        // What the frame holding it cuts it to, if it is in one.
+        let cut = painted.within.map(|f| frame_rect(f, view));
         let mut out = Vec::new();
         match element {
             Element::Rect(r) => {
@@ -1687,10 +1722,9 @@ pub fn document_prims(
             }
             Element::Path(p) => {
                 let tip = Tip::of(p);
-                frame.stroke(
-                    path_prims(&p.curves, &tip, &p.pen, parse_color(&p.stroke), view, shapes),
-                    &tip,
-                );
+                let prims =
+                    path_prims(&p.curves, &tip, &p.pen, parse_color(&p.stroke), view, shapes);
+                frame.stroke(cut_all(prims, cut), &tip);
                 continue;
             }
             // A paint is one object made of many strokes: each is drawn
@@ -1704,15 +1738,17 @@ pub fn document_prims(
                     .iter()
                     .map(|s| {
                         let tip = Tip::of_stroke(s);
-                        let prims =
-                            path_prims(&s.curves, &tip, &s.pen, parse_color(&s.stroke), view, shapes);
+                        let prims = cut_all(
+                            path_prims(&s.curves, &tip, &s.pen, parse_color(&s.stroke), view, shapes),
+                            cut,
+                        );
                         (prims, tip)
                     })
                     .collect();
                 if live.as_ref().is_some_and(|l| l.layer == p.layer)
                     && let Some(l) = live.take()
                 {
-                    strokes.push((l.prims, l.tip.clone()));
+                    strokes.push((cut_all(l.prims, live_cut), l.tip.clone()));
                 }
                 // One stroke rubbing the others out is what asks for a
                 // sheet: without one there would be nothing to rub but
@@ -1730,7 +1766,26 @@ pub fn document_prims(
                 }
                 continue;
             }
-            Element::Frame(_) => {}
+            // An area: its ground, then a hairline edge. The edge is
+            // what makes an area with no ground visible and hittable at
+            // all, and it goes down before the contents, so ink laid
+            // inside covers it as ink does.
+            Element::Frame(f) => {
+                let r = frame_rect(f, view);
+                if let Some(hex) = &f.background {
+                    out.push(Prim::rect(r, parse_color(hex)));
+                }
+                let t = STROKE_PX;
+                let inner_h = (r.h - 2.0 * t).max(0.0);
+                for (x, y, w, h) in [
+                    (r.x, r.y, r.w, t),
+                    (r.x, r.y + r.h - t, r.w, t),
+                    (r.x, r.y + t, t, inner_h),
+                    (r.x + r.w - t, r.y + t, t, inner_h),
+                ] {
+                    out.push(Prim::rect(ScreenRect { x, y, w, h }, edge));
+                }
+            }
             Element::Image(i) => {
                 let (sx, sy) = view.world_to_screen(i.x, i.y);
                 let r = ScreenRect {
@@ -1749,14 +1804,14 @@ pub fn document_prims(
                 });
             }
         }
-        frame.extend(out);
+        frame.extend(cut_all(out, cut));
     }
     // A stroke on a layer that holds no paint yet has nothing to join:
     // it is painted last, over everything, until it lands. An eraser
     // there has nothing to rub out and paints nothing at all, which is
     // exactly what it will do when it is let go of.
     if let Some(l) = live.filter(|l| !l.tip.erases()) {
-        frame.stroke(l.prims, l.tip);
+        frame.stroke(cut_all(l.prims, live_cut), l.tip);
     }
     frame
 }
@@ -2544,7 +2599,7 @@ mod tests {
             strokes: vec![laid(a.clone(), Tip::PENCIL), laid(b.clone(), soft.clone())],
             rotation: 0.0,
         });
-        let together = document_prims(&doc_with(vec![paint], &v), &v, &none, &no_sheet(), None);
+        let together = document_prims(&doc_with(vec![paint], &v), &v, &none, &no_sheet(), EDGE, None);
         // Two strokes in one paint draw what two paths draw: nothing
         // joins them, and the soft one is still composited on its own.
         let apart = document_prims(
@@ -2552,6 +2607,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            EDGE,
             None,
         );
         assert_eq!(together.prims, apart.prims);
@@ -2563,7 +2619,7 @@ mod tests {
     fn a_hard_opaque_path_is_direct_and_a_soft_one_is_a_group() {
         let v = view(0.0, 0.0, 1.0);
         let none = ImageSlots::new();
-        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none, &no_sheet(), None);
+        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none, &no_sheet(), EDGE, None);
         assert_eq!(direct.prims.len(), 1);
         assert!(direct.groups.is_empty(), "the pencil needs no compositing");
 
@@ -2572,6 +2628,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            EDGE,
             None,
         );
         assert_eq!(soft.prims.len(), 1);
@@ -2584,6 +2641,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            EDGE,
             None,
         );
         assert_eq!(faint.groups.len(), 1);
@@ -2882,6 +2940,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            EDGE,
             Some(Live {
                 layer: &layer,
                 prims: prims.clone(),
@@ -2896,6 +2955,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            EDGE,
             Some(Live {
                 layer: "top",
                 prims: prims.clone(),
@@ -2917,6 +2977,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            EDGE,
             Some(Live {
                 layer: "nothing",
                 prims,
@@ -2942,6 +3003,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            EDGE,
             Some(Live {
                 layer: &layer,
                 prims,
@@ -2957,7 +3019,7 @@ mod tests {
     fn a_paint_with_nothing_to_rub_out_is_drawn_as_it_always_was() {
         let v = view(0.0, 0.0, 1.0);
         let paint = paint_of(vec![laid(vec![cubic()], tip(8.0, 1.0, 0.5))]);
-        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), None);
+        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
         assert!(f.sheets.is_empty(), "no sheet is opened for ink alone");
         assert_eq!(f.groups.len(), 1);
     }
@@ -2969,7 +3031,7 @@ mod tests {
             laid(vec![cubic()], stamped(8.0, ROUND)),
             laid(vec![cubic()], rubber(8.0)),
         ]);
-        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), None);
+        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
         assert_eq!(f.sheets.len(), 1, "the layer gets a surface of its own");
         let sheet = f.sheets[0];
         assert_eq!((sheet.start, sheet.end), (0, f.prims.len() as u32));
@@ -3226,12 +3288,12 @@ mod tests {
         });
         // The white rect is first in `elements` but on the top layer.
         doc.elements[0].set_layer("top");
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].color, [0.0, 0.0, 0.0, 1.0], "the lower layer paints first");
         assert_eq!(got[1].color, WHITE);
         doc.layers[1].visible = false;
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
         assert_eq!(got.len(), 1, "a hidden layer paints nothing");
     }
     const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -3474,7 +3536,7 @@ mod tests {
         if let Element::Rect(r) = &mut el {
             r.rotation = 90.0;
         }
-        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new(), &no_sheet(), None).prims;
+        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
         assert_eq!(got.len(), 5);
         let a = std::f32::consts::FRAC_PI_2;
         // The fill is the unturned box, turned in place.
@@ -3494,7 +3556,7 @@ mod tests {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))], &v);
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims,
             vec![Prim::rect(sr(50.0, 50.0, 10.0, 10.0), WHITE)]
         );
     }
@@ -3505,7 +3567,7 @@ mod tests {
         let doc = doc_with(vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)], &v);
         let t = STROKE_PX;
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims,
             vec![
                 // top, bottom, left, right — aligned inwards.
                 Prim::rect(sr(60.0, 60.0, 20.0, t), WHITE),
@@ -3523,7 +3585,7 @@ mod tests {
             vec![rect(0.0, 0.0, 10.0, 10.0, Some("#000"), Some("#fff"))],
             &v,
         );
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
         assert_eq!(got.len(), 5);
         assert_eq!(got[0].color, WHITE, "fill first");
         assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke after");
@@ -3533,7 +3595,7 @@ mod tests {
     fn zoom_scales_rect_position_and_size() {
         let v = view(0.0, 0.0, 2.0);
         let doc = doc_with(vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
         assert_eq!(got[0].geom, [52.0, 50.0, 10.0, 10.0]);
     }
 
@@ -3541,7 +3603,7 @@ mod tests {
     fn rect_without_any_color_still_paints_with_fallback() {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 4.0, 4.0, None, None)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].color, FALLBACK_COLOR);
     }
@@ -3612,7 +3674,7 @@ mod tests {
         );
         // Width is in world units: 2 * zoom 2 = 4px wide → half-width 2.
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims,
             vec![Prim::segment(
                 (50.0, 50.0),
                 (68.0, 50.0),
@@ -3677,7 +3739,7 @@ mod tests {
         let v = view(0.0, 0.0, 2.0);
         let slots = ImageSlots::from([(BLOB.to_owned(), 7)]);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 90.0)], &v);
-        let got = document_prims(&doc, &v, &slots, &no_sheet(), None).prims;
+        let got = document_prims(&doc, &v, &slots, &no_sheet(), EDGE, None).prims;
         // One instance: the SDF box carries the texture, so the turn, the
         // rounded corners and the antialiasing come from the same field.
         assert_eq!(got.len(), 1, "{got:?}");
@@ -3721,7 +3783,7 @@ mod tests {
         // element still has to occupy its box.
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 0.0)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].kind, KIND_BOX);
         assert_eq!(got[0].color, PLACEHOLDER_COLOR);
@@ -3856,5 +3918,153 @@ mod tests {
         let p = Prim::rect(r, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(p.clip, NO_CLIP);
         assert_eq!(p.painted_bounds(), r.inset(-1.5));
+    }
+
+    /// A frame spanning (0,0)–(100,100) in world units, with a rect on
+    /// its inner layer running well past its right edge.
+    fn framed_doc() -> Document {
+        Document::from_json(
+            r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+            "elements": [
+                { "id": "fr", "type": "frame", "layer": "fl",
+                  "x": 0, "y": 0, "w": 100, "h": 100, "background": "#ff0000",
+                  "layers": [ { "id": "in", "name": "Layer 1" } ] },
+                { "id": "inside", "type": "rect", "layer": "in",
+                  "x": 50, "y": 50, "w": 400, "h": 20,
+                  "stroke": null, "fill": "#00ff00", "text": null }
+            ]
+        }"##,
+        )
+        .unwrap()
+    }
+
+    const EDGE: Rgba = [0.4, 0.4, 0.4, 1.0];
+
+    #[test]
+    fn a_frame_lays_its_ground_and_then_its_edge() {
+        let doc = framed_doc();
+        let v = view(0.0, 0.0, 1.0);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        assert_eq!(
+            f.prims[0].color,
+            parse_color("#ff0000"),
+            "the ground goes down first"
+        );
+        assert!(
+            f.prims[1..5].iter().all(|p| p.color == EDGE),
+            "then four hairline edges"
+        );
+    }
+
+    /// A frame with no background is still there: the edge is what makes
+    /// an empty area visible, and hittable.
+    #[test]
+    fn a_frame_with_no_ground_still_shows_its_edge() {
+        let mut doc = framed_doc();
+        let Element::Frame(fr) = &mut doc.elements[0] else {
+            panic!("not a frame");
+        };
+        fr.background = None;
+        let v = view(0.0, 0.0, 1.0);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        assert_eq!(f.prims[0].color, EDGE);
+    }
+
+    #[test]
+    fn what_a_frame_holds_is_cut_to_its_boundary() {
+        let doc = framed_doc();
+        let v = view(0.0, 0.0, 1.0);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let cut = frame_rect(doc.frame("fr").unwrap(), &v);
+        let content = f
+            .prims
+            .iter()
+            .find(|p| p.color == parse_color("#00ff00"))
+            .expect("the rect inside is painted");
+        assert_eq!(
+            content.clip,
+            [cut.x, cut.y, cut.w, cut.h],
+            "the content carries the boundary as its clip"
+        );
+    }
+
+    #[test]
+    fn a_frames_own_prims_are_not_cut_by_itself() {
+        let doc = framed_doc();
+        let v = view(0.0, 0.0, 1.0);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        assert!(
+            f.prims[..5].iter().all(|p| p.clip == NO_CLIP),
+            "a frame is not inside itself"
+        );
+    }
+
+    #[test]
+    fn what_is_not_in_a_frame_is_not_cut() {
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#000"))], &v);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        assert!(
+            f.prims.iter().all(|p| p.clip == NO_CLIP),
+            "an element on the open board carries no cut"
+        );
+    }
+
+    /// The stroke in progress wears the cut it is going to land under:
+    /// its layer names the frame, so the live ink and the ink it becomes
+    /// cannot be under different boundaries.
+    #[test]
+    fn the_live_stroke_is_cut_by_the_frame_its_layer_is_in() {
+        let doc = framed_doc();
+        let v = view(0.0, 0.0, 1.0);
+        let tip = Tip::PENCIL;
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let prims = vec![Prim::rect(
+            ScreenRect { x: 400.0, y: 400.0, w: 10.0, h: 10.0 },
+            blue,
+        )];
+        let live = Live { layer: "in", prims, tip: &tip };
+        let f = document_prims(
+            &doc,
+            &v,
+            &ImageSlots::new(),
+            &no_sheet(),
+            EDGE,
+            Some(live),
+        );
+        let cut = frame_rect(doc.frame("fr").unwrap(), &v);
+        let drawn = f
+            .prims
+            .iter()
+            .find(|p| p.color == blue)
+            .expect("the live stroke is painted");
+        assert_eq!(drawn.clip, [cut.x, cut.y, cut.w, cut.h]);
+    }
+
+    /// And a stroke on the open board is not cut at all.
+    #[test]
+    fn a_live_stroke_on_the_board_wears_no_cut() {
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(Vec::new(), &v);
+        let tip = Tip::PENCIL;
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let prims = vec![Prim::rect(
+            ScreenRect { x: 4.0, y: 4.0, w: 10.0, h: 10.0 },
+            blue,
+        )];
+        let layer = doc.layers[0].id.clone();
+        let live = Live { layer: &layer, prims, tip: &tip };
+        let f = document_prims(
+            &doc,
+            &v,
+            &ImageSlots::new(),
+            &no_sheet(),
+            EDGE,
+            Some(live),
+        );
+        assert_eq!(f.prims[0].clip, NO_CLIP);
     }
 }
