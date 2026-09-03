@@ -397,7 +397,7 @@ impl Editor {
     pub fn active_layer(&self, doc: &Document) -> usize {
         self.layer
             .as_deref()
-            .and_then(|id| doc.layer_index(id))
+            .and_then(|id| doc.layer_index(None, id))
             .unwrap_or(doc.layers.len().saturating_sub(1))
     }
 
@@ -405,7 +405,9 @@ impl Editor {
     /// answers its id — what an element that comes with its own layer is
     /// stamped with.
     fn fresh_layer(&mut self, doc: &mut Document, kind: Kind) -> String {
-        let at = doc.add_layer(self.active_layer(doc), kind);
+        let at = doc
+            .add_layer(None, self.active_layer(doc), kind)
+            .unwrap_or_default();
         let id = doc.layers[at].id.clone();
         self.layer = Some(id.clone());
         id
@@ -454,7 +456,9 @@ impl Editor {
 
     /// Adds a layer above the active one and makes it active.
     pub fn add_layer(&mut self, doc: &mut Document) -> Change {
-        let at = doc.add_layer(self.active_layer(doc), Kind::Raster);
+        let at = doc
+            .add_layer(None, self.active_layer(doc), Kind::Raster)
+            .unwrap_or_default();
         self.layer = Some(doc.layers[at].id.clone());
         Change::Scene
     }
@@ -466,7 +470,7 @@ impl Editor {
     /// object either way.
     pub fn remove_layer(&mut self, doc: &mut Document) -> Change {
         let index = self.active_layer(doc);
-        if !doc.remove_layer(index) {
+        if !doc.remove_layer(None, index) {
             let Some(layer) = doc.layers.get(index) else {
                 return Change::None;
             };
@@ -510,7 +514,7 @@ impl Editor {
     /// Moves the active layer one step up or down. It keeps its id, so
     /// it stays active.
     pub fn move_layer(&mut self, doc: &mut Document, up: bool) -> Change {
-        match doc.move_layer(self.active_layer(doc), up) {
+        match doc.move_layer(None, self.active_layer(doc), up) {
             Some(_) => Change::Scene,
             None => Change::None,
         }
@@ -520,7 +524,7 @@ impl Editor {
     /// row dragged in the panel does. It keeps its id, so it stays
     /// active wherever it lands.
     pub fn move_layer_to(&mut self, doc: &mut Document, index: usize) -> Change {
-        match doc.reorder_layer(self.active_layer(doc), index) {
+        match doc.reorder_layer(None, self.active_layer(doc), index) {
             true => Change::Scene,
             false => Change::None,
         }
@@ -851,9 +855,9 @@ impl Editor {
             .retain(|el| !self.selection.iter().any(|id| id == el.id()));
         for id in emptied {
             if !doc.elements.iter().any(|el| el.layer() == id)
-                && let Some(i) = doc.layer_index(&id)
+                && let Some(i) = doc.layer_index(None, &id)
             {
-                doc.remove_layer(i);
+                doc.remove_layer(None, i);
             }
         }
         self.selection.clear();
@@ -1303,15 +1307,15 @@ mod tests {
     fn active_layer_defaults_to_the_top_and_follows_the_id() {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
-        doc.add_layer(0, Kind::Raster);
-        doc.add_layer(1, Kind::Raster);
+        doc.add_layer(None, 0, Kind::Raster);
+        doc.add_layer(None, 1, Kind::Raster);
         assert_eq!(e.active_layer(&doc), 2);
         assert_eq!(e.select_layer(&doc, 0), Change::Selection);
         assert_eq!(e.active_layer(&doc), 0);
         assert_eq!(e.select_layer(&doc, 9), Change::None);
         assert_eq!(e.active_layer(&doc), 0);
         // The layer goes away under the editor: back to the top.
-        assert!(doc.remove_layer(0));
+        assert!(doc.remove_layer(None, 0));
         assert_eq!(e.active_layer(&doc), 1);
     }
 
@@ -1702,7 +1706,7 @@ mod tests {
     fn move_layer_to_drops_the_active_layer_at_an_index() {
         let mut e = Editor::new();
         let mut doc = layered_board();
-        doc.add_layer(1, Kind::Raster);
+        doc.add_layer(None, 1, Kind::Raster);
         let top = doc.layers[2].id.clone();
         let _ = e.select_layer(&doc, 2);
         assert_eq!(e.move_layer_to(&mut doc, 0), Change::Scene);

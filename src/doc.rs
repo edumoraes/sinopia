@@ -1003,8 +1003,9 @@ impl Document {
             })
     }
 
-    pub fn layer_index(&self, id: &str) -> Option<usize> {
-        self.layers.iter().position(|l| l.id == id)
+    /// The index of `id` in the stack `frame` names.
+    pub fn layer_index(&self, frame: Option<&str>, id: &str) -> Option<usize> {
+        self.stack(frame).iter().position(|l| l.id == id)
     }
 
     /// The frame element `id` names.
@@ -1079,18 +1080,21 @@ impl Document {
     }
 
     /// Adds a layer of `kind` just above `above` (on top when that is
-    /// past the end) and answers its index. It is named `Layer N` with N
-    /// past every number in use, so a name is never handed out twice.
-    pub fn add_layer(&mut self, above: usize, kind: Kind) -> usize {
-        let name = self.next_layer_name();
-        let at = above.saturating_add(1).min(self.layers.len());
-        self.layers.insert(at, Layer::of(&name, kind));
-        at
+    /// past the end) in the stack `frame` names, and answers its index.
+    /// It is named `Layer N` with N past every number in use **in that
+    /// stack**, so a frame's first layer is `Layer 1` however many the
+    /// board has. None when the stack is not there.
+    pub fn add_layer(&mut self, frame: Option<&str>, above: usize, kind: Kind) -> Option<usize> {
+        let name = self.next_layer_name(frame);
+        let layers = self.stack_mut(frame)?;
+        let at = above.saturating_add(1).min(layers.len());
+        layers.insert(at, Layer::of(&name, kind));
+        Some(at)
     }
 
-    fn next_layer_name(&self) -> String {
+    fn next_layer_name(&self, frame: Option<&str>) -> String {
         let highest = self
-            .layers
+            .stack(frame)
             .iter()
             .filter_map(|l| l.name.strip_prefix("Layer ")?.parse::<u32>().ok())
             .max()
@@ -1098,39 +1102,92 @@ impl Document {
         format!("Layer {}", highest.saturating_add(1))
     }
 
-    /// Removes layer `index` and every element on it. A board keeps its
-    /// last layer: false then, and for an index past the end.
-    pub fn remove_layer(&mut self, index: usize) -> bool {
-        if self.layers.len() < 2 || index >= self.layers.len() {
+    /// Removes layer `index` of the stack `frame` names, and every
+    /// element on it. A stack keeps its last layer: false then, and for
+    /// an index past the end. A frame layer takes its frame's whole
+    /// stack with it, since a frame's object *is* a stack.
+    pub fn remove_layer(&mut self, frame: Option<&str>, index: usize) -> bool {
+        let Some(layers) = self.stack_mut(frame) else {
+            return false;
+        };
+        if layers.len() < 2 || index >= layers.len() {
             return false;
         }
-        let gone = self.layers.remove(index);
-        self.elements.retain(|el| el.layer() != gone.id);
+        let gone = layers.remove(index);
+        let held: Vec<String> = self
+            .frame_on(&gone.id)
+            .map(|f| f.layers.iter().map(|l| l.id.clone()).collect())
+            .unwrap_or_default();
+        self.elements
+            .retain(|el| el.layer() != gone.id && !held.iter().any(|id| id == el.layer()));
         true
     }
 
     /// Swaps layer `index` with the one above it (`up`) or below, and
     /// answers where it went. Nothing moves past the edge.
-    pub fn move_layer(&mut self, index: usize, up: bool) -> Option<usize> {
+    pub fn move_layer(&mut self, frame: Option<&str>, index: usize, up: bool) -> Option<usize> {
         let to = if up {
             index.checked_add(1)?
         } else {
             index.checked_sub(1)?
         };
-        self.reorder_layer(index, to).then_some(to)
+        self.reorder_layer(frame, index, to).then_some(to)
     }
 
-    /// Takes layer `from` out of the stack and puts it back at `to`,
-    /// shifting whatever lies between and leaving their order alone —
-    /// what a row dragged several places down does. False when either
-    /// index is past the end, or the layer is already there.
-    pub fn reorder_layer(&mut self, from: usize, to: usize) -> bool {
-        if from >= self.layers.len() || to >= self.layers.len() || from == to {
+    /// Takes layer `from` out of the stack `frame` names and puts it back
+    /// at `to`, shifting whatever lies between and leaving their order
+    /// alone — what a row dragged several places down does. False when
+    /// either index is past the end, or the layer is already there.
+    pub fn reorder_layer(&mut self, frame: Option<&str>, from: usize, to: usize) -> bool {
+        let Some(layers) = self.stack_mut(frame) else {
+            return false;
+        };
+        if from >= layers.len() || to >= layers.len() || from == to {
             return false;
         }
-        let layer = self.layers.remove(from);
-        self.layers.insert(to, layer);
+        let layer = layers.remove(from);
+        layers.insert(to, layer);
         true
+    }
+
+    /// Moves the layer `layer` — and so the object on it — to the top of
+    /// the stack `to` names. A layer holds one object, so the two are one
+    /// move: the element goes on naming its layer, and its layer changes
+    /// stacks. False when the layer is a frame's own (a frame does not
+    /// nest), when it is already there, or when either end is missing.
+    pub fn rehome_layer(&mut self, layer: &str, to: Option<&str>) -> bool {
+        let Some((from, index)) = self.locate(layer) else {
+            return false;
+        };
+        let from = from.map(|s| s.to_owned());
+        if from.as_deref() == to {
+            return false;
+        }
+        if self.stack(from.as_deref())[index].kind == Kind::Frame {
+            return false;
+        }
+        if self.stack_mut(to).is_none() {
+            return false;
+        }
+        let Some(layers) = self.stack_mut(from.as_deref()) else {
+            return false;
+        };
+        let taken = layers.remove(index);
+        // The stack it came from may now be empty, and a stack is never
+        // empty: it gets a fresh layer, as the parse would have given it.
+        if layers.is_empty() {
+            let name = self.next_layer_name(from.as_deref());
+            if let Some(layers) = self.stack_mut(from.as_deref()) {
+                layers.push(Layer::new(&name));
+            }
+        }
+        match self.stack_mut(to) {
+            Some(layers) => {
+                layers.push(taken);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -1287,9 +1344,9 @@ mod tests {
     #[test]
     fn add_layer_makes_the_kind_it_is_asked_for() {
         let mut doc = Document::new("t");
-        assert_eq!(doc.add_layer(0, Kind::Vector), 1);
+        assert_eq!(doc.add_layer(None, 0, Kind::Vector).unwrap(), 1);
         assert_eq!(doc.layers[1].kind, Kind::Vector);
-        assert_eq!(doc.add_layer(1, Kind::Raster), 2);
+        assert_eq!(doc.add_layer(None, 1, Kind::Raster).unwrap(), 2);
         assert_eq!(doc.layers[2].kind, Kind::Raster);
     }
 
@@ -1812,40 +1869,40 @@ mod tests {
     #[test]
     fn layer_index_finds_a_layer_by_id() {
         let doc = three_layers();
-        assert_eq!(doc.layer_index("middle"), Some(1));
-        assert_eq!(doc.layer_index("nope"), None);
+        assert_eq!(doc.layer_index(None, "middle"), Some(1));
+        assert_eq!(doc.layer_index(None, "nope"), None);
     }
 
     #[test]
     fn add_layer_inserts_above_and_names_past_the_highest_number() {
         let mut doc = Document::new("t");
-        assert_eq!(doc.add_layer(0, Kind::Raster), 1);
+        assert_eq!(doc.add_layer(None, 0, Kind::Raster).unwrap(), 1);
         assert_eq!(doc.layers[1].name, "Layer 2");
-        assert!(doc.remove_layer(1));
+        assert!(doc.remove_layer(None, 1));
         // "Layer 2" is gone, but its number is not reused: numbering only
         // ever counts up, as in Photoshop.
-        assert_eq!(doc.add_layer(0, Kind::Raster), 1);
+        assert_eq!(doc.add_layer(None, 0, Kind::Raster).unwrap(), 1);
         assert_eq!(doc.layers[1].name, "Layer 2");
         doc.layers[1].name = "Layer 7".into();
-        assert_eq!(doc.add_layer(0, Kind::Raster), 1);
+        assert_eq!(doc.add_layer(None, 0, Kind::Raster).unwrap(), 1);
         assert_eq!(doc.layers[1].name, "Layer 8");
         assert_eq!(doc.layers[2].name, "Layer 7", "the new layer went in above index 0");
         assert!(doc.layers[1].visible);
         assert_eq!(doc.layers[1].id.len(), 26);
         // Past the end still lands on top.
-        assert_eq!(doc.add_layer(99, Kind::Raster), 3);
+        assert_eq!(doc.add_layer(None, 99, Kind::Raster).unwrap(), 3);
     }
 
     #[test]
     fn remove_layer_drops_its_elements_and_refuses_the_last() {
         let mut doc = three_layers();
-        assert!(doc.remove_layer(1));
+        assert!(doc.remove_layer(None, 1));
         assert_eq!(doc.layers.len(), 2);
         assert_eq!(painted_ids(&doc), vec![(1, "on_bottom"), (0, "on_top")]);
         assert_eq!(doc.elements.len(), 2, "the middle layer's element went with it");
-        assert!(!doc.remove_layer(5), "no such layer");
-        assert!(doc.remove_layer(0));
-        assert!(!doc.remove_layer(0), "a board keeps its last layer");
+        assert!(!doc.remove_layer(None, 5), "no such layer");
+        assert!(doc.remove_layer(None, 0));
+        assert!(!doc.remove_layer(None, 0), "a board keeps its last layer");
         assert_eq!(doc.layers.len(), 1);
         assert_eq!(doc.elements.len(), 1);
     }
@@ -1853,28 +1910,28 @@ mod tests {
     #[test]
     fn move_layer_swaps_with_the_neighbour_and_stops_at_the_edge() {
         let mut doc = three_layers();
-        assert_eq!(doc.move_layer(0, true), Some(1));
+        assert_eq!(doc.move_layer(None, 0, true), Some(1));
         assert_eq!(doc.layers[1].id, "bottom");
         assert_eq!(doc.layers[0].id, "middle");
-        assert_eq!(doc.move_layer(2, true), None, "already on top");
-        assert_eq!(doc.move_layer(0, false), None, "already at the bottom");
-        assert_eq!(doc.move_layer(9, true), None, "no such layer");
-        assert_eq!(doc.move_layer(1, false), Some(0));
+        assert_eq!(doc.move_layer(None, 2, true), None, "already on top");
+        assert_eq!(doc.move_layer(None, 0, false), None, "already at the bottom");
+        assert_eq!(doc.move_layer(None, 9, true), None, "no such layer");
+        assert_eq!(doc.move_layer(None, 1, false), Some(0));
         assert_eq!(doc.layers[0].id, "bottom");
     }
 
     #[test]
     fn reorder_layer_lifts_one_out_and_drops_it_in() {
         let mut doc = three_layers();
-        assert!(doc.reorder_layer(2, 0), "the top one to the bottom");
+        assert!(doc.reorder_layer(None, 2, 0), "the top one to the bottom");
         let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, vec!["top", "bottom", "middle"], "the others keep their order");
-        assert!(doc.reorder_layer(0, 2));
+        assert!(doc.reorder_layer(None, 0, 2));
         let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, vec!["bottom", "middle", "top"]);
-        assert!(!doc.reorder_layer(1, 1), "nowhere to go");
-        assert!(!doc.reorder_layer(3, 0), "no such layer");
-        assert!(!doc.reorder_layer(0, 3), "no such place");
+        assert!(!doc.reorder_layer(None, 1, 1), "nowhere to go");
+        assert!(!doc.reorder_layer(None, 3, 0), "no such layer");
+        assert!(!doc.reorder_layer(None, 0, 3), "no such place");
     }
 
     #[test]
@@ -2418,5 +2475,91 @@ mod tests {
     #[test]
     fn an_element_on_a_frames_layer_parses() {
         assert_eq!(framed().elements.len(), 3);
+    }
+
+    #[test]
+    fn a_layer_added_inside_a_frame_stays_inside_it() {
+        let mut doc = framed();
+        let at = doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
+        assert_eq!(at, 1);
+        assert_eq!(doc.stack(Some("fr")).len(), 2);
+        assert_eq!(doc.layers.len(), 2, "the board's stack did not grow");
+        assert_eq!(
+            doc.stack(Some("fr"))[1].name,
+            "Layer 2",
+            "named within its own stack"
+        );
+    }
+
+    #[test]
+    fn removing_the_last_layer_of_a_frame_is_refused_like_the_boards() {
+        let mut doc = framed();
+        assert!(!doc.remove_layer(Some("fr"), 0));
+        assert_eq!(doc.stack(Some("fr")).len(), 1);
+    }
+
+    #[test]
+    fn removing_a_frames_layer_takes_the_elements_on_it() {
+        let mut doc = framed();
+        doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
+        assert!(doc.remove_layer(Some("fr"), 0));
+        assert!(
+            !doc.elements.iter().any(|el| el.id() == "inside"),
+            "the rect on it went too"
+        );
+    }
+
+    /// A frame layer takes its frame, its whole stack and everything on
+    /// it: the object and its layer go together, and a frame's object is
+    /// a stack.
+    #[test]
+    fn removing_a_frame_layer_takes_the_whole_frame() {
+        let mut doc = framed();
+        assert!(doc.remove_layer(None, 1));
+        assert!(!doc.elements.iter().any(|el| el.id() == "fr"));
+        assert!(!doc.elements.iter().any(|el| el.id() == "inside"));
+        assert!(doc.elements.iter().any(|el| el.id() == "outside"));
+    }
+
+    #[test]
+    fn rehoming_a_layer_moves_it_and_its_object_between_stacks() {
+        let mut doc = framed();
+        assert!(doc.rehome_layer("bottom", Some("fr")));
+        assert_eq!(
+            doc.locate("bottom"),
+            Some((Some("fr"), 1)),
+            "on top of the frame's stack"
+        );
+        // The element did not move — it named its layer, and its layer
+        // moved.
+        let el = doc.elements.iter().find(|el| el.id() == "outside").unwrap();
+        assert_eq!(el.layer(), "bottom");
+
+        assert!(doc.rehome_layer("bottom", None));
+        assert_eq!(doc.locate("bottom").unwrap().0, None);
+    }
+
+    /// A stack it leaves empty gets a fresh layer, as the parse would
+    /// have given it.
+    #[test]
+    fn rehoming_never_leaves_a_stack_empty() {
+        let mut doc = framed();
+        assert!(doc.rehome_layer("in", None));
+        assert_eq!(doc.stack(Some("fr")).len(), 1);
+        assert_ne!(doc.stack(Some("fr"))[0].id, "in");
+    }
+
+    #[test]
+    fn a_frames_own_layer_never_rehomes() {
+        let mut doc = framed();
+        assert!(!doc.rehome_layer("fl", Some("fr")), "a frame does not nest");
+    }
+
+    #[test]
+    fn rehoming_where_it_already_is_does_nothing() {
+        let mut doc = framed();
+        assert!(!doc.rehome_layer("bottom", None));
+        assert!(!doc.rehome_layer("nobody", Some("fr")));
+        assert!(!doc.rehome_layer("bottom", Some("nobody")));
     }
 }
