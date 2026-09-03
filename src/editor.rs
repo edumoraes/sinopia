@@ -772,6 +772,33 @@ impl Editor {
         Change::Selection
     }
 
+    /// Where the moved objects live now. An object's centre names its
+    /// home — a frame's area, or the open board — and what moves is the
+    /// object's **layer**, since a layer holds one object and the two go
+    /// together: the element goes on naming its layer, and its layer
+    /// changes stacks. A frame never rehomes, because it does not nest.
+    fn rehome_moved(&self, doc: &mut Document) {
+        let mut moves: Vec<(String, Option<String>)> = Vec::new();
+        for id in &self.selection {
+            let Some(el) = doc.elements.iter().find(|el| el.id() == id) else {
+                continue;
+            };
+            if matches!(el, Element::Frame(_)) {
+                continue;
+            }
+            let Some(f) = select::frame(el) else { continue };
+            let home = doc.frame_at(f.center).map(str::to_owned);
+            let layer = el.layer().to_owned();
+            let was = doc.locate(&layer).and_then(|(f, _)| f).map(str::to_owned);
+            if was != home {
+                moves.push((layer, home));
+            }
+        }
+        for (layer, home) in moves {
+            doc.rehome_layer(&layer, home.as_deref());
+        }
+    }
+
     fn snapshot(&self, doc: &Document) -> Snapshot {
         doc.elements
             .iter()
@@ -1082,7 +1109,11 @@ impl Editor {
         {
             return match drag {
                 Drag::Move { moved: false, .. } | Drag::Marquee { .. } => Change::Selection,
-                Drag::Move { .. } | Drag::Resize { .. } | Drag::Rotate { .. } => Change::Scene,
+                Drag::Move { .. } => {
+                    self.rehome_moved(doc);
+                    Change::Scene
+                }
+                Drag::Resize { .. } | Drag::Rotate { .. } => Change::Scene,
             };
         }
         match self.nav {
@@ -3054,5 +3085,112 @@ mod tests {
             .expect("a path landed");
         assert_eq!(doc.locate(path.layer()).and_then(|(f, _)| f), Some("fr"));
         assert_eq!(doc.stack(Some("fr")).len(), 2, "its own layer, in the frame");
+    }
+
+    /// A loose rect on a board layer of its own, well away from the
+    /// frame, and the id of the layer it brought with it.
+    fn loose_on_the_board(doc: &mut Document, id: &str, x: f64, y: f64) -> String {
+        let layer = Layer::new("Layer 1");
+        let layer_id = layer.id.clone();
+        doc.layers.insert(0, layer);
+        doc.elements.push(Element::Rect(Rect {
+            id: id.into(),
+            layer: layer_id.clone(),
+            x,
+            y,
+            w: 10.0,
+            h: 10.0,
+            rotation: 0.0,
+            stroke: None,
+            fill: None,
+            text: None,
+        }));
+        layer_id
+    }
+
+    #[test]
+    fn an_object_dragged_into_a_frame_joins_it() {
+        let mut doc = framed_editor_doc();
+        let layer = loose_on_the_board(&mut doc, "loose", 500.0, 500.0);
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 505.0, 505.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 55.0, 55.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 55.0, 55.0), &mut doc, "#111");
+        assert_eq!(
+            doc.locate(&layer).and_then(|(f, _)| f),
+            Some("fr"),
+            "the layer moved into the frame"
+        );
+        let el = doc.elements.iter().find(|el| el.id() == "loose").unwrap();
+        assert_eq!(el.layer(), layer, "and the object still names its layer");
+    }
+
+    #[test]
+    fn an_object_dragged_out_of_a_frame_leaves_it() {
+        let mut doc = framed_editor_doc();
+        doc.layers.insert(0, Layer::new("Layer 1"));
+        doc.elements.push(Element::Rect(Rect {
+            id: "held".into(),
+            layer: "in".into(),
+            x: 40.0,
+            y: 40.0,
+            w: 10.0,
+            h: 10.0,
+            rotation: 0.0,
+            stroke: None,
+            fill: None,
+            text: None,
+        }));
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 600.0, 600.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 600.0, 600.0), &mut doc, "#111");
+        assert_eq!(doc.locate("in").and_then(|(f, _)| f), None, "the layer came out");
+    }
+
+    #[test]
+    fn a_frame_itself_never_rehomes() {
+        let mut doc = framed_editor_doc();
+        doc.layers.insert(0, Layer::new("Layer 1"));
+        doc.layers.push(Layer {
+            id: "fl2".into(),
+            name: "Frame 2".into(),
+            visible: true,
+            kind: Kind::Frame,
+        });
+        doc.elements.push(Element::Frame(crate::doc::Frame {
+            id: "fr2".into(),
+            layer: "fl2".into(),
+            x: 400.0,
+            y: 400.0,
+            w: 200.0,
+            h: 200.0,
+            background: None,
+            layers: vec![Layer::new("Layer 1")],
+        }));
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 10.0, 10.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 460.0, 460.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 460.0, 460.0), &mut doc, "#111");
+        assert_eq!(
+            doc.locate("fl").and_then(|(f, _)| f),
+            None,
+            "a frame does not nest, however far it is dragged"
+        );
+    }
+
+    /// A click that selects is not a move: nothing changes stacks.
+    #[test]
+    fn a_click_that_does_not_move_rehomes_nothing() {
+        let mut doc = framed_editor_doc();
+        let layer = loose_on_the_board(&mut doc, "loose", 20.0, 20.0);
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.release(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, "#111");
+        assert_eq!(doc.locate(&layer).and_then(|(f, _)| f), None);
     }
 }
