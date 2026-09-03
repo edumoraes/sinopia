@@ -397,7 +397,24 @@ impl Editor {
     /// The selection handle under `screen`, for the cursor.
     pub fn hover(&self, doc: &Document, view: &View, screen: (f64, f64)) -> Option<Handle> {
         let frame = self.selection_frame(doc)?;
-        select::handle_at(&frame, view, screen)
+        self.handle_at(doc, &frame, view, screen)
+    }
+
+    /// The handle under `screen`, less the ones the selection cannot
+    /// honour: a frame does not turn, so its rings are not offered — the
+    /// cursor must not promise a turn that will not happen.
+    fn handle_at(
+        &self,
+        doc: &Document,
+        frame: &Frame,
+        view: &View,
+        screen: (f64, f64),
+    ) -> Option<Handle> {
+        let handle = select::handle_at(frame, view, screen)?;
+        match handle {
+            Handle::Rotate(_) if self.selection_holds_a_frame(doc) => None,
+            _ => Some(handle),
+        }
     }
 
     pub fn stroke(&self) -> Option<&Stroke> {
@@ -711,7 +728,7 @@ impl Editor {
     fn select_press(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
         if let Some(frame) = self.selection_frame(doc)
-            && let Some(handle) = select::handle_at(&frame, view, screen)
+            && let Some(handle) = self.handle_at(doc, &frame, view, screen)
         {
             let snapshot = self.snapshot(doc);
             let map = Affine::IDENTITY;
@@ -747,7 +764,15 @@ impl Editor {
             return Change::Selection;
         };
         if let Some(el) = doc.elements.iter().find(|el| el.id() == id) {
-            self.layer = Some(el.layer().to_owned());
+            let layer = el.layer().to_owned();
+            // A layer belongs to a stack, so going to it means going to
+            // that stack: picking something inside a frame goes in with
+            // it, and picking something on the board comes back out.
+            self.inside = doc
+                .locate(&layer)
+                .and_then(|(frame, _)| frame)
+                .map(str::to_owned);
+            self.layer = Some(layer);
         }
         if self.shift {
             if let Some(i) = self.selection.iter().position(|s| *s == id) {
@@ -766,7 +791,7 @@ impl Editor {
             screen,
             frame,
             map: Affine::IDENTITY,
-            snapshot: self.snapshot(doc),
+            snapshot: self.move_snapshot(doc),
             moved: false,
         });
         Change::Selection
@@ -797,6 +822,39 @@ impl Editor {
         for (layer, home) in moves {
             doc.rehome_layer(&layer, home.as_deref());
         }
+    }
+
+    /// What a move carries: the selection, and everything held by any
+    /// frame in it. Moving a frame moves what is inside — their relation
+    /// to the area does not change — while a resize moves the boundary
+    /// alone, which is why only this drag uses it.
+    fn move_snapshot(&self, doc: &Document) -> Snapshot {
+        let held: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Frame(f) if self.selection.iter().any(|id| id == &f.id) => Some(f),
+                _ => None,
+            })
+            .flat_map(|f| f.layers.iter().map(|l| l.id.as_str()))
+            .collect();
+        doc.elements
+            .iter()
+            .enumerate()
+            .filter(|(_, el)| {
+                self.selection.iter().any(|id| id == el.id())
+                    || held.iter().any(|l| *l == el.layer())
+            })
+            .map(|(i, el)| (i, el.clone()))
+            .collect()
+    }
+
+    /// Whether a frame is in the selection — which is what refuses a
+    /// rotation, since the cut that makes a frame is axis-aligned.
+    fn selection_holds_a_frame(&self, doc: &Document) -> bool {
+        doc.elements.iter().any(|el| {
+            matches!(el, Element::Frame(_)) && self.selection.iter().any(|id| id == el.id())
+        })
     }
 
     fn snapshot(&self, doc: &Document) -> Snapshot {
@@ -3192,5 +3250,128 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.release(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, "#111");
         assert_eq!(doc.locate(&layer).and_then(|(f, _)| f), None);
+    }
+
+    /// The frame of `framed_editor_doc`, with a rect inside it and a
+    /// board layer under everything.
+    fn frame_holding_a_rect() -> Document {
+        let mut doc = framed_editor_doc();
+        doc.layers.insert(0, Layer::new("Layer 1"));
+        doc.elements.push(Element::Rect(Rect {
+            id: "held".into(),
+            layer: "in".into(),
+            x: 40.0,
+            y: 40.0,
+            w: 10.0,
+            h: 10.0,
+            rotation: 0.0,
+            stroke: None,
+            fill: None,
+            text: None,
+        }));
+        doc
+    }
+
+    fn centre_of(doc: &Document, id: &str) -> [f64; 2] {
+        let el = doc.elements.iter().find(|el| el.id() == id).unwrap();
+        select::frame(el).unwrap().center
+    }
+
+    #[test]
+    fn moving_a_frame_carries_what_it_holds() {
+        let mut doc = frame_holding_a_rect();
+        let mut e = Editor::new();
+        let v = view();
+        // Press on the frame's own ground, away from the rect.
+        let _ = e.press(Button::Left, &v, at(&v, 90.0, 90.0), &mut doc, &brush().tip(Face::Round));
+        assert_eq!(e.selection(), ["fr"]);
+        let _ = e.moved(&v, at(&v, 190.0, 90.0), &mut doc);
+        let _ = e.release(Button::Left, &v, at(&v, 190.0, 90.0), &mut doc, "#111");
+        assert_eq!(
+            centre_of(&doc, "held"),
+            [145.0, 45.0],
+            "it travelled with the frame"
+        );
+    }
+
+    #[test]
+    fn resizing_a_frame_leaves_what_it_holds_where_it_is() {
+        let mut doc = frame_holding_a_rect();
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 90.0, 90.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.release(Button::Left, &v, at(&v, 90.0, 90.0), &mut doc, "#111");
+        let sel = e.selection_frame(&doc).unwrap();
+        let (_, corner) = *select::handles(&sel, &v)
+            .iter()
+            .find(|(h, _)| matches!(h, Handle::Resize(Corner::BottomRight)))
+            .unwrap();
+        let _ = e.press(Button::Left, &v, (corner[0], corner[1]), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, (corner[0] + 50.0, corner[1] + 50.0), &mut doc);
+        let _ = e.release(Button::Left, &v, (corner[0] + 50.0, corner[1] + 50.0), &mut doc, "#111");
+        assert_eq!(
+            centre_of(&doc, "held"),
+            [45.0, 45.0],
+            "the boundary moved and the contents did not"
+        );
+        let Element::Frame(f) = doc.elements.iter().find(|el| el.id() == "fr").unwrap() else {
+            panic!("not a frame");
+        };
+        assert!(f.w > 100.0 && f.h > 100.0, "the area grew: {} by {}", f.w, f.h);
+    }
+
+    #[test]
+    fn a_frame_in_the_selection_offers_no_rotation() {
+        let mut doc = frame_holding_a_rect();
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 90.0, 90.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.release(Button::Left, &v, at(&v, 90.0, 90.0), &mut doc, "#111");
+        let sel = e.selection_frame(&doc).unwrap();
+        let (_, ring) = *select::handles(&sel, &v)
+            .iter()
+            .find(|(h, _)| matches!(h, Handle::Rotate(_)))
+            .unwrap();
+        assert_eq!(
+            e.hover(&doc, &v, (ring[0], ring[1])),
+            None,
+            "the rings are not offered while a frame is selected"
+        );
+        // And pressing there does not start one.
+        let _ = e.press(Button::Left, &v, (ring[0], ring[1]), &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, (ring[0] + 30.0, ring[1]), &mut doc);
+        let _ = e.release(Button::Left, &v, (ring[0] + 30.0, ring[1]), &mut doc, "#111");
+        let Element::Frame(f) = doc.elements.iter().find(|el| el.id() == "fr").unwrap() else {
+            panic!("not a frame");
+        };
+        assert_eq!((f.w, f.h), (100.0, 100.0), "nothing turned it");
+    }
+
+    /// Picking an element makes its layer active — and when that layer is
+    /// a frame's, the panel goes in with it, or the active layer would
+    /// name a stack nobody is standing in.
+    #[test]
+    fn picking_something_inside_a_frame_goes_in_with_it() {
+        let mut doc = frame_holding_a_rect();
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, &brush().tip(Face::Round));
+        assert_eq!(e.selection(), ["held"]);
+        assert_eq!(e.inside(), Some("fr"));
+        assert_eq!(doc.stack(e.inside())[e.active_layer(&doc)].id, "in");
+    }
+
+    /// And picking something on the board comes back out.
+    #[test]
+    fn picking_something_on_the_board_comes_back_out() {
+        let mut doc = frame_holding_a_rect();
+        let layer = loose_on_the_board(&mut doc, "loose", 500.0, 500.0);
+        let mut e = Editor::new();
+        let v = view();
+        let _ = e.press(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, &brush().tip(Face::Round));
+        let _ = e.release(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, "#111");
+        let _ = e.press(Button::Left, &v, at(&v, 505.0, 505.0), &mut doc, &brush().tip(Face::Round));
+        assert_eq!(e.inside(), None);
+        assert_eq!(doc.stack(None)[e.active_layer(&doc)].id, layer);
     }
 }
