@@ -767,9 +767,9 @@ fn seed_at(start: [f64; 2]) -> u64 {
 /// covers the gap at any spacing anyone paints with.
 ///
 /// A nib with a scatter is thrown off true dab by dab: its radius by
-/// `scatter.size` world units, its angle by `scatter.rotation` degrees
-/// and the gap before it by `scatter.spacing` spacing units, each from
-/// `seed` so the same stroke lands the same way every frame.
+/// `scatter.size` world units and its angle by `scatter.rotation`
+/// degrees, each from `seed` so the same stroke lands the same way
+/// every frame. The rhythm is not thrown — see [`Property::honored`].
 pub fn stamp_prims(
     points: &[(f32, f32)],
     stamp: &Stamp,
@@ -830,15 +830,6 @@ pub fn stamp_prims(
             heading(h) + turn.to_radians(),
         )
     };
-    // The gap before dab `n`, thrown by the scatter and never shorter
-    // than two dabs may sit.
-    let gap = |n: u32| {
-        if true_nib {
-            return step;
-        }
-        let thrown = stamp.spacing as f32 + scatter.spacing as f32 * dice(seed, n, SALT_GAP) as f32;
-        (thrown * SPACING_UNIT * width).max(STAMP_STEP_MIN)
-    };
 
     // The first dab lies along the span it starts on, which the walk
     // has not reached yet.
@@ -852,7 +843,7 @@ pub fn stamp_prims(
     // How far the walk has come since the last dab, carried across the
     // polyline's corners so the spacing is of the stroke, not of a span.
     let mut carry = 0.0f32;
-    let mut next = gap(n);
+    let next = step;
     let mut prev = first;
     for &p in &points[1..] {
         let (dx, dy) = (p.0 - prev.0, p.1 - prev.1);
@@ -866,7 +857,6 @@ pub fn stamp_prims(
             let k = at / span;
             out.push(dab((prev.0 + dx * k, prev.1 + dy * k), n, along));
             n += 1;
-            next = gap(n);
             at += next;
         }
         carry = span - (at - next);
@@ -875,10 +865,9 @@ pub fn stamp_prims(
     out
 }
 
-/// Salts, so that a dab's size, angle and gap are thrown independently.
+/// Salts, so that a dab's size and angle are thrown independently.
 const SALT_SIZE: u64 = 0x51_7C_C1_B7_27_22_0A_95;
 const SALT_ANGLE: u64 = 0x2545_F491_4F6C_DD1D;
-const SALT_GAP: u64 = 0x14057B7EF767814F;
 
 /// What a tip lays along a screen polyline: a row of dabs if it stamps,
 /// one swept span per segment if it does not. The pencil sweeps; every
@@ -1367,7 +1356,6 @@ mod tests {
         scatter: Scatter {
             size: 0.0,
             rotation: 0.0,
-            spacing: 0.0,
         },
     };
 
@@ -1694,7 +1682,6 @@ mod tests {
             scatter: Scatter {
                 size: 3.0,
                 rotation: 45.0,
-                spacing: 1.0,
             },
             ..ROUND
         };
@@ -1712,11 +1699,13 @@ mod tests {
             got.windows(2).any(|w| w[0].angle != w[1].angle),
             "the angle is thrown"
         );
+        // The rhythm is not thrown: the gap is the one amount whose
+        // scale Sketchbook's own assets contradict.
         let xs: Vec<f32> = got.iter().map(|d| d.geom[0] + d.geom[2] / 2.0).collect();
         let gaps: Vec<f32> = xs.windows(2).map(|w| w[1] - w[0]).collect();
         assert!(
-            gaps.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-4),
-            "the gap is thrown: {gaps:?}"
+            gaps.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-4),
+            "the dabs keep their rhythm: {gaps:?}"
         );
 
         // And thrown no further than it was told to: a radius of 4 px

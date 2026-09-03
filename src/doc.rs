@@ -178,17 +178,15 @@ fn is_zero(v: &f64) -> bool {
 }
 
 /// How far each dab is thrown off the nib, in the unit of the thing it
-/// throws: `size` a radius in world units, `rotation` degrees,
-/// `spacing` in Sketchbook's spacing units. Sketchbook's Randomness,
-/// less the two whose
-/// amount is not in their property's own unit — see `brush::Jitter`.
+/// throws: `size` a radius in world units, `rotation` degrees. What is
+/// left of Sketchbook's Randomness once the three amounts whose scale
+/// its own assets contradict are set aside — see [`Property::honored`].
 /// All zero is a nib laid true, which is what a board without one says.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Scatter {
     pub size: f64,
     pub rotation: f64,
-    pub spacing: f64,
 }
 
 impl Scatter {
@@ -203,11 +201,7 @@ impl Scatter {
     /// rather than folded, so a board cannot say something it does not
     /// mean.
     fn checked(self) -> Result<Scatter, String> {
-        for (what, amount) in [
-            ("size", self.size),
-            ("rotation", self.rotation),
-            ("spacing", self.spacing),
-        ] {
+        for (what, amount) in [("size", self.size), ("rotation", self.rotation)] {
             if !(amount.is_finite() && amount >= 0.0) {
                 return Err(format!("{what} scatter {amount} is not an amount"));
             }

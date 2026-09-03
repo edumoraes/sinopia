@@ -285,10 +285,14 @@ impl Property {
     }
 
     /// Whether the canvas paints with it yet: the ones [`Tip`] carries,
-    /// its [`Stamp`] and that nib's `Scatter` included. The two
-    /// randomness amounts left out are the ones Sketchbook does not
-    /// state in their property's own unit — a fraction thrown by five,
-    /// or by twenty — so the canvas would have to guess what they mean.
+    /// its [`Stamp`] and that nib's `Scatter` included. The three
+    /// randomness amounts left out are the ones whose scale the assets
+    /// contradict. Two are not in their property's own unit at all — a
+    /// fraction thrown by five, or by twenty. The third is the gap:
+    /// seventeen of the thirty brushes that throw it name an amount
+    /// larger than the gap itself, so a throw either side of it would
+    /// land negative more often than not, and nobody ships that. The
+    /// canvas does not guess at any of the three.
     pub fn honored(self) -> bool {
         matches!(
             self,
@@ -301,7 +305,6 @@ impl Property {
                 | Property::Rotation
                 | Property::JitterSize
                 | Property::JitterRotation
-                | Property::JitterSpacing
         )
     }
 
@@ -464,7 +467,6 @@ impl Brush {
                 scatter: Scatter {
                     size: self.jitter.size,
                     rotation: self.jitter.rotation,
-                    spacing: self.jitter.spacing,
                 },
             }),
         }
@@ -1026,15 +1028,26 @@ mod tests {
             Scatter {
                 size: 3.0,
                 rotation: 45.0,
-                spacing: 1.0,
             },
             "an amount in the unit of what it throws goes straight through"
         );
-        // The other two are thrown by an amount that is not in their own
-        // unit — five and twenty on a fraction — so the canvas does not
-        // pretend to know what they mean.
+        // The three left out are the ones the assets contradict: two
+        // are not in their property's own unit at all, and the gap is
+        // thrown by more than the gap itself in most of the brushes
+        // that throw it.
         assert!(!Property::JitterOpacity.honored());
         assert!(!Property::JitterFlow.honored());
+        assert!(!Property::JitterSpacing.honored());
+        let noisier = Library::default()
+            .sets()
+            .iter()
+            .flat_map(|s| &s.presets)
+            .filter(|p| p.brush.jitter.spacing > p.brush.spacing)
+            .count();
+        assert!(
+            noisier > 10,
+            "{noisier} brushes name a gap noise larger than their gap"
+        );
     }
 
     #[test]
@@ -1177,7 +1190,6 @@ mod tests {
                     | Property::Rotation
                     | Property::JitterSize
                     | Property::JitterRotation
-                    | Property::JitterSpacing
             );
             assert_eq!(p.honored(), honored, "{p:?}");
         }

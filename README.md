@@ -51,11 +51,14 @@ selection, navigation, pasted images, and projects in tabs:
   bristle nib runs along the curve instead of pointing one way through
   it. The other three Rotation Dynamics are the stylus's tilt and roll,
   which nothing reports yet. A nib is also thrown off true dab by dab:
-  its radius, its angle and the gap before it, each by an amount in its
-  own unit, which is how Sketchbook states randomness. The other two
-  amounts it states — on opacity and flow — are not in those
-  properties' own unit (a fraction thrown by five, or by twenty), so
-  the canvas does not guess at them. The rest of the body is read off
+  its radius and its angle, each by an amount in its own unit, which is
+  how Sketchbook states randomness. Three of its five amounts stay out,
+  because its own sets contradict their scale: opacity and flow are
+  thrown by five and by twenty on a property that is a fraction, and
+  seventeen of the thirty brushes that throw the *gap* name an amount
+  larger than the gap itself — a throw either side of it would land
+  negative more often than not. The canvas does not guess at any of the
+  three. The rest of the body is read off
   the real sets and described truthfully while the engine grows into it
   — dynamics, the tip's profile, texture depth, and what the pen's
   pressure drives. What is left promising a mark the ink cannot make is
@@ -101,7 +104,7 @@ selection, navigation, pasted images, and projects in tabs:
   heading. Closed and open never show the same slider twice, and the
   line above does not move or change width when the panel drops. The
   ones the canvas actually paints with — Size, Opacity, Flow, Edge, the
-  whole Stamp section and three of the five under Randomness — are
+  whole Stamp section and two of the five under Randomness — are
   drawn in ink; every other slider is muted.
   It still moves, and it still writes the brush's own value, but the
   muting is the bar saying it does not promise paint yet. The
