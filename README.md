@@ -279,8 +279,17 @@ selection, navigation, pasted images, and projects in tabs:
   board came from the store, where it already has one; `Ctrl+Shift+S`
   always asks; `Ctrl+O` opens one or more `.omawhite` files, each in its
   own tab; `Ctrl+W` closes the tab, asking first if work would be lost.
-  Nothing autosaves any more: a drawing change dirties the tab, a pan or
-  a zoom does not. A project file holds exactly the document JSON;
+  A drawing change dirties the tab, a pan or a zoom does not. A **draft**
+  — a board with no name of its own — keeps itself: its changes reach the
+  store once the hand has been still for a moment, so `Ctrl+S` is what
+  gives a project a *name*, not what saves it from being lost, and
+  closing a dirty draft no longer asks. A file the person named is the
+  opposite: it is written only when asked, because writing into it behind
+  their back would empty `Ctrl+S`, the dot and the question of all their
+  meaning — so a dirty one still asks on the way out. A new board is
+  written nowhere until it is drawn on, which is what keeps every `+`
+  from leaving an empty board behind. A project file holds exactly the
+  document JSON;
   images stay in the store's `blobs/`, so a file carried to another
   machine shows placeholders.
 - Text: a glyph atlas from a font shipped inside the binary, drawn by
@@ -290,11 +299,21 @@ selection, navigation, pasted images, and projects in tabs:
 - Versioned JSON document (schema 1) + XDG persistence (0700/0600, atomic
   save). Project files chosen through the portal keep the umask instead.
 - IPC protocol §5 (closed schema) + single instance via socket.
-- CLI: `--new`, `--open <id>`, `--export <dir>`, `--shutdown`,
-  `--socket <path>`.
+- Recent projects: `index.json` lists both kinds, newest first — a draft
+  by id, a named file by path — and is the one file the plugin reads. A
+  project moving home stops being two entries; one file stays one entry
+  whatever wrote it. Reaching for a file that has gone is the only thing
+  that drops one, so a project on a drive nobody has mounted keeps its
+  place.
+- CLI: `--new`, `--open <id>`, `--open-file <path>`, `--export <dir>`,
+  `--shutdown`, `--socket <path>`.
 - Omarchy plugin (`plugin/`, §10.2): a bar widget whose popout holds the
-  two ways in — `n` for a new board, `o` for the list of those already
-  saved, newest first, opened by `Enter` or a click. It is a shell and
+  two ways in — `n` for a new board, `o` for the recent projects, newest
+  first, opened by `Enter` or a click. The list shows twenty and marks
+  which kind each is; typing filters the whole index, so the fortieth
+  project is a word away rather than a scroll. A file whose path is not
+  there right now is dimmed and says so rather than being dropped. It is
+  a shell and
   nothing more: it reads `index.json`, which is the one file it is
   allowed to read, drops any entry naming an id the engine would refuse,
   and launches the binary detached, so the board owns its own window and
