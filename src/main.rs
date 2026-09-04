@@ -30,6 +30,7 @@ mod props;
 mod scene;
 mod select;
 mod send;
+mod slots;
 mod store;
 mod tablet;
 mod tabs;

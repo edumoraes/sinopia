@@ -402,7 +402,7 @@ impl Palette {
 }
 
 /// The slice of the icon sheet one cell takes.
-fn icon_uv(icon: u16) -> [f32; 4] {
+pub(crate) fn icon_uv(icon: u16) -> [f32; 4] {
     let cols = f32::from(ICON_COLS);
     let rows = (f32::from(ICONS) / cols).ceil();
     let (col, row) = (
