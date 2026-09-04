@@ -51,7 +51,7 @@
 - Consumes: `scene::{Prim, ScreenRect}`, `text::Atlas`, `theme::Theme`.
 - Produces: `field::Field` with `Field::new(&str) -> Field`, `value(&self) -> &str`, `insert(&mut self, char)`, `backspace(&mut self)`, `left(&mut self)`, `right(&mut self)`, `home(&mut self)`, `end(&mut self)`, `prims(&self, r: ScreenRect, atlas: &Atlas, slot: u32, theme: &Theme, focused: bool) -> Vec<Prim>`. Tasks 2 and 9 both use it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `src/field.rs` with only the test module and the type it needs:
 
@@ -119,12 +119,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test field::`
 Expected: FAIL — `cannot find type Field in this scope`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Above the test module in `src/field.rs`:
 
@@ -206,12 +206,12 @@ impl Field {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cargo test field::`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Write the failing test for the prims**
+- [x] **Step 5: Write the failing test for the prims**
 
 Add to the test module:
 
@@ -241,12 +241,12 @@ Add to the test module:
     }
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test field::`
 Expected: FAIL — `no method named prims`.
 
-- [ ] **Step 7: Implement the prims**
+- [x] **Step 7: Implement the prims**
 
 Add to `impl Field`:
 
@@ -285,12 +285,12 @@ Add to `impl Field`:
 
 Add `mod field;` to `src/main.rs`, in the alphabetical run of modules (after `mod editor;`).
 
-- [ ] **Step 8: Run the tests to verify they pass**
+- [x] **Step 8: Run the tests to verify they pass**
 
 Run: `cargo test field::` then `cargo test`
 Expected: both PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/field.rs src/main.rs
@@ -320,7 +320,7 @@ EOF
 - Consumes: `field::Field` from Task 1.
 - Produces: `Document::next_layer_name(&self, frame: Option<&str>, kind: Kind) -> String`; `Editor::rename_layer(&mut self, doc: &mut Document, index: usize, name: &str) -> Change`; `layers::PanelHit::Rename(usize)`. Task 3 reads the name a frame now carries.
 
-- [ ] **Step 1: Write the failing test for naming by kind**
+- [x] **Step 1: Write the failing test for naming by kind**
 
 In `src/doc.rs`'s test module:
 
@@ -339,12 +339,12 @@ In `src/doc.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test doc::tests::a_frame_layer_is_born_named_for_what_it_is`
 Expected: FAIL — `assertion failed: left "Layer 2", right "Frame 1"`.
 
-- [ ] **Step 3: Teach `next_layer_name` the kind**
+- [x] **Step 3: Teach `next_layer_name` the kind**
 
 Replace `src/doc.rs:1148-1156` with:
 
@@ -370,12 +370,12 @@ Replace `src/doc.rs:1148-1156` with:
 
 And at `src/doc.rs:1141`, pass the kind: `let name = self.next_layer_name(frame, kind);`
 
-- [ ] **Step 4: Run the doc tests**
+- [x] **Step 4: Run the doc tests**
 
 Run: `cargo test doc::`
 Expected: PASS. The existing `add_layer_inserts_above_and_names_past_the_highest_number` still passes — it only ever adds `Kind::Raster`.
 
-- [ ] **Step 5: Write the failing test for the rename**
+- [x] **Step 5: Write the failing test for the rename**
 
 In `src/editor.rs`'s test module:
 
@@ -411,12 +411,12 @@ Add the small helper the last two use, beside the other test helpers in that mod
     }
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test editor::tests::renaming`
 Expected: FAIL — `no method named rename_layer`.
 
-- [ ] **Step 7: Implement `rename_layer`**
+- [x] **Step 7: Implement `rename_layer`**
 
 In `src/editor.rs`, beside `remove_layer`:
 
@@ -444,12 +444,12 @@ In `src/editor.rs`, beside `remove_layer`:
 
 `inside_in` is the accessor `Editor::remove_layer` uses (`src/editor.rs:598`): a rename acts on the stack the editor is standing in, exactly as every other layer operation does.
 
-- [ ] **Step 8: Run the editor tests**
+- [x] **Step 8: Run the editor tests**
 
 Run: `cargo test editor::`
 Expected: PASS.
 
-- [ ] **Step 9: Add the panel hit**
+- [x] **Step 9: Add the panel hit**
 
 In `src/layers.rs`, add to `PanelHit` (`src/layers.rs:86`):
 
@@ -473,7 +473,7 @@ In `src/layers.rs`, add to `PanelHit` (`src/layers.rs:86`):
     }
 ```
 
-- [ ] **Step 10: Wire the double-click in `app`**
+- [x] **Step 10: Wire the double-click in `app`**
 
 In `src/app.rs`, add to the `App` struct, beside `carry`:
 
@@ -560,7 +560,7 @@ In `fn frame`, where the panel's prims are gathered, draw the field over the row
 
 `ROW_RADIUS` is private today (`src/layers.rs:24`) — make it `pub const ROW_RADIUS`, since the rename is drawn over a card and must round the same way it does. Use whatever `fn frame` already calls the atlas and its slot.
 
-- [ ] **Step 11: Run the suite and the app**
+- [x] **Step 11: Run the suite and the app**
 
 Run: `cargo test`
 Expected: PASS, the count up by the new tests.
@@ -568,7 +568,7 @@ Expected: PASS, the count up by the new tests.
 Run: `XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- --socket /tmp/omawhite-smoke.sock --smoke-frames 3`
 Expected: exits 0 after three frames.
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 git add src/doc.rs src/editor.rs src/layers.rs src/app.rs
@@ -600,7 +600,7 @@ EOF
 - Consumes: `doc::{Document, Element, Layer, Kind}`, `geom::Frame`, `select::frame_of`.
 - Produces: `export::Scope`, `export::bounds`, `export::named`, `export::sub_document`. Tasks 4, 5, 6 and 9 all use them.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/export.rs`:
 
@@ -738,12 +738,12 @@ mod tests {
 
 `Rect` derives no `Default` (`src/doc.rs:163`), so the fixture names every field, as the fixtures in `doc.rs`'s own tests do.
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test export::`
 Expected: FAIL — `cannot find function bounds in this scope`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add above the test module:
 
@@ -827,12 +827,12 @@ pub fn sub_document(doc: &Document, scope: &Scope) -> Document {
 
 Add `mod export;` to `src/main.rs`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test export::`
 Expected: PASS, 7 tests. If `sub_document` for a frame drops the frame's inner layers, the `to_json`/`from_json` round trip will fail on `settle_layers` — a frame's own stack rides inside `Element::Frame`, so cloning the element carries it; the outer `layers` list needs the frame's own layer, which `locate` answers with `(None, at)`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/export.rs src/main.rs
@@ -859,7 +859,7 @@ EOF
 **Interfaces:**
 - Produces: `export::slug(&str) -> String`, `export::free_name(&str, &[String]) -> String`. Task 5 writes under the slug; Task 9 prefills the folder field with the free name.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `src/export.rs`'s test module:
 
@@ -907,12 +907,12 @@ Add to `src/export.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test export::`
 Expected: FAIL — `cannot find function slug in this scope`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add to `src/export.rs`:
 
@@ -956,12 +956,12 @@ pub fn free_name(base: &str, taken: &[String]) -> String {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test export::`
 Expected: PASS, 13 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/export.rs
@@ -989,7 +989,7 @@ EOF
 - Consumes: `store::write_atomic`, `export::{Scope, sub_document, bounds}`.
 - Produces: `export::inventory(&Document, &Frame) -> String`, `export::allowed(&Path) -> anyhow::Result<PathBuf>`, `export::write(dir: &Path, slug: &str, png: &[u8], doc: &Document, md: &str, blobs: &[(String, Vec<u8>)]) -> anyhow::Result<Vec<PathBuf>>`. Task 9 calls `write`.
 
-- [ ] **Step 1: Write the failing tests for the inventory**
+- [x] **Step 1: Write the failing tests for the inventory**
 
 Add to `src/export.rs`'s test module:
 
@@ -1029,12 +1029,12 @@ Add to `src/export.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test export::`
 Expected: FAIL — `cannot find function inventory`.
 
-- [ ] **Step 3: Implement the inventory**
+- [x] **Step 3: Implement the inventory**
 
 Add to `src/export.rs`:
 
@@ -1088,12 +1088,12 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
 }
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test export::`
 Expected: PASS, 16 tests.
 
-- [ ] **Step 5: Write the failing tests for the write and the allowlist**
+- [x] **Step 5: Write the failing tests for the write and the allowlist**
 
 Add to `src/export.rs`'s test module:
 
@@ -1173,16 +1173,16 @@ Add to `src/export.rs`'s test module:
 
 Add `use std::path::{Path, PathBuf};` to the module's imports.
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test export::`
 Expected: FAIL — `cannot find function write`.
 
-- [ ] **Step 7: Make `write_atomic` reachable**
+- [x] **Step 7: Make `write_atomic` reachable**
 
 In `src/store.rs:325`, change `fn write_atomic(` to `pub(crate) fn write_atomic(` and add a line to its doc comment: `Shared with [`crate::export`], which owes the same terms: same directory, atomic rename, explicit mode.`
 
-- [ ] **Step 8: Implement the allowlist and the write**
+- [x] **Step 8: Implement the allowlist and the write**
 
 Add to `src/export.rs`:
 
@@ -1269,12 +1269,12 @@ fn make_dir(dir: &Path) -> anyhow::Result<()> {
 
 Add `use anyhow::Context as _;` to the module's imports.
 
-- [ ] **Step 9: Run the tests**
+- [x] **Step 9: Run the tests**
 
 Run: `cargo test export::`
 Expected: PASS, 23 tests.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add src/export.rs src/store.rs
@@ -1306,7 +1306,7 @@ EOF
 - Consumes: `scene::{Frame, View, Viewport, passes}`, `export::bounds`.
 - Produces: `export::view_for(&Frame, u32) -> (View, u32, u32)`; `Gfx::render_offscreen(&mut self, w: u32, h: u32, background: Rgba, frame: &scene::Frame) -> anyhow::Result<Vec<u8>>` returning tight RGBA8. Task 9 calls both.
 
-- [ ] **Step 1: Write the failing test for the view**
+- [x] **Step 1: Write the failing test for the view**
 
 Add to `src/export.rs`'s test module:
 
@@ -1343,12 +1343,12 @@ Add to `src/export.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test export::`
 Expected: FAIL — `cannot find function view_for`.
 
-- [ ] **Step 3: Implement `view_for`**
+- [x] **Step 3: Implement `view_for`**
 
 Add to `src/export.rs`:
 
@@ -1390,12 +1390,12 @@ pub fn view_for(bounds: &Frame, max_dim: u32) -> (View, u32, u32) {
 
 If `Camera` carries fields beyond `x`, `y` and `zoom`, build it from `Camera::default()` and set the three.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test export::`
 Expected: PASS, 26 tests.
 
-- [ ] **Step 5: Give `ensure_surface` a size**
+- [x] **Step 5: Give `ensure_surface` a size**
 
 In `src/gfx.rs:456`, change the signature and the first line:
 
@@ -1411,7 +1411,7 @@ Delete the `let size = (self.config.width, self.config.height);` line that follo
         let sheet = self.ensure_surface(Which::Sheet, size);
 ```
 
-- [ ] **Step 6: Extract the pass loop**
+- [x] **Step 6: Extract the pass loop**
 
 In `src/gfx.rs`, cut the body of `render` from `let viewport = Viewport {` down to the end of the `for pass in passes` loop, and put it in a new private method. `render` then reads:
 
@@ -1452,7 +1452,7 @@ In `src/gfx.rs`, cut the body of `render` from `let viewport = Viewport {` down 
 
 Keep every existing line of the moved body as it is; only the target view and the viewport become parameters, and the `present`/`submit` at the end stay in `render`. Run `cargo build` after the move and before going on.
 
-- [ ] **Step 7: Add `render_offscreen`**
+- [x] **Step 7: Add `render_offscreen`**
 
 ```rust
     /// Renders `frame` into a texture of its own and answers the pixels,
@@ -1541,7 +1541,7 @@ Keep every existing line of the moved body as it is; only the target view and th
 
 The exact spelling of wgpu 30's copy structs, `PollType` and `map_async` callback may differ; build and follow the compiler, keeping the shape. `self.device.limits().max_texture_dimension_2d` is the `max_dim` Task 9 passes to `view_for`.
 
-- [ ] **Step 8: Build and smoke**
+- [x] **Step 8: Build and smoke**
 
 Run: `cargo build`
 Expected: clean.
@@ -1552,7 +1552,7 @@ Expected: PASS.
 Run: `XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- --socket /tmp/omawhite-smoke.sock --smoke-frames 3`
 Expected: exits 0 — the extracted pass loop still draws the window.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add src/gfx.rs src/export.rs
@@ -1584,7 +1584,7 @@ EOF
 **Interfaces:**
 - Produces: `agents::{Agent, Reach}`, `agents::parse_herdr(&str) -> Vec<Agent>`, `agents::parse_tmux(&str) -> Vec<Agent>`, `agents::parse_proc(&[(String, String)]) -> Vec<Agent>`, `agents::merge(Vec<Agent>) -> Vec<Agent>`, `agents::list() -> Vec<Agent>`. Task 8 sends to an `Agent`; Task 9 lists them.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src/agents.rs`:
 
@@ -1688,12 +1688,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test agents::`
 Expected: FAIL — `cannot find type Agent`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add above the test module:
 
@@ -1879,12 +1879,12 @@ fn scan_proc() -> Vec<(String, String)> {
 
 Add `mod agents;` to `src/main.rs`.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test agents::`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/agents.rs src/main.rs
@@ -1916,7 +1916,7 @@ EOF
 - Consumes: `agents::{Agent, Reach}` from Task 7.
 - Produces: `agents::sanitize(&str) -> anyhow::Result<String>`, `agents::prompt(&str, &[String]) -> String`, `agents::send(&Agent, &str) -> anyhow::Result<()>`. Task 9 calls all three.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `src/agents.rs`'s test module:
 
@@ -1977,12 +1977,12 @@ Add to `src/agents.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test agents::`
 Expected: FAIL — `cannot find function sanitize`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add to `src/agents.rs`:
 
@@ -2092,12 +2092,12 @@ pub fn send(agent: &Agent, text: &str) -> anyhow::Result<()> {
 
 Add `use anyhow::Context as _;` to the module's imports.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `cargo test agents::`
 Expected: PASS, 15 tests.
 
-- [ ] **Step 5: Verify the send by hand, against a throwaway pane**
+- [x] **Step 5: Verify the send by hand, against a throwaway pane**
 
 Do not send into a live agent. Run:
 
@@ -2115,7 +2115,7 @@ tmux kill-session -t omawhite-check
 
 Expected: the output is wrapped in `^[[200~` … `^[[201~` — one paste, both lines. If the markers are missing, `-p` is not reaching tmux and a multi-line prompt would submit early.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/agents.rs
@@ -2150,7 +2150,7 @@ EOF
 - Consumes: everything from Tasks 1, 3, 4, 5, 6, 7, 8.
 - Produces: `send::Panel`, `send::Hit`, `send::Panel::layout(viewport: Viewport, scale: f64, rows: usize, folder: bool) -> Panel`, `hit(&self, x: f64, y: f64) -> Option<Hit>`, `prims(&self, agents: &[Agent], target: usize, folder: Option<&Field>, line: &Field, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim>`.
 
-- [ ] **Step 1: Write the failing tests for the panel's geometry**
+- [x] **Step 1: Write the failing tests for the panel's geometry**
 
 Create `src/send.rs`:
 
@@ -2262,12 +2262,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test send::`
 Expected: FAIL — `cannot find type Panel`.
 
-- [ ] **Step 3: Implement the panel**
+- [x] **Step 3: Implement the panel**
 
 Add above the test module:
 
@@ -2440,12 +2440,12 @@ impl Panel {
 
 Add `mod send;` to `src/main.rs`.
 
-- [ ] **Step 4: Run the panel tests**
+- [x] **Step 4: Run the panel tests**
 
 Run: `cargo test send::`
 Expected: PASS, 8 tests. If the fitting one fails, widen `WIDTH` until every label fits beside a status — that test is the promise, not the number.
 
-- [ ] **Step 5: Hold the sending state in `app`**
+- [x] **Step 5: Hold the sending state in `app`**
 
 In `src/app.rs`, add near the `renaming` field from Task 2:
 
@@ -2486,7 +2486,7 @@ impl Sending {
 }
 ```
 
-- [ ] **Step 6: Open it on `Ctrl+E`**
+- [x] **Step 6: Open it on `Ctrl+E`**
 
 In the `Ctrl`-modified match in `fn key` (`src/app.rs:1459`), add `"e" => self.ask_send(),` and implement:
 
@@ -2548,7 +2548,7 @@ fn taken_names(cwd: &str) -> Vec<String> {
 }
 ```
 
-- [ ] **Step 7: Take the keyboard while it is open**
+- [x] **Step 7: Take the keyboard while it is open**
 
 In `fn key`, add an arm **before** the rename arm from Task 2:
 
@@ -2585,7 +2585,7 @@ In `fn key`, add an arm **before** the rename arm from Task 2:
 
 Every arm above that says `sending.line` writes to `sending.writing()` instead, so a press on the folder field moves the caret there. Only `focus` decides which field that is; `Hit::Target` never changes it.
 
-- [ ] **Step 8: Put the panel in the hit order and in the frame**
+- [x] **Step 8: Put the panel in the hit order and in the frame**
 
 In `pointer_pressed`, **first** — a modal panel is over everything, including the strip:
 
@@ -2640,7 +2640,7 @@ In `fn frame`, last of everything so it is over the whole window:
         }
 ```
 
-- [ ] **Step 9: Do the send**
+- [x] **Step 9: Do the send**
 
 ```rust
     /// Writes the page into the agent's own directory and hands it the
@@ -2724,7 +2724,7 @@ Add to `src/gfx.rs`:
 
 Add `use image::ImageEncoder as _;` where `app.rs` keeps its imports.
 
-- [ ] **Step 10: Refresh the list when the window takes focus**
+- [x] **Step 10: Refresh the list when the window takes focus**
 
 In `src/app.rs:1745`, beside `WindowEvent::Focused(false)`:
 
@@ -2745,7 +2745,7 @@ In `src/app.rs:1745`, beside `WindowEvent::Focused(false)`:
             }
 ```
 
-- [ ] **Step 11: Run everything**
+- [x] **Step 11: Run everything**
 
 Run: `cargo build`
 Expected: clean.
@@ -2756,7 +2756,7 @@ Expected: PASS.
 Run: `XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- --socket /tmp/omawhite-smoke.sock --smoke-frames 3`
 Expected: exits 0.
 
-- [ ] **Step 12: Try it against a real agent**
+- [x] **Step 12: Try it against a real agent**
 
 Start a throwaway agent in a scratch project and send to it:
 
@@ -2775,11 +2775,11 @@ tmux kill-session -t omawhite-try
 
 Expected: three files under one slug, the PNG opens and shows what was selected, and the agent's input carries the line and the paths.
 
-- [ ] **Step 13: Update the README**
+- [x] **Step 13: Update the README**
 
 In `README.md`, add to the status list, after the Ink entry, an entry for export to the agent: what it does, that it needs a running agent, how the agents are found (herdr, tmux, `/proc`), that the folder is named by the frame or asked for, and that the instruction is the person's own line. Update the test count on the line that says how many the suite carries — take the number from `cargo test`'s own output.
 
-- [ ] **Step 14: Commit**
+- [x] **Step 14: Commit**
 
 ```bash
 git add src/send.rs src/app.rs src/gfx.rs src/main.rs README.md
