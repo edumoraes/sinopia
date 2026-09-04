@@ -859,7 +859,7 @@ impl Library {
 
     /// Whether a brush is already within reach of the numbered seats.
     fn seated(&self, at: (usize, usize)) -> bool {
-        self.slots[1..].iter().any(|s| *s == Some(at))
+        self.slots[1..].contains(&Some(at))
     }
 
     /// What the seats hold on a build nobody has rearranged: the

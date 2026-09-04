@@ -143,19 +143,32 @@ export to the agent:
   opacity the ceiling the pile reaches, so a stroke crossing itself is
   darker for it, as paint is. Hardness spends `1 − hardness` of the
   radius on the edge ramp, inside the nominal width.
-- Brush palette: picking the brush brings up Sketchbook's Brush Library
-  on the left. Every set stands one under the next in a single scroll —
-  its name, then its brushes as a grid of icons six across, drawn with
-  Sketchbook's own art — and the brush in the hand wears a ring. Above
-  them a preview says which brush it is: its icon, its name, the set it
-  came off, and a dab of what it actually lays. The icon is the art and
-  may promise a mark the canvas cannot stamp yet; the dab is the part
-  that cannot. Two buttons there open Brush Properties and put the
-  brush back the way it shipped. 211 brushes fit no window, so the
-  panel is a scroll area with a thumb: the wheel over it walks the
-  list, and taking up a brush brings its cell into sight. It is the
-  tool's own chrome: it comes and goes with the brush, and `Shift+B`
-  shuts it without putting the brush down.
+- Brush strip: picking the brush stands a narrow strip up on the left.
+  Its head is the brush in the hand — Sketchbook's own icon for it, its
+  name, the shelf it came off, and a dab of what it actually lays. The
+  icon is the art and may promise a mark the canvas cannot stamp yet;
+  the dab is the part that cannot. Under it two buttons: the sliders
+  open Brush Properties, the chevron opens the library beside the strip.
+  Then the seats — nine numbered `1`–`9`, and slot `0` at the foot.
+  `Shift` and a digit takes the brush in that seat, and a brush is put
+  in one by dragging it out of the library. Nine ship filled with the
+  first of Basic — pencil, marker, airbrush, pen, ink, watercolour,
+  inker, blur and eraser — and slot `0` nobody fills: it follows the
+  hand, holding whatever was last reached for that none of the nine
+  already keeps, so a brush taken off a far shelf stays one key away for
+  as long as it is wanted. What is moved is kept in `brushes.json`
+  beside the boards; seats nobody rearranged are not written down. It is
+  the tool's own chrome: it comes and goes with the brush, and
+  `Shift+B` shuts it without putting the brush down.
+- Brush library: the chevron opens Sketchbook's Brush Library as a panel
+  to the right of the strip, with canvas between them — both on show at
+  once, because that is what a brush is dragged across. Every set stands
+  one under the next in a single scroll — its name, then its brushes as
+  a grid of icons six across, drawn with Sketchbook's own art — and the
+  brush in the hand wears a ring. 211 brushes fit no window, so the
+  panel is a scroll area with a thumb: the wheel over it walks the list,
+  and taking up a brush brings its cell into sight. It is opened from
+  inside the strip, so hiding the strip hides it too.
 - Brush properties: a bar floats under the tab strip while the brush is
   in hand — the brush's name, a dot after it while it is off the
   settings it shipped with, and the pair a brush is judged by, Size and
@@ -178,8 +191,11 @@ export to the agent:
   a different engine rather than a missing line, and the bar says so by
   not promising.
   It still moves, and it still writes the brush's own value, but the
-  muting is the bar saying it does not promise paint yet. The
-  palette's `≡` opens the same panel.
+  muting is the bar saying it does not promise paint yet. The strip's
+  `≡` opens the same panel. Beside the dot that says the brush was
+  moved off its factory settings stands the arrow that puts it back —
+  both in a run reserved after the name, so neither travels with the
+  length of a brush's name.
 - Ink: the dock carries the colours a stroke is laid in, after the
   tools and a divider — the theme's own near-black first, then red,
   amber, green, blue and violet. The chosen one wears a ring, as the
@@ -446,12 +462,16 @@ anywhere.
 | `V` / `H` / `P` / `B` / `F` / `Z` | Select / Hand / Pencil / Brush / Frame / Zoom tool (also clickable in the dock) |
 | `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
 | Left drag (Brush) | Paint with the brush; the stroke is fitted to Béziers on release |
-| `Shift` + `B` | Show / hide the brush palette |
-| Palette `≡` / bar chevron | Open / fold Brush Properties |
+| `Shift` + `B` | Show / hide the brush strip (and the library with it) |
+| Strip `≡` / bar chevron | Open / fold Brush Properties |
+| Strip `>` | Open / shut the brush library beside the strip |
+| `Shift` + `1`–`9`, `0` (Brush) | Take up the brush in that seat |
+| Click a seat | The same, by hand |
+| Drag a brush onto a seat | Put it there; slot `0` refuses, it is computed |
 | Drag a slider in the bar | That property of the brush in hand |
-| Click an icon in the palette | Take up that brush |
-| Wheel over the palette | Walk the library |
-| Palette `↺` | Put the brush back the way it shipped |
+| Click an icon in the library | Take up that brush |
+| Wheel over the library | Walk the shelves |
+| Bar `↺` | Put the brush back the way it shipped |
 | `[` / `]` (Brush selected) | Brush smaller / larger |
 | `{` / `}` (Brush selected) | Brush softer / harder |
 | `1`–`9`, `0` (Brush selected) | Brush opacity 10%–90%, 100% |
@@ -528,7 +548,8 @@ contrib/omarchy/omawhite  a theme-set / font-set hook, installed by hand
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, illustrated icons + line fallback (pure, tested)
 src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)
-src/palette.rs   brush library on the left: the shelves, the grid of icons, the preview (pure, tested)
+src/slots.rs     brush strip on the left: the brush in the hand, the two buttons, the ten seats (pure, tested)
+src/palette.rs   brush library beside it: the shelves, the grid of icons, the scroll (pure, tested)
 src/props.rs     brush properties bar under the strip: the basic pair, and the Advanced layout it drops (pure, tested)
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)
@@ -548,8 +569,9 @@ plugin/          the Omarchy bar widget (QML): manifest, BarWidget, install note
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay +
-brush ring + dock + brush palette + properties bar + layers panel + tab
-strip → `scene`/`select`/`brush`/`palette`/`props`/`layers`/`tabs`
+brush ring + dock + brush strip + brush library + properties bar +
+layers panel + tab strip →
+`scene`/`select`/`brush`/`slots`/`palette`/`props`/`layers`/`tabs`
 prims, gathered in a `scene::Frame` whose groups mark
 the strokes composited as one shape → `scene::passes` plans the render
 passes → `gfx` executes them.
