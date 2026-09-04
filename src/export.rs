@@ -9,6 +9,7 @@ use anyhow::Context as _;
 
 use crate::doc::{Document, Element, Kind, Layer};
 use crate::geom::Frame;
+use crate::scene::{View, Viewport};
 use crate::select;
 
 /// What is being exported.
@@ -265,6 +266,38 @@ fn make_dir(dir: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Px per world unit a picture is taken at: twice what a board drawn at
+/// zoom 1 shows, so a diagram survives being looked at.
+pub const EXPORT_SCALE: f64 = 2.0;
+/// How much room is left around the box, in world units.
+pub const EXPORT_MARGIN: f64 = 24.0;
+
+/// The camera and the size a picture of `bounds` is taken with, clamped
+/// to `max_dim` — the device's largest texture. Past that the zoom gives
+/// way rather than the frame: a picture of part of a diagram is a lie,
+/// and a smaller one is only smaller.
+pub fn view_for(bounds: &Frame, max_dim: u32) -> (View, u32, u32) {
+    let world_w = (bounds.half[0] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0);
+    let world_h = (bounds.half[1] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0);
+    let max = f64::from(max_dim);
+    let scale = EXPORT_SCALE
+        .min(max / world_w)
+        .min(max / world_h)
+        .max(f64::MIN_POSITIVE);
+    let w = ((world_w * scale).ceil() as u32).clamp(1, max_dim);
+    let h = ((world_h * scale).ceil() as u32).clamp(1, max_dim);
+    let view = View {
+        camera: crate::doc::Camera {
+            x: bounds.center[0],
+            y: bounds.center[1],
+            zoom: scale,
+        },
+        viewport: Viewport { w, h },
+        scale: 1.0,
+    };
+    (view, w, h)
 }
 
 #[cfg(test)]
@@ -534,5 +567,36 @@ mod tests {
                 "{bad} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn the_picture_covers_the_box_and_a_margin_of_it() {
+        let b = Frame::spanning([0.0, 0.0], [100.0, 50.0]);
+        let (view, w, h) = view_for(&b, 4096);
+        assert_eq!(view.camera.x, 50.0, "centred on the box");
+        assert_eq!(view.camera.y, 25.0);
+        let expect = |side: f64| ((side + 2.0 * EXPORT_MARGIN) * EXPORT_SCALE).ceil() as u32;
+        assert_eq!(w, expect(100.0));
+        assert_eq!(h, expect(50.0));
+        assert_eq!(view.px_per_world(), EXPORT_SCALE);
+    }
+
+    #[test]
+    fn a_picture_too_big_for_the_device_is_taken_smaller_rather_than_not_at_all() {
+        let b = Frame::spanning([0.0, 0.0], [100_000.0, 10.0]);
+        let (view, w, h) = view_for(&b, 4096);
+        assert_eq!(w, 4096, "clamped to what the device allows");
+        assert!(h >= 1);
+        assert!(
+            view.px_per_world() < EXPORT_SCALE,
+            "the zoom gives way, not the frame"
+        );
+    }
+
+    #[test]
+    fn a_box_of_no_size_still_makes_a_picture() {
+        let b = Frame::spanning([5.0, 5.0], [5.0, 5.0]);
+        let (_, w, h) = view_for(&b, 4096);
+        assert!(w >= 1 && h >= 1);
     }
 }
