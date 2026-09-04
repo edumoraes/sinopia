@@ -160,10 +160,15 @@ impl History {
     /// Drops the oldest until the history is inside both ceilings. The
     /// present is never dropped: a tab always has a state it is in, even
     /// one too heavy to keep a single step behind.
+    ///
+    /// Only the past is counted, and that is enough for the whole
+    /// history: this runs at the end of [`History::keep`], which has
+    /// just dropped the future, and nothing after that puts entries
+    /// back — undo moves one from the past to the future and leaves the
+    /// total where it was. Counting the future here as well would read
+    /// like a second guard and could never fire.
     fn trim(&mut self) {
-        while self.past.len() > 1
-            && (self.past.len() + self.future.len() > DEPTH || self.weight > BUDGET)
-        {
+        while self.past.len() > 1 && (self.past.len() > DEPTH || self.weight > BUDGET) {
             self.weight -= self.past.remove(0).weight;
         }
     }
@@ -394,5 +399,111 @@ mod tests {
     fn undo_at_the_start_of_the_line_answers_nothing() {
         let mut h = History::new(&board(), spot(&[]));
         assert!(h.undo().is_none());
+    }
+
+    #[test]
+    fn a_boards_weight_is_the_geometry_it_carries() {
+        let light = weight(&heavy(1));
+        let heavier = weight(&heavy(1001));
+        assert_eq!(
+            heavier - light,
+            1000 * size_of::<Cubic>(),
+            "a thousand more curves cost a thousand curves"
+        );
+    }
+
+    #[test]
+    fn the_history_is_no_deeper_than_the_depth() {
+        let mut h = History::new(&board(), spot(&[]));
+        for i in 1..DEPTH * 2 {
+            h.keep(&with_layers(i), spot(&[]));
+        }
+        assert_eq!(h.past.len() + h.future.len(), DEPTH);
+    }
+
+    #[test]
+    fn the_depth_drops_the_oldest_and_keeps_the_newest() {
+        let mut h = History::new(&board(), spot(&[]));
+        for i in 1..DEPTH * 2 {
+            h.keep(&with_layers(i), spot(&[]));
+        }
+        let newest = with_layers(DEPTH * 2 - 1);
+        assert!(present(&h).doc.same_board(&newest), "the present survives");
+        let oldest = h.past.first().expect("a past");
+        assert!(
+            !oldest.doc.same_board(&board()),
+            "the state the tab opened in is long gone"
+        );
+    }
+
+    #[test]
+    fn no_run_of_changes_and_steps_back_ever_passes_the_depth() {
+        // Undo moves an entry from one side to the other and a change
+        // drops the far side, so the two ceilings hold across any mix of
+        // them — never more states than the depth, and never none.
+        let mut h = History::new(&board(), spot(&[]));
+        let mut kept = 0usize;
+        for round in 1..DEPTH * 3 {
+            kept += 1;
+            h.keep(&with_layers(kept), spot(&[]));
+            if round % 3 == 0 {
+                for _ in 0..round % 7 {
+                    h.undo();
+                }
+            }
+            assert!(
+                h.past.len() + h.future.len() <= DEPTH,
+                "round {round}: {} past, {} future",
+                h.past.len(),
+                h.future.len()
+            );
+            assert!(!h.past.is_empty(), "round {round}: a tab is always in a state");
+        }
+    }
+
+    #[test]
+    fn a_board_too_heavy_for_the_budget_still_keeps_its_present() {
+        // One entry over budget on its own: the ceiling cannot answer by
+        // leaving the tab with no state to be in.
+        let over = BUDGET / size_of::<Cubic>() + 1;
+        let mut h = History::new(&board(), spot(&[]));
+        h.keep(&heavy(over), spot(&[]));
+        assert_eq!(h.past.len(), 1, "trimmed back to the present alone");
+        assert!(present(&h).doc.same_board(&heavy(over)));
+        assert!(!h.can_undo());
+    }
+
+    #[test]
+    fn the_budget_bites_before_the_depth_does_on_a_heavy_board() {
+        // A tenth of the budget per entry: ten fit where a hundred would
+        // have, so it is the weight that stopped it and not the count.
+        let tenth = BUDGET / 10 / size_of::<Cubic>();
+        let mut h = History::new(&heavy(tenth), spot(&[]));
+        for i in 1..20 {
+            let mut doc = heavy(tenth);
+            doc.layers.push(Layer::new(&format!("L{i}")));
+            h.keep(&doc, spot(&[]));
+        }
+        assert!(h.past.len() < DEPTH, "the weight stopped it, not the count");
+        assert!(h.weight <= BUDGET, "and stopped it inside the budget");
+    }
+
+    #[test]
+    fn the_running_weight_is_what_is_actually_there() {
+        // A step back moves an entry from one side to the other; nothing
+        // is kept twice, and nothing is paid for after it is dropped.
+        let mut h = History::new(&board(), spot(&[]));
+        for i in 1..5 {
+            h.keep(&with_layers(i), spot(&[]));
+        }
+        let full = h.weight;
+        h.undo();
+        h.undo();
+        assert_eq!(h.weight, full, "a step back keeps what it stepped over");
+        h.redo();
+        assert_eq!(h.weight, full);
+        h.keep(&heavy(40), spot(&[]));
+        let counted: usize = h.past.iter().chain(&h.future).map(|e| e.weight).sum();
+        assert_eq!(h.weight, counted, "the future it dropped is not still paid for");
     }
 }
