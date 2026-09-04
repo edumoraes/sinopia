@@ -53,12 +53,20 @@ you see what came back.
 For that to hold, the spot has to be current. The top of the past *is*
 the present, and the present's spot is live: a selection made between
 two changes belongs to the state on screen, not to the state before it.
-So `History::keep` does both jobs — if the board is what it already was,
-only the spot is written down; if it is not, a new entry is pushed and
-the future is dropped. One method, one rule.
 
 Without that, undoing a move would deselect what it moved: the entry
 under it would still hold the empty selection the tab was born with.
+
+**Corrected during the build.** This section first said `History::keep`
+could do both jobs — push when the board changed, write the spot when it
+had not — and that a resting point was the only moment either was
+needed. A test of a whole drag proved otherwise: `select_press` selects
+an object *and* arms the drag in the same call, so there is no moment
+between the two when anything is at rest, and a spot written only at
+rest is still the empty one the tab was born with. `History::mark` is
+therefore its own method and is called on every change, at rest or not;
+`keep` marks and returns when the board has not moved. Marking is cheap
+enough for a pointer sample — a handful of ids, and never the board.
 
 ## 3. The camera stays out
 
@@ -186,6 +194,9 @@ one case out of many.
 - The camera is neither compared nor restored.
 - `Esc` restoring a drag pushes nothing, because the board is what it
   already was.
+- A whole gesture is one step: a stroke however many samples it took, a
+  drag however far it went, two strokes two steps. Driven through the
+  editor the way the window drives it, since `app` carries no tests.
 - A push drops the future.
 - Depth and weight both trim, oldest first, and the present survives
   both.
@@ -194,6 +205,25 @@ one case out of many.
 
 `Document::same_board` is tested to disagree on every field that is part
 of a board and agree across a camera.
+
+## 8.1 What the build corrected
+
+Three things this design got wrong, kept here because a spec that
+quietly disagrees with the code is worse than none:
+
+- **The spot could not wait for a resting point.** See §2. A test of a
+  whole drag found it; `History::mark` is the fix.
+- **A carried layer card is let go of behind an early return.**
+  `App::pointer_released` and `App::focus_lost` both clear the carry and
+  return without reaching `apply`, so the stack the card was dropped in
+  was never written down: the drag applied and was not undoable, and the
+  next change to come to rest would have swallowed it into one step.
+  Driving the real window found it — no test could have, since `app`
+  carries none. Both now call `remember` themselves.
+- **`trim` counting the future was dead code.** It runs only at the end
+  of `keep`, which has just dropped the future, so the term could never
+  fire. It read like a second guard and was not one. Removed, with the
+  reason written where it stood.
 
 ## 9. Not in this cut
 
