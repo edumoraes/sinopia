@@ -1719,6 +1719,12 @@ impl App {
             && let Some(carry) = self.carry.as_mut().filter(|c| c.held)
         {
             carry.held = false;
+            // The stack the card was let go of in is a state to step
+            // back to, and this is the only place that can say so: the
+            // canvas never saw the press, so no `Change` comes back
+            // from the editor to end the gesture the way a release on
+            // the canvas does.
+            self.remember();
             self.redraw();
             return self.update_cursor_icon();
         }
@@ -2003,7 +2009,13 @@ impl App {
         editor.hold_space(false);
         editor.hold_ctrl(false);
         editor.hold_shift(false);
-        if editor.cancel(doc) || carrying {
+        let cancelled = editor.cancel(doc);
+        // Losing the window is as much a resting point as letting go of
+        // the button: a card dropped this way left a stack behind, and
+        // a cancelled drag put one back. Whichever it was, the board is
+        // now at rest — and a board that did not move writes nothing.
+        self.remember();
+        if cancelled || carrying {
             self.redraw();
         }
         self.update_cursor_icon();
