@@ -1134,25 +1134,34 @@ impl Document {
 
     /// Adds a layer of `kind` just above `above` (on top when that is
     /// past the end) in the stack `frame` names, and answers its index.
-    /// It is named `Layer N` with N past every number in use **in that
-    /// stack**, so a frame's first layer is `Layer 1` however many the
-    /// board has. None when the stack is not there.
+    /// It is named for its kind, with N past every number in use under
+    /// that word **in that stack**, so a frame's first layer is
+    /// `Layer 1` however many the board has. None when the stack is not
+    /// there.
     pub fn add_layer(&mut self, frame: Option<&str>, above: usize, kind: Kind) -> Option<usize> {
-        let name = self.next_layer_name(frame);
+        let name = self.next_layer_name(frame, kind);
         let layers = self.stack_mut(frame)?;
         let at = above.saturating_add(1).min(layers.len());
         layers.insert(at, Layer::of(&name, kind));
         Some(at)
     }
 
-    fn next_layer_name(&self, frame: Option<&str>) -> String {
+    /// The name a new layer of `kind` takes: one past the highest number
+    /// already carried under that kind's own word. A frame is not a gap
+    /// in the layers' numbering and a layer is not a gap in the frames'.
+    fn next_layer_name(&self, frame: Option<&str>, kind: Kind) -> String {
+        let word = match kind {
+            Kind::Frame => "Frame",
+            Kind::Raster | Kind::Vector => "Layer",
+        };
+        let prefix = format!("{word} ");
         let highest = self
             .stack(frame)
             .iter()
-            .filter_map(|l| l.name.strip_prefix("Layer ")?.parse::<u32>().ok())
+            .filter_map(|l| l.name.strip_prefix(&prefix)?.parse::<u32>().ok())
             .max()
             .unwrap_or(0);
-        format!("Layer {}", highest.saturating_add(1))
+        format!("{word} {}", highest.saturating_add(1))
     }
 
     /// Removes layer `index` of the stack `frame` names, and every
@@ -1229,7 +1238,7 @@ impl Document {
         // The stack it came from may now be empty, and a stack is never
         // empty: it gets a fresh layer, as the parse would have given it.
         if layers.is_empty() {
-            let name = self.next_layer_name(from.as_deref());
+            let name = self.next_layer_name(from.as_deref(), Kind::Raster);
             if let Some(layers) = self.stack_mut(from.as_deref()) {
                 layers.push(Layer::new(&name));
             }
@@ -1944,6 +1953,19 @@ mod tests {
         assert_eq!(doc.layers[1].id.len(), 26);
         // Past the end still lands on top.
         assert_eq!(doc.add_layer(None, 99, Kind::Raster).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_frame_layer_is_born_named_for_what_it_is() {
+        let mut doc = Document::new("t");
+        assert_eq!(doc.add_layer(None, 0, Kind::Frame).unwrap(), 1);
+        assert_eq!(doc.layers[1].name, "Frame 1");
+        // Frames and layers count separately: one is not a gap in the
+        // other's numbering.
+        assert_eq!(doc.add_layer(None, 1, Kind::Raster).unwrap(), 2);
+        assert_eq!(doc.layers[2].name, "Layer 2");
+        assert_eq!(doc.add_layer(None, 2, Kind::Frame).unwrap(), 3);
+        assert_eq!(doc.layers[3].name, "Frame 2");
     }
 
     #[test]

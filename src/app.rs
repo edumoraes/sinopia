@@ -23,6 +23,7 @@ use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Stylus, Tool};
+use crate::field::Field;
 use crate::geom::Corner;
 use crate::gestures;
 use crate::gfx::Gfx;
@@ -33,7 +34,7 @@ use crate::layers::{self, Panel, PanelHit};
 use crate::palette::{self, Palette};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
-use crate::scene::{self, Frame, ImageSlots, Rgba, Shapes, View, Viewport, with_alpha};
+use crate::scene::{self, Frame, ImageSlots, Prim, Rgba, Shapes, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
@@ -55,6 +56,9 @@ const RING_ALPHA: f32 = 0.6;
 /// hand to stop turns a stroke into one write. Short enough that what is
 /// lost to a crash is the last breath of drawing, not the drawing.
 const SAFETY_DELAY: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// How close two presses on one card have to be to be a double click.
+const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// State the server thread reads (replies to `ping`).
 struct SharedState {
@@ -156,6 +160,12 @@ struct App {
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
+    /// A card being renamed: the row's index and the name being typed.
+    /// It is the window's, not a tab's — like every other panel state.
+    renaming: Option<(usize, Field)>,
+    /// When the last press landed on a card, and on which. A second
+    /// press on the same card inside [`DOUBLE_CLICK`] opens the rename.
+    last_card: Option<(usize, Instant)>,
     /// The cards making room around a carried one.
     slides: layers::Slides,
     /// How far down the stack the panel is looking, in physical px, and
@@ -989,6 +999,11 @@ impl App {
                 None => Change::None,
             },
             PanelHit::Leave => editor.leave_frame(doc),
+            // `Panel::hit` never makes one: a rename is a *second* press
+            // on a card that is already selected, and counting presses
+            // is `app`'s. It opens a field rather than changing the
+            // document, so there is nothing to apply here.
+            PanelHit::Rename(_) => Change::None,
             PanelHit::Panel => Change::None,
         };
         self.apply(change);
@@ -1187,6 +1202,20 @@ impl App {
                 self.atlas_slot,
                 &self.theme,
             ));
+            // The name being typed is drawn over the card it belongs to,
+            // rounded the way the card is: the row underneath goes on
+            // showing its eye and its mark, so what is being renamed
+            // stays in its place in the stack.
+            if let Some((index, field)) = &self.renaming
+                && let Some(row) = panel.rows.iter().find(|r| r.index == *index)
+            {
+                frame.extend([Prim::rounded(
+                    row.card,
+                    layers::ROW_RADIUS,
+                    self.theme.panel,
+                )]);
+                frame.extend(field.prims(row.card, atlas, self.atlas_slot, &self.theme, true));
+            }
         }
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
             frame.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
@@ -1251,6 +1280,24 @@ impl App {
                 if let PanelHit::Select(i) = hit
                     && let Some(row) = panel.rows.iter().find(|r| r.index == i)
                 {
+                    // A second press on a card that is already selected
+                    // opens its name. The row's own label is cut down to
+                    // what fits, so the name is read off the stack.
+                    let now = Instant::now();
+                    let again = self
+                        .last_card
+                        .is_some_and(|(was, at)| was == i && now.duration_since(at) < DOUBLE_CLICK);
+                    self.last_card = Some((i, now));
+                    if again {
+                        let editor = self.editor();
+                        let name = self
+                            .doc()
+                            .stack(editor.inside())
+                            .get(i)
+                            .map(|l| l.name.clone())
+                            .unwrap_or_default();
+                        self.renaming = Some((i, Field::new(&name)));
+                    }
                     self.carry = Some(Carry {
                         index: i,
                         grab_dy: y as f32 - row.card.y,
@@ -1440,6 +1487,36 @@ impl App {
     fn key(&mut self, key: &Key, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
+            // A field being typed into takes the keyboard whole, and so
+            // stands first: `Ctrl+S` in the middle of a name would
+            // otherwise save mid-word.
+            _ if self.renaming.is_some() && pressed => {
+                let Some((index, field)) = self.renaming.as_mut() else {
+                    return;
+                };
+                match key {
+                    Key::Named(NamedKey::Escape) => self.renaming = None,
+                    Key::Named(NamedKey::Enter) => {
+                        let (index, name) = (*index, field.value().to_owned());
+                        self.renaming = None;
+                        let (editor, doc) = self.active();
+                        let change = editor.rename_layer(doc, index, &name);
+                        self.apply(change);
+                    }
+                    Key::Named(NamedKey::Backspace) => field.backspace(),
+                    Key::Named(NamedKey::ArrowLeft) => field.left(),
+                    Key::Named(NamedKey::ArrowRight) => field.right(),
+                    Key::Named(NamedKey::Home) => field.home(),
+                    Key::Named(NamedKey::End) => field.end(),
+                    Key::Character(text) => {
+                        for c in text.chars().filter(|c| !c.is_control()) {
+                            field.insert(c);
+                        }
+                    }
+                    _ => {}
+                }
+                self.redraw();
+            }
             Key::Named(NamedKey::Space) => self.active().0.hold_space(pressed),
             Key::Named(NamedKey::Escape) if pressed => {
                 let (editor, doc) = self.active();
@@ -1934,6 +2011,8 @@ pub fn run(
         shapes: Shapes::default(),
         shown_brush: None,
         carry: None,
+        renaming: None,
+        last_card: None,
         slides: layers::Slides::default(),
         scroll: 0.0,
         scrolling: layers::Coming::default(),

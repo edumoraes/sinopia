@@ -594,6 +594,26 @@ impl Editor {
     /// the one below when it was on top. The last layer stays, but what
     /// it holds does not: a layer is its object, so the trash takes the
     /// object either way.
+    /// Gives layer `index` of the stack being worked in the name it was
+    /// typed. A name that is nothing but space is not a name, and the
+    /// layer keeps the one it had — a card with no word on it can be
+    /// neither read nor exported under.
+    pub fn rename_layer(&mut self, doc: &mut Document, index: usize, name: &str) -> Change {
+        let name = name.trim();
+        let stack = self.inside_in(doc).map(str::to_owned);
+        let Some(layers) = doc.stack_mut(stack.as_deref()) else {
+            return Change::None;
+        };
+        let Some(layer) = layers.get_mut(index) else {
+            return Change::None;
+        };
+        if name.is_empty() || layer.name == name {
+            return Change::None;
+        }
+        layer.name = name.to_owned();
+        Change::Scene
+    }
+
     pub fn remove_layer(&mut self, doc: &mut Document) -> Change {
         let stack = self.inside_in(doc).map(str::to_owned);
         let index = self.active_layer(doc);
@@ -2036,6 +2056,32 @@ mod tests {
 
     fn cam(x: f64, y: f64, zoom: f64) -> Camera {
         Camera { x, y, zoom }
+    }
+
+    fn ed_default() -> Editor {
+        Editor::default()
+    }
+
+    #[test]
+    fn renaming_a_layer_writes_the_name_and_asks_for_a_save() {
+        let mut doc = Document::new("t");
+        let mut ed = Editor::default();
+        assert_eq!(ed.rename_layer(&mut doc, 0, "  auth flow  "), Change::Scene);
+        assert_eq!(doc.layers[0].name, "auth flow");
+    }
+
+    #[test]
+    fn a_name_of_nothing_but_space_leaves_the_layer_as_it_was() {
+        let mut doc = Document::new("t");
+        let was = doc.layers[0].name.clone();
+        assert_eq!(ed_default().rename_layer(&mut doc, 0, "   "), Change::None);
+        assert_eq!(doc.layers[0].name, was);
+    }
+
+    #[test]
+    fn renaming_past_the_end_of_the_stack_changes_nothing() {
+        let mut doc = Document::new("t");
+        assert_eq!(ed_default().rename_layer(&mut doc, 9, "x"), Change::None);
     }
 
     fn tool(t: Tool) -> Editor {
