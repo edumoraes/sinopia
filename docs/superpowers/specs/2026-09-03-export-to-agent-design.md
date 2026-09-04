@@ -1,22 +1,33 @@
 # Export to the agent — design
 
-The feature §8 promised and §15 item 5 ordered: a frame leaves the board and
-lands in the folder an agent is running in, and the agent is told it is there.
+A sketch leaves the board, lands in the folder an agent is running in, and the
+agent is told it is there — on one keystroke, with nobody hunting for a folder.
+It is what §2 says the product is for and what §15 item 5 ordered, though it is
+not the export §8 drew; the section below says where the two part.
+
 The board becomes what it was drawn for — a notebook of sketches and directions
 for the agents on this desktop — rather than a place drawings go to sit.
 
-## Why both halves, and why neither alone
+## One action, and what it depends on
 
 The question that opened this was whether to write files into the agent's folder
 *or* to push a message into its running session. It is not a choice: every send
 channel available carries **text**, and a diagram is an image. A message can only
 say "look at `docs/boards/auth-flow/board.png`", which means the file has to
-exist first. The file is the payload and the message is the doorbell.
+exist first. The file is the payload and the message is the doorbell, and one
+keystroke is both.
 
-They also age differently. The file is durable — it goes into the repo, a human
-reads it, tomorrow's agent reads it. The message is spent the moment the session
-ends. So the file is the contract and the send is a convenience laid on top,
-and the export must work with no agent running at all.
+This is **not** the generic export of §8, and the difference decides the design.
+`--export <dir>` and `op: export` take a directory somebody named. *Export to the
+agent* names nothing: the whole point is that the person never goes looking for
+a folder — a running agent already knows where it is, and that is the only reason
+the shortcut is worth having. So the feature **depends on a live agent**, and
+with none running it is off: the window says so and nothing is written. A folder
+picker as a fallback would be exactly the friction the feature exists to remove,
+which is why there is none.
+
+The two exports share the machinery that writes the three files and nothing else.
+§8's keeps its own destination story for the day the plugin asks for it.
 
 ## What was verified
 
@@ -58,15 +69,25 @@ is the one the rest of the codebase already draws.
 
 ### 1. Scope
 
-What leaves the board. `Scope::Frame(id)` in this cut; `Selection` and `Board`
-are the same machine and follow. A scope answers three things — the world box it
-covers, the elements and layers inside it, and the name it exports under — and
-all three are pure functions over the document, so they carry tests.
+What leaves the board: `Scope::Frame(id)` or `Scope::Selection`, both in this
+cut, because a sketch worth sending is often three strokes and a circle and
+making the person draw a frame around it first is the friction this feature
+exists to remove. `Scope::Board` is the same machine again and follows.
 
-The frame is the natural unit: it already is an area with a box of its own and a
-stack of its own, and §4's invariant (a layer is the object it holds) means the
-frame's layer *is* the frame's identity — which is also where its name will live,
-once there is a way to give it one (§5 below).
+A scope answers three things — the world box it covers, the elements and layers
+inside it, and **whether it has a name** — and all three are pure functions over
+the document, so they carry tests.
+
+A frame has a name: it is an area with a box and a stack of its own, and §4's
+invariant (a layer is the object it holds) means the frame's layer *is* the
+frame's identity, which is where the name lives once there is a way to give it
+one (§5 below). It owns its folder by that name, so sending the same frame again
+updates the same page rather than littering.
+
+A loose selection has no name, and the panel asks for one rather than inventing
+it: a second field, shown only in that case, prefilled with the board's own name
+and a counter past whatever `docs/boards/` already holds. Picking the free name
+is a pure function over the existing names; only the listing is shell.
 
 ### 2. The three artifacts
 
@@ -98,8 +119,9 @@ directories, exactly as the store writes (§9.3).
 
 A new `agents` module: an `Agent { kind, cwd, label, send }` where `send` is
 `Herdr(pane)`, `Tmux(pane)` or `None`. `None` is an agent the `/proc` scan found
-that neither multiplexer claims: it can be exported to and cannot be messaged,
-and the panel says so rather than pretending.
+that neither multiplexer claims: the files still land in its folder, which is the
+half nobody can do by hand, and the panel says the message could not go rather
+than pretending it did.
 
 The shell runs the three commands; **parsing their output is pure**, over
 captured fixtures, the way `tablet` keeps its frame accumulation pure while the
@@ -107,8 +129,18 @@ protocol stays in the shell. Entries are deduplicated by `cwd` against the ones
 that already arrived with a pane, so an agent inside herdr is not also listed by
 the scan.
 
-The list is offered; nothing is guessed. The last target used is remembered per
-board for the session, so a second send is one keystroke.
+The list is offered and nothing is guessed — but it is not a form to fill in
+either. The panel opens with a target already chosen (the last one used on this
+board, else the focused one, else the only one there is) and the cursor already
+in the instruction — in the instruction even when the folder field is showing,
+since its prefill is usually right and the line never is. The fast path is
+`Ctrl+E`, type the line, `Enter`. The list is there to change the target, not to
+make the person pick one every time.
+
+An empty list is the feature's off switch. Discovery runs when the panel is asked
+for and again whenever the window takes focus — which is exactly when the person
+has come back from the terminal they started an agent in — so what the window
+shows is never more than one alt-tab stale.
 
 ### 4. The send
 
@@ -148,16 +180,24 @@ opens the field over it, `Enter` commits, `Esc` cancels. And `next_layer_name`
 learns the kind, so a frame is born `Frame N` and the rename starts from
 something sensible.
 
-The slug is the frame's name, lowercased, spaces to hyphens, restricted to
-`[a-z0-9-]`, and a name that reduces to nothing falls back to the frame's id —
-the destination is never a path component the user could steer.
+The slug — the frame's name, or the one typed for a loose selection — is
+lowercased, spaces to hyphens and restricted to `[a-z0-9-]`, and a name that
+reduces to nothing falls back to the scope's id. That rule is what keeps the
+typed field harmless: `../../etc` holds no character the slug admits, so it can
+never be more than one directory under `docs/boards/`. The person chooses the
+name; the shape of the path is not theirs to choose.
 
 ## Where it hangs
 
 `Ctrl+E` in the `Key::Character` arm at `src/app.rs:1459`, beside `Ctrl+S`. It
-opens the panel with the selected frame as the scope; `Enter` sends, `Esc`
-cancels. The IPC protocol does not change: `op: export` already exists for the
-plugin, and the send begins in the app's own UI, so it needs no op of its own.
+opens the panel on whatever is selected — a frame, or a loose selection. `Tab`
+walks the fields, `Enter` sends from either, `Esc` cancels. With nothing
+selected, or with no agent found, the panel does not open and the window says
+which of the two it was — a shortcut that opens onto a dead end teaches nothing.
+
+The IPC protocol does not change. `op: export` already exists for the plugin and
+means the other export; this one begins and ends inside the app's own UI, so it
+needs no op of its own.
 
 ## Security invariants
 
@@ -179,23 +219,33 @@ typed at send time. The board never speaks to the agent in its own voice.
 
 ## Testing
 
-Pure, and therefore tested: the scope's box, its sub-document and its slug;
-`board.md`'s generation and escaping; the prompt template and the sanitizer
-(rejecting ESC and C0, capping length); parsing herdr's JSON and tmux's format
-output into `Agent`s over captured fixtures; the dedupe by cwd; the allowlist
-check on the destination; `next_layer_name` by kind; the rename's effect on a
-slug.
+Pure, and therefore tested: the scope's box, its sub-document and whether it has
+a name; the slug rule, including that a typed name cannot reach past
+`docs/boards/`; picking the free name over a listing; `board.md`'s generation and
+escaping; the prompt template and the sanitizer (rejecting ESC and C0, capping
+length); parsing herdr's JSON and tmux's format output into `Agent`s over
+captured fixtures; the dedupe by cwd; the allowlist check on the destination;
+`next_layer_name` by kind; the rename's effect on a slug.
 
 Shell, and therefore not: spawning herdr and tmux, the wgpu readback, the field's
 keyboard plumbing.
 
 ## Out of this cut
 
-`Scope::Selection` and `Scope::Board` (the machine is built for all three, only
-the frame is wired), a new IPC op for the send, any configurable send command
-(herdr and tmux are detected, not configured — no new config file), persisting
-the remembered target across restarts, and the text tool that would one day let
-the direction be written on the board itself instead of in the field.
+`Scope::Board` — the machine is built for all three and the frame and the
+selection are wired. §8's own export: `--export <dir>` and `op: export` stay
+unimplemented and keep their own destination story. A new IPC op for the send, or
+any configurable send command — herdr and tmux are detected, not configured, so
+no new config file. Persisting the remembered target across restarts.
+
+Renaming the *board*, which is the field's third user and the one thing that
+would make a loose selection's prefill worth reading: `Document.title` is born
+`untitled` and stays there, so until a tab can be renamed the prefill is
+`untitled`, `untitled-2`, `untitled-3`. It is a placeholder over a field the
+person was going to fill anyway, so it costs a name and not a step.
+
+And the text tool that would one day let the direction be written on the board
+itself instead of in the field.
 
 ## Risks
 
