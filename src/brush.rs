@@ -659,7 +659,32 @@ pub struct Edits {
     pub held: Option<Held>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub brushes: Vec<Edit>,
+    /// The ten seats, in their own order. Empty when nothing has been
+    /// seated by hand, so a file written before the strip existed opens
+    /// with the shipped nine rather than with none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<Option<Held>>,
 }
+
+/// How many seats the strip keeps within reach. Nine that ship filled,
+/// and slot 0 — the last brush used that none of the nine already hold.
+pub const SLOTS: usize = 10;
+
+/// What seats 1..=9 hold on a machine that has never been drawn on: the
+/// shelf Sketchbook puts first, which covers pencil, marker, airbrush,
+/// pen, ink, watercolour, blur and eraser — a whole hand without anybody
+/// picking one out.
+pub const SLOT_DEFAULTS: [(&str, &str); SLOTS - 1] = [
+    ("Basic", "Textured Pencil"),
+    ("Basic", "Textured Marker"),
+    ("Basic", "Pressure Airbrush"),
+    ("Basic", "Technical Pen"),
+    ("Basic", "80% Inking Pen"),
+    ("Basic", "Textured Watercolor"),
+    ("Basic", "Textured Inker"),
+    ("Basic", "Natural Blur"),
+    ("Basic", "Auto Eraser Soft"),
+];
 
 /// Which brush was in the hand, by name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -768,6 +793,10 @@ pub struct Library {
     paper_px: u16,
     /// The brush in the hand: which set, and which brush of it.
     selected: (usize, usize),
+    /// The ten seats the strip keeps, `[0]` the overflow and `[1..=9]`
+    /// the numbered ones. A seat is empty when it names a brush this
+    /// build no longer carries.
+    slots: Vec<Option<(usize, usize)>>,
 }
 
 impl Library {
@@ -779,11 +808,74 @@ impl Library {
         self.selected
     }
 
-    /// Takes up a brush, if there is one in that seat.
+    /// Takes up a brush, if there is one in that seat. Slot 0 follows
+    /// the hand: it is the way back to whatever was last reached for
+    /// that none of the numbered seats already holds.
     pub fn select(&mut self, set: usize, index: usize) {
-        if self.sets.get(set).is_some_and(|s| index < s.presets.len()) {
-            self.selected = (set, index);
+        if !self.holds((set, index)) {
+            return;
         }
+        self.selected = (set, index);
+        if !self.seated((set, index)) {
+            self.slots[0] = Some((set, index));
+        }
+    }
+
+    /// The ten seats, `[0]` the overflow and `[1..=9]` the numbered ones.
+    pub fn slots(&self) -> &[Option<(usize, usize)>] {
+        &self.slots
+    }
+
+    /// Takes up the brush in a seat. False when the seat is empty or
+    /// there is no such seat, so the caller knows nothing moved and
+    /// writes nothing back.
+    pub fn take_slot(&mut self, n: usize) -> bool {
+        let Some(Some(at)) = self.slots.get(n).copied() else {
+            return false;
+        };
+        self.select(at.0, at.1);
+        true
+    }
+
+    /// Seats a brush in one of the nine. Slot 0 is computed from what
+    /// the hand has been reaching for, so it is never written to.
+    pub fn assign_slot(&mut self, n: usize, at: (usize, usize)) -> bool {
+        if n == 0 || n >= SLOTS || !self.holds(at) {
+            return false;
+        }
+        self.slots[n] = Some(at);
+        // It is within reach by its number now, so the overflow has
+        // nothing left to keep.
+        if self.slots[0] == Some(at) {
+            self.slots[0] = None;
+        }
+        true
+    }
+
+    /// Whether the library has a brush in that seat at all.
+    fn holds(&self, (set, index): (usize, usize)) -> bool {
+        self.sets.get(set).is_some_and(|s| index < s.presets.len())
+    }
+
+    /// Whether a brush is already within reach of the numbered seats.
+    fn seated(&self, at: (usize, usize)) -> bool {
+        self.slots[1..].iter().any(|s| *s == Some(at))
+    }
+
+    /// What the seats hold on a build nobody has rearranged: the
+    /// overflow empty, and the shipped nine wherever the sets put them —
+    /// empty for any name this build no longer carries.
+    fn shipped_slots(&self) -> Vec<Option<(usize, usize)>> {
+        std::iter::once(None)
+            .chain(SLOT_DEFAULTS.iter().map(|(set, name)| self.seat(set, name)))
+            .collect()
+    }
+
+    /// Fills the seats as the library is built. Called once.
+    fn seed_slots(mut self) -> Library {
+        let seats = self.shipped_slots();
+        self.slots = seats;
+        self
     }
 
     fn preset(&self) -> &Preset {
@@ -870,6 +962,21 @@ impl Library {
                     })
                 })
                 .collect(),
+            // Seats nobody rearranged are not a change, so they are not
+            // written down — the same reason an untouched brush is not.
+            slots: if self.slots == self.shipped_slots() {
+                Vec::new()
+            } else {
+                self.slots
+                    .iter()
+                    .map(|seat| {
+                        seat.map(|(s, i)| Held {
+                            set: self.sets[s].name.clone(),
+                            name: self.sets[s].presets[i].name.clone(),
+                        })
+                    })
+                    .collect()
+            },
         }
     }
 
@@ -884,6 +991,17 @@ impl Library {
             if let Some(p) = self.find_mut(&edit.set, &edit.name) {
                 p.brush = settled(edit.brush);
             }
+        }
+        // An empty list is a file written before the seats existed: the
+        // shipped nine stand. A name this build no longer carries leaves
+        // its seat empty, since a brush that has gone is one the person
+        // can no longer be reaching for either.
+        if !edits.slots.is_empty() {
+            let mut slots = vec![None; SLOTS];
+            for (n, seat) in edits.slots.iter().take(SLOTS).enumerate() {
+                slots[n] = seat.as_ref().and_then(|h| self.seat(&h.set, &h.name));
+            }
+            self.slots = slots;
         }
         if let Some(held) = &edits.held
             && let Some(at) = self.seat(&held.set, &held.name)
@@ -1045,7 +1163,9 @@ impl Default for Library {
             papers: disk.papers,
             paper_px: disk.paper_px,
             selected: (0, 0),
+            slots: Vec::new(),
         }
+        .seed_slots()
     }
 }
 
@@ -1072,7 +1192,11 @@ impl Library {
             papers: Vec::new(),
             paper_px: 0,
             selected: (0, 0),
+            slots: Vec::new(),
         }
+        // None of the nine is in a library this bare, so every seat but
+        // the one brush there is comes up empty — which is the truth.
+        .seed_slots()
     }
 }
 
@@ -1434,6 +1558,7 @@ mod tests {
                     ..Brush::default()
                 },
             }],
+            slots: Vec::new(),
         });
         assert_eq!(lib.edits().held, Some(held), "the hand does not move");
         assert!(lib.edits().brushes.is_empty(), "and nothing is dressed");
@@ -1458,6 +1583,7 @@ mod tests {
                     ..Brush::default()
                 },
             }],
+            slots: Vec::new(),
         });
         let b = lib.sets()[0].presets[0].brush;
         assert_eq!(b.size, SIZE_MAX);
@@ -2110,5 +2236,126 @@ mod tests {
         assert_eq!(b.size, SIZE_MIN);
         Property::Size.set_fraction(&mut b, 1.0);
         assert_eq!(b.size, SIZE_MAX);
+    }
+
+    /// A seat holding a brush from a named shelf, for the tests that need
+    /// one the shipped nine do not already hold.
+    fn outside(lib: &Library, index: usize) -> (usize, usize) {
+        lib.sets()
+            .iter()
+            .position(|s| s.name == "Splatter")
+            .map(|s| (s, index))
+            .expect("the shipped library has a Splatter shelf")
+    }
+
+    #[test]
+    fn the_slots_ship_with_the_first_nine_of_basic() {
+        let lib = Library::default();
+        let slots = lib.slots();
+        assert_eq!(slots.len(), SLOTS);
+        assert_eq!(slots[0], None, "the overflow seat starts empty");
+        for (n, (set, name)) in SLOT_DEFAULTS.iter().enumerate() {
+            let (s, i) = slots[n + 1].expect("a default sits in every seat 1..=9");
+            assert_eq!(lib.sets()[s].name, *set);
+            assert_eq!(lib.sets()[s].presets[i].name, *name);
+        }
+    }
+
+    #[test]
+    fn a_brush_taken_from_outside_the_slots_lands_in_slot_zero() {
+        let mut lib = Library::default();
+        let far = outside(&lib, 0);
+        lib.select(far.0, far.1);
+        assert_eq!(lib.slots()[0], Some(far), "the last one used, kept to hand");
+
+        let inside = lib.slots()[1].unwrap();
+        lib.select(inside.0, inside.1);
+        assert_eq!(
+            lib.slots()[0],
+            Some(far),
+            "one already in a seat leaves the overflow alone"
+        );
+    }
+
+    #[test]
+    fn a_slot_takes_up_its_brush_and_an_empty_one_takes_nothing() {
+        let mut lib = Library::default();
+        let seat = lib.slots()[3].unwrap();
+        assert!(lib.take_slot(3));
+        assert_eq!(lib.selected(), seat);
+        assert!(!lib.take_slot(0), "nothing has overflowed yet");
+        assert!(!lib.take_slot(SLOTS), "and there is no eleventh seat");
+    }
+
+    #[test]
+    fn assigning_a_brush_to_a_seat_clears_the_overflow_it_came_from() {
+        let mut lib = Library::default();
+        let far = outside(&lib, 0);
+        lib.select(far.0, far.1);
+        assert_eq!(lib.slots()[0], Some(far));
+
+        assert!(lib.assign_slot(5, far));
+        assert_eq!(lib.slots()[5], Some(far));
+        assert_eq!(lib.slots()[0], None, "it is no longer outside the seats");
+        assert!(
+            !lib.assign_slot(0, far),
+            "slot 0 is computed, never assigned"
+        );
+    }
+
+    #[test]
+    fn the_slots_go_to_disk_by_name_and_come_back() {
+        let mut lib = Library::default();
+        let far = outside(&lib, 2);
+        assert!(lib.assign_slot(2, far));
+        let edits = lib.edits();
+        assert_eq!(edits.slots.len(), SLOTS);
+        let held = edits.slots[2].clone().expect("seat 2 names its brush");
+        assert_eq!(held.set, lib.sets()[far.0].name);
+        assert_eq!(held.name, lib.sets()[far.0].presets[far.1].name);
+
+        let mut fresh = Library::default();
+        fresh.apply(&edits);
+        assert_eq!(fresh.slots(), lib.slots());
+    }
+
+    #[test]
+    fn edits_written_before_slots_existed_open_with_the_shipped_nine() {
+        let mut lib = Library::default();
+        let before: Edits = serde_json::from_str("{}").unwrap();
+        assert!(before.slots.is_empty(), "absent on disk");
+        lib.apply(&before);
+        assert_eq!(lib.slots(), Library::default().slots());
+    }
+
+    #[test]
+    fn seats_nobody_rearranged_are_not_written_down() {
+        let mut lib = Library::default();
+        assert!(
+            lib.edits().slots.is_empty(),
+            "the shipped nine are not a change"
+        );
+        let far = outside(&lib, 0);
+        lib.select(far.0, far.1);
+        assert_eq!(
+            lib.edits().slots.len(),
+            SLOTS,
+            "but reaching outside them is"
+        );
+    }
+
+    #[test]
+    fn a_slot_naming_a_brush_this_build_dropped_opens_empty() {
+        let mut lib = Library::default();
+        let mut slots = vec![None; SLOTS];
+        slots[4] = Some(Held {
+            set: "Gone".to_owned(),
+            name: "Vanished".to_owned(),
+        });
+        lib.apply(&Edits {
+            slots,
+            ..Edits::default()
+        });
+        assert_eq!(lib.slots()[4], None, "passed over, not refused");
     }
 }

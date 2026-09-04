@@ -448,6 +448,7 @@ mod tests {
                     ..crate::brush::Brush::default()
                 },
             }],
+            slots: Vec::new(),
         };
         store.save_brushes(&edits).unwrap();
         assert_eq!(mode_of(&store.root().join("brushes.json")), 0o600);
