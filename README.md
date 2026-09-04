@@ -404,9 +404,11 @@ the dock and the panels are `[menu]`, and what is inside them is
 `[controls]`, down to the alpha a selected control is filled at.
 
 Corners scale by `rounding / 8`, the 8 the chrome was drawn to: at
-Omarchy's own 0 the board goes square like every window around it. A
-capsule is not a corner — a slider's track, a scrollbar's thumb, the
-layers handle and an ink dot keep their own shape.
+Omarchy's own 0 the board goes square like every window around it —
+the layers handle with the rest, since a tab standing beside a squared
+panel is a surface and not a knob. A capsule is not a corner, though:
+a slider's track, a scrollbar's thumb and an ink dot keep their own
+shape.
 
 The **dock's inks do not move**. They are what a board is marked up in,
 not what the interface is painted with, and a fixed red goes on matching

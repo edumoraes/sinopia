@@ -807,7 +807,11 @@ impl Handle {
     pub fn prims(&self, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
         let s = self.scale;
         let b = theme.edge(s);
-        let radius = self.rect.w.min(self.rect.h) / 2.0;
+        // The tab is a surface, painted like the panel it opens, so the
+        // desktop's corner reaches it as well — never past a capsule,
+        // which is as round as a tab this narrow goes.
+        let capsule = self.rect.w.min(self.rect.h) / 2.0;
+        let radius = theme.corner(HANDLE_W / 2.0, s).min(capsule);
         let mut out = vec![
             Prim::soft(
                 self.rect.offset(0.0, SHADOW_OFFSET * s),
@@ -1315,6 +1319,42 @@ mod tests {
             chevron_tip(&prims) > open.chevron.center().0,
             "the arrow points back, the way the panel goes"
         );
+    }
+
+    /// The tab is a surface, not a knob: it stands beside the panel and
+    /// is painted like it, so the desktop's own corner has to reach it.
+    /// At Omarchy's `decoration:rounding` of 0 the panel and the dock go
+    /// square, and a pill left standing between them reads as broken.
+    #[test]
+    fn the_desktops_corner_reaches_the_handle() {
+        let mut theme = Theme::light();
+        let a = atlas();
+        let body = |h: &Handle, theme: &Theme| {
+            h.prims(&a, 7, theme)
+                .into_iter()
+                .find(|q| q.color == theme.panel && q.bounds() == h.rect)
+                .expect("the handle's body")
+        };
+
+        // As the chrome was drawn: the tab is a capsule, rounded to half
+        // its own short side, open and closed alike.
+        let closed = handle(VP, 1.0, false);
+        let open = handle(VP, 1.0, true);
+        assert_eq!(body(&closed, &theme).radius, HANDLE_W / 2.0);
+        assert_eq!(body(&open, &theme).radius, HANDLE_W / 2.0);
+
+        theme.rounding = 0.0;
+        assert_eq!(
+            body(&closed, &theme).radius,
+            0.0,
+            "square, like every window out there"
+        );
+        assert_eq!(body(&open, &theme).radius, 0.0);
+
+        // And it never rounds past a capsule, however far the desktop
+        // rounds its own windows.
+        theme.rounding = 4.0;
+        assert_eq!(body(&closed, &theme).radius, HANDLE_W / 2.0);
     }
 
     #[test]
