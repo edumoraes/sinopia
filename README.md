@@ -7,9 +7,10 @@ the real architecture emerges from development.
 ## Status
 
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
-selection, navigation, pasted images, and projects in tabs:
+selection, navigation, pasted images, projects in tabs, frames, and
+export to the agent:
 
-- `cargo build` clean, `cargo test` with 607 tests.
+- `cargo build` clean, `cargo test` with 668 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -184,6 +185,24 @@ selection, navigation, pasted images, and projects in tabs:
   tool: the pencil and every brush lay it, and the brush's ring shows
   it before the press. Every stroke has always named its colour on
   disk; what was missing was somewhere to pick one.
+- Export to the agent: `Ctrl+E` sends what is selected to an AI agent
+  running on this machine. A panel lists the agents found — herdr says
+  where each one is working, which is focused and what it is doing;
+  tmux says the pane and its path; a `/proc` walk finds the ones under
+  neither and, having no way to talk to them, writes them muted. The
+  page lands in that agent's own working directory as three files under
+  `docs/boards/<name>/` — `board.png`, the picture; `board.json`, the
+  same objects in the board's own schema; and `board.md`, an inventory
+  under a preface saying it is a diagram and not an order. A frame
+  brings the name it carries on its card; a loose selection is asked
+  for one, prefilled with a name the folder does not already hold, and
+  whatever is typed becomes exactly one directory. The instruction is
+  the person's own line, typed into the panel and submitted into the
+  agent's live session — never the board's text, which is inventory.
+  With nothing selected, or no agent running, the key opens nothing and
+  says which half is missing. A layer's name is now the person's to
+  give: a second press on a card opens it for editing, and a frame is
+  born `Frame 1` rather than `Layer 3`.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it
@@ -435,6 +454,10 @@ src/props.rs     brush properties bar under the strip: the basic pair, and the A
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
+src/field.rs     a one-line editable value: the string, the caret, the keys that move it (pure, tested)
+src/export.rs    what leaves the board: the scope, its box, its sub-document, the slug, the inventory, the write (pure, tested)
+src/agents.rs    the agents running here: herdr, tmux and /proc parsed into one list, and reaching one (pure, tested)
+src/send.rs      the export panel: the targets, the folder, the instruction (pure, tested)
 src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch a group is composited in
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge

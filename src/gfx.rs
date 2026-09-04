@@ -451,10 +451,10 @@ impl Gfx {
         })
     }
 
-    /// One of the two offscreen surfaces at the window's current size,
-    /// made or remade as needed, and its slot.
-    fn ensure_surface(&mut self, which: Which) -> u32 {
-        let size = (self.config.width, self.config.height);
+    /// One of the two offscreen surfaces at `size`, made or remade as
+    /// needed, and its slot. The window asks for its own size; an export
+    /// asks for the picture's, and puts them back afterwards.
+    fn ensure_surface(&mut self, which: Which, size: (u32, u32)) -> u32 {
         let held = match which {
             Which::Scratch => self.scratch.as_ref(),
             Which::Sheet => self.sheet.as_ref(),
@@ -611,14 +611,119 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// The largest texture this device will make, which is the ceiling
+    /// on an export's size.
+    pub fn max_dimension(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
+    }
+
+    /// Renders `frame` into a texture of its own and answers the pixels,
+    /// tight RGBA8, `w * h * 4` bytes. The copy out is padded to wgpu's
+    /// 256-byte row alignment and unpadded here, so the caller gets rows
+    /// it can hand straight to an encoder.
+    ///
+    /// The texture is the *surface's* format, not RGBA: a pipeline is
+    /// built against one colour format and a pass onto any other is a
+    /// validation error, so an export drawn through the window's own
+    /// pipelines has to be drawn onto what they were made for. The
+    /// channels are put in RGBA order here instead, which is where a
+    /// PNG wants them.
+    pub fn render_offscreen(
+        &mut self,
+        w: u32,
+        h: u32,
+        background: Rgba,
+        frame: &Frame,
+    ) -> anyhow::Result<Vec<u8>> {
+        let (w, h) = (w.max(1), h.max(1));
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("export"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let unpadded = w * 4;
+        let padded = unpadded.div_ceil(align) * align;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("export readback"),
+            size: u64::from(padded) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.encode(&view, Viewport { w, h }, background, frame);
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            size,
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::PollType::wait_indefinitely())?;
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("the export readback never answered"))?
+            .map_err(|e| anyhow::anyhow!("mapping the export readback: {e}"))?;
+        let padded_bytes = slice
+            .get_mapped_range()
+            .map_err(|e| anyhow::anyhow!("reading the export readback: {e}"))?;
+        let mut out = Vec::with_capacity((unpadded * h) as usize);
+        for row in 0..h as usize {
+            let at = row * padded as usize;
+            out.extend_from_slice(&padded_bytes[at..at + unpadded as usize]);
+        }
+        drop(padded_bytes);
+        buffer.unmap();
+        // Every surface this runs on so far is BGRA; RGBA needs nothing.
+        if matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            for px in out.as_chunks_mut::<4>().0 {
+                px.swap(0, 2);
+            }
+        }
+        // The window's surface is the size it was; the scratch and the
+        // sheet have just been resized to the export and must go back,
+        // or the next frame composites through a texture of the wrong
+        // size.
+        let window = (self.config.width, self.config.height);
+        self.ensure_surface(Which::Scratch, window);
+        self.ensure_surface(Which::Sheet, window);
+        Ok(out)
+    }
+
     /// Renders one frame: clear to `background`, then the frame's passes
     /// as [`scene::passes`] plans them — the prims in order, one draw per
     /// texture run, with each group composited through the scratch.
     /// `Ok(false)` = frame skipped (surface occluded or temporarily lost);
     /// the caller may try again later.
     pub fn render(&mut self, background: Rgba, frame: &Frame) -> anyhow::Result<bool> {
-        let scratch = self.ensure_surface(Which::Scratch);
-        let sheet = self.ensure_surface(Which::Sheet);
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -641,6 +746,25 @@ impl Gfx {
             w: self.config.width,
             h: self.config.height,
         };
+        let encoder = self.encode(&view, viewport, background, frame);
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(texture);
+        Ok(true)
+    }
+
+    /// Encodes one frame's passes onto `target`. The only thing the
+    /// window and an export do differently is what they draw onto and
+    /// how big it is, so this is the whole of the drawing and both
+    /// callers give it a view.
+    fn encode(
+        &mut self,
+        target: &wgpu::TextureView,
+        viewport: Viewport,
+        background: Rgba,
+        frame: &Frame,
+    ) -> wgpu::CommandEncoder {
+        let scratch = self.ensure_surface(Which::Scratch, (viewport.w, viewport.h));
+        let sheet = self.ensure_surface(Which::Sheet, (viewport.w, viewport.h));
         let globals: [f32; 4] = [viewport.w as f32, viewport.h as f32, 0.0, 0.0];
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::cast_slice(&globals));
@@ -679,7 +803,7 @@ impl Gfx {
                 Onto::Window => {
                     let load = if cleared { wgpu::LoadOp::Load } else { clear };
                     cleared = true;
-                    ("window", &view, load)
+                    ("window", target, load)
                 }
                 Onto::Sheet => ("sheet", sheet_view, wgpu::LoadOp::Load),
                 Onto::Scratch => ("scratch", scratch_view, wgpu::LoadOp::Load),
@@ -742,9 +866,7 @@ impl Gfx {
                 rp.draw(0..6, range.start + run.start..range.start + run.end);
             }
         }
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(texture);
-        Ok(true)
+        encoder
     }
 }
 

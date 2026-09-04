@@ -322,7 +322,10 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// Hidden tmp in the same directory, then rename — so a reader never sees
 /// half a file, and a crash never leaves one. `mode` is the permission to
 /// create the tmp with, or `None` to leave it to the umask.
-fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> anyhow::Result<()> {
+///
+/// Shared with [`crate::export`], which owes the same terms: same
+/// directory, atomic rename, explicit mode.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> anyhow::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let dir = path

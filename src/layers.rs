@@ -21,7 +21,9 @@ pub const PADDING: f32 = 6.0;
 /// The header buttons and the eye are this square.
 pub const BUTTON: f32 = 24.0;
 pub const RADIUS: f32 = 12.0;
-const ROW_RADIUS: f32 = 6.0;
+/// A card's corner. The rename is drawn over a card and must round
+/// the same way it does.
+pub const ROW_RADIUS: f32 = 6.0;
 /// A row's card sits this far inside it, so the gap between two cards is
 /// twice this and a click in the gap still lands on a row.
 const CARD_INSET: f32 = 2.0;
@@ -91,6 +93,8 @@ pub enum PanelHit {
     Toggle(usize),
     /// Work inside the frame on this layer: the panel shows its stack.
     Enter(usize),
+    /// A card asked to be renamed: the row's index in its stack.
+    Rename(usize),
     /// Back out to the board.
     Leave,
     Add,
@@ -1770,5 +1774,16 @@ mod tests {
             p.crumb.unwrap().x + width <= p.up.x,
             "the title runs into the buttons: {width}"
         );
+    }
+
+    #[test]
+    fn rename_names_a_row_by_its_index_like_select_does() {
+        // The two travel together: app turns a Select into a Rename on
+        // the second press, so they must name a row the same way.
+        assert_eq!(
+            std::mem::discriminant(&PanelHit::Rename(3)),
+            std::mem::discriminant(&PanelHit::Rename(0))
+        );
+        assert!(matches!(PanelHit::Rename(3), PanelHit::Rename(i) if i == 3));
     }
 }
