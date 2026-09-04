@@ -30,6 +30,7 @@ use crate::export;
 use crate::field::Field;
 use crate::geom::Corner;
 use crate::gestures;
+use crate::history::History;
 use crate::gfx::Gfx;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
@@ -113,6 +114,10 @@ enum Pending {
 struct Open {
     project: Project,
     editor: Editor,
+    /// What this tab can step back through. Per tab, because a board and
+    /// the work done on it go together: switching tabs hands nothing on,
+    /// exactly as the tool and the selection do not.
+    history: History,
 }
 
 struct App {
@@ -469,6 +474,84 @@ impl App {
         }
     }
 
+    /// Nothing is in the middle of happening. A carried layer card is
+    /// the one gesture the editor knows nothing about: it lives here and
+    /// reorders the document on every pointer move while the editor sits
+    /// perfectly still.
+    fn settled(&self) -> bool {
+        !self.editor().busy() && !self.carry.as_ref().is_some_and(|c| c.held)
+    }
+
+    /// Writes down where a change left things.
+    ///
+    /// A state is only written at rest: a stroke changes the scene on
+    /// every sample of the hand and a drag on every step, and neither is
+    /// a state anybody meant to arrive at. The *spot* is written either
+    /// way, because a press on an object selects it and starts dragging
+    /// it in one motion — there is no settled moment between the two,
+    /// and an undo that did not know the object had been picked up
+    /// would put it back and drop it.
+    fn remember(&mut self) {
+        let settled = self.settled();
+        let Open {
+            project,
+            editor,
+            history,
+        } = &mut self.open[self.active];
+        let spot = editor.at();
+        match settled {
+            true => history.keep(&project.doc, spot),
+            false => history.mark(spot),
+        }
+    }
+
+    /// `Ctrl+Z`: the board goes back to the state before the last
+    /// change, and the hand back to where it was standing then.
+    fn undo(&mut self) {
+        self.drop_gesture();
+        let Open {
+            project,
+            editor,
+            history,
+        } = &mut self.open[self.active];
+        let Some(entry) = history.undo() else { return };
+        entry.restore(&mut project.doc, editor);
+        self.stepped();
+    }
+
+    /// `Ctrl+Y`, or `Ctrl+Shift+Z`: forward again.
+    fn redo(&mut self) {
+        self.drop_gesture();
+        let Open {
+            project,
+            editor,
+            history,
+        } = &mut self.open[self.active];
+        let Some(entry) = history.redo() else { return };
+        entry.restore(&mut project.doc, editor);
+        self.stepped();
+    }
+
+    /// Drops whatever is in progress before a step is taken, exactly as
+    /// `Esc` would. A gesture that has not finished is not a change to
+    /// step behind — it is a change that has not happened — and a card
+    /// still in the hand would be carrying a row the restored stack may
+    /// not have.
+    fn drop_gesture(&mut self) {
+        let (editor, doc) = self.active();
+        editor.cancel(doc);
+        if let Some(carry) = &mut self.carry {
+            carry.held = false;
+        }
+    }
+
+    /// A step was taken. The board is not what is on disk any more,
+    /// whichever way it moved.
+    fn stepped(&mut self) {
+        self.touch();
+        self.redraw();
+    }
+
     /// The document changed. A draft owes the disk a safety save; a file
     /// the user named owes nothing until `Ctrl+S` says so.
     fn touch(&mut self) {
@@ -542,7 +625,9 @@ impl App {
         // set off, or a slide born this frame is a third over before its
         // first frame is drawn.
         self.slides.tick(dt);
-        let Open { project, editor } = &self.open[self.active];
+        let Open {
+            project, editor, ..
+        } = &self.open[self.active];
         self.slides
             .restack(project.doc.stack(editor.inside()), row);
         self.scrolling.tick(dt);
@@ -719,7 +804,12 @@ impl App {
     fn open_project(&mut self, project: Project) {
         let mut editor = Editor::new();
         editor.set_surface(&self.theme.panel_hex);
-        self.open.push(Open { project, editor });
+        let history = History::new(&project.doc, editor.at());
+        self.open.push(Open {
+            project,
+            editor,
+            history,
+        });
         self.activate(self.open.len() - 1);
     }
 
@@ -1444,8 +1534,12 @@ impl App {
     fn apply(&mut self, change: Change) {
         match change {
             Change::None => {}
-            Change::Selection => self.redraw(),
+            Change::Selection => {
+                self.remember();
+                self.redraw();
+            }
             Change::Scene => {
+                self.remember();
                 self.touch();
                 self.redraw();
             }
@@ -1801,6 +1895,9 @@ impl App {
                 let shift = self.modifiers.state().shift_key();
                 match text.to_ascii_lowercase().as_str() {
                     "v" => self.paste(),
+                    "z" if shift => self.redo(),
+                    "z" => self.undo(),
+                    "y" => self.redo(),
                     "s" if shift => self.ask_name(self.active, Then::Stay),
                     "s" => self.save_active(),
                     "o" => self.ask_open(),
@@ -2275,9 +2372,14 @@ pub fn run(
     let store_brushes = store.brushes();
     let mut app = App {
         store,
-        open: vec![Open {
-            project: first,
-            editor: Editor::new(),
+        open: vec![{
+            let editor = Editor::new();
+            let history = History::new(&first.doc, editor.at());
+            Open {
+                project: first,
+                editor,
+                history,
+            }
         }],
         active: 0,
         shared,

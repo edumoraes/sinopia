@@ -110,9 +110,8 @@ impl History {
     /// A board that really changed pushes an entry and drops the future,
     /// because there is no longer a way forward from here.
     pub fn keep(&mut self, doc: &Document, spot: Spot) {
-        let present = self.present_mut();
-        if present.doc.same_board(doc) {
-            present.spot = spot;
+        if self.present_mut().doc.same_board(doc) {
+            self.mark(spot);
             return;
         }
         for gone in self.future.drain(..) {
@@ -122,6 +121,24 @@ impl History {
         self.weight += entry.weight;
         self.past.push(entry);
         self.trim();
+    }
+
+    /// The hand moved, whether or not the board is at rest.
+    ///
+    /// The top of the past is the present, and the present's spot is
+    /// live: what is selected belongs to the state on screen, not to
+    /// the one before it. Undoing a move has to leave what it moved in
+    /// hand, and that is only possible if the entry under the move
+    /// knows it was picked up.
+    ///
+    /// It cannot wait for a resting point, because a press on an object
+    /// selects it *and* starts dragging it in one motion — there is no
+    /// moment between the two when anything is settled, so a spot
+    /// written only at rest would still be the empty one the tab was
+    /// born with. Cheap enough to do on every sample: a handful of ids,
+    /// and never the board.
+    pub fn mark(&mut self, spot: Spot) {
+        self.present_mut().spot = spot;
     }
 
     /// One step back, and the state to put on screen.
@@ -141,14 +158,11 @@ impl History {
         self.past.last()
     }
 
-    /// There is a state behind the present one.
-    pub fn can_undo(&self) -> bool {
+    /// There is a state behind the present one. Private: the only
+    /// caller is [`History::undo`], and a dock that wanted to grey out
+    /// an arrow would be asking a question this cut does not have.
+    fn can_undo(&self) -> bool {
         self.past.len() > 1
-    }
-
-    /// A step was taken back and not yet taken again.
-    pub fn can_redo(&self) -> bool {
-        !self.future.is_empty()
     }
 
     fn present_mut(&mut self) -> &mut Entry {
@@ -221,7 +235,7 @@ mod tests {
         doc
     }
 
-    fn spot(selection: &[&str]) -> Spot {
+    pub(super) fn spot(selection: &[&str]) -> Spot {
         Spot {
             selection: selection.iter().map(|s| (*s).to_owned()).collect(),
             layer: None,
@@ -262,7 +276,7 @@ mod tests {
         doc
     }
 
-    fn present(h: &History) -> &Entry {
+    pub(super) fn present(h: &History) -> &Entry {
         h.past.last().expect("a present")
     }
 
@@ -279,7 +293,7 @@ mod tests {
     fn a_tab_opens_with_the_state_it_opens_in_and_nowhere_to_go() {
         let h = History::new(&board(), spot(&[]));
         assert!(!h.can_undo(), "nothing behind the state it opened in");
-        assert!(!h.can_redo());
+        assert!(h.future.is_empty());
     }
 
     #[test]
@@ -374,7 +388,7 @@ mod tests {
             let (doc, _) = step(&mut h, false);
             assert!(doc.same_board(want), "on to {:?}", want.layers.len());
         }
-        assert!(!h.can_redo());
+        assert!(h.future.is_empty());
     }
 
     #[test]
@@ -382,9 +396,9 @@ mod tests {
         let mut h = History::new(&board(), spot(&[]));
         h.keep(&with_layers(1), spot(&[]));
         h.undo();
-        assert!(h.can_redo());
+        assert!(!h.future.is_empty());
         h.keep(&with_layers(7), spot(&[]));
-        assert!(!h.can_redo(), "there is no forward from a different past");
+        assert!(h.future.is_empty(), "there is no forward from a different past");
     }
 
     #[test]
@@ -505,5 +519,168 @@ mod tests {
         h.keep(&heavy(40), spot(&[]));
         let counted: usize = h.past.iter().chain(&h.future).map(|e| e.weight).sum();
         assert_eq!(h.weight, counted, "the future it dropped is not still paid for");
+    }
+}
+
+/// Whole gestures, driven the way the window drives them: a stroke, a
+/// drag, an `Esc`. `app` carries no tests of its own, so the rule it
+/// encodes — a change is written down only once nothing is still
+/// happening — is held here, where the editor and the history can be
+/// put through it without a window.
+#[cfg(test)]
+mod gestures {
+    use super::tests::present;
+    use super::*;
+    use crate::brush::Tip;
+    use crate::doc::{Camera, Element, Rect};
+    use crate::editor::{Button, Change, Tool};
+    use crate::scene::{View, Viewport};
+
+    /// What `app::App::remember` does, less the carried layer card —
+    /// the one gesture the editor cannot see, because it lives on the
+    /// window and reorders the document while the editor sits still.
+    fn drive(h: &mut History, e: &Editor, doc: &Document, change: Change) {
+        if !matches!(change, Change::Scene | Change::Selection) {
+            return;
+        }
+        match e.busy() {
+            true => h.mark(e.at()),
+            false => h.keep(doc, e.at()),
+        }
+    }
+
+    fn view() -> View {
+        View {
+            camera: Camera {
+                x: 50.0,
+                y: 50.0,
+                zoom: 1.0,
+            },
+            viewport: Viewport { w: 100, h: 100 },
+            scale: 1.0,
+        }
+    }
+
+    /// One rect at (10, 10), 20 by 10, on the board's only layer.
+    fn board() -> Document {
+        let mut doc = Document::new("t");
+        doc.id = "01JTESTTESTTESTTESTTESTTES".into();
+        doc.layers[0].id = "L1".into();
+        doc.elements = vec![Element::Rect(Rect {
+            id: "a".into(),
+            layer: "L1".into(),
+            x: 10.0,
+            y: 10.0,
+            w: 20.0,
+            h: 10.0,
+            rotation: 0.0,
+            stroke: Some("#222".into()),
+            fill: None,
+            text: None,
+        })];
+        doc
+    }
+
+    fn with(tool: Tool, doc: &mut Document) -> Editor {
+        let mut e = Editor::new();
+        e.set_tool(tool, doc);
+        e
+    }
+
+    #[test]
+    fn a_whole_stroke_is_one_step_however_many_samples_it_took() {
+        let (v, mut doc) = (view(), board());
+        let mut e = with(Tool::Pencil, &mut doc);
+        let mut h = History::new(&doc, e.at());
+
+        let c = e.press(Button::Left, &v, (40.0, 40.0), &mut doc, &Tip::PENCIL);
+        drive(&mut h, &e, &doc, c);
+        for i in 1..30 {
+            let at = (40.0 + f64::from(i) * 1.5, 40.0 + f64::from(i));
+            let c = e.moved(&v, at, &mut doc);
+            drive(&mut h, &e, &doc, c);
+        }
+        assert_eq!(h.past.len(), 1, "nothing is written down mid-stroke");
+
+        let c = e.release(Button::Left, &v, (85.0, 70.0), &mut doc, "#111111");
+        drive(&mut h, &e, &doc, c);
+        assert_eq!(h.past.len(), 2, "and the whole stroke is one step");
+
+        let (mut back, mut hand) = (doc.clone(), Editor::new());
+        h.undo().expect("a step back").restore(&mut back, &mut hand);
+        assert!(back.elements.iter().all(|el| el.id() == "a"), "the ink is gone");
+    }
+
+    #[test]
+    fn a_whole_drag_is_one_step_however_far_it_went() {
+        let (v, mut doc) = (view(), board());
+        let mut e = with(Tool::Select, &mut doc);
+        let mut h = History::new(&doc, e.at());
+
+        // Pick the rect up: a press on it selects it, which is a resting
+        // state of its own — the hand moved, the board did not.
+        let c = e.press(Button::Left, &v, (15.0, 15.0), &mut doc, &Tip::PENCIL);
+        drive(&mut h, &e, &doc, c);
+        assert_eq!(h.past.len(), 1, "selecting is not a change to the board");
+        assert_eq!(present(&h).spot.selection, ["a"], "but the spot followed it");
+
+        for i in 1..20 {
+            let at = (15.0 + f64::from(i) * 2.0, 15.0);
+            let c = e.moved(&v, at, &mut doc);
+            drive(&mut h, &e, &doc, c);
+        }
+        assert_eq!(h.past.len(), 1, "nothing is written down mid-drag");
+
+        let c = e.release(Button::Left, &v, (53.0, 15.0), &mut doc, "#111111");
+        drive(&mut h, &e, &doc, c);
+        assert_eq!(h.past.len(), 2, "and the whole drag is one step");
+
+        // Undo puts it back where it was, still selected: the spot on the
+        // entry under the move is the one the press wrote.
+        let (mut back, mut hand) = (doc.clone(), Editor::new());
+        h.undo().expect("a step back").restore(&mut back, &mut hand);
+        let Element::Rect(r) = &back.elements[0] else {
+            panic!("a rect");
+        };
+        assert_eq!((r.x, r.y), (10.0, 10.0), "back where it was");
+        assert_eq!(hand.at().selection, ["a"], "and still in hand");
+    }
+
+    #[test]
+    fn a_drag_taken_back_with_escape_is_no_step_at_all() {
+        let (v, mut doc) = (view(), board());
+        let mut e = with(Tool::Select, &mut doc);
+        let mut h = History::new(&doc, e.at());
+
+        let c = e.press(Button::Left, &v, (15.0, 15.0), &mut doc, &Tip::PENCIL);
+        drive(&mut h, &e, &doc, c);
+        for i in 1..10 {
+            let c = e.moved(&v, (15.0 + f64::from(i) * 3.0, 15.0), &mut doc);
+            drive(&mut h, &e, &doc, c);
+        }
+        assert!(e.escape(&mut doc), "there was a drag to cancel");
+        drive(&mut h, &e, &doc, Change::Scene);
+
+        assert_eq!(h.past.len(), 1, "the board is what it already was");
+        assert!(!h.can_undo());
+    }
+
+    #[test]
+    fn two_strokes_are_two_steps() {
+        let (v, mut doc) = (view(), board());
+        let mut e = with(Tool::Pencil, &mut doc);
+        let mut h = History::new(&doc, e.at());
+        for round in 0..2 {
+            let y = 30.0 + f64::from(round) * 20.0;
+            let c = e.press(Button::Left, &v, (20.0, y), &mut doc, &Tip::PENCIL);
+            drive(&mut h, &e, &doc, c);
+            for i in 1..15 {
+                let c = e.moved(&v, (20.0 + f64::from(i) * 2.0, y), &mut doc);
+                drive(&mut h, &e, &doc, c);
+            }
+            let c = e.release(Button::Left, &v, (48.0, y), &mut doc, "#111111");
+            drive(&mut h, &e, &doc, c);
+        }
+        assert_eq!(h.past.len(), 3, "the state it opened in and one per stroke");
     }
 }
