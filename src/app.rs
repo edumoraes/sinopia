@@ -824,10 +824,18 @@ impl App {
 
     /// Reads the desktop's theme again and puts the window back on in
     /// it: the palette, the border and the corner, the face and the one
-    /// size the chrome letters itself at. The atlas goes because it is
-    /// built from a face at a size and the theme names both — the next
-    /// frame builds the new one.
+    /// size the chrome letters itself at.
+    ///
+    /// Reading a face is the whole cost of a restyle and the only part of
+    /// it anyone can feel — the desktop's `monospace` here is a Nerd
+    /// Font, megabytes of outlines, and parsing it blocks the loop for
+    /// tens of milliseconds where everything else costs microseconds. A
+    /// theme set does not touch the face, so only a face that actually
+    /// moved is read again, and the atlas goes with it: `ensure_atlas`
+    /// guards on the size, which cannot see a new face at the old one. A
+    /// size that changed is that guard's own business.
     fn restyle(&mut self) {
+        let face_was = self.style.face.clone();
         self.style = omarchy::read(&self.home);
         log::info!(
             "theme: {}",
@@ -837,8 +845,10 @@ impl App {
             }
         );
         self.theme = Theme::from_style(&self.style);
-        self.font = face(&self.style);
-        self.atlas = None;
+        if self.style.face != face_was {
+            self.font = face(&self.style);
+            self.atlas = None;
+        }
         self.dress_editors();
         self.redraw();
     }
