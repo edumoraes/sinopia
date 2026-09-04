@@ -13,6 +13,7 @@ mod dialogs;
 mod doc;
 mod dock;
 mod editor;
+mod export;
 mod field;
 mod geom;
 mod gestures;
