@@ -2297,6 +2297,13 @@ impl App {
                 if self.animating() {
                     self.redraw();
                 }
+                // A frame is drawn with the atlas in hand, and the two
+                // things that name one — the theme's face and size, and
+                // the window's scale factor — both move under it. Here
+                // is where the new one is built, since `frame` only
+                // reads: an atlas nobody put back would leave every
+                // lettered surface drawing nothing at all.
+                self.ensure_atlas();
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
