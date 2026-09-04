@@ -10,7 +10,7 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames, and
 export to the agent:
 
-- `cargo build` clean, `cargo test` with 668 tests.
+- `cargo build` clean, `cargo test` with 697 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -185,6 +185,19 @@ export to the agent:
   tool: the pencil and every brush lay it, and the brush's ring shows
   it before the press. Every stroke has always named its colour on
   disk; what was missing was somewhere to pick one.
+- Undo: `Ctrl+Z` puts the board back the way it was before the last
+  change and the hand back where it was standing then; `Ctrl+Y` and
+  `Ctrl+Shift+Z` put it forward again. A step is a change that came to
+  **rest** — a whole stroke, a whole drag, a delete, a paste, a layer
+  carried across the stack — never a sample of one, which is why a
+  stroke undoes as a stroke and a card dragged over two rows comes back
+  in a single step. Undoing a delete brings the objects back
+  *selected*, because what is kept is the board **and** the spot the
+  hand was on: they are kept together, so the ids one names are ids the
+  other has. The view is not part of it — panning between two strokes
+  is not work, and a step back does not move it. The history is a tab's
+  own, capped by a depth and by a memory budget, so a heavy board gets
+  fewer steps rather than a quarter of a gigabyte of them.
 - Export to the agent: `Ctrl+E` sends what is selected to an AI agent
   running on this machine. A panel lists the agents found — herdr says
   where each one is working, which is focused and what it is doing;
@@ -359,7 +372,7 @@ export to the agent:
   menu rows carry their own letters, and a selection nobody is shown is
   one nobody meant.
 
-Not yet: the text tool, shapes, undo, export,
+Not yet: the text tool, shapes, export,
 thumbnails, layer opacity and renaming, frames that nest or turn or come
 in more than the one basic kind, and the six sliders that stay
 muted — three randomness amounts whose scale the sets contradict, and
@@ -397,6 +410,8 @@ already laid.
 | `Ctrl` + drag a corner handle | Resize about the center (`Shift` too: both) |
 | Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
 | `Ctrl` + `V` | Paste the clipboard image onto the board |
+| `Ctrl` + `Z` | Undo: back to the state before the last change |
+| `Ctrl` + `Y`, `Ctrl` + `Shift` + `Z` | Redo |
 | `Ctrl` + `S` | Save the tab; asks for a name the first time |
 | `Ctrl` + `Shift` + `S` | Save as — always asks |
 | `Ctrl` + `O` | Open boards, one tab each |

@@ -440,6 +440,20 @@ transform the document live from a snapshot taken at the press, so `Esc`
 puts it back; `Delete`/`Backspace` removes. The selection is session
 state (§6.2) and is dropped on a tool switch.
 
+Undo landed: `Ctrl+Z` and `Ctrl+Y` from the table above, plus
+`Ctrl+Shift+Z`. A step is a resting **state** rather than a change — the
+scene changes on every sample of a stroke, and on every step of a drag —
+so the history is written where a change lands with nothing still
+happening, and a whole stroke, a whole drag or a card carried over two
+rows comes back in one step. What is kept is the whole document beside
+the editor's spot (selection, ink layer, frame being worked in), so the
+two cannot come to disagree about what a restored board holds: undoing a
+delete brings the objects back selected. The camera is excluded at both
+ends — §6.2 keeps the cursor out of the document for the same reason it
+keeps panning out of a step. The history is a tab's own, capped by a
+depth and a memory budget rather than by a count alone, since an entry
+carries the whole board and a session makes that board grow.
+
 Brush (`B`) landed, and then took Sketchbook's shape rather than
 Photoshop's: a `Library` of named brushes on shelves, one in the hand,
 and an edit that belongs to the brush — the keyboard (`[` `]`, `{` `}`,
