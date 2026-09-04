@@ -42,7 +42,9 @@ use crate::palette::{self, Palette};
 use crate::slots::{self, Strip};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
-use crate::scene::{self, Frame, ImageSlots, Prim, Rgba, Shapes, View, Viewport, with_alpha};
+use crate::scene::{
+    self, Frame, ImageSlots, Prim, Rgba, ScreenRect, Shapes, View, Viewport, with_alpha,
+};
 use crate::select::{self, Handle};
 use crate::send;
 use crate::store::{self, Store};
@@ -185,6 +187,9 @@ struct App {
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
+    /// A brush the pointer is carrying out of the library, if any. It
+    /// does not outlive the release: there is nothing to settle.
+    drag: Option<Dragging>,
     /// A card being renamed: the row's index and the name being typed.
     /// It is the window's, not a tab's — like every other panel state.
     renaming: Option<(usize, Field)>,
@@ -261,6 +266,29 @@ impl Sending {
         }
     }
 }
+
+/// A brush on its way from the library to a seat. The press may still
+/// turn out to be a click, so nothing is carried until the pointer has
+/// moved past the slop — and a click is what it was if it never does.
+/// The brush is taken up at the press either way, as it always was: a
+/// drag that ends nowhere leaves the hand where a click would have.
+struct Dragging {
+    at: (usize, usize),
+    /// The brush's cell of the icon sheet, carried behind the pointer.
+    icon: u16,
+    /// Where the press landed, and where the pointer is now, in
+    /// physical px.
+    from: (f32, f32),
+    to: (f32, f32),
+    /// Past the slop: the icon is in the hand.
+    carried: bool,
+    /// The seat under the pointer, when it is one that can be written.
+    over: Option<usize>,
+}
+
+/// How far a press has to travel before it is a drag and not a click,
+/// in logical px — what it refuses is a hand that did not mean to drag.
+const DRAG_SLOP: f64 = 4.0;
 
 /// A layer card in the pointer's hand: which row it came from, where it
 /// is being carried, and how far into the lift it is. It stays after the
@@ -1141,6 +1169,17 @@ impl App {
         self.brushes_dirty = true;
     }
 
+    /// The seat under a point, when it is one a brush can be put in.
+    /// Slot 0 is computed from what the hand has been reaching for, so
+    /// it is not a place to drop one.
+    fn seat_under(&self, x: f64, y: f64) -> Option<usize> {
+        let view = self.view()?;
+        match self.strip(&view)?.hit(x, y) {
+            Some(slots::Hit::Slot(n)) if n != 0 => Some(n),
+            _ => None,
+        }
+    }
+
     /// A click on the brush strip.
     fn strip_hit(&mut self, hit: slots::Hit) {
         match hit {
@@ -1574,12 +1613,27 @@ impl App {
                 self.brushes.selected(),
                 self.brushes.slots(),
                 self.brushes.brush(),
-                None,
+                self.drag.as_ref().and_then(|d| d.over),
                 atlas,
                 self.atlas_slot,
                 self.icon_slot,
                 &self.theme,
             ));
+        }
+        // The brush in the pointer's hand, drawn last: it passes over
+        // every panel between the shelf it came off and its seat.
+        if let Some(drag) = self.drag.as_ref().filter(|d| d.carried) {
+            let side = palette::ICON * self.chrome(view) as f32;
+            frame.extend([Prim::sprite(
+                ScreenRect {
+                    x: drag.to.0 - side / 2.0,
+                    y: drag.to.1 - side / 2.0,
+                    w: side,
+                    h: side,
+                },
+                palette::icon_uv(drag.icon),
+                self.icon_slot,
+            )]);
         }
         if let (Some(bar), Some(atlas)) = (self.props(view), self.atlas.as_ref()) {
             frame.extend(bar.prims(
@@ -1789,6 +1843,20 @@ impl App {
         {
             if button == Button::Left {
                 self.palette_hit(hit);
+                // The same press may yet turn out to be a drag onto a
+                // seat. Nothing is carried until it has moved.
+                if let palette::Hit::Brush(set, index) = hit
+                    && let Some(cell) = pal.cells.iter().find(|c| (c.set, c.index) == (set, index))
+                {
+                    self.drag = Some(Dragging {
+                        at: (set, index),
+                        icon: cell.icon,
+                        from: (x as f32, y as f32),
+                        to: (x as f32, y as f32),
+                        carried: false,
+                        over: None,
+                    });
+                }
                 self.redraw();
             }
             return self.update_cursor_icon();
@@ -1837,6 +1905,20 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        // A brush carried out of the library is seated where it was let
+        // go of, if that was a seat that can be written. Dropped
+        // anywhere else it is simply the brush in the hand, which the
+        // press already made it.
+        if let Some(drag) = self.drag.take() {
+            if let Some(n) = drag.over
+                && self.brushes.assign_slot(n, drag.at)
+            {
+                self.brushes_dirty = true;
+            }
+            self.keep_brushes();
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A brush edit is over when the pointer that made it comes up.
         self.keep_brushes();
         // A slider let go of is just let go of: the canvas never saw the
@@ -1872,6 +1954,21 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
+        // A brush out of the library has the pointer to itself once it
+        // has moved far enough to mean it, and the canvas sees nothing.
+        if self.drag.is_some() {
+            let over = self.seat_under(x, y);
+            let slop = DRAG_SLOP * self.view().map_or(1.0, |v| self.chrome(&v));
+            if let Some(drag) = &mut self.drag {
+                drag.to = (x as f32, y as f32);
+                let far = f64::from(drag.to.0 - drag.from.0)
+                    .hypot(f64::from(drag.to.1 - drag.from.1));
+                drag.carried |= far > slop;
+                drag.over = drag.carried.then_some(over).flatten();
+            }
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A carried layer has the pointer to itself: the card follows
         // it, the stack opens at whichever row is under it, and the
         // canvas sees nothing.
@@ -2146,6 +2243,10 @@ impl App {
     /// Keys can't be released into a window that lost focus: drop the held
     /// overrides and whatever gesture they were driving.
     fn focus_lost(&mut self) {
+        // A brush half-carried out of the library is put down where it
+        // came from: it was never seated, and the hand it is in was the
+        // press's doing, not the drag's.
+        self.drag = None;
         // A layer the pointer was carrying stays where the window last
         // saw it: the reorder was applied as it went, so there is
         // nothing half-done to put back. The card still has to settle.
@@ -2603,6 +2704,7 @@ pub fn run(
         shapes: Shapes::default(),
         shown_brush: None,
         carry: None,
+        drag: None,
         renaming: None,
         last_card: None,
         sending: None,
