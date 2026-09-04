@@ -277,6 +277,21 @@ impl Stroke {
     }
 }
 
+/// Where the hand is standing: what is selected, the layer new ink
+/// lands on, and the frame being worked in. Session state (§6.2) — it
+/// never enters the document — and exactly the part of it that belongs
+/// beside a board rather than to the window.
+///
+/// The tool, the keys held down and what the pen last said are not
+/// here: those are physical, and a step backwards does not move a hand.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Spot {
+    /// Ids of the selected elements, in selection order.
+    pub selection: Vec<String>,
+    pub layer: Option<String>,
+    pub inside: Option<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct Editor {
     tool: Tool,
@@ -698,6 +713,42 @@ impl Editor {
 
     pub fn is_drawing(&self) -> bool {
         self.stroke.is_some() || self.framing.is_some()
+    }
+
+    /// Where the hand is standing now.
+    pub fn at(&self) -> Spot {
+        Spot {
+            selection: self.selection.clone(),
+            layer: self.layer.clone(),
+            inside: self.inside.clone(),
+        }
+    }
+
+    /// Stands there instead. Nothing physical moves: a spot is where the
+    /// work is, and the tool and the held keys belong to the window.
+    pub fn go(&mut self, spot: Spot) {
+        let Spot {
+            selection,
+            layer,
+            inside,
+        } = spot;
+        self.selection = selection;
+        self.layer = layer;
+        self.inside = inside;
+    }
+
+    /// Something is in the middle of happening: a stroke, an area being
+    /// dragged out, a navigation or a drag. What the document says
+    /// mid-gesture is not a state anybody meant to arrive at, which is
+    /// why the history does not write it down.
+    ///
+    /// Wider than [`Editor::is_moving`], which only ever meant a
+    /// `Drag::Move` that had already passed the click slop.
+    pub fn busy(&self) -> bool {
+        self.stroke.is_some()
+            || self.framing.is_some()
+            || self.nav.is_some()
+            || self.drag.is_some()
     }
 
     pub fn is_panning(&self) -> bool {
@@ -3674,5 +3725,85 @@ mod tests {
         e.set_tool(Tool::Select, &mut doc);
         assert!(e.framing().is_none());
         assert!(!doc.elements.iter().any(|el| matches!(el, Element::Frame(_))));
+    }
+
+    #[test]
+    fn a_spot_is_what_is_selected_the_ink_layer_and_the_frame_worked_in() {
+        let mut e = Editor::new();
+        e.selection = vec!["a".into()];
+        e.layer = Some("L1".into());
+        e.inside = Some("F1".into());
+        let spot = e.at();
+        assert_eq!(spot.selection, ["a"]);
+        assert_eq!(spot.layer.as_deref(), Some("L1"));
+        assert_eq!(spot.inside.as_deref(), Some("F1"));
+    }
+
+    #[test]
+    fn going_to_a_spot_puts_all_three_back() {
+        let mut e = Editor::new();
+        e.selection = vec!["a".into()];
+        e.layer = Some("L1".into());
+        e.inside = Some("F1".into());
+        let there = e.at();
+
+        let mut other = Editor::new();
+        other.selection = vec!["z".into(), "y".into()];
+        other.layer = Some("L9".into());
+        other.go(there.clone());
+        assert_eq!(other.at(), there);
+    }
+
+    #[test]
+    fn going_to_a_spot_leaves_the_hand_alone() {
+        // A spot is where the work is, not what the hand is doing: the
+        // tool and the keys held down are physical and belong to the
+        // window, so a step backwards must not move them.
+        let mut e = tool(Tool::Brush);
+        e.hold_shift(true);
+        e.go(Spot::default());
+        assert_eq!(e.tool(), Tool::Brush);
+        assert!(e.shift);
+    }
+
+    #[test]
+    fn an_editor_at_rest_is_not_busy() {
+        assert!(!Editor::new().busy());
+    }
+
+    #[test]
+    fn every_gesture_makes_the_editor_busy() {
+        let v = view();
+        let tip = brush().tip(Face::Round);
+
+        // A stroke.
+        let mut doc = board();
+        let mut e = tool(Tool::Pencil);
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &tip);
+        assert!(e.busy(), "a stroke in progress");
+        e.cancel(&mut doc);
+        assert!(!e.busy(), "and not once it is cancelled");
+
+        // An area being dragged out.
+        let mut e = tool(Tool::Frame);
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &tip);
+        assert!(e.busy(), "an area being dragged out");
+
+        // A navigation.
+        let mut e = tool(Tool::Hand);
+        let _ = e.press(Button::Left, &v, (10.0, 10.0), &mut doc, &tip);
+        assert!(e.busy(), "a pan");
+
+        // A move, which `is_moving` only admits to after the click slop.
+        let mut e = tool(Tool::Select);
+        let _ = e.press(Button::Left, &v, (15.0, 15.0), &mut doc, &tip);
+        assert!(e.busy(), "a press on an element is already a drag");
+        assert!(!e.is_moving(), "though nothing has moved yet");
+
+        // A marquee, which `is_moving` never covered at all.
+        let mut e = tool(Tool::Select);
+        let _ = e.press(Button::Left, &v, (95.0, 5.0), &mut doc, &tip);
+        assert!(e.busy(), "a marquee is a drag too");
+        assert!(!e.is_moving(), "and is not a move");
     }
 }
