@@ -155,13 +155,14 @@ impl Tabs {
     /// active tab's body is drawn over its neighbours' separators.
     pub fn prims(&self, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
         let s = self.scale;
+        let b = theme.edge(s);
         let mut out = vec![
             Prim::rect(self.strip, theme.panel),
             // The seam against the canvas, so the strip has a bottom.
             Prim::rect(
                 ScreenRect {
-                    y: self.strip.y + self.strip.h - s,
-                    h: s,
+                    y: self.strip.y + self.strip.h - b,
+                    h: b,
                     ..self.strip
                 },
                 theme.border,
@@ -173,7 +174,7 @@ impl Tabs {
             if active {
                 out.push(Prim::rounded(
                     tab.rect.inset(2.0 * s),
-                    TAB_RADIUS * s,
+                    theme.corner(TAB_RADIUS, s),
                     theme.active_bg,
                 ));
             } else if i > 0 && !self.tabs.get(i - 1).is_some_and(|_| i - 1 == self.active) {
@@ -183,7 +184,7 @@ impl Tabs {
                 out.push(Prim::segment(
                     (x, tab.rect.y + 8.0 * s),
                     (x, tab.rect.y + tab.rect.h - 8.0 * s),
-                    s / 2.0,
+                    b / 2.0,
                     theme.border,
                 ));
             }

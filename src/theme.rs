@@ -45,8 +45,8 @@ pub struct Theme {
     /// How far a panel's corner is cut, as a share of the family the
     /// chrome was drawn as: Hyprland's `decoration:rounding` against the
     /// 8 it was drawn to. At 0 the chrome is square, like every window on
-    /// the desktop. A capsule is not a corner and does not answer to it.
-    pub corner: f32,
+    /// the desktop. Read through [`Theme::corner`], never directly.
+    pub rounding: f32,
     /// A chrome border, in logical px — `[controls] normal-border-width`.
     pub border_px: f32,
 }
@@ -104,7 +104,7 @@ impl Theme {
             lifted: parse_color(LIFTED),
             handle: panel,
             inks: inks(ink_hex_for_inks),
-            corner: 1.0,
+            rounding: 1.0,
             border_px: 1.0,
         }
     }
@@ -117,9 +117,25 @@ impl Theme {
             Some(p) => Theme::from_omarchy(p, &style.shell),
             None => Theme::light(),
         };
-        theme.corner = style.corner.clamp(0.0, 4.0);
+        theme.rounding = style.corner.clamp(0.0, 4.0);
         theme.border_px = style.shell.border_width;
         theme
+    }
+
+    /// A panel's or a button's corner, in physical px: the radius it was
+    /// drawn with, at this scale, cut to what the desktop rounds a window
+    /// to. **A capsule is not a corner** — a slider's track, a scrollbar's
+    /// thumb, an ink dot and a round knob are shapes whose radius is half
+    /// their own height, and squaring those would not make the board look
+    /// like Omarchy, it would make it look broken.
+    pub fn corner(&self, radius: f32, scale: f32) -> f32 {
+        radius * scale * self.rounding
+    }
+
+    /// A chrome border, in physical px. Drawn as a rounded rect behind
+    /// the surface, so a panel's outer radius is its own plus this.
+    pub fn edge(&self, scale: f32) -> f32 {
+        self.border_px * scale
     }
 
     /// Omarchy paints every surface in `background` and separates it with
@@ -177,7 +193,7 @@ impl Theme {
             // what the interface is painted with: a fixed red goes on
             // matching itself across every theme.
             inks: inks(ink_hex),
-            corner: 1.0,
+            rounding: 1.0,
             border_px: 1.0,
         }
     }
@@ -399,8 +415,10 @@ mod tests {
             style.corner = 0.0;
             style.shell.border_width = 2.0;
             let t = Theme::from_style(&style);
-            assert_eq!(t.corner, 0.0, "square, like every window out there");
+            assert_eq!(t.rounding, 0.0, "square, like every window out there");
+            assert_eq!(t.corner(12.0, 2.0), 0.0);
             assert_eq!(t.border_px, 2.0);
+            assert_eq!(t.edge(2.0), 4.0, "a border is logical px, like the rest");
         }
     }
 
@@ -409,7 +427,8 @@ mod tests {
         let t = Theme::from_style(&Style::default());
         assert_eq!(t.bg, Theme::light().bg);
         assert_eq!(t.ink_hex, Theme::light().ink_hex);
-        assert_eq!(t.corner, 1.0);
+        assert_eq!(t.rounding, 1.0);
+        assert_eq!(t.corner(12.0, 2.0), 24.0, "the chrome as it was drawn");
         assert_eq!(t.border_px, 1.0);
     }
 

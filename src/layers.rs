@@ -561,15 +561,17 @@ impl Panel {
         theme: &Theme,
     ) -> Vec<Prim> {
         let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(RADIUS, s);
         let mut out = vec![
             Prim::soft(
                 self.rect.offset(0.0, SHADOW_OFFSET * s),
-                RADIUS * s,
+                corner,
                 SHADOW_FEATHER * s,
                 theme.shadow,
             ),
-            Prim::rounded(self.rect.inset(-s), RADIUS * s + s, theme.border),
-            Prim::rounded(self.rect, RADIUS * s, theme.panel),
+            Prim::rounded(self.rect.inset(-b), corner + b, theme.border),
+            Prim::rounded(self.rect, corner, theme.panel),
         ];
         let baseline = atlas.baseline_in(self.header);
         for g in atlas.layout(&self.title, self.header.x + PADDING * s, baseline) {
@@ -625,13 +627,13 @@ impl Panel {
         out: &mut Vec<Prim>,
     ) {
         let s = self.scale;
-        let radius = ROW_RADIUS * s;
+        let radius = theme.corner(ROW_RADIUS, s);
         let e = lift.map_or(0.0, |l| ease(l.t));
         let at = |rest: f32, flight: f32| rest + (flight - rest) * e;
         let (drop, feather, edge) = (
             at(CARD_SHADOW_OFFSET, LIFT_SHADOW_OFFSET),
             at(CARD_SHADOW_FEATHER, LIFT_SHADOW_FEATHER),
-            at(1.0, LIFT_BORDER),
+            at(theme.border_px, LIFT_BORDER.max(theme.border_px)),
         );
         let outline = mix(theme.border, theme.lifted, e);
         let is_active = row.index == active;
@@ -804,6 +806,7 @@ impl Handle {
     /// word it opens and the key that opens it.
     pub fn prims(&self, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
         let s = self.scale;
+        let b = theme.edge(s);
         let radius = self.rect.w.min(self.rect.h) / 2.0;
         let mut out = vec![
             Prim::soft(
@@ -812,7 +815,7 @@ impl Handle {
                 SHADOW_FEATHER * s,
                 theme.shadow,
             ),
-            Prim::rounded(self.rect.inset(-s), radius + s, theme.border),
+            Prim::rounded(self.rect.inset(-b), radius + b, theme.border),
             Prim::rounded(self.rect, radius, theme.panel),
         ];
         let chevron = if self.open { CHEVRON_RIGHT } else { CHEVRON_LEFT };
@@ -830,8 +833,9 @@ impl Handle {
             out.extend(reading_up(atlas, TITLE, across, top, slot, theme.ink));
         }
         if let Some(k) = self.kbd {
-            out.push(Prim::rounded(k.inset(-s), KBD_RADIUS * s + s, theme.border));
-            out.push(Prim::rounded(k, KBD_RADIUS * s, theme.active_bg));
+            let kbd = theme.corner(KBD_RADIUS, s);
+            out.push(Prim::rounded(k.inset(-b), kbd + b, theme.border));
+            out.push(Prim::rounded(k, kbd, theme.active_bg));
             let top = k.y + KBD_PAD * s;
             out.extend(reading_up(atlas, KBD, (k.x, k.w), top, slot, theme.icon));
         }

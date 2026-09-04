@@ -133,20 +133,26 @@ impl Dock {
     /// highlight and the icon.
     pub fn prims(&self, active: Tool, ink: usize, theme: &Theme) -> Vec<Prim> {
         let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(PANEL_RADIUS, s);
         let mut out = vec![
             Prim::soft(
                 self.panel.offset(0.0, SHADOW_OFFSET * s),
-                PANEL_RADIUS * s,
+                corner,
                 SHADOW_FEATHER * s,
                 theme.shadow,
             ),
-            Prim::rounded(self.panel.inset(-s), PANEL_RADIUS * s + s, theme.border),
-            Prim::rounded(self.panel, PANEL_RADIUS * s, theme.panel),
+            Prim::rounded(self.panel.inset(-b), corner + b, theme.border),
+            Prim::rounded(self.panel, corner, theme.panel),
         ];
         for (tool, rect) in &self.buttons {
             let is_active = *tool == active;
             if is_active {
-                out.push(Prim::rounded(*rect, BUTTON_RADIUS * s, theme.active_bg));
+                out.push(Prim::rounded(
+                    *rect,
+                    theme.corner(BUTTON_RADIUS, s),
+                    theme.active_bg,
+                ));
             }
             let color = if is_active {
                 theme.icon_active
@@ -383,6 +389,49 @@ mod tests {
             None,
             "and above the panel is still canvas"
         );
+    }
+
+    /// Omarchy ships `decoration:rounding` at 0, and a board that says
+    /// it follows the desktop has to go square when the desktop is.
+    #[test]
+    fn the_desktops_corner_and_border_reach_the_panel() {
+        let mut theme = Theme::light();
+        theme.rounding = 0.0;
+        theme.border_px = 3.0;
+        let d = Dock::layout(VP, 1.0, &TOOLS, theme.inks.len());
+        let prims = d.prims(Tool::Pencil, 0, &theme);
+
+        let body = prims
+            .iter()
+            .find(|p| p.color == theme.panel)
+            .expect("the panel's body");
+        assert_eq!(body.radius, 0.0, "square, like every window out there");
+
+        let edge = prims
+            .iter()
+            .find(|p| p.color == theme.border)
+            .expect("the panel's outline");
+        assert_eq!(
+            edge.bounds(),
+            body.bounds().inset(-3.0),
+            "the outline stands the desktop's own width outside the body"
+        );
+    }
+
+    /// An ink dot is a circle: its radius is half its own width, and no
+    /// rounding of the desktop's makes it a square.
+    #[test]
+    fn a_capsule_is_not_a_corner() {
+        let mut theme = Theme::light();
+        theme.rounding = 0.0;
+        let d = Dock::layout(VP, 1.0, &TOOLS, theme.inks.len());
+        let prims = d.prims(Tool::Pencil, 2, &theme);
+        let (cx, cy) = d.inks[2].center();
+        let dot = prims
+            .iter()
+            .find(|p| p.bounds().center() == (cx, cy) && p.color == theme.selection)
+            .expect("the ring around the chosen ink");
+        assert!(dot.radius > 0.0, "still round at a rounding of nothing");
     }
 
     #[test]

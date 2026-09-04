@@ -267,15 +267,17 @@ impl Props {
         theme: &Theme,
     ) -> Vec<Prim> {
         let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(RADIUS, s);
         let mut out = vec![
             Prim::soft(
                 self.rect.offset(0.0, SHADOW_OFFSET * s),
-                RADIUS * s,
+                corner,
                 SHADOW_FEATHER * s,
                 theme.shadow,
             ),
-            Prim::rounded(self.rect.inset(-s), RADIUS * s + s, theme.border),
-            Prim::rounded(self.rect, RADIUS * s, theme.panel),
+            Prim::rounded(self.rect.inset(-b), corner + b, theme.border),
+            Prim::rounded(self.rect, corner, theme.panel),
         ];
 
         // The brush's name, with a dot after it while it is off the
@@ -355,7 +357,7 @@ impl Props {
                 w: side,
                 h: side,
             };
-            out.push(Prim::rounded(knob.inset(-s), side / 2.0 + s, theme.border));
+            out.push(Prim::rounded(knob.inset(-b), side / 2.0 + b, theme.border));
             out.push(Prim::rounded(knob, side / 2.0, theme.panel));
 
             let baseline = atlas.baseline_in(f.value);

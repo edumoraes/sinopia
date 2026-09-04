@@ -272,15 +272,17 @@ impl Palette {
         theme: &Theme,
     ) -> Vec<Prim> {
         let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(RADIUS, s);
         let mut out = vec![
             Prim::soft(
                 self.rect.offset(0.0, SHADOW_OFFSET * s),
-                RADIUS * s,
+                corner,
                 SHADOW_FEATHER * s,
                 theme.shadow,
             ),
-            Prim::rounded(self.rect.inset(-s), RADIUS * s + s, theme.border),
-            Prim::rounded(self.rect, RADIUS * s, theme.panel),
+            Prim::rounded(self.rect.inset(-b), corner + b, theme.border),
+            Prim::rounded(self.rect, corner, theme.panel),
         ];
         self.preview_prims(sets, selected, brush, atlas, slot, icons, theme, &mut out);
 
@@ -297,9 +299,10 @@ impl Palette {
             // rounded box with the panel's own color laid back inside it.
             if (cell.set, cell.index) == selected {
                 let box_ = cell.rect.inset(CELL_INSET * s);
-                out.push(Prim::rounded(box_, CELL_RADIUS * s, theme.selection).clipped(self.band));
+                let cell = theme.corner(CELL_RADIUS, s);
+                out.push(Prim::rounded(box_, cell, theme.selection).clipped(self.band));
                 out.push(
-                    Prim::rounded(box_.inset(HELD_RING * s), CELL_RADIUS * s, theme.active_bg)
+                    Prim::rounded(box_.inset(HELD_RING * s), cell, theme.active_bg)
                         .clipped(self.band),
                 );
             }

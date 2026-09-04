@@ -128,9 +128,10 @@ impl Panel {
         slot: u32,
         theme: &Theme,
     ) -> Vec<Prim> {
+        let corner = theme.corner(RADIUS, 1.0);
         let mut out = vec![
-            Prim::soft(self.rect, RADIUS, 18.0, theme.shadow),
-            Prim::rounded(self.rect, RADIUS, theme.panel),
+            Prim::soft(self.rect, corner, 18.0, theme.shadow),
+            Prim::rounded(self.rect, corner, theme.panel),
         ];
         let baseline = atlas.baseline_in(self.title);
         for g in atlas.layout("Send to the agent", self.title.x, baseline) {
@@ -140,7 +141,7 @@ impl Panel {
             let picked = i == target;
             out.push(Prim::rounded(
                 *r,
-                ROW_RADIUS,
+                theme.corner(ROW_RADIUS, 1.0),
                 if picked { theme.active_bg } else { theme.panel },
             ));
             // An agent nothing can reach still takes the files; the row
@@ -161,10 +162,10 @@ impl Panel {
             }
         }
         if let (Some(rect), Some(field)) = (self.folder, folder) {
-            out.push(Prim::rounded(rect, ROW_RADIUS, theme.bg));
+            out.push(Prim::rounded(rect, theme.corner(ROW_RADIUS, 1.0), theme.bg));
             out.extend(field.prims(rect, atlas, slot, theme, false));
         }
-        out.push(Prim::rounded(self.line, ROW_RADIUS, theme.bg));
+        out.push(Prim::rounded(self.line, theme.corner(ROW_RADIUS, 1.0), theme.bg));
         out.extend(line.prims(self.line, atlas, slot, theme, true));
         out
     }
