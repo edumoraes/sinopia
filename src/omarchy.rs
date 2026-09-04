@@ -134,9 +134,13 @@ impl Style {
         f64::from((self.shell.spacing_scale * font).clamp(0.25, 4.0))
     }
 
-    /// The one size the chrome letters itself at, in logical px.
-    pub fn text_px(&self) -> f32 {
-        self.shell.base_size.clamp(1.0, 96.0)
+    /// The one size the chrome letters itself at, in logical px — or
+    /// `None` where no theme was found, which leaves the board the size
+    /// it has always lettered itself at, exactly as it keeps its own
+    /// colours.
+    pub fn text_px(&self) -> Option<f32> {
+        self.palette.as_ref()?;
+        Some(self.shell.base_size.clamp(1.0, 96.0))
     }
 }
 
@@ -402,10 +406,12 @@ fn bytes_of(hex: &str) -> Option<[u8; 3]> {
     Some(out)
 }
 
-/// Mixes two hex colours by byte, which is how the desktop's own shades
-/// are derived — a board deriving them in linear light would not land on
-/// the same `dark_background` the rest of the session is using.
-fn mix_hex(a: &str, b: &str, t: f32) -> String {
+/// Mixes two hex colours by byte, which is how the desktop mixes: its
+/// shades are derived this way and its fill alphas are composited this
+/// way, sRGB over sRGB. The same fraction taken in linear light comes out
+/// half again as bright, and chrome mixed that way would not match the
+/// shell sitting next to it.
+pub fn mix_hex(a: &str, b: &str, t: f32) -> String {
     let (Some(a), Some(b)) = (bytes_of(a), bytes_of(b)) else {
         return a.to_owned();
     };
@@ -715,20 +721,26 @@ color8 = "#565656"
 
     #[test]
     fn the_chrome_travels_with_the_type_when_the_theme_asks_it_to() {
-        let mut style = Style::default();
+        let mut style = Style {
+            palette: Palette::read(DARK, false),
+            ..Style::default()
+        };
         assert_eq!(style.chrome_scale(), 1.0, "an untouched theme moves nothing");
-        assert_eq!(style.text_px(), BASE_SIZE);
+        assert_eq!(style.text_px(), Some(BASE_SIZE));
 
         style.shell.base_size = 24.0;
         assert_eq!(style.chrome_scale(), 2.0);
-        assert_eq!(style.text_px(), 24.0);
+        assert_eq!(style.text_px(), Some(24.0));
 
         style.shell.spacing_with_font = false;
         assert_eq!(style.chrome_scale(), 1.0, "the type moves alone");
-        assert_eq!(style.text_px(), 24.0);
+        assert_eq!(style.text_px(), Some(24.0));
 
         style.shell.spacing_scale = 1.5;
         assert_eq!(style.chrome_scale(), 1.5);
+
+        // No theme, no size: the board letters itself as it always has.
+        assert_eq!(Style::default().text_px(), None);
     }
 
     /// A theme is on disk, or it is not; neither is a reason for the

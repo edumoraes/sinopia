@@ -1,0 +1,19 @@
+#!/bin/bash
+# Omarchy hook: tell a running omawhite that the desktop's look changed.
+#
+# Install into either hook directory — or both, since a font is as much
+# of the look as a colour:
+#
+#   ln -s "$PWD/contrib/omarchy/omawhite" ~/.config/omarchy/hooks/theme-set.d/omawhite
+#   ln -s "$PWD/contrib/omarchy/omawhite" ~/.config/omarchy/hooks/font-set.d/omawhite
+#
+# Without it the board still follows: it re-reads the theme whenever the
+# window comes back into focus, which is what happens the moment the
+# theme switcher gives the keyboard back. The hook only makes it
+# immediate, for a board left in sight on another monitor.
+#
+# `--theme` never opens a window: a board that is not running has nothing
+# to re-dress, and the next one to open reads the theme for itself.
+
+command -v omawhite >/dev/null || exit 0
+omawhite --theme >/dev/null 2>&1 || true

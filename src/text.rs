@@ -5,12 +5,17 @@
 //! use, and the shader's `texel * color` tints a glyph for free. What it
 //! adds is a sub-rectangle per glyph, which is why [`Prim`] carries `uv`.
 //!
-//! The face ships inside the binary: a whiteboard that cannot draw its
-//! own tab labels because a machine is missing a font is not local-first.
+//! The face is the desktop's where there is one — whatever fontconfig
+//! resolves `monospace` to, which is what `omarchy-font-set` writes and
+//! what the shell and every Qt app letter themselves with — and the
+//! bundled one otherwise. One ships inside the binary because a
+//! whiteboard that cannot draw its own tab labels for want of a font on
+//! the machine is not local-first.
 //!
 //! [`Prim`]: crate::scene::Prim
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::bitmap::Bitmap;
 use crate::scene::ScreenRect;
@@ -46,6 +51,15 @@ impl Font {
     pub fn bundled() -> Font {
         let settings = fontdue::FontSettings::default();
         Font(fontdue::Font::from_bytes(FACE, settings).expect("the bundled face parses"))
+    }
+
+    /// A face off the machine. `None` for a file that will not open or
+    /// will not parse — the caller falls back on [`Font::bundled`], which
+    /// is the whole reason one is bundled.
+    pub fn from_file(path: &Path) -> Option<Font> {
+        let bytes = std::fs::read(path).ok()?;
+        let settings = fontdue::FontSettings::default();
+        Some(Font(fontdue::Font::from_bytes(bytes, settings).ok()?))
     }
 }
 

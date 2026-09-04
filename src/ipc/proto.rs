@@ -34,8 +34,13 @@ pub enum Request {
         dir: PathBuf,
         formats: Vec<ExportFormat>,
     },
+    /// With colours, the host is dressing the board in its own three.
+    /// Without them, it is saying the desktop's theme has changed and
+    /// the board should read it again — which is what a `theme-set` hook
+    /// calls. Optional rather than a second op: the field is declared
+    /// either way, so the schema stays closed.
     Theme {
-        colors: ThemeColors,
+        colors: Option<ThemeColors>,
     },
     Shutdown,
 }
@@ -149,11 +154,13 @@ pub fn request_line(req: &Request) -> String {
             "export"
         }
         Request::Theme { colors } => {
-            let mut c = Map::new();
-            c.insert("bg".into(), colors.bg.clone().into());
-            c.insert("fg".into(), colors.fg.clone().into());
-            c.insert("accent".into(), colors.accent.clone().into());
-            map.insert("colors".into(), Value::Object(c));
+            if let Some(colors) = colors {
+                let mut c = Map::new();
+                c.insert("bg".into(), colors.bg.clone().into());
+                c.insert("fg".into(), colors.fg.clone().into());
+                c.insert("accent".into(), colors.accent.clone().into());
+                map.insert("colors".into(), Value::Object(c));
+            }
             "theme"
         }
     };
@@ -245,9 +252,9 @@ fn take_formats(map: &mut Map<String, Value>) -> anyhow::Result<Vec<ExportFormat
         .collect()
 }
 
-fn take_colors(map: &mut Map<String, Value>) -> anyhow::Result<ThemeColors> {
+fn take_colors(map: &mut Map<String, Value>) -> anyhow::Result<Option<ThemeColors>> {
     let Some(value) = map.remove("colors") else {
-        anyhow::bail!("field colors missing");
+        return Ok(None);
     };
     let Value::Object(mut m) = value else {
         anyhow::bail!("field colors must be an object");
@@ -258,7 +265,7 @@ fn take_colors(map: &mut Map<String, Value>) -> anyhow::Result<ThemeColors> {
         accent: take_string(&mut m, "accent")?,
     };
     reject_leftovers(&m, "theme.colors")?;
-    Ok(colors)
+    Ok(Some(colors))
 }
 
 fn reject_leftovers(map: &Map<String, Value>, ctx: &str) -> anyhow::Result<()> {
@@ -358,13 +365,24 @@ mod tests {
         assert_eq!(
             got,
             Request::Theme {
-                colors: ThemeColors {
+                colors: Some(ThemeColors {
                     bg: "#1a1a1a".into(),
                     fg: "#eee".into(),
                     accent: "#7aa".into(),
-                }
+                }),
             }
         );
+    }
+
+    /// No colours is not a missing field: it is the host saying the
+    /// desktop's own theme has changed and the board should read it
+    /// again. The schema stays closed either way.
+    #[test]
+    fn theme_without_colours_asks_the_desktop() {
+        let got = parse_request(r##"{ "v": 1, "op": "theme" }"##).unwrap();
+        assert_eq!(got, Request::Theme { colors: None });
+        let err = parse_request(r##"{ "v": 1, "op": "theme", "mode": "dark" }"##).unwrap_err();
+        assert!(err.to_string().contains("mode"), "{err}");
     }
 
     #[test]
@@ -458,12 +476,13 @@ mod tests {
                 formats: vec![ExportFormat::Png, ExportFormat::Md],
             },
             Request::Theme {
-                colors: ThemeColors {
+                colors: Some(ThemeColors {
                     bg: "#1a1a1a".into(),
                     fg: "#eee".into(),
                     accent: "#7aa".into(),
-                },
+                }),
             },
+            Request::Theme { colors: None },
         ];
         for req in all {
             let line = request_line(&req);

@@ -33,6 +33,10 @@ pub struct Cli {
     #[arg(long, group = "action")]
     pub shutdown: bool,
 
+    /// Read the desktop's theme again (requires a live instance)
+    #[arg(long, group = "action")]
+    pub theme: bool,
+
     /// Socket path (default: $XDG_RUNTIME_DIR/omawhite.sock)
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
@@ -54,6 +58,10 @@ pub enum Action {
     OpenFile(PathBuf),
     Export(PathBuf),
     Shutdown,
+    /// The desktop's theme has changed. What a `theme-set` hook calls,
+    /// and — like `Export` and `Shutdown` — never a reason to open a
+    /// window: there is nothing to re-dress until there is one.
+    Theme,
 }
 
 impl Cli {
@@ -68,6 +76,8 @@ impl Cli {
             Action::Export(dir.clone())
         } else if self.shutdown {
             Action::Shutdown
+        } else if self.theme {
+            Action::Theme
         } else {
             Action::Default
         }
@@ -99,6 +109,7 @@ mod tests {
             Action::Export(PathBuf::from("/tmp/proj"))
         );
         assert_eq!(parse(&["--shutdown"]).unwrap().action(), Action::Shutdown);
+        assert_eq!(parse(&["--theme"]).unwrap().action(), Action::Theme);
         assert_eq!(
             parse(&["--open-file", "/home/you/plan.omawhite"])
                 .unwrap()
@@ -114,6 +125,8 @@ mod tests {
             &["--new", "--shutdown"][..],
             &["--open", "x", "--export", "/tmp"][..],
             &["--export", "/tmp", "--shutdown"][..],
+            &["--theme", "--new"][..],
+            &["--theme", "--shutdown"][..],
             &["--open", "x", "--open-file", "/tmp/a"][..],
             &["--new", "--open-file", "/tmp/a"][..],
         ] {

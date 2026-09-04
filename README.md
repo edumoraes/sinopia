@@ -10,12 +10,14 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames, and
 export to the agent:
 
-- `cargo build` clean, `cargo test` with 697 tests.
+- `cargo build` clean, `cargo test` with 728 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
 - Dotted background fixed in world space; light theme matching the
-  reference look, re-derived from `op: theme`.
+  reference look, re-derived from `op: theme` — or from the theme the
+  desktop is actually wearing, which is the whole of what Omarchy
+  changes when a theme is set (see **The Omarchy theme** below).
 - Images: `Ctrl+V` pastes what the clipboard holds (PNG, JPEG, WebP) as an
   `image` element — centered on the pointer, one world unit per pixel,
   shrunk to 80% of the visible world if it would not fit, and selected.
@@ -379,6 +381,48 @@ muted — three randomness amounts whose scale the sets contradict, and
 the whole of Paint, which asks the canvas to read back the ink it has
 already laid.
 
+## The Omarchy theme
+
+The board wears what the desktop wears. `omarchy-theme-set` stages a
+theme whole into `~/.local/state/omarchy/current/theme/`, and the board
+reads the same files every other app on the desktop reads:
+
+| what | where it comes from |
+|---|---|
+| the palette | `colors.toml` — `mode`, `accent`, `muted`, the grounds and the foregrounds, by name |
+| borders and fills | `shell.toml` `[controls]`, with `~/.config/omarchy/shell.toml` laid over it |
+| the type | fontconfig's `monospace` (what `omarchy-font-set` writes) at `[font] base-size` |
+| the corner | Hyprland's `decoration:rounding` |
+
+Omarchy paints every surface in `background` and separates it with a
+border. That does not close on a board, whose canvas *is* the ground, so
+the desktop's own darker ground is the canvas and the panels stand on it
+in `background` — which on the `white` theme lands on exactly the
+off-white-under-near-white this board's reference look was drawn as. The
+rest follows the section each surface belongs to: the strip is `[bar]`,
+the dock and the panels are `[menu]`, and what is inside them is
+`[controls]`, down to the alpha a selected control is filled at.
+
+Corners scale by `rounding / 8`, the 8 the chrome was drawn to: at
+Omarchy's own 0 the board goes square like every window around it. A
+capsule is not a corner — a slider's track, a scrollbar's thumb, the
+layers handle and an ink dot keep their own shape.
+
+The **dock's inks do not move**. They are what a board is marked up in,
+not what the interface is painted with, and a fixed red goes on matching
+itself across every theme.
+
+A change arrives two ways. The board re-reads the theme whenever the
+window comes back into focus — which is the moment the theme switcher
+gives the keyboard back, and asks nothing of anybody. For a board left
+in sight, `contrib/omarchy/omawhite` is a hook to symlink into
+`~/.config/omarchy/hooks/theme-set.d/` (and `font-set.d/`); it runs
+`omawhite --theme`, which never opens a window. Nothing on disk changes
+either way: a theme is what the window is painted with.
+
+Without Omarchy — no theme files, no Hyprland — nothing is guessed and
+the board opens in the colours, corners and type it has always had.
+
 ## Controls
 
 | Input | Effect |
@@ -433,6 +477,7 @@ Zoom range is 10%–1000%. The camera is saved with the board.
 ```sh
 cargo run                      # most recent board (or a new one)
 cargo run -- --new             # new board
+cargo run -- --theme           # re-read the desktop's theme (needs a live board)
 cargo test                     # full suite
 ```
 
@@ -460,7 +505,9 @@ src/scene.rs     View (camera + viewport + scale), document → SDF prims, frame
 src/geom.rs      affine maps, corners and oriented frames (pure, tested)
 src/select.rs    selection: element frames, hit-testing, handles, transforms, overlay prims (pure, tested)
 src/grid.rs      dotted background (pure, tested)
-src/theme.rs     palette: light default, derived from op: theme (pure, tested)
+src/theme.rs     palette: light default, derived from op: theme or from the desktop's own theme (pure, tested)
+src/omarchy.rs   the desktop's look: colors.toml, shell.toml, the monospace face, Hyprland's rounding (parsing pure, tested)
+contrib/omarchy/omawhite  a theme-set / font-set hook, installed by hand
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
 src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)

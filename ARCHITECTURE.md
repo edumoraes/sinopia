@@ -158,8 +158,17 @@ The plugin speaks intent. The child does not send strokes over the socket.
 { "v": 1, "op": "raise" }
 { "v": 1, "op": "export", "dir": "/home/you/Work/foo", "formats": ["png", "json", "md"] }
 { "v": 1, "op": "theme", "colors": { "bg": "#1a1a1a", "fg": "#eee", "accent": "#7aa" } }
+{ "v": 1, "op": "theme" }
 { "v": 1, "op": "shutdown" }
 ```
+
+`colors` is optional, and its absence is not a missing field but a
+different sentence: with colours a host is dressing the board in its
+own three; without them it is saying the *desktop's* theme has changed
+and the board should read it again. The schema stays closed either way —
+an optional field is a declared field, and an unknown one is still an
+error. `omawhite --theme` is the CLI half, and an Omarchy
+`theme-set` hook is what calls it.
 
 ### App → plugin
 
@@ -699,7 +708,11 @@ Future promotion to `kind: service` (resident child, the overlay only raises the
 - Persistence + gallery via plugin.
 - Undo/redo, internal copy/paste.
 - Export png + json + md with allowlist.
-- Theme: Omarchy colors via `op: theme` (the plugin reads the palette and sends it).
+- Theme: the whole of what Omarchy changes when a theme is set — the palette
+  by its own names out of `colors.toml`, the border and fill tokens out of
+  `shell.toml`, fontconfig's `monospace` and Hyprland's rounding — read by the
+  binary itself and re-read on focus or on `op: theme` with no colours. The
+  plugin's own three colours still work, for a host that is not Omarchy.
 - Single-instance + CLI.
 
 **1.1**

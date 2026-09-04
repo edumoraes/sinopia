@@ -10,7 +10,7 @@
 //! `&Theme` — so the desktop reaches the whole chrome without a single
 //! signature changing.
 
-use crate::omarchy::{Mode, Palette, Shell, Style};
+use crate::omarchy::{Mode, Palette, Shell, Style, mix_hex};
 use crate::scene::{Rgba, mix, parse_color, to_hex, try_parse_color, with_alpha};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,13 +113,21 @@ impl Theme {
     /// is none — dressed either way in the desktop's border and corner,
     /// since those come from the session and not from the theme.
     pub fn from_style(style: &Style) -> Theme {
-        let mut theme = match &style.palette {
+        let theme = match &style.palette {
             Some(p) => Theme::from_omarchy(p, &style.shell),
             None => Theme::light(),
         };
-        theme.rounding = style.corner.clamp(0.0, 4.0);
-        theme.border_px = style.shell.border_width;
-        theme
+        theme.wearing(style)
+    }
+
+    /// The border and the corner the session is drawing with, over a
+    /// palette that came from somewhere else — the plugin's three
+    /// colours are still how a host that is not Omarchy dresses the
+    /// board, and they say nothing about either.
+    pub fn wearing(mut self, style: &Style) -> Theme {
+        self.rounding = style.corner.clamp(0.0, 4.0);
+        self.border_px = style.shell.border_width;
+        self
     }
 
     /// A panel's or a button's corner, in physical px: the radius it was
@@ -182,10 +190,11 @@ impl Theme {
             // The token the theme names, rather than a mix of its own.
             muted: parse_color(&p.muted),
             // A fill alpha over the surface is what Omarchy means by a
-            // selected control, and compositing it here rather than
-            // leaving it translucent is what lets the rest of the palette
-            // be compared against it.
-            active_bg: mix(panel, ink, shell.selected_fill),
+            // selected control. Compositing it here rather than leaving
+            // it translucent is what lets the rest of the palette be
+            // compared against it — and it is done in the desktop's own
+            // sRGB, since that is where the number was chosen.
+            active_bg: parse_color(&mix_hex(&p.background, &ink_hex, shell.selected_fill)),
             selection: accent,
             lifted: parse_color(LIFTED),
             handle: panel,
@@ -385,13 +394,21 @@ mod tests {
         assert_eq!(t.icon, t.ink, "an icon is lettered in the same ink");
     }
 
+    /// Mixed where the number was chosen: sRGB over sRGB, as Qt
+    /// composites. In linear light the same fraction comes out half
+    /// again as bright, and the chrome would not match the shell.
     #[test]
     fn a_selected_control_is_the_ink_at_the_shells_own_fill() {
         let mut style = wearing(DARK);
         style.shell.selected_fill = 0.5;
         let t = Theme::from_style(&style);
-        assert_eq!(t.active_bg, mix(t.panel, t.ink, 0.5));
+        assert_eq!(t.active_bg, parse_color("#897f80"));
         assert_eq!(t.active_bg[3], 1.0, "composited, not left translucent");
+        assert_ne!(
+            t.active_bg,
+            mix(t.panel, t.ink, 0.5),
+            "and not in linear light, which would be brighter"
+        );
     }
 
     /// The inks are what a board is marked up in, not what the interface

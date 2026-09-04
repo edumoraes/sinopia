@@ -65,6 +65,9 @@ fn main() -> anyhow::Result<()> {
             formats: vec![ExportFormat::Png, ExportFormat::Json, ExportFormat::Md],
         },
         Action::Shutdown => Request::Shutdown,
+        // No colours: the desktop's own theme, read again by the
+        // instance that is drawing with it.
+        Action::Theme => Request::Theme { colors: None },
     };
 
     // §5: a second omawhite becomes a command on the socket, not a second window.
@@ -86,6 +89,12 @@ fn main() -> anyhow::Result<()> {
         }
         Action::Shutdown => {
             log::info!("no instance running; nothing to shut down");
+            Ok(())
+        }
+        // A board that is not open has nothing to re-dress, and the one
+        // opened next reads the theme for itself.
+        Action::Theme => {
+            log::info!("no instance running; nothing to re-theme");
             Ok(())
         }
         Action::Default | Action::New | Action::Open(_) | Action::OpenFile(_) => {

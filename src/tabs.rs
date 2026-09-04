@@ -30,7 +30,8 @@ const NEW: f32 = 30.0;
 const NEW_STROKE: f32 = 1.4;
 const NEW_ARM: f32 = 5.0;
 const TAB_RADIUS: f32 = 7.0;
-const LABEL: f32 = 13.0;
+/// The size the strip letters itself at where the desktop names none.
+pub const LABEL: f32 = 13.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabHit {
@@ -208,9 +209,11 @@ impl Tabs {
         out
     }
 
-    /// Label size in physical px: what the atlas has to be built at.
-    pub fn label_px(scale: f64) -> u32 {
-        (LABEL * scale as f32).round().max(1.0) as u32
+    /// A logical text size at this display scale, in physical px: what
+    /// the atlas has to be built at. The one place the chrome's one size
+    /// is rounded, whether it came from the desktop or from [`LABEL`].
+    pub fn label_px(px: f32, scale: f64) -> u32 {
+        (px * scale as f32).round().max(1.0) as u32
     }
 }
 
@@ -296,7 +299,7 @@ mod tests {
     use crate::text::Font;
 
     fn atlas() -> Atlas {
-        Atlas::build(&Font::bundled(), Tabs::label_px(1.0))
+        Atlas::build(&Font::bundled(), Tabs::label_px(LABEL, 1.0))
     }
 
     fn viewport(w: u32) -> Viewport {
@@ -485,7 +488,7 @@ mod tests {
 
     #[test]
     fn the_scale_factor_carries_through() {
-        let a = Atlas::build(&Font::bundled(), Tabs::label_px(2.0));
+        let a = Atlas::build(&Font::bundled(), Tabs::label_px(LABEL, 2.0));
         let t = Tabs::layout(viewport(2400), 2.0, &a, &labels(&["notes"]), 0);
         assert_eq!(t.strip.h, HEIGHT * 2.0);
         assert_eq!(t.tabs[0].rect.w, MAX_TAB * 2.0);
@@ -494,8 +497,8 @@ mod tests {
 
     #[test]
     fn the_label_size_follows_the_display() {
-        assert_eq!(Tabs::label_px(1.0), LABEL as u32);
-        assert_eq!(Tabs::label_px(2.0), LABEL as u32 * 2);
+        assert_eq!(Tabs::label_px(LABEL, 1.0), LABEL as u32);
+        assert_eq!(Tabs::label_px(LABEL, 2.0), LABEL as u32 * 2);
     }
 
     #[test]

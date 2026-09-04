@@ -941,7 +941,7 @@ mod tests {
     use crate::text::Font;
 
     fn atlas() -> Atlas {
-        Atlas::build(&Font::bundled(), Tabs::label_px(1.0))
+        Atlas::build(&Font::bundled(), Tabs::label_px(crate::tabs::LABEL, 1.0))
     }
 
     fn layers(n: usize) -> Vec<Layer> {

@@ -36,6 +36,7 @@ use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
+use crate::omarchy::{self, Style};
 use crate::palette::{self, Palette};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
@@ -131,6 +132,12 @@ struct App {
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     theme: Theme,
+    /// What the desktop says the window should look like. Kept beside
+    /// the palette it derives because the face, the one text size and
+    /// the chrome's own scale are read from it directly.
+    style: Style,
+    /// Where the desktop's theme is read from, so it can be read again.
+    home: String,
     font: Font,
     /// Every brush there is, and which one `B` paints with. One library
     /// for the window, whichever tab is in front, as in Photoshop.
@@ -815,6 +822,27 @@ impl App {
         self.activate(self.open.len() - 1);
     }
 
+    /// Reads the desktop's theme again and puts the window back on in
+    /// it: the palette, the border and the corner, the face and the one
+    /// size the chrome letters itself at. The atlas goes because it is
+    /// built from a face at a size and the theme names both — the next
+    /// frame builds the new one.
+    fn restyle(&mut self) {
+        self.style = omarchy::read(&self.home);
+        log::info!(
+            "theme: {}",
+            match &self.style.palette {
+                Some(p) => format!("{} on {}", p.foreground, p.background),
+                None => "the board's own".to_owned(),
+            }
+        );
+        self.theme = Theme::from_style(&self.style);
+        self.font = face(&self.style);
+        self.atlas = None;
+        self.dress_editors();
+        self.redraw();
+    }
+
     /// Tells every tab what a new frame's ground is laid in. The theme is
     /// the window's, so a frame drawn after `op: theme` is born the new
     /// surface and the ones already down keep the colour they were given.
@@ -921,8 +949,27 @@ impl App {
         })
     }
 
+    /// What the chrome is laid out at: the window's own scale factor
+    /// times the theme's spacing scale. The canvas, the grid and the
+    /// selection handles keep the window's alone — panel density is not
+    /// zoom.
+    fn chrome(&self, view: &View) -> f64 {
+        view.scale * self.style.chrome_scale()
+    }
+
+    /// Where the canvas begins: everything that hangs off the strip has
+    /// to measure it the same way the strip does.
+    fn strip_top(&self, view: &View) -> f32 {
+        (tabs::HEIGHT * self.chrome(view) as f32).round()
+    }
+
     fn dock(&self, view: &View) -> Dock {
-        Dock::layout(view.viewport, view.scale, &Tool::ALL, self.theme.inks.len())
+        Dock::layout(
+            view.viewport,
+            self.chrome(view),
+            &Tool::ALL,
+            self.theme.inks.len(),
+        )
     }
 
     /// The strip, or `None` before the atlas exists — there is nothing to
@@ -936,7 +983,7 @@ impl App {
             .collect();
         Some(Tabs::layout(
             view.viewport,
-            view.scale,
+            self.chrome(view),
             atlas,
             &labels,
             self.active,
@@ -950,7 +997,7 @@ impl App {
             return None;
         }
         let atlas = self.atlas.as_ref()?;
-        let top = (tabs::HEIGHT * view.scale as f32).round();
+        let top = self.strip_top(view);
         // The panel shows one flat stack, whichever one the editor is
         // standing in — which is what keeps its lift, its slides and its
         // scroll from having to know that frames exist at all.
@@ -958,7 +1005,7 @@ impl App {
         let name = inside.and_then(|id| self.frame_name(id));
         Some(Panel::layout(
             view.viewport,
-            view.scale,
+            self.chrome(view),
             top,
             atlas,
             self.doc().stack(inside),
@@ -983,10 +1030,10 @@ impl App {
     /// only thing that says the panel is there.
     fn handle(&self, view: &View) -> Option<layers::Handle> {
         let atlas = self.atlas.as_ref()?;
-        let top = (tabs::HEIGHT * view.scale as f32).round();
+        let top = self.strip_top(view);
         Some(layers::Handle::layout(
             view.viewport,
-            view.scale,
+            self.chrome(view),
             top,
             atlas,
             self.layers_shown,
@@ -1000,10 +1047,10 @@ impl App {
         if self.editor().tool() != Tool::Brush {
             return None;
         }
-        let top = (tabs::HEIGHT * view.scale as f32).round();
+        let top = self.strip_top(view);
         Some(Props::layout(
             view.viewport,
-            view.scale,
+            self.chrome(view),
             top,
             self.props_open,
         ))
@@ -1019,13 +1066,12 @@ impl App {
         }
         // The panel hangs off whatever stands above it: the properties
         // bar when the brush is in hand, the strip otherwise.
-        let top = self.props(view).map_or_else(
-            || (tabs::HEIGHT * view.scale as f32).round(),
-            |b| b.rect.y + b.rect.h,
-        );
+        let top = self
+            .props(view)
+            .map_or_else(|| self.strip_top(view), |b| b.rect.y + b.rect.h);
         Some(Palette::layout(
             view.viewport,
-            view.scale,
+            self.chrome(view),
             top,
             self.brushes.sets(),
             self.palette_scroll,
@@ -1366,7 +1412,10 @@ impl App {
     /// unless the one in hand already matches.
     fn ensure_atlas(&mut self) {
         let Some(window) = &self.window else { return };
-        let px = Tabs::label_px(window.scale_factor());
+        let px = Tabs::label_px(
+            self.style.text_px().unwrap_or(tabs::LABEL),
+            window.scale_factor(),
+        );
         if self.atlas.as_ref().is_some_and(|a| a.px() == px) {
             return;
         }
@@ -1510,7 +1559,7 @@ impl App {
         if let (Some(sending), Some(atlas)) = (&self.sending, self.atlas.as_ref()) {
             let panel = send::Panel::layout(
                 view.viewport,
-                view.scale,
+                self.chrome(view),
                 sending.agents.len(),
                 sending.folder.is_some(),
             );
@@ -1562,7 +1611,7 @@ impl App {
         if let Some(sending) = &self.sending {
             let panel = send::Panel::layout(
                 view.viewport,
-                view.scale,
+                self.chrome(&view),
                 sending.agents.len(),
                 sending.folder.is_some(),
             );
@@ -2198,6 +2247,13 @@ impl App {
             }
             WindowEvent::Focused(false) => self.focus_lost(),
             WindowEvent::Focused(true) => {
+                // The theme switcher takes the keyboard and gives it
+                // back, so coming back into focus is the moment a theme
+                // that changed under the window has to be noticed. One
+                // stat, and a re-read only where it moved.
+                if omarchy::stamp(&self.home) != self.style.stamp {
+                    self.restyle();
+                }
                 // The person has just come back from the terminal they
                 // may have started an agent in.
                 if let Some(sending) = self.sending.as_mut() {
@@ -2312,15 +2368,30 @@ impl App {
                 }
             }
             Request::Shutdown => self.quit(),
-            Request::Theme { colors } => {
-                self.theme = Theme::from_hex(&colors.bg, &colors.fg, &colors.accent);
-                self.dress_editors();
-                self.redraw();
-            }
+            Request::Theme { colors } => match colors {
+                // The plugin's own three, which is how a host that is not
+                // Omarchy dresses the board.
+                Some(c) => {
+                    self.theme = Theme::from_hex(&c.bg, &c.fg, &c.accent).wearing(&self.style);
+                    self.dress_editors();
+                    self.redraw();
+                }
+                None => self.restyle(),
+            },
             // The server answers `denied` without forwarding; never reaches here.
             Request::Export { .. } | Request::Ping => {}
         }
     }
+}
+
+/// The face the desktop letters itself with, or the bundled one where
+/// there is none this build can read.
+fn face(style: &Style) -> Font {
+    style
+        .face
+        .as_deref()
+        .and_then(Font::from_file)
+        .unwrap_or_else(Font::bundled)
 }
 
 /// The pages `docs/boards/` in `cwd` already holds. A directory that is
@@ -2383,6 +2454,11 @@ pub fn run(
     // a first run with nothing behind it — an untitled one that has not
     // been written anywhere yet, and will not be until it is drawn on.
     let store_brushes = store.brushes();
+    // What the desktop is wearing, where the desktop is Omarchy. Every
+    // piece falls back on its own, so a machine without it opens the
+    // board in the colours it has always had.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let style = omarchy::read(&home);
     let mut app = App {
         store,
         open: vec![{
@@ -2399,8 +2475,10 @@ pub fn run(
         proxy: event_loop.create_proxy(),
         window: None,
         gfx: None,
-        theme: Theme::light(),
-        font: Font::bundled(),
+        theme: Theme::from_style(&style),
+        font: face(&style),
+        style,
+        home,
         brushes: {
             // The shipped sets, dressed in whatever the person kept of
             // them: a library file is a list of exceptions, so a brush

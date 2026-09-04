@@ -389,7 +389,7 @@ mod tests {
     const TOP: f32 = 34.0;
 
     fn atlas() -> Atlas {
-        Atlas::build(&Font::bundled(), Tabs::label_px(1.0))
+        Atlas::build(&Font::bundled(), Tabs::label_px(crate::tabs::LABEL, 1.0))
     }
 
     fn mid(r: ScreenRect) -> (f64, f64) {
