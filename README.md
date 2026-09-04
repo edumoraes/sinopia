@@ -420,8 +420,13 @@ in sight, `contrib/omarchy/omawhite` is a hook to symlink into
 `omawhite --theme`, which never opens a window. Nothing on disk changes
 either way: a theme is what the window is painted with.
 
-Without Omarchy — no theme files, no Hyprland — nothing is guessed and
-the board opens in the colours, corners and type it has always had.
+The split is worth stating: the palette and the text size come from the
+theme, so they need one — without theme files the board keeps the
+colours and the size it has always had. The face and the corner come
+from the session, so they follow wherever the session answers: on a
+machine with fontconfig the board letters itself in `monospace`, and on
+Hyprland it cuts its corners to the desktop's. Nothing is guessed
+anywhere.
 
 ## Controls
 

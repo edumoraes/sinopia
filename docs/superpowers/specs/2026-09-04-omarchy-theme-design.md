@@ -182,9 +182,22 @@ So that nobody derives it twice:
 - **The marquee's alpha.** `selection-fill-alpha` is 0.35 and describes
   a text selection inside an input. The marquee is canvas overlay at
   0.1 and stays there.
+- **`[controls] normal-fill-alpha`, and `colors.toml`'s `selection`.**
+  Both want a surface this window does not draw: nothing in the chrome
+  has an idle fill distinct from the panel it sits on, and the one
+  editable field draws a caret and no selection. Consuming them would
+  mean *adding* those surfaces, which is a design change and not a
+  theme mapping.
 - **`general:border_size`.** It is the width Hyprland draws *around the
   window*, which the compositor draws already. The chrome's own borders
   are `[controls]`'.
+
+One line falls out of all this and is worth stating plainly, because it
+decides what a machine without Omarchy sees: **the palette and the text
+size come from the theme, so they need one; the face and the corner come
+from the session, so they apply wherever the session answers.** It is
+exactly the split `Theme::from_style` makes when it lays `wearing` over a
+palette or over the board's own.
 
 ## 8. Tests
 
