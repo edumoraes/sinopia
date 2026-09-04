@@ -9,7 +9,7 @@
 
 use crate::editor::Tool;
 use crate::scene::{self, Prim, Rgba, ScreenRect, Viewport};
-use crate::theme::Theme;
+use crate::theme::{INKS, Theme};
 
 // Logical px.
 pub const BUTTON: f32 = 36.0;
@@ -177,8 +177,7 @@ impl Dock {
             ));
         }
         for (i, cell) in self.inks.iter().enumerate() {
-            let color = theme
-                .inks
+            let color = INKS
                 .get(i)
                 .map_or(theme.ink, |hex| scene::parse_color(hex));
             let (cx, cy) = cell.center();
@@ -194,6 +193,11 @@ impl Dock {
                     theme.panel,
                 ));
             }
+            // A swatch wears the same hairline every other surface in
+            // the chrome does, and needs it more: white ink on a light
+            // panel, or black on a dark one, is the colour of the thing
+            // under it — a slot nobody can see, let alone aim at.
+            out.push(Prim::circle(cx, cy, INK_DOT * s / 2.0 + b, theme.border));
             out.push(Prim::circle(cx, cy, INK_DOT * s / 2.0, color));
         }
         out
@@ -398,7 +402,7 @@ mod tests {
         let mut theme = Theme::light();
         theme.rounding = 0.0;
         theme.border_px = 3.0;
-        let d = Dock::layout(VP, 1.0, &TOOLS, theme.inks.len());
+        let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
         let prims = d.prims(Tool::Pencil, 0, &theme);
 
         let body = prims
@@ -424,7 +428,7 @@ mod tests {
     fn a_capsule_is_not_a_corner() {
         let mut theme = Theme::light();
         theme.rounding = 0.0;
-        let d = Dock::layout(VP, 1.0, &TOOLS, theme.inks.len());
+        let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
         let prims = d.prims(Tool::Pencil, 2, &theme);
         let (cx, cy) = d.inks[2].center();
         let dot = prims
@@ -434,14 +438,45 @@ mod tests {
         assert!(dot.radius > 0.0, "still round at a rounding of nothing");
     }
 
+    /// The palette holds a white and a black, and one of them always
+    /// matches the panel it stands on. The hairline is what keeps the
+    /// slot visible on either kind of theme.
+    #[test]
+    fn every_swatch_wears_a_hairline_so_the_neutrals_read() {
+        for theme in [
+            Theme::light(),
+            Theme::from_hex("#101010", "#e6e6e6", "#7aa2f7"),
+        ] {
+            let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
+            let prims = d.prims(Tool::Pencil, 0, &theme);
+            for cell in &d.inks {
+                let at = cell.center();
+                let edge = prims
+                    .iter()
+                    .find(|p| p.color == theme.border && p.bounds().center() == at)
+                    .expect("a hairline under the swatch");
+                assert!(
+                    edge.radius > INK_DOT / 2.0,
+                    "it stands outside the dot, the way every border here does"
+                );
+                let dot = prims
+                    .iter()
+                    .rposition(|p| p.bounds().center() == at && p.radius == INK_DOT / 2.0)
+                    .expect("the dot itself");
+                let under = prims.iter().position(|p| std::ptr::eq(p, edge)).unwrap();
+                assert!(under < dot, "and behind it, not over it");
+            }
+        }
+    }
+
     #[test]
     fn the_chosen_ink_wears_a_ring_and_every_dot_is_its_own_colour() {
         let theme = Theme::light();
-        let d = Dock::layout(VP, 1.0, &TOOLS, theme.inks.len());
+        let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
         let prims = d.prims(Tool::Pencil, 2, &theme);
         for (i, cell) in d.inks.iter().enumerate() {
             let (cx, cy) = cell.center();
-            let want = scene::parse_color(&theme.inks[i]);
+            let want = scene::parse_color(INKS[i]);
             assert!(
                 prims
                     .iter()

@@ -410,9 +410,15 @@ panel is a surface and not a knob. A capsule is not a corner, though:
 a slider's track, a scrollbar's thumb and an ink dot keep their own
 shape.
 
-The **dock's inks do not move**. They are what a board is marked up in,
-not what the interface is painted with, and a fixed red goes on matching
-itself across every theme.
+The **dock's inks do not move**. Black, white and five colours, a
+constant no part of a theme reaches: they are what a board is marked up
+in, not what the interface is painted with, and ink picked today has to
+be the same colour tomorrow. The canvas answers one question about
+them — which of the two neutrals a board is *born* holding, since a
+black pencil on a dark ground draws a line nobody can see. It is asked
+once, at birth; a theme set later leaves the ink in the hand alone.
+Every swatch wears the chrome's hairline, because on any theme one
+neutral is the colour of the panel under it.
 
 A change arrives two ways. The board re-reads the theme whenever the
 window comes back into focus — which is the moment the theme switcher

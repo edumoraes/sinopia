@@ -47,7 +47,7 @@ use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
 use crate::text::{Atlas, Font};
-use crate::theme::Theme;
+use crate::theme::{INKS, Theme};
 
 /// The longest step the panel's easing takes in one frame. A window
 /// that has been idle wakes with a huge gap since the last frame;
@@ -978,7 +978,7 @@ impl App {
             view.viewport,
             self.chrome(view),
             &Tool::ALL,
-            self.theme.inks.len(),
+            INKS.len(),
         )
     }
 
@@ -1101,13 +1101,10 @@ impl App {
     }
 
     /// The ink the next stroke lays, as the document writes it. The
-    /// theme's own when nothing has been picked, and when the theme
-    /// changes under a pick that is no longer there.
+    /// palette is fixed, so an index can only fall outside it if one is
+    /// ever seated from somewhere that is not a click on a cell.
     fn ink_hex(&self) -> &str {
-        self.theme
-            .inks
-            .get(self.ink)
-            .unwrap_or(&self.theme.ink_hex)
+        INKS.get(self.ink).copied().unwrap_or(INKS[0])
     }
 
     /// The same ink, as the canvas draws it.
@@ -1730,12 +1727,12 @@ impl App {
                 }
             }
             Some(Hit::Ink(i)) => {
-                if button == Button::Left && i < self.theme.inks.len() {
+                if button == Button::Left && i < INKS.len() {
                     // A colour the window is holding has to go on
                     // something: with a frame selected it is that
                     // frame's ground, and otherwise it is the ink new
                     // strokes are laid in.
-                    let hex = self.theme.inks[i].clone();
+                    let hex = INKS[i].to_owned();
                     let (editor, doc) = self.active();
                     let selected: Vec<String> = editor.selection().to_vec();
                     let mut painted = false;
@@ -2476,6 +2473,8 @@ pub fn run(
     // board in the colours it has always had.
     let home = std::env::var("HOME").unwrap_or_default();
     let style = omarchy::read(&home);
+    let theme = Theme::from_style(&style);
+    let ink = theme.first_ink();
     let mut app = App {
         store,
         open: vec![{
@@ -2492,7 +2491,7 @@ pub fn run(
         proxy: event_loop.create_proxy(),
         window: None,
         gfx: None,
-        theme: Theme::from_style(&style),
+        theme,
         font: face(&style),
         style,
         home,
@@ -2508,7 +2507,7 @@ pub fn run(
         palette_shown: true,
         palette_scroll: 0.0,
         props_open: false,
-        ink: 0,
+        ink,
         brushes_dirty: false,
         grab: None,
         icon_slot: 0,

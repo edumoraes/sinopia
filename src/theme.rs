@@ -39,9 +39,6 @@ pub struct Theme {
     pub lifted: Rgba,
     /// Handle body.
     pub handle: Rgba,
-    /// The inks the dock offers, as hex — the theme's own first, then
-    /// the colours a board is marked up in. See [`INKS`].
-    pub inks: Vec<String>,
     /// How far a panel's corner is cut, as a share of the family the
     /// chrome was drawn as: Hyprland's `decoration:rounding` against the
     /// 8 it was drawn to. At 0 the chrome is square, like every window on
@@ -58,12 +55,24 @@ const FALLBACK_INK: &str = "#808080";
 /// What a card being dragged is outlined in, on any theme.
 const LIFTED: &str = "#3b82f6";
 
-/// The colours a board is marked up in, after the theme's own ink. Fixed
-/// and not derived: a red drawn out of whatever three colors the plugin
-/// sent might not be red, and a person reaching for the red one means
-/// red. Enough of them to tell things apart, few enough to fit under
-/// the tools without a picker.
-pub const INKS: [&str; 5] = ["#e5484d", "#f5a524", "#30a46c", "#3b82f6", "#8e4ec6"];
+/// The colours a board is marked up in. Fixed and not derived — none of
+/// them, the two neutrals included: a red drawn out of whatever three
+/// colours the plugin sent might not be red, and a person reaching for
+/// the red one means red. The same argument reaches black and white,
+/// which is why they are here and not taken from the theme's own
+/// foreground the way the first ink once was. A board is a document:
+/// ink chosen today has to mean the same colour tomorrow, and a palette
+/// that moved when the desktop did would quietly break that. The
+/// neutrals lead because they are what a board is drawn in and the rest
+/// is emphasis. Enough of them to tell things apart, few enough to fit
+/// under the tools without a picker.
+pub const INKS: [&str; 7] = [
+    "#000000", "#ffffff", "#e5484d", "#f5a524", "#30a46c", "#3b82f6", "#8e4ec6",
+];
+
+/// Where the two neutrals sit in [`INKS`].
+const BLACK_INK: usize = 0;
+const WHITE_INK: usize = 1;
 
 impl Theme {
     pub fn light() -> Theme {
@@ -78,7 +87,6 @@ impl Theme {
             None => FALLBACK_INK.to_owned(),
         };
         let ink = parse_color(&ink_hex);
-        let ink_hex_for_inks = ink_hex.clone();
         let light = luminance(bg_c) > 0.5;
         // The dock floats above the canvas: lighter than it on both kinds
         // of theme (toward white on light, toward the ink on dark).
@@ -103,7 +111,6 @@ impl Theme {
             selection: parse_color(accent),
             lifted: parse_color(LIFTED),
             handle: panel,
-            inks: inks(ink_hex_for_inks),
             rounding: 1.0,
             border_px: 1.0,
         }
@@ -128,6 +135,20 @@ impl Theme {
         self.rounding = style.corner.clamp(0.0, 4.0);
         self.border_px = style.shell.border_width;
         self
+    }
+
+    /// The ink a board is born holding. The palette itself does not move
+    /// with the theme, so the canvas answers only which of the two
+    /// neutrals reads against it — a black pencil on a dark ground draws
+    /// a line nobody can see, and a white one on a light ground the
+    /// same. Asked once, at birth: a theme set later leaves the ink in
+    /// the hand exactly where it is, the way it leaves the tool.
+    pub fn first_ink(&self) -> usize {
+        if luminance(self.bg) > 0.5 {
+            BLACK_INK
+        } else {
+            WHITE_INK
+        }
     }
 
     /// A panel's or a button's corner, in physical px: the radius it was
@@ -198,10 +219,6 @@ impl Theme {
             selection: accent,
             lifted: parse_color(LIFTED),
             handle: panel,
-            // The dock's inks are what a board is *marked up* in, not
-            // what the interface is painted with: a fixed red goes on
-            // matching itself across every theme.
-            inks: inks(ink_hex),
             rounding: 1.0,
             border_px: 1.0,
         }
@@ -209,12 +226,6 @@ impl Theme {
 }
 
 /// The theme's own ink, then the ones a board is marked up in.
-fn inks(own: String) -> Vec<String> {
-    std::iter::once(own)
-        .chain(INKS.iter().map(|&s| s.to_owned()))
-        .collect()
-}
-
 fn luminance(c: Rgba) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
@@ -305,22 +316,53 @@ mod tests {
         assert_eq!(t.ink, parse_color(&t.ink_hex));
     }
 
+    /// Every ink is written into a document, so every one of them has to
+    /// parse — and the two neutrals have to be exactly the neutrals.
     #[test]
-    fn the_first_ink_is_the_theme_s_own_and_the_rest_are_fixed() {
-        let light = Theme::light();
-        assert_eq!(light.inks[0], light.ink_hex, "the board's usual ink");
-        assert_eq!(light.inks.len(), 1 + INKS.len());
-        // A red drawn out of whatever three colors the plugin sent
-        // might not be red, so the rest do not move with the theme.
-        let dark = Theme::from_hex("#101010", "#e6e6e6", "#7aa2f7");
-        assert_ne!(dark.inks[0], light.inks[0]);
-        assert_eq!(dark.inks[1..], light.inks[1..]);
-        for hex in &light.inks {
+    fn the_inks_are_a_fixed_list_and_the_neutrals_lead_it() {
+        assert_eq!(INKS[BLACK_INK], "#000000");
+        assert_eq!(INKS[WHITE_INK], "#ffffff");
+        for hex in INKS {
             assert!(
                 try_parse_color(hex).is_some(),
                 "{hex} is written into documents"
             );
         }
+    }
+
+    /// The palette is the board's, not the desktop's: a colour picked
+    /// today has to be the same colour tomorrow, whatever the desktop
+    /// went and put on. Nothing about a theme can reach this list, which
+    /// is why the test can only say that it is a constant — and that is
+    /// the whole of the guarantee.
+    #[test]
+    fn no_theme_moves_the_docks_inks() {
+        let themes = [
+            Theme::light(),
+            Theme::from_hex("#101010", "#e6e6e6", "#7aa2f7"),
+            Theme::from_style(&wearing(DARK)),
+            Theme::from_style(&wearing(WHITE)),
+        ];
+        for t in themes {
+            // The ink the chrome letters itself in still follows the
+            // theme; what a board is marked up in does not.
+            assert_eq!(t.ink, parse_color(&t.ink_hex));
+            assert_eq!(INKS.len(), 7, "black, white, and the five");
+        }
+    }
+
+    /// A black pencil on a dark ground draws a line nobody can see, so
+    /// the board is born on the neutral that reads against its canvas.
+    /// The list itself never moves — only which of the two it opens on.
+    #[test]
+    fn a_board_is_born_on_the_neutral_that_reads_against_its_canvas() {
+        assert_eq!(Theme::light().first_ink(), BLACK_INK);
+        assert_eq!(
+            Theme::from_hex("#101010", "#e6e6e6", "#7aa2f7").first_ink(),
+            WHITE_INK
+        );
+        assert_eq!(Theme::from_style(&wearing(DARK)).first_ink(), WHITE_INK);
+        assert_eq!(Theme::from_style(&wearing(WHITE)).first_ink(), BLACK_INK);
     }
 
     /// The panel is a mix, and a hex carries eight bits a channel, so
@@ -411,18 +453,6 @@ mod tests {
         );
     }
 
-    /// The inks are what a board is marked up in, not what the interface
-    /// is painted with. Only the theme's own moves.
-    #[test]
-    fn the_docks_inks_do_not_move_with_the_interface() {
-        let dark = Theme::from_style(&wearing(DARK));
-        let white = Theme::from_style(&wearing(WHITE));
-        assert_eq!(dark.inks[0], "#e6d9db");
-        assert_eq!(white.inks[0], "#000000");
-        assert_eq!(dark.inks[1..], white.inks[1..]);
-        assert_eq!(dark.inks[1..], *Theme::light().inks[1..].to_vec());
-    }
-
     /// A corner and a border width belong to the session, not to the
     /// palette, so they are worn whether or not there is one.
     #[test]
@@ -464,6 +494,5 @@ mod tests {
         let style = wearing("background = \"#101010\"\nforeground = \"perhaps\"\n");
         let t = Theme::from_style(&style);
         assert!(try_parse_color(&t.ink_hex).is_some(), "{:?}", t.ink_hex);
-        assert_eq!(t.inks[0], t.ink_hex);
     }
 }
