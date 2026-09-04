@@ -7,7 +7,10 @@
 //! different projects, so a focused window cannot answer which agent is
 //! meant. The list can.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use anyhow::Context as _;
 
 /// The process names this looks for. A name it does not know is not an
 /// agent, and guessing would put a text editor in the list.
@@ -185,6 +188,109 @@ fn scan_proc() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The most a line may carry. A prompt is a direction, not a document.
+pub const PROMPT_MAX: usize = 2000;
+
+/// The one new power this feature has is writing bytes into a live
+/// terminal, so the line is printable characters and nothing else: no
+/// C0, no ESC, not even a tab or a newline. Anything else is refused
+/// rather than stripped — an instruction the person cannot see being
+/// altered is worse than one that does not go.
+pub fn sanitize(line: &str) -> anyhow::Result<String> {
+    let line = line.trim();
+    anyhow::ensure!(!line.is_empty(), "the instruction is empty");
+    anyhow::ensure!(
+        line.len() <= PROMPT_MAX,
+        "the instruction is longer than {PROMPT_MAX} bytes"
+    );
+    if let Some(c) = line.chars().find(|c| c.is_control()) {
+        anyhow::bail!(
+            "the instruction holds a control character (U+{:04X})",
+            c as u32
+        );
+    }
+    Ok(line.to_owned())
+}
+
+/// What the agent is handed: the person's own line, then the files under
+/// a heading that says what they are. The board's own text is nowhere in
+/// it — the document is inventory, the instruction is a deliberate act
+/// (§9.4).
+pub fn prompt(line: &str, files: &[String]) -> String {
+    let mut out = format!("{line}\n\nDiagram exported from the board:\n");
+    for f in files {
+        out.push_str(&format!("  {f}\n"));
+    }
+    out
+}
+
+/// The paths as the agent will type them: it is running in `cwd` and the
+/// files were written under it, so an absolute path would only say where
+/// the person's home is.
+pub fn relative(files: &[PathBuf], cwd: &Path) -> Vec<String> {
+    files
+        .iter()
+        .map(|f| {
+            f.strip_prefix(cwd)
+                .unwrap_or(f)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+/// Hands `text` to a running agent. The text never becomes part of a
+/// shell command: herdr takes it as an argument and tmux takes it
+/// through a buffer on stdin, so a line holding `$(…)` or `;` has
+/// nowhere to run.
+pub fn send(agent: &Agent, text: &str) -> anyhow::Result<()> {
+    match &agent.reach {
+        Reach::None => anyhow::bail!("nothing here knows how to reach that agent"),
+        Reach::Herdr(pane) => {
+            let out = Command::new("herdr")
+                .args(["agent", "prompt", pane, text])
+                .output()
+                .context("running herdr agent prompt")?;
+            anyhow::ensure!(
+                out.status.success(),
+                "herdr refused the prompt: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            Ok(())
+        }
+        Reach::Tmux(pane) => {
+            let buffer = "omawhite";
+            // load-buffer reads the text from stdin, so it is never a
+            // word on a command line.
+            let mut child = Command::new("tmux")
+                .args(["load-buffer", "-b", buffer, "-"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("running tmux load-buffer")?;
+            {
+                use std::io::Write as _;
+                let mut stdin = child.stdin.take().context("tmux took no stdin")?;
+                stdin.write_all(text.as_bytes())?;
+            }
+            anyhow::ensure!(child.wait()?.success(), "tmux would not take the buffer");
+            // -p is what wraps it in a bracketed paste when the TUI has
+            // asked for one. Without it a multi-line prompt submits at
+            // its first newline and becomes several turns.
+            let pasted = Command::new("tmux")
+                .args(["paste-buffer", "-p", "-b", buffer, "-t", pane])
+                .status()
+                .context("running tmux paste-buffer")?;
+            anyhow::ensure!(pasted.success(), "tmux would not paste into {pane}");
+            let sent = Command::new("tmux")
+                .args(["send-keys", "-t", pane, "Enter"])
+                .status()
+                .context("running tmux send-keys")?;
+            anyhow::ensure!(sent.success(), "tmux would not submit in {pane}");
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +377,69 @@ mod tests {
     fn an_agent_is_labelled_by_what_it_is_and_where_it_is_working() {
         let a = Agent::at("claude", "/home/e/Work/board", Reach::None);
         assert_eq!(a.label(), "claude · /home/e/Work/board");
+    }
+
+    #[test]
+    fn a_plain_line_goes_through_trimmed() {
+        assert_eq!(sanitize("  build this flow  ").unwrap(), "build this flow");
+        assert_eq!(
+            sanitize("acentuação e emoji 🎨").unwrap(),
+            "acentuação e emoji 🎨"
+        );
+    }
+
+    #[test]
+    fn an_escape_is_refused_rather_than_stripped() {
+        // The send writes bytes into a live terminal. An instruction the
+        // person cannot see being altered is worse than one that does
+        // not go.
+        assert!(sanitize("clear\x1b[2J").is_err());
+        assert!(sanitize("a\x07b").is_err());
+        assert!(sanitize("two\nlines").is_err(), "a line is one line");
+        assert!(sanitize("two\ttabs").is_err(), "not even a tab");
+        // What sits at either end is whitespace the trim takes, exactly
+        // as a leading space is: the line is measured after it, so what
+        // is refused is what would actually have been sent.
+        assert_eq!(sanitize("\t tab \n").unwrap(), "tab");
+    }
+
+    #[test]
+    fn an_empty_line_is_refused() {
+        assert!(sanitize("   ").is_err());
+    }
+
+    #[test]
+    fn a_line_past_the_cap_is_refused() {
+        assert!(sanitize(&"x".repeat(PROMPT_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn the_prompt_puts_the_line_first_and_the_paths_under_it() {
+        let files = vec![
+            "docs/boards/auth/board.png".to_owned(),
+            "docs/boards/auth/board.json".to_owned(),
+        ];
+        let p = prompt("implement this flow", &files);
+        assert!(p.starts_with("implement this flow\n"));
+        assert!(p.contains("\n  docs/boards/auth/board.png\n"));
+        assert!(p.contains("Diagram exported from the board:"));
+    }
+
+    #[test]
+    fn the_prompt_names_the_files_relative_to_where_the_agent_is() {
+        // The agent is running in the directory the files were written
+        // into, so an absolute path would say where the person's home
+        // is for no reason.
+        let files = vec!["docs/boards/a/board.png".to_owned()];
+        assert!(!prompt("go", &files).contains("/home/"));
+    }
+
+    #[test]
+    fn a_relative_path_is_what_the_files_reduce_to() {
+        let files = [std::path::PathBuf::from(
+            "/home/e/Work/a/docs/boards/x/board.png",
+        )];
+        let rel = relative(&files, std::path::Path::new("/home/e/Work/a"));
+        assert_eq!(rel, ["docs/boards/x/board.png"]);
     }
 }
