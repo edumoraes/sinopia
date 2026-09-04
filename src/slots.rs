@@ -20,8 +20,11 @@ use crate::text::Atlas;
 use crate::theme::Theme;
 
 // Logical px.
-/// Wide enough for the icon and a brush's name beside it.
-pub const WIDTH: f32 = 132.0;
+/// Wide enough for the icon and a brush's name beside it. Sketchbook's
+/// names run long — "Textured Watercolor" fits no strip that is still a
+/// strip — so a name still truncates; this is as wide as it is worth
+/// going to shorten the ellipsis.
+pub const WIDTH: f32 = 150.0;
 /// From the window's left edge, and from whatever is above the strip.
 pub const MARGIN: f32 = 12.0;
 pub const PADDING: f32 = 8.0;
@@ -34,15 +37,19 @@ const DAB_ROW: f32 = 10.0;
 const ROW_GAP: f32 = 6.0;
 /// The two buttons are this square.
 const BUTTON: f32 = 22.0;
-/// One seat, and the icon centered in it.
-const CELL: f32 = 32.0;
-const SLOT_ICON: f32 = 26.0;
+/// One seat: the row it takes, the box drawn in it, and the icon
+/// centered in that. The row is wider than the box so the number has a
+/// gutter of its own — written over the art, it would be lost against
+/// half the icons Sketchbook ships.
+const CELL: f32 = 36.0;
+const BOX: f32 = 36.0;
+const SLOT_ICON: f32 = 28.0;
 const CELL_RADIUS: f32 = 6.0;
 const CELL_INSET: f32 = 1.0;
 /// How thick the ring around the brush in the hand is.
 const HELD_RING: f32 = 1.5;
-/// The seat's number, in from its bottom-right corner.
-const NUMBER_INSET: f32 = 3.0;
+/// Between a seat's number and the box it belongs to.
+const NUMBER_GAP: f32 = 8.0;
 const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
 const ICON_BOX: f32 = 15.0;
@@ -132,9 +139,9 @@ impl Strip {
             .map(|i| Seat {
                 n: (i + 1) % SLOTS,
                 rect: ScreenRect {
-                    x: inner_x + (inner_w - CELL * s) / 2.0,
+                    x: inner_x,
                     y: column_y + i as f32 * CELL * s,
-                    w: CELL * s,
+                    w: inner_w,
                     h: CELL * s,
                 },
             })
@@ -309,7 +316,14 @@ impl Strip {
         let cell = theme.corner(CELL_RADIUS, s);
         for seat in &self.seats {
             let at = slots.get(seat.n).copied().flatten();
-            let box_ = seat.rect.inset(CELL_INSET * s);
+            let side = BOX * s;
+            let box_ = ScreenRect {
+                x: seat.rect.x + (seat.rect.w - side) / 2.0,
+                y: seat.rect.y + (seat.rect.h - side) / 2.0,
+                w: side,
+                h: side,
+            }
+            .inset(CELL_INSET * s);
 
             // The brush in the hand wears a ring, which is a filled
             // rounded box with the panel's own color laid back inside it.
@@ -326,25 +340,26 @@ impl Strip {
             if let Some((set, index)) = at
                 && let Some(preset) = sets.get(set).and_then(|q| q.presets.get(index))
             {
-                let side = SLOT_ICON * s;
+                let art_side = SLOT_ICON * s;
                 let art = ScreenRect {
-                    x: seat.rect.x + (seat.rect.w - side) / 2.0,
-                    y: seat.rect.y + (seat.rect.h - side) / 2.0,
-                    w: side,
-                    h: side,
+                    x: box_.x + (box_.w - art_side) / 2.0,
+                    y: box_.y + (box_.h - art_side) / 2.0,
+                    w: art_side,
+                    h: art_side,
                 };
                 out.push(Prim::sprite(art, icon_uv(preset.icon), icons).clipped(self.band));
             }
 
-            // The number is read, never clicked, so it is drawn muted and
-            // tucked into the corner the icon leaves.
+            // The number is read, never clicked, so it is drawn muted —
+            // and in the gutter beside the box rather than over the art,
+            // which is the only place it is legible on every icon.
             let digit = seat.n.to_string();
             let w = atlas.measure(&digit);
             let row = ScreenRect {
-                x: seat.rect.x + seat.rect.w - NUMBER_INSET * s - w,
-                y: seat.rect.y + seat.rect.h / 2.0,
+                x: box_.x - NUMBER_GAP * s - w,
+                y: seat.rect.y,
                 w,
-                h: seat.rect.h / 2.0,
+                h: seat.rect.h,
             };
             let baseline = atlas.baseline_in(row);
             for g in atlas.layout(&digit, row.x, baseline) {

@@ -41,8 +41,13 @@ const GAP: f32 = 8.0;
 const FIELD_W: f32 = LABEL_W + GAP + TRACK_W + GAP + VALUE_W;
 /// The brush's name, at the head of the bar.
 const NAME_W: f32 = 92.0;
-/// The dot beside a name that has been moved off its factory settings.
+/// The dot beside a name that has been moved off its factory settings,
+/// and the arrow after it that takes the edit back. The run they share
+/// is reserved whether or not there is an edit, so the line does not
+/// jump the moment a slider moves.
 const DOT: f32 = 5.0;
+const RESET: f32 = 20.0;
+const MARK: f32 = DOT + GAP + RESET;
 const TRACK_H: f32 = 4.0;
 const KNOB: f32 = 11.0;
 /// The chevron's button, at the bar's right end.
@@ -70,6 +75,11 @@ pub enum Hit {
     Slider(usize),
     /// The chevron: the Advanced layout drops or folds away.
     Toggle,
+    /// The arrow beside the dot: the brush goes back to what it shipped
+    /// as. It answers whether or not there is an edit to take back,
+    /// which costs nothing — resetting an untouched brush is already a
+    /// no-op, and the bar swallows the click either way.
+    Reset,
     /// Bar chrome: swallowed, never reaches the canvas.
     Bar,
 }
@@ -99,6 +109,8 @@ pub struct Props {
     /// chevron.
     pub bar: ScreenRect,
     pub name: ScreenRect,
+    /// The arrow that takes an edit back, after the name and its dot.
+    pub reset: ScreenRect,
     pub toggle: ScreenRect,
     /// The basic pair when it is closed, the whole body when it is open.
     pub fields: Vec<Field>,
@@ -116,7 +128,8 @@ impl Props {
         let y = (top + MARGIN * s).round();
         // The same width either way: the line must not jump when the
         // chevron drops what is under it.
-        let closed_w = PADDING + NAME_W + GAP + 2.0 * FIELD_W + GAP + TOGGLE + PADDING;
+        let closed_w =
+            PADDING + NAME_W + GAP + MARK + GAP + 2.0 * FIELD_W + GAP + TOGGLE + PADDING;
         let open_w = PADDING + 2.0 * FIELD_W + COL_GAP + PADDING;
         let w = closed_w.max(open_w) * s;
         let bar = ScreenRect {
@@ -136,6 +149,12 @@ impl Props {
             y: bar.y,
             w: NAME_W * s,
             h: bar.h,
+        };
+        let reset = ScreenRect {
+            x: name.x + (NAME_W + GAP + DOT + GAP) * s,
+            y: bar.y + (bar.h - RESET * s) / 2.0,
+            w: RESET * s,
+            h: RESET * s,
         };
 
         // A field is laid out from its left edge: label, track, number.
@@ -199,7 +218,7 @@ impl Props {
                 .iter()
                 .enumerate()
                 .map(|(i, &property)| {
-                    let fx = name.x + (NAME_W + GAP) * s + i as f32 * FIELD_W * s;
+                    let fx = name.x + (NAME_W + GAP + MARK + GAP) * s + i as f32 * FIELD_W * s;
                     field(property, fx, bar)
                 })
                 .collect();
@@ -213,6 +232,7 @@ impl Props {
             },
             bar,
             name,
+            reset,
             toggle,
             fields,
             headings,
@@ -227,6 +247,9 @@ impl Props {
         }
         if self.toggle.contains(x, y) {
             return Some(Hit::Toggle);
+        }
+        if self.reset.contains(x, y) {
+            return Some(Hit::Reset);
         }
         // A field is grabbed by the whole of it but its label: the track
         // is a hairline, and the number beside it reads as part of it.
@@ -283,19 +306,19 @@ impl Props {
         // The brush's name, with a dot after it while it is off the
         // settings it shipped with — the tab strip's own way of saying
         // there is something here that was not here before.
-        let room = self.name.w - if edited { (DOT + GAP) * s } else { 0.0 };
-        let text = atlas.truncate(name, room);
+        let text = atlas.truncate(name, self.name.w);
         let baseline = atlas.baseline_in(self.name);
-        let mut pen = self.name.x;
-        for g in atlas.layout(&text, pen, baseline) {
-            pen = g.rect.x + g.rect.w;
+        for g in atlas.layout(&text, self.name.x, baseline) {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink).clipped(self.name));
         }
+        // Both stand in the run reserved after the name rather than
+        // trailing the words: a button that moves with the length of a
+        // brush's name is a button nobody can aim at twice.
         if edited {
             let d = DOT * s;
             out.push(Prim::rounded(
                 ScreenRect {
-                    x: pen + GAP * s,
+                    x: self.reset.x - (GAP + DOT) * s,
                     y: self.name.y + (self.name.h - d) / 2.0,
                     w: d,
                     h: d,
@@ -303,6 +326,7 @@ impl Props {
                 d / 2.0,
                 theme.icon_active,
             ));
+            out.extend(icon_prims(RESET_ARROW, self.reset, s, theme.icon));
         }
 
         // The chevron points the way the panel would go: down to drop
@@ -373,6 +397,23 @@ impl Props {
 /// A chevron pointing down, to drop the Advanced layout; turned over
 /// when it is already down.
 const CHEVRON: &[&[(f32, f32)]] = &[&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]];
+/// An arrow curling back on itself: the brush as it shipped.
+const RESET_ARROW: &[&[(f32, f32)]] = &[
+    &[
+        (4.0, 12.0),
+        (4.6, 8.4),
+        (6.6, 5.6),
+        (9.7, 4.2),
+        (13.1, 4.4),
+        (16.6, 6.4),
+        (18.9, 9.6),
+        (19.4, 13.4),
+        (18.0, 16.9),
+        (15.2, 19.3),
+        (11.6, 20.0),
+    ],
+    &[(4.0, 7.0), (4.0, 12.0), (9.0, 12.0)],
+];
 
 fn icon_prims(lines: &[&[(f32, f32)]], r: ScreenRect, s: f32, color: Rgba) -> Vec<Prim> {
     scene::icon_prims(lines, r, 24.0, ICON_BOX, ICON_STROKE, s, color)
@@ -381,6 +422,7 @@ fn icon_prims(lines: &[&[(f32, f32)]], r: ScreenRect, s: f32, color: Rgba) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brush::Library;
     use crate::tabs::Tabs;
     use crate::text::Font;
 
@@ -502,11 +544,21 @@ mod tests {
             plain.iter().any(|q| q.color == theme.panel && q.bounds() == p.rect),
             "bar body"
         );
-        assert_eq!(
-            marked.len(),
-            plain.len() + 1,
-            "an edited brush is marked with one dot"
-        );
+        // Everything between the name and the sliders is the mark: the
+        // dot that says the brush moved, and the arrow that puts it back.
+        let mark = ScreenRect {
+            x: p.name.x + p.name.w,
+            y: p.bar.y,
+            w: p.reset.x + p.reset.w - (p.name.x + p.name.w),
+            h: p.bar.h,
+        };
+        let inside = |list: &[Prim]| {
+            list.iter()
+                .filter(|q| mark.inset(-1.0).contains_rect(&q.bounds()))
+                .count()
+        };
+        assert_eq!(inside(&plain), 0, "a brush as it shipped carries no mark");
+        assert!(inside(&marked) > 1, "an edited one is marked, and offered the arrow");
     }
 
     #[test]
@@ -601,5 +653,56 @@ mod tests {
         let p = Props::layout(Viewport { w: 320, h: 800 }, 1.0, TOP, true);
         assert!(!p.fields.is_empty());
         assert!(p.rect.w > 0.0 && p.rect.h > 0.0);
+    }
+
+    #[test]
+    fn the_bar_carries_the_arrow_that_takes_an_edit_back() {
+        let bar = Props::layout(VP, 1.0, TOP, false);
+        let mid = |r: ScreenRect| (f64::from(r.x + r.w / 2.0), f64::from(r.y + r.h / 2.0));
+        let (x, y) = mid(bar.reset);
+        assert_eq!(bar.hit(x, y), Some(Hit::Reset));
+        assert!(
+            bar.reset.x > bar.name.x + bar.name.w,
+            "after the name and its dot"
+        );
+        assert!(
+            bar.reset.x + bar.reset.w < bar.fields[0].label.x,
+            "and clear of the sliders"
+        );
+    }
+
+    #[test]
+    fn the_arrow_is_drawn_only_while_there_is_an_edit_to_take_back() {
+        let theme = Theme::light();
+        let atlas = atlas();
+        let brush = *Library::default().brush();
+        let bar = Props::layout(VP, 1.0, TOP, false);
+        let inside = |list: &[Prim]| {
+            list.iter()
+                .filter(|q| bar.reset.inset(-1.0).contains_rect(&q.bounds()))
+                .count()
+        };
+        assert_eq!(
+            inside(&bar.prims("Textured Pencil", false, &brush, &atlas, 7, &theme)),
+            0,
+            "nothing to take back, nothing drawn"
+        );
+        assert!(
+            inside(&bar.prims("Textured Pencil", true, &brush, &atlas, 7, &theme)) > 0,
+            "the arrow appears beside the dot"
+        );
+    }
+
+    #[test]
+    fn the_bar_is_the_same_width_whether_the_brush_is_edited_or_not() {
+        // The rect is what layout answers with; only the drawing knows
+        // about the edit, so the line cannot jump when a slider moves.
+        let bar = Props::layout(VP, 1.0, TOP, false);
+        let theme = Theme::light();
+        let atlas = atlas();
+        let brush = *Library::default().brush();
+        let plain = bar.prims("Textured Pencil", false, &brush, &atlas, 7, &theme);
+        let edited = bar.prims("Textured Pencil", true, &brush, &atlas, 7, &theme);
+        assert_eq!(plain[2].bounds(), edited[2].bounds(), "the body is one width");
     }
 }

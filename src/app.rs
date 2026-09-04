@@ -38,6 +38,7 @@ use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::omarchy::{self, Style};
 use crate::palette::{self, Palette};
+use crate::slots::{self, Strip};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
 use crate::scene::{self, Frame, ImageSlots, Prim, Rgba, Shapes, View, Viewport, with_alpha};
@@ -144,10 +145,13 @@ struct App {
     brushes: Library,
     /// `Shift+L`, or the handle beside it: the layers panel is up.
     layers_shown: bool,
-    /// `Shift+B`: the brush palette is up. It only shows with the brush
+    /// `Shift+B`: the brush strip is up. It only shows with the brush
     /// in hand, so this is what shuts it without putting the brush down.
+    /// The library is opened from inside the strip, so it goes too.
     palette_shown: bool,
-    /// How far down the shelf the palette is looking, in physical px.
+    /// The strip's chevron: the library stands open beside it.
+    library_shown: bool,
+    /// How far down the shelf the library is looking, in physical px.
     palette_scroll: f32,
     /// Brush Properties' Advanced layout is dropped under the bar.
     props_open: bool,
@@ -652,7 +656,7 @@ impl App {
             self.scroll = panel.scroll();
         }
         if let Some(view) = self.view()
-            && let Some(pal) = self.palette(&view)
+            && let Some(pal) = self.library(&view)
         {
             self.palette_scroll = pal.scroll();
         }
@@ -706,9 +710,9 @@ impl App {
         if self.shown_brush == Some(held) {
             return;
         }
-        self.shown_brush = Some(held);
         let Some(view) = self.view() else { return };
-        let Some(pal) = self.palette(&view) else { return };
+        let Some(pal) = self.library(&view) else { return };
+        self.shown_brush = Some(held);
         let (set, index) = held;
         self.palette_scroll = pal.scroll_showing(self.brushes.sets(), set, index);
     }
@@ -1069,26 +1073,37 @@ impl App {
         ))
     }
 
-    /// The brush palette, when the brush is in hand and the panel is up.
-    /// It is the tool's own chrome: no other tool has a use for it, so it
+    /// The brush strip, when the brush is in hand and it is up. It is
+    /// the tool's own chrome: no other tool has a use for it, so it
     /// comes and goes with the tool rather than being toggled on top of
     /// one that ignores it.
-    fn palette(&self, view: &View) -> Option<Palette> {
+    fn strip(&self, view: &View) -> Option<Strip> {
         if !self.palette_shown || self.editor().tool() != Tool::Brush {
             return None;
         }
-        // The panel hangs off whatever stands above it: the properties
-        // bar when the brush is in hand, the strip otherwise.
-        let top = self
-            .props(view)
-            .map_or_else(|| self.strip_top(view), |b| b.rect.y + b.rect.h);
+        Some(Strip::layout(view.viewport, self.chrome(view), self.above(view)))
+    }
+
+    /// The brush library, when the strip's chevron has opened it. It
+    /// stands to the right of the strip with canvas between them, so a
+    /// brush can be carried from one to the other.
+    fn library(&self, view: &View) -> Option<Palette> {
+        let strip = self.strip(view).filter(|_| self.library_shown)?;
         Some(Palette::layout(
             view.viewport,
             self.chrome(view),
-            top,
+            self.above(view),
+            strip.rect.x + strip.rect.w + palette::MARGIN * self.chrome(view) as f32,
             self.brushes.sets(),
             self.palette_scroll,
         ))
+    }
+
+    /// Where the left-hand panels hang from: the properties bar when the
+    /// brush is in hand, the tab strip otherwise.
+    fn above(&self, view: &View) -> f32 {
+        self.props(view)
+            .map_or_else(|| self.strip_top(view), |b| b.rect.y + b.rect.h)
     }
 
     /// Whether `screen` is over the strip, the handle, either panel or
@@ -1099,7 +1114,8 @@ impl App {
             || self.handle(view).is_some_and(|h| h.hit(x, y))
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
             || self.props(view).and_then(|b| b.hit(x, y)).is_some()
-            || self.palette(view).and_then(|p| p.hit(x, y)).is_some()
+            || self.strip(view).and_then(|s| s.hit(x, y)).is_some()
+            || self.library(view).and_then(|p| p.hit(x, y)).is_some()
             || self.dock(view).hit(x, y).is_some()
     }
 
@@ -1115,13 +1131,28 @@ impl App {
         scene::parse_color(self.ink_hex())
     }
 
-    /// A click on the brush palette.
+    /// A click on the brush library.
     fn palette_hit(&mut self, hit: palette::Hit) {
         match hit {
             palette::Hit::Brush(set, index) => self.brushes.select(set, index),
-            palette::Hit::Properties => self.props_open = !self.props_open,
-            palette::Hit::Reset => self.brushes.reset(),
             palette::Hit::Panel => return,
+        }
+        self.brushes_dirty = true;
+    }
+
+    /// A click on the brush strip.
+    fn strip_hit(&mut self, hit: slots::Hit) {
+        match hit {
+            // An empty seat holds nothing to take up, and the library
+            // opening is the window's business rather than the brushes'.
+            slots::Hit::Slot(n) if !self.brushes.take_slot(n) => return,
+            slots::Hit::Slot(_) => {}
+            slots::Hit::Properties => self.props_open = !self.props_open,
+            slots::Hit::Library => {
+                self.library_shown = !self.library_shown;
+                return;
+            }
+            slots::Hit::Panel => return,
         }
         self.brushes_dirty = true;
     }
@@ -1145,6 +1176,11 @@ impl App {
             props::Hit::Slider(i) => {
                 self.grab = Some(i);
                 self.drag_field(bar, i, x);
+            }
+            props::Hit::Reset => {
+                self.brushes.reset();
+                self.brushes_dirty = true;
+                self.keep_brushes();
             }
             props::Hit::Bar => {}
         }
@@ -1521,11 +1557,23 @@ impl App {
             self.dock_icon_slot,
             &self.theme,
         ));
-        if let (Some(pal), Some(atlas)) = (self.palette(view), self.atlas.as_ref()) {
+        if let (Some(pal), Some(atlas)) = (self.library(view), self.atlas.as_ref()) {
             frame.extend(pal.prims(
                 self.brushes.sets(),
                 self.brushes.selected(),
+                atlas,
+                self.atlas_slot,
+                self.icon_slot,
+                &self.theme,
+            ));
+        }
+        if let (Some(strip), Some(atlas)) = (self.strip(view), self.atlas.as_ref()) {
+            frame.extend(strip.prims(
+                self.brushes.sets(),
+                self.brushes.selected(),
+                self.brushes.slots(),
                 self.brushes.brush(),
+                None,
                 atlas,
                 self.atlas_slot,
                 self.icon_slot,
@@ -1725,7 +1773,17 @@ impl App {
             }
             return self.update_cursor_icon();
         }
-        if let Some(pal) = self.palette(&view)
+        if let Some(strip) = self.strip(&view)
+            && let Some(hit) = strip.hit(x, y)
+        {
+            if button == Button::Left {
+                self.strip_hit(hit);
+                self.keep_brushes();
+                self.redraw();
+            }
+            return self.update_cursor_icon();
+        }
+        if let Some(pal) = self.library(&view)
             && let Some(hit) = pal.hit(x, y)
         {
             if button == Button::Left {
@@ -1878,8 +1936,8 @@ impl App {
         {
             return self.scroll_panel(-delta.1);
         }
-        // So does the palette, over its own shelf.
-        if let Some(pal) = self.palette(&view)
+        // So does the library, over its own shelf.
+        if let Some(pal) = self.library(&view)
             && pal.hit(cursor.0, cursor.1).is_some()
         {
             let next = (self.palette_scroll - delta.1 as f32).clamp(0.0, pal.max_scroll());
@@ -2521,6 +2579,7 @@ pub fn run(
         },
         layers_shown: false,
         palette_shown: true,
+        library_shown: false,
         palette_scroll: 0.0,
         props_open: false,
         ink,

@@ -1,20 +1,20 @@
-//! The brush palette: Sketchbook's Brush Library on the left of the
-//! canvas. Every set stands one under the next in a single scroll — a
-//! heading, then its brushes as a grid of icons, six across — and above
-//! them a preview of the brush in the hand: its own icon, its name, the
-//! set it came off, and a dab of what it actually paints. Pure — `app`
-//! asks where a click landed and what to draw.
+//! The brush library: Sketchbook's own, every set one under the next in
+//! a single scroll — a heading, then its brushes as a grid of icons, six
+//! across. Pure — `app` asks where a click landed and what to draw.
 //!
-//! It is the brush tool's own chrome: it comes up with the tool and goes
-//! away with it, and `Shift+B` shuts it without putting the brush down.
+//! It opens beside the brush strip, from the chevron there, and is the
+//! only place all 211 brushes can be reached: what the strip keeps is
+//! the ten a hand goes back to. Which brush is in the hand, and the two
+//! buttons that were once above this grid, belong to the strip — see
+//! [`crate::slots`].
 //!
 //! The icons are Sketchbook's own art, one cell each on a sheet built by
 //! `tools/import-skbrushes.py`. Two thirds of them draw a mark the canvas
 //! cannot stamp yet, so the icon runs ahead of the ink; the preview's dab
 //! is the part that never does.
 
-use crate::brush::{Brush, ICONS, Preset, Set};
-use crate::scene::{self, Prim, Rgba, ScreenRect, Viewport, with_alpha};
+use crate::brush::{ICONS, Set};
+use crate::scene::{Prim, ScreenRect, Viewport};
 use crate::text::Atlas;
 use crate::theme::Theme;
 
@@ -30,31 +30,17 @@ const RAIL: f32 = 10.0;
 pub const WIDTH: f32 = 2.0 * PADDING + COLS as f32 * CELL + RAIL;
 /// From the window's left edge, and from whatever is above the panel.
 pub const MARGIN: f32 = 12.0;
-/// The block at the top: the brush in the hand, named.
-pub const PREVIEW: f32 = 56.0;
 /// A set's name over its grid.
 pub const HEAD: f32 = 22.0;
 pub const RADIUS: f32 = 12.0;
-/// The preview's buttons are this square.
-pub const BUTTON: f32 = 22.0;
-const BUTTON_GAP: f32 = 2.0;
 const BAR_W: f32 = 4.0;
 const BAR_MIN: f32 = 24.0;
-/// The preview's own icon, and the gap before the words beside it.
-const PREVIEW_ICON: f32 = 34.0;
-const LABEL_GAP: f32 = 8.0;
-/// The dab in the preview: a stroke of what the brush lays, this wide at
-/// the very most.
-const DAB_MAX: f32 = 8.0;
-const DAB_MIN: f32 = 1.0;
 const CELL_RADIUS: f32 = 6.0;
 const CELL_INSET: f32 = 1.0;
 /// How thick the ring around the brush in the hand is.
 const HELD_RING: f32 = 1.5;
 const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
-const ICON_BOX: f32 = 15.0;
-const ICON_STROKE: f32 = 1.5;
 /// How the sheet `tools/import-skbrushes.py` writes is cut up.
 const ICON_COLS: u16 = 16;
 
@@ -62,10 +48,6 @@ const ICON_COLS: u16 = 16;
 pub enum Hit {
     /// A brush, by the shelf it stands on and its place there.
     Brush(usize, usize),
-    /// The preview's sliders: Brush Properties opens or folds away.
-    Properties,
-    /// The preview's undo arrow: the brush goes back to what it shipped as.
-    Reset,
     /// Panel chrome: swallowed, never reaches the canvas.
     Panel,
 }
@@ -90,10 +72,6 @@ pub struct Head {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Palette {
     pub rect: ScreenRect,
-    /// The block at the top, which does not scroll.
-    pub preview: ScreenRect,
-    pub reset: ScreenRect,
-    pub properties: ScreenRect,
     /// As much of the library as the window has room for.
     pub band: ScreenRect,
     pub cells: Vec<Cell>,
@@ -112,33 +90,24 @@ fn set_height(brushes: usize, s: f32) -> f32 {
 
 impl Palette {
     /// `top` is where whatever stands above the panel ends, in physical
-    /// px: the properties bar, or the tab strip.
-    pub fn layout(viewport: Viewport, scale: f64, top: f32, sets: &[Set], scroll: f32) -> Palette {
+    /// px: the properties bar, or the tab strip. `left` is the panel's
+    /// own x, also physical: it stands beside the strip rather than at
+    /// the window's edge, so it is told where rather than working it out.
+    pub fn layout(
+        viewport: Viewport,
+        scale: f64,
+        top: f32,
+        left: f32,
+        sets: &[Set],
+        scroll: f32,
+    ) -> Palette {
         let s = scale as f32;
-        let x = (MARGIN * s).round();
+        let x = left.round();
         let y = (top + MARGIN * s).round();
         let inner_x = x + PADDING * s;
         let inner_w = (WIDTH - 2.0 * PADDING) * s;
 
-        let preview = ScreenRect {
-            x: inner_x,
-            y: y + PADDING * s,
-            w: inner_w,
-            h: PREVIEW * s,
-        };
-        let side = BUTTON * s;
-        let reset = ScreenRect {
-            x: preview.x + preview.w - side,
-            y: preview.y + preview.h - side,
-            w: side,
-            h: side,
-        };
-        let properties = ScreenRect {
-            x: reset.x - side - BUTTON_GAP * s,
-            ..reset
-        };
-
-        let band_y = preview.y + preview.h;
+        let band_y = y + PADDING * s;
         let room = (viewport.h as f32 - (MARGIN + PADDING) * s - band_y).max(0.0);
         let content: f32 = sets.iter().map(|q| set_height(q.presets.len(), s)).sum();
         let band = ScreenRect {
@@ -198,11 +167,8 @@ impl Palette {
                 x,
                 y,
                 w: WIDTH * s,
-                h: preview.h + band.h + 2.0 * PADDING * s,
+                h: band.h + 2.0 * PADDING * s,
             },
-            preview,
-            reset,
-            properties,
             band,
             cells,
             heads,
@@ -241,12 +207,6 @@ impl Palette {
         if !self.rect.contains(x, y) {
             return None;
         }
-        if self.properties.contains(x, y) {
-            return Some(Hit::Properties);
-        }
-        if self.reset.contains(x, y) {
-            return Some(Hit::Reset);
-        }
         let cell = self
             .cells
             .iter()
@@ -257,15 +217,13 @@ impl Palette {
         })
     }
 
-    /// `sets` is the whole library and `selected` the brush in the hand;
-    /// `brush` is its body, which the preview's dab is drawn with.
-    /// `icons` is the slot the icon sheet was uploaded to.
-    #[allow(clippy::too_many_arguments)]
+    /// `sets` is the whole library and `selected` the brush in the hand,
+    /// which wears a ring. `icons` is the slot the icon sheet was
+    /// uploaded to.
     pub fn prims(
         &self,
         sets: &[Set],
         selected: (usize, usize),
-        brush: &Brush,
         atlas: &Atlas,
         slot: u32,
         icons: u32,
@@ -284,8 +242,6 @@ impl Palette {
             Prim::rounded(self.rect.inset(-b), corner + b, theme.border),
             Prim::rounded(self.rect, corner, theme.panel),
         ];
-        self.preview_prims(sets, selected, brush, atlas, slot, icons, theme, &mut out);
-
         for head in &self.heads {
             let Some(set) = sets.get(head.set) else { continue };
             let baseline = atlas.baseline_in(head.rect);
@@ -321,84 +277,6 @@ impl Palette {
         out
     }
 
-    /// The block at the top: the brush's own icon, its name, the shelf it
-    /// came off, the two buttons, and a dab of what it paints.
-    #[allow(clippy::too_many_arguments)]
-    fn preview_prims(
-        &self,
-        sets: &[Set],
-        selected: (usize, usize),
-        brush: &Brush,
-        atlas: &Atlas,
-        slot: u32,
-        icons: u32,
-        theme: &Theme,
-        out: &mut Vec<Prim>,
-    ) {
-        let s = self.scale;
-        let (set, index) = selected;
-        let Some((shelf, preset)) = sets
-            .get(set)
-            .and_then(|q| q.presets.get(index).map(|p: &Preset| (q, p)))
-        else {
-            return;
-        };
-
-        let side = PREVIEW_ICON * s;
-        let icon_box = ScreenRect {
-            x: self.preview.x,
-            y: self.preview.y,
-            w: side,
-            h: side,
-        };
-        out.push(Prim::sprite(icon_box, icon_uv(preset.icon), icons));
-
-        // The name on one line, the shelf under it in the muted color.
-        let tx = icon_box.x + side + LABEL_GAP * s;
-        let room = (self.properties.x - BUTTON_GAP * s - tx).max(0.0);
-        let line = side / 2.0;
-        for (text, y, color) in [
-            (preset.name.as_str(), self.preview.y, theme.ink),
-            (shelf.name.as_str(), self.preview.y + line, theme.muted),
-        ] {
-            let row = ScreenRect {
-                x: tx,
-                y,
-                w: room,
-                h: line,
-            };
-            let baseline = atlas.baseline_in(row);
-            for g in atlas.layout(&atlas.truncate(text, room), tx, baseline) {
-                out.push(Prim::glyph(g.rect, g.uv, slot, color).clipped(self.preview));
-            }
-        }
-
-        out.extend(icon_prims(SLIDERS, self.properties, s, theme.icon));
-        out.extend(icon_prims(RESET, self.reset, s, theme.icon));
-
-        // And what it actually lays. The icon above is Sketchbook's art
-        // and may promise a mark the ink cannot make; this is the part
-        // that cannot — the three the canvas answers to, drawn.
-        let (radius, feather) = dab(brush);
-        let nominal = (radius + feather / 2.0) * s;
-        let cy = icon_box.y + side + (self.preview.h - side) / 2.0;
-        let (x0, x1) = (
-            self.preview.x + nominal,
-            self.properties.x - LABEL_GAP * s - nominal,
-        );
-        if x1 > x0 {
-            out.push(
-                Prim::soft_segment(
-                    (x0, cy),
-                    (x1, cy),
-                    radius * s,
-                    feather * s,
-                    with_alpha(theme.ink, brush.opacity as f32),
-                )
-                .clipped(self.preview),
-            );
-        }
-    }
 }
 
 /// The slice of the icon sheet one cell takes.
@@ -412,51 +290,11 @@ pub(crate) fn icon_uv(icon: u16) -> [f32; 4] {
     [col / cols, row / rows, (col + 1.0) / cols, (row + 1.0) / rows]
 }
 
-/// The half-width and edge ramp the preview's dab is drawn with, in
-/// logical px. Size is taken by its square root so a fine brush is still
-/// visible beside a fat one; the ramp is the stroke's own, so a soft
-/// brush previews soft.
-fn dab(brush: &Brush) -> (f32, f32) {
-    let t = ((brush.size / crate::brush::SIZE_MAX) as f32).sqrt();
-    let r = DAB_MIN + t * (DAB_MAX - DAB_MIN);
-    let feather = (1.0 - brush.hardness.clamp(0.0, 1.0)) as f32 * r;
-    (r - feather / 2.0, feather)
-}
-
-/// Sliders: what Brush Properties is.
-const SLIDERS: &[&[(f32, f32)]] = &[
-    &[(4.0, 8.0), (20.0, 8.0)],
-    &[(4.0, 16.0), (20.0, 16.0)],
-    &[(9.0, 5.5), (9.0, 10.5)],
-    &[(15.0, 13.5), (15.0, 18.5)],
-];
-/// An arrow curling back on itself: the brush as it shipped.
-const RESET: &[&[(f32, f32)]] = &[
-    &[
-        (4.0, 12.0),
-        (4.6, 8.4),
-        (6.6, 5.6),
-        (9.7, 4.2),
-        (13.1, 4.4),
-        (16.6, 6.4),
-        (18.9, 9.6),
-        (19.4, 13.4),
-        (18.0, 16.9),
-        (15.2, 19.3),
-        (11.6, 20.0),
-    ],
-    &[(4.0, 7.0), (4.0, 12.0), (9.0, 12.0)],
-];
-
-fn icon_prims(lines: &[&[(f32, f32)]], r: ScreenRect, s: f32, color: Rgba) -> Vec<Prim> {
-    scene::icon_prims(lines, r, 24.0, ICON_BOX, ICON_STROKE, s, color)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::brush::Library;
-    use crate::scene::KIND_SEGMENT;
+    use crate::scene::{self, KIND_SEGMENT};
     use crate::tabs::Tabs;
     use crate::text::Font;
 
@@ -470,16 +308,19 @@ mod tests {
         Atlas::build(&Font::bundled(), Tabs::label_px(crate::tabs::LABEL, 1.0))
     }
 
+    /// Where the strip leaves the library, in physical px.
+    const LEFT: f32 = 156.0;
+
     fn palette(vp: Viewport, scale: f64, scroll: f32) -> (Library, Palette) {
         let lib = Library::default();
-        let p = Palette::layout(vp, scale, TOP, lib.sets(), scroll);
+        let p = Palette::layout(vp, scale, TOP, LEFT * scale as f32, lib.sets(), scroll);
         (lib, p)
     }
 
     #[test]
     fn the_panel_stands_at_the_left_with_a_grid_six_across() {
         let (lib, p) = palette(TALL, 1.0, 0.0);
-        assert_eq!(p.rect.x, MARGIN, "off the window's left edge");
+        assert_eq!(p.rect.x, LEFT, "where the strip leaves it");
         assert_eq!(p.rect.y, TOP + MARGIN, "under whatever is above it");
         assert_eq!(p.rect.w, WIDTH);
 
@@ -532,23 +373,19 @@ mod tests {
     #[test]
     fn layout_scales_with_the_display() {
         let (_, p) = palette(TALL, 2.0, 0.0);
-        assert_eq!(p.rect.x, MARGIN * 2.0);
+        assert_eq!(p.rect.x, LEFT * 2.0);
         assert_eq!(p.rect.w, WIDTH * 2.0);
         assert_eq!(p.cells[0].rect.w, CELL * 2.0);
     }
 
     #[test]
-    fn hit_reports_the_brush_the_buttons_and_the_panel() {
+    fn hit_reports_the_brush_and_the_panel() {
         let (_, p) = palette(VP, 1.0, 0.0);
         let mid = |r: ScreenRect| (f64::from(r.x + r.w / 2.0), f64::from(r.y + r.h / 2.0));
 
         let c = p.cells[3];
         let (x, y) = mid(c.rect);
         assert_eq!(p.hit(x, y), Some(Hit::Brush(c.set, c.index)));
-        let (x, y) = mid(p.reset);
-        assert_eq!(p.hit(x, y), Some(Hit::Reset));
-        let (x, y) = mid(p.properties);
-        assert_eq!(p.hit(x, y), Some(Hit::Properties));
         let (x, y) = mid(p.heads[0].rect);
         assert_eq!(p.hit(x, y), Some(Hit::Panel), "a shelf's name is no brush");
         assert_eq!(p.hit(2.0, 2.0), None, "outside is canvas");
@@ -597,7 +434,7 @@ mod tests {
         let theme = Theme::light();
         let atlas = atlas();
         let (lib, p) = palette(VP, 1.0, 0.0);
-        let prims = p.prims(lib.sets(), (0, 2), lib.brush(), &atlas, 7, 9, &theme);
+        let prims = p.prims(lib.sets(), (0, 2), &atlas, 7, 9, &theme);
 
         assert!(prims[0].feather > 0.0, "the soft shadow goes first");
         assert!(
@@ -614,48 +451,22 @@ mod tests {
         assert!(held.rect.contains_rect(&framed[0]));
 
         let sprites = prims.iter().filter(|q| q.slot == 9).count();
-        assert_eq!(
-            sprites,
-            p.cells.len() + 1,
-            "a sprite per cell, and one more for the preview"
-        );
+        assert_eq!(sprites, p.cells.len(), "a sprite per cell, and nothing else");
     }
 
     #[test]
-    fn the_preview_names_the_brush_and_shows_what_it_lays() {
+    fn the_library_is_the_shelves_alone() {
         let theme = Theme::light();
-        let atlas = atlas();
-        let (lib, p) = palette(VP, 1.0, 0.0);
-        let prims = p.prims(lib.sets(), (0, 0), lib.brush(), &atlas, 7, 9, &theme);
-
-        // The buttons' icons are segments in the preview too; the dab is
-        // the one that runs across it, clear of both.
-        let dab_in = |list: &[Prim]| {
-            list.iter()
-                .find(|q| {
-                    q.kind == KIND_SEGMENT
-                        && p.preview.contains_rect(&q.bounds())
-                        && q.bounds().intersect(&p.properties).is_none()
-                        && q.bounds().intersect(&p.reset).is_none()
-                })
-                .copied()
-                .expect("the preview draws a dab")
-        };
-        let dab = dab_in(&prims);
-        assert!(dab.radius > 0.0);
+        let (lib, p) = palette(TALL, 1.0, 0.0);
+        let prims = p.prims(lib.sets(), (0, 0), &atlas(), 7, 9, &theme);
         assert!(
-            (f64::from(dab.color[3]) - lib.brush().opacity).abs() < 1e-3,
-            "drawn at the brush's own opacity, not the theme's ink"
+            prims.iter().all(|q| q.kind != KIND_SEGMENT),
+            "the dab and the two buttons went to the strip"
         );
-
-        let soft = Brush {
-            hardness: 0.0,
-            ..*lib.brush()
-        };
-        let softened = p.prims(lib.sets(), (0, 0), &soft, &atlas, 7, 9, &theme);
-        assert!(
-            dab_in(&softened).feather > dab.feather,
-            "a softer brush previews softer"
+        assert_eq!(
+            p.band.y,
+            p.rect.y + PADDING,
+            "and the shelves start at the top"
         );
     }
 
@@ -664,7 +475,7 @@ mod tests {
         let theme = Theme::light();
         let atlas = atlas();
         let (lib, p) = palette(Viewport { w: 900, h: 420 }, 1.0, 60.0);
-        let prims = p.prims(lib.sets(), (1, 1), lib.brush(), &atlas, 7, 9, &theme);
+        let prims = p.prims(lib.sets(), (1, 1), &atlas, 7, 9, &theme);
         let room = p.rect.inset(-2.0);
         for q in prims.iter().skip(1) {
             assert!(
