@@ -1000,6 +1000,31 @@ pub struct Painted<'a> {
 }
 
 impl Document {
+    /// Whether `other` holds the same board. The camera is left out:
+    /// where the view is looking is not the board's business — panning
+    /// is not work to undo, which is why `Change::Camera` does not
+    /// dirty a tab — and a step backwards that moved the view would
+    /// make the two mean the same thing.
+    ///
+    /// The fields are destructured rather than listed, so a field added
+    /// to a document fails to compile here until somebody has decided
+    /// which side of this line it falls on.
+    pub fn same_board(&self, other: &Document) -> bool {
+        let Document {
+            schema,
+            id,
+            title,
+            camera: _,
+            layers,
+            elements,
+        } = self;
+        *schema == other.schema
+            && *id == other.id
+            && *title == other.title
+            && *layers == other.layers
+            && *elements == other.elements
+    }
+
     /// The elements in paint order — bottom layer first, document order
     /// within a layer — each with the frame that cuts it. A frame layer
     /// paints its frame first and then that frame's own stack, so what
@@ -2692,6 +2717,69 @@ mod tests {
         let doc = framed();
         for p in doc.painted() {
             assert_eq!(doc.elements[p.index].id(), p.element.id());
+        }
+    }
+
+    #[test]
+    fn two_documents_are_the_same_board_when_only_the_camera_differs() {
+        // Panning is not work — `Change::Camera` does not even dirty a
+        // tab — so a board looked at from somewhere else is the same
+        // board, and undo has nothing to step back to.
+        let a = sample_doc();
+        let mut b = a.clone();
+        b.camera = Camera {
+            x: 900.0,
+            y: -12.0,
+            zoom: 3.5,
+        };
+        assert!(a.same_board(&b));
+        assert!(b.same_board(&a));
+    }
+
+    #[test]
+    fn every_part_of_a_board_but_the_camera_tells_two_apart() {
+        let base = sample_doc();
+        let mut cases: Vec<(&str, Document)> = Vec::new();
+
+        let mut d = base.clone();
+        d.schema += 1;
+        cases.push(("schema", d));
+
+        let mut d = base.clone();
+        d.id = "01JOTHEROTHEROTHEROTHEROTH".into();
+        cases.push(("id", d));
+
+        let mut d = base.clone();
+        d.title = "another".into();
+        cases.push(("title", d));
+
+        let mut d = base.clone();
+        d.layers.push(layer("01JLAYER2LAYER2LAYER2LAYER", "Layer 2"));
+        cases.push(("a layer added", d));
+
+        let mut d = base.clone();
+        d.layers[0].name = "renamed".into();
+        cases.push(("a layer's name", d));
+
+        let mut d = base.clone();
+        d.layers[0].visible = false;
+        cases.push(("a layer hidden", d));
+
+        let mut d = base.clone();
+        d.elements.pop();
+        cases.push(("an element removed", d));
+
+        let mut d = base.clone();
+        if let Element::Rect(r) = &mut d.elements[0] {
+            r.x += 1.0;
+        }
+        cases.push(("an element moved", d));
+
+        for (what, other) in cases {
+            assert!(
+                !base.same_board(&other),
+                "{what} is part of the board and has to tell two apart"
+            );
         }
     }
 }

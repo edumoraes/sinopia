@@ -20,6 +20,7 @@ mod geom;
 mod gestures;
 mod gfx;
 mod grid;
+mod history;
 mod ipc;
 mod layers;
 mod palette;

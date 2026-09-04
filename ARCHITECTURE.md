@@ -403,7 +403,7 @@ Portals: `xdg-desktop-portal` for “open image” / “save PNG elsewhere”. D
 | T | text |
 | N | sticky |
 | Ctrl+V | paste the clipboard image |
-| Ctrl+Z / Ctrl+Y | undo / redo |
+| Ctrl+Z / Ctrl+Shift+Z | undo / redo |
 | Ctrl+0 / 1 | fit / 100% |
 | Ctrl+Shift+E | export to the last known cwd or dialog |
 
@@ -439,6 +439,22 @@ the creation state); dragging the selection itself moves it. Drags
 transform the document live from a snapshot taken at the press, so `Esc`
 puts it back; `Delete`/`Backspace` removes. The selection is session
 state (§6.2) and is dropped on a tool switch.
+
+Undo landed: `Ctrl+Z`, and `Ctrl+Shift+Z` to go forward again. The
+table above said `Ctrl+Y` for that, and this is the draft catching up:
+the undo key with Shift on it is what every drawing tool uses, and a
+second key onto the same room is one more thing to keep true. A step is a resting **state** rather than a change — the
+scene changes on every sample of a stroke, and on every step of a drag —
+so the history is written where a change lands with nothing still
+happening, and a whole stroke, a whole drag or a card carried over two
+rows comes back in one step. What is kept is the whole document beside
+the editor's spot (selection, ink layer, frame being worked in), so the
+two cannot come to disagree about what a restored board holds: undoing a
+delete brings the objects back selected. The camera is excluded at both
+ends — §6.2 keeps the cursor out of the document for the same reason it
+keeps panning out of a step. The history is a tab's own, capped by a
+depth and a memory budget rather than by a count alone, since an entry
+carries the whole board and a session makes that board grow.
 
 Brush (`B`) landed, and then took Sketchbook's shape rather than
 Photoshop's: a `Library` of named brushes on shelves, one in the hand,
