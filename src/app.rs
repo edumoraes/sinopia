@@ -13,7 +13,8 @@ use std::time::Instant;
 use anyhow::Context as _;
 use image::ImageEncoder as _;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -1952,7 +1953,11 @@ impl App {
         self.apply(Change::Camera(camera));
     }
 
-    fn key(&mut self, key: &Key, state: ElementState) {
+    /// `bare` is the key with every modifier taken off it. The letters
+    /// are read off `key`, which follows the layout the way a hotkey
+    /// should; a seat's digit has to come off `bare`, because `Shift+1`
+    /// arrives as a different character on every layout there is.
+    fn key(&mut self, key: &Key, bare: &Key, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
             // The send panel is modal: it takes the keyboard before
@@ -2050,7 +2055,7 @@ impl App {
                 }
                 let mut chars = text.chars();
                 if let (Some(c), None) = (chars.next(), chars.next()) {
-                    self.plain_key(c, mods.shift_key());
+                    self.plain_key(c, bare, mods.shift_key());
                 }
             }
             _ => {}
@@ -2061,7 +2066,22 @@ impl App {
     /// A character typed with no modifier but Shift: `Shift+L` shows or
     /// hides the layers, a tool's letter selects it, and the brush's
     /// keys adjust it while it is selected.
-    fn plain_key(&mut self, c: char, shift: bool) {
+    fn plain_key(&mut self, c: char, bare: &Key, shift: bool) {
+        // A seat is numbered, and the number is the key. Taken off the
+        // key without its modifiers rather than off the character that
+        // arrived: `Shift+1` is `!` on one layout and something else on
+        // the next, but the key is the `1` key on both.
+        if shift
+            && self.editor().tool() == Tool::Brush
+            && let Key::Character(digit) = bare
+            && let Ok(n) = digit.parse::<usize>()
+            && self.brushes.take_slot(n)
+        {
+            self.brushes_dirty = true;
+            self.keep_brushes();
+            self.redraw();
+            return;
+        }
         if shift && c.eq_ignore_ascii_case(&'l') {
             self.layers_shown = !self.layers_shown;
             self.redraw();
@@ -2363,16 +2383,9 @@ impl App {
             }
             WindowEvent::MouseWheel { delta, .. } => self.scrolled(delta),
             WindowEvent::ModifiersChanged(m) => self.modifiers_changed(m),
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key,
-                        state,
-                        repeat: false,
-                        ..
-                    },
-                ..
-            } => self.key(&logical_key, state),
+            WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
+                self.key(&event.logical_key, &event.key_without_modifiers(), event.state);
+            }
             WindowEvent::RedrawRequested => {
                 self.tick();
                 if self.animating() {
