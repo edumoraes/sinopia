@@ -16,7 +16,7 @@
 - Commits are **atomic** — one coherent change each — with succinct messages.
 - `CLAUDE.md` is a symlink to `AGENTS.md`; edit `AGENTS.md`.
 - Pure core, thin shell: `doc`, `editor` and the new `history` carry tests. `app` is the untested shell — keep logic out of it.
-- Every task ends with `cargo test` green and `cargo clippy --all-targets` adding **no new warnings**. `main` already carries three (`is_draft` never used, two `sort_by_key`); `-D warnings` is not this repo's gate and never was. A `never used` warning on something a later task consumes is expected and transient.
+- Every task ends with `cargo test` green and `cargo clippy --all-targets` adding **no new warnings**. `main` carries three when this plan starts (`is_draft` never used, two `sort_by_key`), so `-D warnings` is not the gate mid-plan; a `never used` warning on something a later task consumes is expected and transient. The branch ends on zero, those three included — `cargo build`, `cargo run` and `cargo clippy` are all silent.
 - The suite is at 668 tests before this plan; it only ever grows.
 - No new file may be added to `src/` without a `mod` line in `src/main.rs` (alphabetical).
 

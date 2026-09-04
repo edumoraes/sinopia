@@ -37,13 +37,6 @@ pub struct IndexEntry {
     pub path: Option<PathBuf>,
 }
 
-impl IndexEntry {
-    /// A draft: the store is its home, and the id is how it is opened.
-    pub fn is_draft(&self) -> bool {
-        self.path.is_none()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Index {
     schema: u32,
@@ -162,7 +155,7 @@ impl Store {
             .boards
             .retain(|e| e.id != entry.id && (e.path.is_none() || e.path != entry.path));
         index.boards.push(entry);
-        index.boards.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        index.boards.sort_by_key(|e| std::cmp::Reverse(e.updated_at));
         self.write_index(&index)
     }
 
@@ -217,7 +210,7 @@ impl Store {
     /// Index entries, most recent first.
     pub fn index(&self) -> anyhow::Result<Vec<IndexEntry>> {
         let mut index = self.read_index()?;
-        index.boards.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        index.boards.sort_by_key(|e| std::cmp::Reverse(e.updated_at));
         Ok(index.boards)
     }
 
@@ -539,7 +532,6 @@ mod tests {
         let index = store.index().unwrap();
         assert_eq!(index.len(), 1);
         assert_eq!(index[0].path, Some(path));
-        assert!(!index[0].is_draft());
         // The recents remember where it is; the safety save is a draft's
         // privilege, so nothing was written under boards/.
         assert!(
@@ -625,7 +617,7 @@ mod tests {
         let index = store.index().unwrap();
         assert_eq!(index.len(), 1);
         assert!(
-            index[0].is_draft(),
+            index[0].path.is_none(),
             "no path is what a board has always been"
         );
     }
