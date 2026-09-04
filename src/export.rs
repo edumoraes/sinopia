@@ -93,6 +93,44 @@ pub fn sub_document(doc: &Document, scope: &Scope) -> Document {
     out
 }
 
+/// What a name becomes as a directory: lowercase, words joined by
+/// hyphens, and nothing but `[a-z0-9-]` left. It is the whole of the
+/// defence around the typed folder field — `../../etc` holds no
+/// character the rule admits, so what comes out is one directory under
+/// `docs/boards/` whatever went in. The person names the folder; the
+/// shape of the path is not theirs to name.
+pub fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_owned()
+}
+
+/// The fallback when a name slugs to nothing.
+const UNNAMED: &str = "board";
+
+/// A slug of `base` that nothing in `taken` already holds, counting up
+/// from 2 as a file manager does. `taken` is what `docs/boards/` already
+/// holds — the listing is the shell's; picking is not.
+pub fn free_name(base: &str, taken: &[String]) -> String {
+    let stem = match slug(base) {
+        s if s.is_empty() => UNNAMED.to_owned(),
+        s => s,
+    };
+    if !taken.iter().any(|t| *t == stem) {
+        return stem;
+    }
+    (2u32..)
+        .map(|n| format!("{stem}-{n}"))
+        .find(|c| !taken.iter().any(|t| t == c))
+        .unwrap_or(stem)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +244,47 @@ mod tests {
         let json = sub.to_json().unwrap();
         let back = Document::from_json(&json).unwrap();
         assert_eq!(back.elements.len(), sub.elements.len());
+    }
+
+    #[test]
+    fn a_slug_is_lowercase_words_joined_by_hyphens() {
+        assert_eq!(slug("Auth Flow"), "auth-flow");
+        assert_eq!(slug("  Login   screen  "), "login-screen");
+        assert_eq!(slug("Frame 12"), "frame-12");
+    }
+
+    #[test]
+    fn a_slug_cannot_reach_out_of_the_folder_it_names() {
+        // The typed field is the only place a person names a path
+        // component. Nothing that steers a path survives the rule.
+        assert_eq!(slug("../../etc"), "etc");
+        assert_eq!(slug("a/b"), "a-b");
+        assert_eq!(slug("..."), "");
+        assert_eq!(slug("~/.ssh"), "ssh");
+        assert_eq!(slug(".hidden"), "hidden");
+    }
+
+    #[test]
+    fn a_name_that_reduces_to_nothing_is_no_name_at_all() {
+        assert_eq!(slug("///"), "");
+        assert_eq!(slug("   "), "");
+    }
+
+    #[test]
+    fn a_free_name_is_the_base_when_the_base_is_free() {
+        assert_eq!(free_name("plan", &[]), "plan");
+        assert_eq!(free_name("plan", &["other".into()]), "plan");
+    }
+
+    #[test]
+    fn a_taken_name_counts_up_until_it_is_free() {
+        let taken = vec!["plan".into(), "plan-2".into()];
+        assert_eq!(free_name("plan", &taken), "plan-3");
+    }
+
+    #[test]
+    fn a_base_that_slugs_to_nothing_falls_back_to_a_word() {
+        assert_eq!(free_name("...", &[]), "board");
+        assert_eq!(free_name("...", &["board".into()]), "board-2");
     }
 }
