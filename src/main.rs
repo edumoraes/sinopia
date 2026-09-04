@@ -3,6 +3,7 @@
 //! Single instance: if the socket answers, the intent is forwarded and this
 //! process exits; otherwise this process becomes the main instance.
 
+mod agents;
 mod app;
 mod bitmap;
 mod brush;
