@@ -10,12 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use anyhow::Context as _;
+use image::ImageEncoder as _;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
 
+use crate::agents;
 use crate::bitmap::{self, Bitmap};
 use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
@@ -23,6 +26,7 @@ use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Stylus, Tool};
+use crate::export;
 use crate::field::Field;
 use crate::geom::Corner;
 use crate::gestures;
@@ -36,6 +40,7 @@ use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
 use crate::scene::{self, Frame, ImageSlots, Prim, Rgba, Shapes, View, Viewport, with_alpha};
 use crate::select::{self, Handle};
+use crate::send;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
@@ -166,6 +171,10 @@ struct App {
     /// When the last press landed on a card, and on which. A second
     /// press on the same card inside [`DOUBLE_CLICK`] opens the rename.
     last_card: Option<(usize, Instant)>,
+    /// The send in progress: what is going, where it can go, which one
+    /// is picked, and the two fields. It is the window's, like the tool
+    /// and the ink.
+    sending: Option<Sending>,
     /// The cards making room around a carried one.
     slides: layers::Slides,
     /// How far down the stack the panel is looking, in physical px, and
@@ -205,6 +214,32 @@ struct App {
     /// Smoke-test mode: exit cleanly after N presented frames.
     smoke_frames_left: Option<u32>,
     exit_error: Option<anyhow::Error>,
+}
+
+/// A send being composed. It holds the agents as they were when the
+/// panel opened: a list that changed under the person mid-sentence would
+/// move the row they were about to press.
+struct Sending {
+    scope: export::Scope,
+    agents: Vec<agents::Agent>,
+    target: usize,
+    /// The folder, when the scope has no name of its own.
+    folder: Option<Field>,
+    line: Field,
+    /// Which field the keyboard is writing into. The line, until a press
+    /// says otherwise — the folder's prefill is usually right and the
+    /// line never is.
+    focus: send::Hit,
+}
+
+impl Sending {
+    /// The field the keyboard is writing into.
+    fn writing(&mut self) -> &mut Field {
+        match (self.focus, self.folder.as_mut()) {
+            (send::Hit::Folder, Some(folder)) => folder,
+            _ => &mut self.line,
+        }
+    }
 }
 
 /// A layer card in the pointer's hand: which row it came from, where it
@@ -980,7 +1015,50 @@ impl App {
     }
 
     /// A click on the layers panel, handed to the editor.
+    /// Writes the name being typed onto its layer and shuts the field.
+    /// A name of nothing but space leaves the layer as it was, which is
+    /// `rename_layer`'s own answer.
+    fn commit_rename(&mut self) {
+        let Some((index, field)) = self.renaming.take() else {
+            return;
+        };
+        let name = field.value().to_owned();
+        let (editor, doc) = self.active();
+        let change = editor.rename_layer(doc, index, &name);
+        self.apply(change);
+    }
+
+    /// What a press on the panel means once the clock is taken into
+    /// account: a press on a card that is already selected, inside
+    /// [`DOUBLE_CLICK`] of the last one on that same card, asks for the
+    /// name rather than for the layer.
+    fn second_press(&mut self, hit: PanelHit) -> PanelHit {
+        let PanelHit::Select(i) = hit else {
+            return hit;
+        };
+        let now = Instant::now();
+        let again = self
+            .last_card
+            .is_some_and(|(was, at)| was == i && now.duration_since(at) < DOUBLE_CLICK);
+        self.last_card = Some((i, now));
+        if again { PanelHit::Rename(i) } else { hit }
+    }
+
     fn panel_hit(&mut self, hit: PanelHit) {
+        // A rename opens a field rather than changing the document, so
+        // it is answered before the editor is borrowed. The name comes
+        // off the stack: a row's own label is cut down to what fits.
+        if let PanelHit::Rename(i) = hit {
+            let inside = self.editor().inside();
+            let name = self
+                .doc()
+                .stack(inside)
+                .get(i)
+                .map(|l| l.name.clone())
+                .unwrap_or_default();
+            self.renaming = Some((i, Field::new(&name)));
+            return;
+        }
         let (editor, doc) = self.active();
         let change = match hit {
             PanelHit::Select(i) => editor.select_layer(doc, i),
@@ -999,14 +1077,129 @@ impl App {
                 None => Change::None,
             },
             PanelHit::Leave => editor.leave_frame(doc),
-            // `Panel::hit` never makes one: a rename is a *second* press
-            // on a card that is already selected, and counting presses
-            // is `app`'s. It opens a field rather than changing the
-            // document, so there is nothing to apply here.
             PanelHit::Rename(_) => Change::None,
             PanelHit::Panel => Change::None,
         };
         self.apply(change);
+    }
+
+    /// Opens the send panel on what is selected. It needs both halves —
+    /// something to send and somewhere to send it — so with either
+    /// missing it says which and opens nothing: a shortcut onto a dead
+    /// end teaches nothing.
+    fn ask_send(&mut self) {
+        let selection = self.editor().selection().to_vec();
+        let scope = match selection.as_slice() {
+            [] => {
+                log::info!("nothing selected: select a frame or some objects to send");
+                return;
+            }
+            [one] if self.doc().frame(one).is_some() => export::Scope::Frame(one.clone()),
+            ids => export::Scope::Selection(ids.to_vec()),
+        };
+        let found = agents::list();
+        if found.is_empty() {
+            log::info!("no agent is running: export to the agent needs one");
+            return;
+        }
+        // A frame brings its name; a loose selection is asked for one,
+        // counted past whatever the folder already holds.
+        let folder = match export::named(self.doc(), &scope) {
+            Some(_) => None,
+            None => {
+                let taken = taken_names(&found[0].cwd);
+                Some(Field::new(&export::free_name(&self.doc().title, &taken)))
+            }
+        };
+        self.sending = Some(Sending {
+            scope,
+            agents: found,
+            target: 0,
+            folder,
+            line: Field::new(""),
+            focus: send::Hit::Line,
+        });
+        self.redraw();
+    }
+
+    /// Writes the page into the agent's own directory and hands it the
+    /// line. Either half failing leaves a message and the panel shut:
+    /// the files are on disk whatever the terminal did with them.
+    fn do_send(&mut self) {
+        let Some(sending) = self.sending.take() else {
+            return;
+        };
+        let Some(agent) = sending.agents.get(sending.target).cloned() else {
+            return;
+        };
+        if let Err(e) = self.send_to(&agent, &sending) {
+            log::warn!("export to the agent: {e:#}");
+        }
+        self.redraw();
+    }
+
+    fn send_to(&mut self, agent: &agents::Agent, sending: &Sending) -> anyhow::Result<()> {
+        let line = agents::sanitize(sending.line.value())?;
+        let name = export::named(self.doc(), &sending.scope)
+            .or_else(|| sending.folder.as_ref().map(|f| f.value().to_owned()))
+            .unwrap_or_default();
+        let slug = match export::slug(&name) {
+            s if s.is_empty() => anyhow::bail!("the page needs a name"),
+            s => s,
+        };
+        let bounds = export::bounds(self.doc(), &sending.scope)
+            .context("there is nothing in the selection to send")?;
+        let sub = export::sub_document(self.doc(), &sending.scope);
+        let md = export::inventory(&sub, &bounds);
+        let blobs = self.blobs_of(&sub);
+        let theme_bg = self.theme.bg;
+        let edge = self.theme.muted;
+        let shapes = std::mem::take(&mut self.shapes);
+        let picture = {
+            let images = self.gfx.as_ref().map(Gfx::image_slots);
+            let none = ImageSlots::new();
+            let images = images.unwrap_or(&none);
+            let (view, w, h) = match &self.gfx {
+                Some(gfx) => export::view_for(&bounds, gfx.max_dimension()),
+                None => (export::view_for(&bounds, 1).0, 1, 1),
+            };
+            (
+                scene::document_prims(self.doc(), &view, images, &shapes, edge, None),
+                w,
+                h,
+            )
+        };
+        self.shapes = shapes;
+        let (picture, w, h) = picture;
+        let gfx = self
+            .gfx
+            .as_mut()
+            .context("there is no window to draw with")?;
+        let rgba = gfx.render_offscreen(w, h, theme_bg, &picture)?;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(
+            &rgba,
+            w,
+            h,
+            image::ExtendedColorType::Rgba8,
+        )?;
+        let cwd = std::path::Path::new(&agent.cwd);
+        let files = export::write(cwd, &slug, &png, &sub, &md, &blobs)?;
+        log::info!("exported {} files to {}", files.len(), agent.cwd);
+        agents::send(agent, &agents::prompt(&line, &agents::relative(&files, cwd)))
+    }
+
+    /// The bytes behind every image the sub-document names, so the json
+    /// stands on its own where it lands.
+    fn blobs_of(&self, sub: &Document) -> Vec<(String, Vec<u8>)> {
+        sub.elements
+            .iter()
+            .filter_map(|e| match e {
+                Element::Image(i) => Some(i.blob.clone()),
+                _ => None,
+            })
+            .filter_map(|hash| Some((hash.clone(), self.store.read_blob(&hash).ok()?)))
+            .collect()
     }
 
     /// A key that adjusts the brush, while the brush tool is selected:
@@ -1220,6 +1413,25 @@ impl App {
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
             frame.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
         }
+        // The send panel is modal, so it is drawn last of everything —
+        // over the strip the way it is pressed before it.
+        if let (Some(sending), Some(atlas)) = (&self.sending, self.atlas.as_ref()) {
+            let panel = send::Panel::layout(
+                view.viewport,
+                view.scale,
+                sending.agents.len(),
+                sending.folder.is_some(),
+            );
+            frame.extend(panel.prims(
+                &sending.agents,
+                sending.target,
+                sending.folder.as_ref(),
+                &sending.line,
+                atlas,
+                self.atlas_slot,
+                &self.theme,
+            ));
+        }
         frame
     }
 
@@ -1248,6 +1460,41 @@ impl App {
         let (Some(view), Some((x, y))) = (self.view(), self.cursor) else {
             return;
         };
+        // The send panel is modal and over everything, the strip
+        // included: it is the one thing in this window that is finished
+        // by leaving it.
+        if let Some(sending) = &self.sending {
+            let panel = send::Panel::layout(
+                view.viewport,
+                view.scale,
+                sending.agents.len(),
+                sending.folder.is_some(),
+            );
+            if button == Button::Left {
+                match panel.hit(x, y) {
+                    Some(send::Hit::Target(i)) => {
+                        if let Some(s) = self.sending.as_mut() {
+                            s.target = i;
+                        }
+                    }
+                    Some(hit) => {
+                        if let Some(s) = self.sending.as_mut() {
+                            s.focus = hit;
+                        }
+                    }
+                    // A press outside a modal panel closes it.
+                    None => self.sending = None,
+                }
+                self.redraw();
+            }
+            return self.update_cursor_icon();
+        }
+        // A name being typed is finished by pressing somewhere else, as
+        // Enter finishes it: the keyboard cannot be left held by a field
+        // the pointer has walked away from.
+        if self.renaming.is_some() && button == Button::Left {
+            self.commit_rename();
+        }
         // The strip is over the handle is over the panel is over the
         // dock is over the canvas.
         if let Some(hit) = self.tabs(&view).and_then(|t| t.hit(x, y)) {
@@ -1274,30 +1521,19 @@ impl App {
             && let Some(hit) = panel.hit(x, y)
         {
             if button == Button::Left {
+                // `Panel::hit` cannot see a second press: counting them
+                // is the window's. A press on a card that is already
+                // selected, soon enough after the last one, is what
+                // makes a Select a Rename.
+                let hit = self.second_press(hit);
                 self.panel_hit(hit);
                 // A card taken by its name is picked up by the grip the
-                // press made, and follows the pointer from there.
+                // press made, and follows the pointer from there. A card
+                // whose name is open is not also lifted: a field is not
+                // dragged.
                 if let PanelHit::Select(i) = hit
                     && let Some(row) = panel.rows.iter().find(|r| r.index == i)
                 {
-                    // A second press on a card that is already selected
-                    // opens its name. The row's own label is cut down to
-                    // what fits, so the name is read off the stack.
-                    let now = Instant::now();
-                    let again = self
-                        .last_card
-                        .is_some_and(|(was, at)| was == i && now.duration_since(at) < DOUBLE_CLICK);
-                    self.last_card = Some((i, now));
-                    if again {
-                        let editor = self.editor();
-                        let name = self
-                            .doc()
-                            .stack(editor.inside())
-                            .get(i)
-                            .map(|l| l.name.clone())
-                            .unwrap_or_default();
-                        self.renaming = Some((i, Field::new(&name)));
-                    }
                     self.carry = Some(Carry {
                         index: i,
                         grab_dy: y as f32 - row.card.y,
@@ -1487,27 +1723,57 @@ impl App {
     fn key(&mut self, key: &Key, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
+            // The send panel is modal: it takes the keyboard before
+            // anything else, including the rename that cannot be open
+            // under it.
+            _ if self.sending.is_some() && pressed => {
+                let Some(sending) = self.sending.as_mut() else {
+                    return;
+                };
+                match key {
+                    Key::Named(NamedKey::Escape) => self.sending = None,
+                    Key::Named(NamedKey::Enter) => self.do_send(),
+                    Key::Named(NamedKey::Tab) => {
+                        // Tab walks the targets when there is more than
+                        // one, since the fields are two at most and the
+                        // list is the thing being chosen from.
+                        let n = sending.agents.len();
+                        sending.target = (sending.target + 1) % n.max(1);
+                    }
+                    Key::Named(NamedKey::Backspace) => sending.writing().backspace(),
+                    Key::Named(NamedKey::ArrowLeft) => sending.writing().left(),
+                    Key::Named(NamedKey::ArrowRight) => sending.writing().right(),
+                    Key::Named(NamedKey::Home) => sending.writing().home(),
+                    Key::Named(NamedKey::End) => sending.writing().end(),
+                    // A space is a named key and never a character, so
+                    // without this an instruction is one word long.
+                    Key::Named(NamedKey::Space) => sending.writing().insert(' '),
+                    Key::Character(text) => {
+                        let field = sending.writing();
+                        for c in text.chars().filter(|c| !c.is_control()) {
+                            field.insert(c);
+                        }
+                    }
+                    _ => {}
+                }
+                self.redraw();
+            }
             // A field being typed into takes the keyboard whole, and so
             // stands first: `Ctrl+S` in the middle of a name would
             // otherwise save mid-word.
             _ if self.renaming.is_some() && pressed => {
-                let Some((index, field)) = self.renaming.as_mut() else {
+                let Some((_, field)) = self.renaming.as_mut() else {
                     return;
                 };
                 match key {
                     Key::Named(NamedKey::Escape) => self.renaming = None,
-                    Key::Named(NamedKey::Enter) => {
-                        let (index, name) = (*index, field.value().to_owned());
-                        self.renaming = None;
-                        let (editor, doc) = self.active();
-                        let change = editor.rename_layer(doc, index, &name);
-                        self.apply(change);
-                    }
+                    Key::Named(NamedKey::Enter) => self.commit_rename(),
                     Key::Named(NamedKey::Backspace) => field.backspace(),
                     Key::Named(NamedKey::ArrowLeft) => field.left(),
                     Key::Named(NamedKey::ArrowRight) => field.right(),
                     Key::Named(NamedKey::Home) => field.home(),
                     Key::Named(NamedKey::End) => field.end(),
+                    Key::Named(NamedKey::Space) => field.insert(' '),
                     Key::Character(text) => {
                         for c in text.chars().filter(|c| !c.is_control()) {
                             field.insert(c);
@@ -1538,6 +1804,7 @@ impl App {
                     "s" if shift => self.ask_name(self.active, Then::Stay),
                     "s" => self.save_active(),
                     "o" => self.ask_open(),
+                    "e" => self.ask_send(),
                     "w" => self.request_close(self.active),
                     _ => {}
                 }
@@ -1820,6 +2087,20 @@ impl App {
                 self.update_cursor_icon();
             }
             WindowEvent::Focused(false) => self.focus_lost(),
+            WindowEvent::Focused(true) => {
+                // The person has just come back from the terminal they
+                // may have started an agent in.
+                if let Some(sending) = self.sending.as_mut() {
+                    let found = agents::list();
+                    if found.is_empty() {
+                        self.sending = None;
+                    } else {
+                        sending.target = sending.target.min(found.len() - 1);
+                        sending.agents = found;
+                    }
+                    self.redraw();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let button = match button {
                     MouseButton::Left => Button::Left,
@@ -1932,6 +2213,19 @@ impl App {
     }
 }
 
+/// The pages `docs/boards/` in `cwd` already holds. A directory that is
+/// not there holds nothing, which is the answer, not an error.
+fn taken_names(cwd: &str) -> Vec<String> {
+    let at = std::path::Path::new(cwd).join(export::BOARDS_DIR);
+    std::fs::read_dir(at)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
 /// Brings up server + window and runs until the user closes it (or the
 /// smoke test is done).
 pub fn run(
@@ -2013,6 +2307,7 @@ pub fn run(
         carry: None,
         renaming: None,
         last_card: None,
+        sending: None,
         slides: layers::Slides::default(),
         scroll: 0.0,
         scrolling: layers::Coming::default(),

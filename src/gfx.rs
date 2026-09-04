@@ -621,6 +621,13 @@ impl Gfx {
     /// tight RGBA8, `w * h * 4` bytes. The copy out is padded to wgpu's
     /// 256-byte row alignment and unpadded here, so the caller gets rows
     /// it can hand straight to an encoder.
+    ///
+    /// The texture is the *surface's* format, not RGBA: a pipeline is
+    /// built against one colour format and a pass onto any other is a
+    /// validation error, so an export drawn through the window's own
+    /// pipelines has to be drawn onto what they were made for. The
+    /// channels are put in RGBA order here instead, which is where a
+    /// PNG wants them.
     pub fn render_offscreen(
         &mut self,
         w: u32,
@@ -640,7 +647,7 @@ impl Gfx {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format: self.config.format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -692,6 +699,15 @@ impl Gfx {
         }
         drop(padded_bytes);
         buffer.unmap();
+        // Every surface this runs on so far is BGRA; RGBA needs nothing.
+        if matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            for px in out.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+        }
         // The window's surface is the size it was; the scratch and the
         // sheet have just been resized to the export and must go back,
         // or the next frame composites through a texture of the wrong
