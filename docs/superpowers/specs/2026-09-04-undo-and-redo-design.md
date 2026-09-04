@@ -1,8 +1,9 @@
 # Undo and redo
 
 `Ctrl+Z` puts the board back the way it was before the last change, and
-the hand back where it was standing then. `Ctrl+Y` and `Ctrl+Shift+Z`
-put it forward again. Keys only: nothing new is drawn in the window.
+the hand back where it was standing then. `Ctrl+Shift+Z` puts it
+forward again — one key and not two, which is §7.2's table catching up
+rather than being obeyed. Keys only: nothing new is drawn in the window.
 
 ARCHITECTURE.md promises this in three places — §7.2's key table, §12's
 MVP list, §15's fourth cut — and each of them assumed a history that
@@ -168,7 +169,7 @@ says.
 - `App::undo` / `App::redo` — cancel whatever is in progress first, the
   way `Esc` does (a gesture that has not finished is not a change to
   step behind), then swap and `touch`.
-- `Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z` in the existing control branch. A
+- `Ctrl+Z` and `Ctrl+Shift+Z` in the existing control branch. A
   field being typed into already swallows the whole keyboard, so
   `Ctrl+Z` mid-rename cannot reach the canvas.
 

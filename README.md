@@ -186,8 +186,8 @@ export to the agent:
   it before the press. Every stroke has always named its colour on
   disk; what was missing was somewhere to pick one.
 - Undo: `Ctrl+Z` puts the board back the way it was before the last
-  change and the hand back where it was standing then; `Ctrl+Y` and
-  `Ctrl+Shift+Z` put it forward again. A step is a change that came to
+  change and the hand back where it was standing then; `Ctrl+Shift+Z`
+  puts it forward again. A step is a change that came to
   **rest** — a whole stroke, a whole drag, a delete, a paste, a layer
   carried across the stack — never a sample of one, which is why a
   stroke undoes as a stroke and a card dragged over two rows comes back
@@ -411,7 +411,7 @@ already laid.
 | Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
 | `Ctrl` + `V` | Paste the clipboard image onto the board |
 | `Ctrl` + `Z` | Undo: back to the state before the last change |
-| `Ctrl` + `Y`, `Ctrl` + `Shift` + `Z` | Redo |
+| `Ctrl` + `Shift` + `Z` | Redo |
 | `Ctrl` + `S` | Save the tab; asks for a name the first time |
 | `Ctrl` + `Shift` + `S` | Save as — always asks |
 | `Ctrl` + `O` | Open boards, one tab each |

@@ -403,7 +403,7 @@ Portals: `xdg-desktop-portal` for “open image” / “save PNG elsewhere”. D
 | T | text |
 | N | sticky |
 | Ctrl+V | paste the clipboard image |
-| Ctrl+Z / Ctrl+Y | undo / redo |
+| Ctrl+Z / Ctrl+Shift+Z | undo / redo |
 | Ctrl+0 / 1 | fit / 100% |
 | Ctrl+Shift+E | export to the last known cwd or dialog |
 
@@ -440,8 +440,10 @@ transform the document live from a snapshot taken at the press, so `Esc`
 puts it back; `Delete`/`Backspace` removes. The selection is session
 state (§6.2) and is dropped on a tool switch.
 
-Undo landed: `Ctrl+Z` and `Ctrl+Y` from the table above, plus
-`Ctrl+Shift+Z`. A step is a resting **state** rather than a change — the
+Undo landed: `Ctrl+Z`, and `Ctrl+Shift+Z` to go forward again. The
+table above said `Ctrl+Y` for that, and this is the draft catching up:
+the undo key with Shift on it is what every drawing tool uses, and a
+second key onto the same room is one more thing to keep true. A step is a resting **state** rather than a change — the
 scene changes on every sample of a stroke, and on every step of a drag —
 so the history is written where a change lands with nothing still
 happening, and a whole stroke, a whole drag or a card carried over two

@@ -519,7 +519,9 @@ impl App {
         self.stepped();
     }
 
-    /// `Ctrl+Y`, or `Ctrl+Shift+Z`: forward again.
+    /// `Ctrl+Shift+Z`: forward again. One shortcut and not two — the
+    /// undo key with Shift on it is what every drawing tool uses, and
+    /// `Ctrl+Y` would be a second door onto the same room.
     fn redo(&mut self) {
         self.drop_gesture();
         let Open {
@@ -1903,7 +1905,6 @@ impl App {
                     "v" => self.paste(),
                     "z" if shift => self.redo(),
                     "z" => self.undo(),
-                    "y" => self.redo(),
                     "s" if shift => self.ask_name(self.active, Then::Stay),
                     "s" => self.save_active(),
                     "o" => self.ask_open(),
