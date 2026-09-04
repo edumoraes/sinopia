@@ -117,6 +117,7 @@ impl Panel {
     /// `target` is which row wears the ring; `folder` is the field when
     /// there is one, and `line` is the instruction. The panel holds
     /// neither — `app` owns them, as it owns every other field.
+    #[allow(clippy::too_many_arguments)]
     pub fn prims(
         &self,
         agents: &[Agent],
@@ -251,7 +252,7 @@ mod tests {
         // The same promise the properties bar makes: a name in this
         // window is never written with an ellipsis it did not choose.
         let atlas = Atlas::build(&crate::text::Font::bundled(), 13);
-        let agents = vec![
+        let agents = [
             crate::agents::Agent::at("claude", "/home/e/Work/board", crate::agents::Reach::None),
             crate::agents::Agent::at(
                 "opencode",

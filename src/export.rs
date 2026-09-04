@@ -127,7 +127,7 @@ pub fn free_name(base: &str, taken: &[String]) -> String {
         s if s.is_empty() => UNNAMED.to_owned(),
         s => s,
     };
-    if !taken.iter().any(|t| *t == stem) {
+    if !taken.contains(&stem) {
         return stem;
     }
     (2u32..)

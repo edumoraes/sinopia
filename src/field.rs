@@ -34,10 +34,6 @@ impl Field {
         &self.value
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.value.trim().is_empty()
-    }
-
     /// The byte offset the caret sits at.
     fn offset(&self) -> usize {
         self.value
