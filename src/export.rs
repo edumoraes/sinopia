@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
+use serde::Serialize;
 
 use crate::doc::{Document, Element, Kind, Layer};
 use crate::geom::Frame;
@@ -52,6 +53,53 @@ pub fn named(doc: &Document, scope: &Scope) -> Option<String> {
         .iter()
         .find(|l| l.id == frame.layer)
         .map(|l| l.name.clone())
+}
+
+/// One frame, as an agent is told about it: what to ask for it by, what
+/// it is called, where it stands and how much is standing in it. It is
+/// the whole of what can be said about a frame without exporting it, and
+/// it is what an agent picks from.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Card {
+    pub id: String,
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// How many elements the frame holds — its own boundary not counted.
+    pub elements: usize,
+}
+
+/// Every frame on the board, in paint order. A frame's name is its
+/// layer's, exactly as [`named`] answers it, and what it holds is what
+/// `painted()` says its boundary cuts — the same seam the renderer and
+/// the pointer read, so a listing cannot disagree with a picture.
+pub fn frames(doc: &Document) -> Vec<Card> {
+    let mut out = Vec::new();
+    for p in doc.painted() {
+        let Element::Frame(f) = p.element else {
+            continue;
+        };
+        out.push(Card {
+            id: f.id.clone(),
+            name: doc
+                .layers
+                .iter()
+                .find(|l| l.id == f.layer)
+                .map(|l| l.name.clone())
+                .unwrap_or_default(),
+            x: f.x,
+            y: f.y,
+            w: f.w,
+            h: f.h,
+            elements: doc
+                .painted()
+                .filter(|held| held.within.is_some_and(|w| w.id == f.id))
+                .count(),
+        });
+    }
+    out
 }
 
 /// A document holding only what the scope covers, in paint order, with
@@ -382,6 +430,51 @@ mod tests {
             Some("Auth Flow")
         );
         assert_eq!(named(&doc, &Scope::Selection(vec!["outside".into()])), None);
+    }
+
+    #[test]
+    fn the_listing_says_what_a_frame_is_called_where_it_is_and_what_it_holds() {
+        let cards = frames(&board());
+        assert_eq!(cards.len(), 1, "one frame on this board");
+        let c = &cards[0];
+        assert_eq!(c.id, "f1");
+        assert_eq!(c.name, "Auth Flow", "a frame's name is its layer's");
+        assert_eq!((c.x, c.y, c.w, c.h), (0.0, 0.0, 100.0, 50.0));
+        assert_eq!(
+            c.elements, 1,
+            "what the boundary cuts, and not the loose rect outside it"
+        );
+    }
+
+    #[test]
+    fn a_board_with_no_frames_lists_none() {
+        let mut doc = Document::new("plain");
+        doc.elements
+            .push(Element::Rect(rect("r", "", 0.0, 0.0, 10.0, 10.0)));
+        assert!(frames(&doc).is_empty());
+    }
+
+    #[test]
+    fn the_listing_is_in_paint_order() {
+        let mut doc = board();
+        doc.layers.push(Layer {
+            id: "fl2".into(),
+            name: "Second".into(),
+            visible: true,
+            kind: Kind::Frame,
+        });
+        doc.elements.push(Element::Frame(crate::doc::Frame {
+            id: "f2".into(),
+            layer: "fl2".into(),
+            x: 200.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            background: None,
+            layers: vec![Layer::new("Layer 1")],
+        }));
+        let ids: Vec<_> = frames(&doc).into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["f1", "f2"], "the layers' order, bottom first");
     }
 
     #[test]
