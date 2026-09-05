@@ -2,3 +2,6 @@
 /brushes
 
 __pycache__/
+
+# Where a board leaves for an agent. What lands here is a copy, not a source.
+docs/boards/

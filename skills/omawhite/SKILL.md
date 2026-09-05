@@ -19,7 +19,9 @@ frame someone else made.
 
 Everything below needs a **board open on this desktop**. Without one every
 command exits non-zero saying so; do not try to start one, ask the person to
-open it.
+open it. If several boards are open in tabs, every command acts on the one in
+front — so name the frame you mean and say which board you read it from, and
+if a listing looks like the wrong board, ask rather than guess.
 
 Every command prints one line of JSON and exits `0`, or prints an error and
 exits `1`. `{"ev":"denied", ...}` is also exit `1`, and its `reason` says what

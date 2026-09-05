@@ -113,9 +113,14 @@ pub fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(Strin
     let at = spot(board);
     let by = Affine::translate(at[0] - frame.x, at[1] - frame.y);
 
+    // Read straight off `elements` and not through `painted()`: that one
+    // skips a hidden layer, and hiding is a property that should travel
+    // with a frame rather than quietly filter what it holds. Document
+    // order within a layer is what `elements` already carries, and order
+    // between layers is the board's own to derive.
     let mut planted: Vec<Element> = Vec::new();
-    for p in fragment.painted() {
-        let mut el = p.element.clone();
+    for el in &fragment.elements {
+        let mut el = el.clone();
         match &mut el {
             Element::Frame(f) => {
                 f.id = id.clone();
@@ -371,6 +376,25 @@ mod tests {
         assert!(
             board.frame(&first).is_some(),
             "the frame it was read from is untouched"
+        );
+    }
+
+    #[test]
+    fn a_hidden_layer_travels_hidden_rather_than_being_dropped() {
+        // `painted()` would filter it away and the frame would arrive
+        // empty with nothing said. A frame carries what it holds.
+        let mut frag = fragment();
+        let Element::Frame(f) = &mut frag.elements[0] else {
+            panic!("a frame")
+        };
+        f.layers[0].visible = false;
+        let mut board = board();
+        let (id, _) = plant(&mut board, &frag).unwrap();
+        let inner = &board.frame(&id).unwrap().layers[0];
+        assert!(!inner.visible, "it is still hidden");
+        assert!(
+            board.elements.iter().any(|e| e.layer() == inner.id),
+            "and what stood on it came along"
         );
     }
 
