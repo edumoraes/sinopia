@@ -144,6 +144,20 @@ impl Element {
         }
     }
 
+    /// Renames the element. What arrives from outside the board is
+    /// minted anew rather than trusted to be unique — [`crate::graft`]
+    /// is where that matters and why this exists.
+    pub fn set_id(&mut self, id: &str) {
+        let at = match self {
+            Element::Rect(r) => &mut r.id,
+            Element::Path(p) => &mut p.id,
+            Element::Paint(p) => &mut p.id,
+            Element::Image(i) => &mut i.id,
+            Element::Frame(f) => &mut f.id,
+        };
+        id.clone_into(at);
+    }
+
     pub fn set_layer(&mut self, id: &str) {
         let layer = match self {
             Element::Rect(r) => &mut r.layer,

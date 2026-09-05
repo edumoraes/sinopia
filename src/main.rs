@@ -19,6 +19,7 @@ mod field;
 mod geom;
 mod gestures;
 mod gfx;
+mod graft;
 mod grid;
 mod history;
 mod ipc;

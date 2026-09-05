@@ -1,0 +1,388 @@
+//! A frame an agent hands over, planted on a board (§8).
+//!
+//! What `read` writes is what `add` takes: a document that is **one
+//! frame** plus what stands on that frame's own layers, and nothing
+//! else — literally what [`crate::export::sub_document`] produces for a
+//! [`crate::export::Scope::Frame`]. One shape, so the round trip is
+//! exact and the schema's own parse is the whole of the validation.
+//!
+//! Everything here is pure. The bytes behind an image are the store's
+//! business, and the store is `app`'s.
+
+use anyhow::Context as _;
+
+use crate::doc::{Document, Element, Frame, Kind, Layer, new_id};
+use crate::geom::Affine;
+use crate::select;
+
+/// How far to the right of everything a planted frame stands, in world
+/// units — far enough that the two do not read as one area.
+pub const GUTTER: f64 = 80.0;
+
+/// The one frame a fragment is, checked: exactly one, on a frame layer
+/// of the fragment's own stack, with every other element standing on one
+/// of *that frame's* layers. Anything else is refused naming what is
+/// wrong — a fragment carries a frame and what is in it, and a loose
+/// object travelling beside one would have nowhere to land.
+pub fn only_frame(fragment: &Document) -> anyhow::Result<&Frame> {
+    let mut found = fragment.elements.iter().filter_map(|el| match el {
+        Element::Frame(f) => Some(f),
+        _ => None,
+    });
+    let frame = found
+        .next()
+        .context("a fragment is one frame and what stands in it; this one holds none")?;
+    if let Some(second) = found.next() {
+        anyhow::bail!(
+            "a fragment is one frame; this one holds {:?} and {:?}",
+            frame.id,
+            second.id
+        );
+    }
+    anyhow::ensure!(
+        fragment
+            .layers
+            .iter()
+            .any(|l| l.id == frame.layer && l.kind == Kind::Frame),
+        "frame {:?} names layer {:?}, which is not a frame layer of the fragment",
+        frame.id,
+        frame.layer
+    );
+    for el in &fragment.elements {
+        if matches!(el, Element::Frame(_)) {
+            continue;
+        }
+        anyhow::ensure!(
+            frame.layers.iter().any(|l| l.id == el.layer()),
+            "element {:?} is on layer {:?}, which is not one of frame {:?}'s: \
+             a fragment carries what stands in its frame and nothing beside it",
+            el.id(),
+            el.layer(),
+            frame.id
+        );
+    }
+    Ok(frame)
+}
+
+/// The name a fragment's frame carries: its layer's, as a frame's name
+/// is everywhere else.
+pub fn name_of(fragment: &Document, frame: &Frame) -> String {
+    fragment
+        .layers
+        .iter()
+        .find(|l| l.id == frame.layer)
+        .map(|l| l.name.clone())
+        .unwrap_or_default()
+}
+
+/// Where the board puts a frame it is handed: to the right of everything
+/// already on it, aligned with the top of it. An empty board takes one
+/// at the origin, which is where its camera starts.
+///
+/// The board picks and not the agent: an agent cannot see the board, so
+/// a spot it named would land on top of work at random. Whoever wants it
+/// somewhere else drags it.
+pub fn spot(board: &Document) -> [f64; 2] {
+    let ids: Vec<String> = board.elements.iter().map(|e| e.id().to_owned()).collect();
+    match select::frame_of(board, &ids) {
+        None => [0.0, 0.0],
+        Some(f) => {
+            let (lo, hi) = f.aabb();
+            [hi[0] + GUTTER, lo[1]]
+        }
+    }
+}
+
+/// Plants `fragment`'s frame on `board` and answers the id and the name
+/// it now goes by.
+pub fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(String, String)> {
+    let frame = only_frame(fragment)?;
+    let name = name_of(fragment, frame);
+
+    // Every id is minted anew: what arrives is a *new* frame, so handing
+    // back the page just read plants a sibling rather than writing over
+    // the frame it was read from.
+    let stem = Layer::of(&name, Kind::Frame);
+    let id = new_id();
+    let inner: Vec<(String, String)> = frame
+        .layers
+        .iter()
+        .map(|l| (l.id.clone(), new_id()))
+        .collect();
+
+    let at = spot(board);
+    let by = Affine::translate(at[0] - frame.x, at[1] - frame.y);
+
+    let mut planted: Vec<Element> = Vec::new();
+    for p in fragment.painted() {
+        let mut el = p.element.clone();
+        match &mut el {
+            Element::Frame(f) => {
+                f.id = id.clone();
+                f.layer = stem.id.clone();
+                for l in &mut f.layers {
+                    let to = minted(&inner, &l.id).expect("every inner layer was just minted");
+                    l.id = to;
+                }
+            }
+            other => {
+                let to = minted(&inner, other.layer()).with_context(|| {
+                    format!(
+                        "element {:?} is on layer {:?}, which the frame does not have",
+                        other.id(),
+                        other.layer()
+                    )
+                })?;
+                other.set_layer(&to);
+                other.set_id(&new_id());
+            }
+        }
+        select::transform(&mut el, &by);
+        planted.push(el);
+    }
+
+    // On top: a frame an agent hands over arrives over the work that is
+    // already there, never under it.
+    board.layers.push(stem);
+    board.elements.extend(planted);
+    Ok((id, name))
+}
+
+/// The id a layer of the fragment was minted as.
+fn minted(pairs: &[(String, String)], was: &str) -> Option<String> {
+    pairs
+        .iter()
+        .find(|(from, _)| from == was)
+        .map(|(_, to)| to.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc::Rect;
+    use crate::export::{self, Scope};
+
+    fn rect(id: &str, layer: &str, x: f64, y: f64, w: f64, h: f64) -> Element {
+        Element::Rect(Rect {
+            id: id.into(),
+            layer: layer.into(),
+            x,
+            y,
+            w,
+            h,
+            rotation: 0.0,
+            stroke: None,
+            fill: Some("#eee".into()),
+            text: None,
+        })
+    }
+
+    /// A fragment: one frame 100×50 at the origin, named "Auth Flow",
+    /// holding one rect 10 in from its top left.
+    fn fragment() -> Document {
+        let mut doc = Document::new("page");
+        doc.layers = vec![Layer {
+            id: "fl".into(),
+            name: "Auth Flow".into(),
+            visible: true,
+            kind: Kind::Frame,
+        }];
+        doc.elements = vec![
+            Element::Frame(Frame {
+                id: "f1".into(),
+                layer: "fl".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 50.0,
+                background: Some("#ffffff".into()),
+                layers: vec![Layer {
+                    id: "in".into(),
+                    name: "Layer 1".into(),
+                    visible: true,
+                    kind: Kind::Raster,
+                }],
+            }),
+            rect("r1", "in", 10.0, 10.0, 20.0, 20.0),
+        ];
+        doc
+    }
+
+    /// A board with one rect spanning (0,0)–(200,100).
+    fn board() -> Document {
+        let mut doc = Document::new("board");
+        doc.layers[0].id = "L1".into();
+        doc.elements = vec![rect("b1", "L1", 0.0, 0.0, 200.0, 100.0)];
+        doc
+    }
+
+    fn frame_of<'a>(doc: &'a Document, id: &str) -> &'a Frame {
+        doc.frame(id).expect("a frame by that id")
+    }
+
+    #[test]
+    fn a_fragment_holding_no_frame_is_refused() {
+        let mut doc = Document::new("flat");
+        doc.elements = vec![rect("r", "", 0.0, 0.0, 10.0, 10.0)];
+        let e = only_frame(&doc).unwrap_err().to_string();
+        assert!(e.contains("none"), "{e}");
+    }
+
+    #[test]
+    fn a_fragment_holding_two_frames_is_refused_naming_both() {
+        let mut doc = fragment();
+        doc.layers.push(Layer {
+            id: "fl2".into(),
+            name: "Other".into(),
+            visible: true,
+            kind: Kind::Frame,
+        });
+        doc.elements.push(Element::Frame(Frame {
+            id: "f2".into(),
+            layer: "fl2".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            background: None,
+            layers: vec![Layer::new("Layer 1")],
+        }));
+        let e = only_frame(&doc).unwrap_err().to_string();
+        assert!(e.contains("f1") && e.contains("f2"), "{e}");
+    }
+
+    #[test]
+    fn an_object_standing_outside_the_frame_is_refused_naming_it() {
+        let mut doc = fragment();
+        doc.layers.push(Layer::new("loose"));
+        let loose = doc.layers.last().unwrap().id.clone();
+        doc.elements.push(rect("stray", &loose, 0.0, 0.0, 5.0, 5.0));
+        let e = only_frame(&doc).unwrap_err().to_string();
+        assert!(e.contains("stray"), "{e}");
+    }
+
+    #[test]
+    fn a_frame_on_a_layer_that_is_not_a_frame_layer_is_refused() {
+        let mut doc = fragment();
+        doc.layers[0].kind = Kind::Raster;
+        assert!(only_frame(&doc).is_err());
+    }
+
+    #[test]
+    fn a_planted_frame_keeps_its_name_and_its_size() {
+        let mut board = board();
+        let (id, name) = plant(&mut board, &fragment()).unwrap();
+        assert_eq!(name, "Auth Flow");
+        let f = frame_of(&board, &id);
+        assert_eq!((f.w, f.h), (100.0, 50.0), "the size is the agent's");
+        assert_eq!(
+            board.layers.last().unwrap().name,
+            "Auth Flow",
+            "the frame's layer carries the name"
+        );
+    }
+
+    #[test]
+    fn a_planted_frame_stands_to_the_right_of_everything() {
+        let mut board = board();
+        let (id, _) = plant(&mut board, &fragment()).unwrap();
+        let f = frame_of(&board, &id);
+        assert_eq!(f.x, 200.0 + GUTTER, "past the right edge of the board");
+        assert_eq!(f.y, 0.0, "aligned with the top of what is there");
+    }
+
+    #[test]
+    fn an_empty_board_takes_a_frame_at_the_origin() {
+        let mut board = Document::new("empty");
+        let (id, _) = plant(&mut board, &fragment()).unwrap();
+        let f = frame_of(&board, &id);
+        assert_eq!((f.x, f.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn what_the_frame_holds_moves_with_it() {
+        let mut board = board();
+        let (id, _) = plant(&mut board, &fragment()).unwrap();
+        let f = frame_of(&board, &id).clone();
+        let held: Vec<&Element> = board
+            .painted()
+            .filter(|p| p.within.is_some_and(|w| w.id == id))
+            .map(|p| p.element)
+            .collect();
+        assert_eq!(held.len(), 1, "the rect came with it");
+        let Element::Rect(r) = held[0] else {
+            panic!("a rect")
+        };
+        assert_eq!(
+            (r.x - f.x, r.y - f.y),
+            (10.0, 10.0),
+            "it keeps where it stood inside the frame"
+        );
+    }
+
+    #[test]
+    fn every_id_is_minted_anew_so_planting_twice_makes_two_frames() {
+        let mut board = board();
+        let frag = fragment();
+        let (a, _) = plant(&mut board, &frag).unwrap();
+        let (b, _) = plant(&mut board, &frag).unwrap();
+        assert_ne!(a, b, "two frames, not one written over");
+        assert_eq!(export::frames(&board).len(), 2);
+        assert!(
+            !board.elements.iter().any(|e| e.id() == "f1" || e.id() == "r1"),
+            "nothing keeps the id it arrived with"
+        );
+    }
+
+    #[test]
+    fn a_planted_frame_lands_on_top() {
+        let mut board = board();
+        let (id, _) = plant(&mut board, &fragment()).unwrap();
+        let last = board.painted().last().expect("something is painted");
+        assert!(
+            last.within.is_some_and(|w| w.id == id) || last.element.id() == id,
+            "the frame an agent hands over arrives over what is there"
+        );
+    }
+
+    #[test]
+    fn a_board_that_took_a_graft_is_still_a_board_that_parses() {
+        // The whole of the validation is the schema's own: unique layer
+        // ids across both stacks, a frame layer with its frame on it, no
+        // frame nested, every element naming a layer that exists.
+        let mut board = board();
+        plant(&mut board, &fragment()).unwrap();
+        plant(&mut board, &fragment()).unwrap();
+        let json = board.to_json().unwrap();
+        Document::from_json(&json).expect("settle_layers accepts what was grafted");
+    }
+
+    #[test]
+    fn what_read_writes_is_what_add_takes() {
+        // The design's own claim, end to end: a frame exported off a
+        // board is a fragment that board can be handed back.
+        let mut board = board();
+        let (first, _) = plant(&mut board, &fragment()).unwrap();
+        let page = export::sub_document(&board, &Scope::Frame(first.clone()));
+        let (second, name) = plant(&mut board, &page).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(name, "Auth Flow", "the name survives the round trip");
+        assert_eq!(export::frames(&board).len(), 2);
+        assert!(
+            board.frame(&first).is_some(),
+            "the frame it was read from is untouched"
+        );
+    }
+
+    #[test]
+    fn the_spot_is_the_origin_when_there_is_nothing_on_the_board() {
+        assert_eq!(spot(&Document::new("empty")), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_name_of_a_frame_is_its_layers() {
+        let frag = fragment();
+        let f = only_frame(&frag).unwrap();
+        assert_eq!(name_of(&frag, f), "Auth Flow");
+    }
+}
