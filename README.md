@@ -10,7 +10,7 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames,
 export to the agent and the CLI an agent asks the board through:
 
-- `cargo build` clean, `cargo test` with 780 tests.
+- `cargo build` clean, `cargo test` with 781 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -254,7 +254,8 @@ export to the agent and the CLI an agent asks the board through:
   beside the json — so a label today is a picture the agent rendered,
   the canvas having no text of its own yet. It lands as one undo step:
   `Ctrl+Z` takes an agent's frame back off. All three need the board to
-  be **open** — it is the live document, unsaved work included — and
+  be **open** — it is the live document, unsaved work included, and the
+  tab in front where several are — and
   their answer is real work rather than an ack, so they go over the
   socket on a path of their own and wait for the loop to do it. The
   skill that teaches an agent all of this is `skills/omawhite/`, one
