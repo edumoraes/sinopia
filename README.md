@@ -259,7 +259,10 @@ export to the agent and the CLI an agent asks the board through:
   their answer is real work rather than an ack, so they go over the
   socket on a path of their own and wait for the loop to do it. The
   skill that teaches an agent all of this is `skills/omawhite/`, one
-  markdown file and an installer.
+  markdown file and an installer that puts it where each host on the
+  machine looks — `~/.claude/skills/`, `~/.codex/skills/` and
+  `~/.config/opencode/skills/` all read a directory holding a
+  `SKILL.md`, and the installer says which hosts it found.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it

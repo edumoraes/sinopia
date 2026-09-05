@@ -1,39 +1,92 @@
 #!/usr/bin/env sh
-# Installs the omawhite skill where an agent will find it.
+# Installs the omawhite skill where each agent on this machine looks for
+# one. A skill is a directory named after it holding a `SKILL.md`, and
+# three hosts agree on that shape — they only disagree on where the
+# directory goes:
+#
+#   Claude Code  ${CLAUDE_CONFIG_DIR:-~/.claude}/skills/omawhite/
+#   Codex        ${CODEX_HOME:-~/.codex}/skills/omawhite/
+#   OpenCode     ${XDG_CONFIG_HOME:-~/.config}/opencode/skills/omawhite/
 #
 # Usage:
-#   ./install.sh              # ~/.claude/skills/omawhite/
-#   ./install.sh <directory>  # anywhere else a host reads skills from
+#   ./install.sh              # every host found on this machine
+#   ./install.sh <directory>  # one place, for a host not listed above
 #
-# The skill is one markdown file with frontmatter. An agent that reads a
-# directory of skills wants the directory; an agent that reads a single
-# instructions file (AGENTS.md, GEMINI.md) wants a line pointing at the
-# installed SKILL.md — the last thing this script prints is that line.
+# A host is "found" when its command is on PATH or its config directory
+# already exists; anything else is skipped and said out loud, because an
+# install that quietly wrote nowhere is worse than one that reports it.
 
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-to=${1:-"$HOME/.claude/skills/omawhite"}
+skill="$here/SKILL.md"
 
-if [ ! -f "$here/SKILL.md" ]; then
+if [ ! -f "$skill" ]; then
 	echo "no SKILL.md beside $0" >&2
 	exit 1
 fi
 
-mkdir -p "$to"
-cp "$here/SKILL.md" "$to/SKILL.md"
-echo "installed $to/SKILL.md"
+put() {
+	mkdir -p "$1"
+	cp "$skill" "$1/SKILL.md"
+	echo "  installed  $1/SKILL.md"
+}
 
+# One directory named on the command line: install there and stop.
+if [ $# -gt 0 ]; then
+	put "$1"
+	exit 0
+fi
+
+found=0
+
+# $1 host, $2 command, $3 config directory, $4 skills directory
+host() {
+	if command -v "$2" >/dev/null 2>&1 || [ -d "$3" ]; then
+		printf '%-12s' "$1"
+		put "$4"
+		found=$((found + 1))
+	else
+		echo "  skipped    $1 — not installed here"
+	fi
+}
+
+echo "omawhite skill:"
+host "Claude Code" claude "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" \
+	"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/omawhite"
+host "Codex" codex "${CODEX_HOME:-$HOME/.codex}" \
+	"${CODEX_HOME:-$HOME/.codex}/skills/omawhite"
+host "OpenCode" opencode "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" \
+	"${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/omawhite"
+
+if [ "$found" -eq 0 ]; then
+	echo
+	echo "nothing installed: no host found. Name a directory instead:" >&2
+	echo "  $0 <directory>" >&2
+	exit 1
+fi
+
+# The binary has to be new enough to answer the verb, not merely be
+# there: a skill whose every command errors is worse than none, and an
+# old build on PATH is the likeliest way to get one.
 if ! command -v omawhite >/dev/null 2>&1; then
 	echo
 	echo "note: 'omawhite' is not on PATH. The skill's commands need the"
 	echo "      binary; put it on PATH or in ~/.local/bin."
+elif ! omawhite agent --help >/dev/null 2>&1; then
+	echo
+	echo "note: the omawhite on PATH does not know the 'agent' verb —"
+	echo "      $(command -v omawhite) predates it. Build and install a"
+	echo "      newer one, or the skill's commands will all fail:"
+	echo "        cargo build --release && install -m755 \\"
+	echo "          target/release/omawhite ~/.local/bin/omawhite"
 fi
 
 cat <<EOF
 
-For an agent that reads one instructions file instead of a skills
-directory, add this line to it:
+A host that reads one instructions file rather than a skills directory
+wants a line pointing at the installed copy instead:
 
-    See $to/SKILL.md for reading and writing frames on the omawhite board.
+    See ~/.claude/skills/omawhite/SKILL.md for reading and writing
+    frames on the omawhite board.
 EOF
