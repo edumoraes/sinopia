@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::doc::{Document, Element, Kind, Layer};
 use crate::geom::Frame;
@@ -59,7 +59,7 @@ pub fn named(doc: &Document, scope: &Scope) -> Option<String> {
 /// it is called, where it stands and how much is standing in it. It is
 /// the whole of what can be said about a frame without exporting it, and
 /// it is what an agent picks from.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Card {
     pub id: String,
     pub name: String,

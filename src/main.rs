@@ -43,7 +43,7 @@ use clap::Parser as _;
 
 use cli::{Action, Cli};
 use ipc::client::try_forward;
-use ipc::proto::{ExportFormat, Request};
+use ipc::proto::{Event, ExportFormat, Request, parse_event};
 use project::{Origin, Project};
 use store::Store;
 
@@ -70,6 +70,15 @@ fn main() -> anyhow::Result<()> {
         // No colours: the desktop's own theme, read again by the
         // instance that is drawing with it.
         Action::Theme => Request::Theme { colors: None },
+        Action::Frames => Request::Frames,
+        Action::Read { frame, to } => Request::ReadFrame {
+            id: frame_id(&socket_path, frame)?,
+            dir: destination(to.as_deref())?,
+        },
+        Action::Add(file) => Request::AddFrame {
+            path: std::fs::canonicalize(file)
+                .with_context(|| format!("reading the fragment {file:?}"))?,
+        },
     };
 
     // §5: a second omawhite becomes a command on the socket, not a second window.
@@ -88,6 +97,13 @@ fn main() -> anyhow::Result<()> {
     match action {
         Action::Export(_) => {
             anyhow::bail!("no omawhite instance running; open the board before exporting")
+        }
+        // The board that is *open* is the one being read and written,
+        // with the work nobody has saved yet inside it. There is nothing
+        // to answer without one, and opening a window to answer would
+        // answer about a different board.
+        Action::Frames | Action::Read { .. } | Action::Add(_) => {
+            anyhow::bail!("no omawhite instance running; open the board first")
         }
         Action::Shutdown => {
             log::info!("no instance running; nothing to shut down");
@@ -122,6 +138,57 @@ fn main() -> anyhow::Result<()> {
             };
             app::run(store, project, socket_path, cli.smoke_frames)
         }
+    }
+}
+
+/// The directory a page lands in, as the *caller* meant it: the one
+/// named, or the one the command was run in. Resolved here because the
+/// running instance's working directory is not the caller's, and
+/// canonical because `..` says nothing about where a write lands to
+/// whoever reads the line. It is still only a candidate — the binary
+/// measures it against the allowlist (§8.2) before writing.
+fn destination(to: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
+    let dir = match to {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir().context("reading the current directory")?,
+    };
+    std::fs::canonicalize(&dir).with_context(|| format!("resolving the destination {dir:?}"))
+}
+
+/// The id of the frame the caller named. An id is taken as one; anything
+/// else is looked for in the listing by name, and a name two frames
+/// answer to is refused naming both.
+///
+/// The lookup is here and not in the protocol on purpose: `op:
+/// read_frame` takes an id and only an id, for the reason `open` and
+/// `open_file` are two ops — guessing what a string is, is the best
+/// effort §5 forbids. Guessing outside the schema costs one round trip
+/// and binds nobody.
+fn frame_id(socket: &std::path::Path, asked: &str) -> anyhow::Result<String> {
+    let reply = try_forward(socket, &Request::Frames)?
+        .context("no omawhite instance running; open the board first")?;
+    let frames = match parse_event(&reply)? {
+        Event::Frames { frames } => frames,
+        Event::Denied { reason, .. } => anyhow::bail!("the board refused the listing: {reason}"),
+        other => anyhow::bail!("the board answered {other:?} to a listing"),
+    };
+    if frames.iter().any(|f| f.id == asked) {
+        return Ok(asked.to_owned());
+    }
+    let by_name: Vec<&export::Card> = frames.iter().filter(|f| f.name == asked).collect();
+    match by_name.as_slice() {
+        [one] => Ok(one.id.clone()),
+        [] => anyhow::bail!(
+            "no frame {asked:?} on the board that is open; `omawhite agent frames` lists them"
+        ),
+        many => anyhow::bail!(
+            "{} frames go by {asked:?} — ask for one by id: {}",
+            many.len(),
+            many.iter()
+                .map(|f| f.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

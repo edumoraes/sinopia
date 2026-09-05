@@ -8,8 +8,10 @@
 use std::path::PathBuf;
 
 use anyhow::Context as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+use crate::export::Card;
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -43,6 +45,54 @@ pub enum Request {
         colors: Option<ThemeColors>,
     },
     Shutdown,
+    /// What frames the open board has. The three below are an agent's
+    /// own door (§8): their answer *is* the work — the listing wants the
+    /// live document and a picture wants the GPU — so unlike every op
+    /// above them they are not acked and forgotten.
+    Frames,
+    /// One frame, exported into `dir` as the page §8 describes. `dir` is
+    /// a candidate like any other export destination, measured against
+    /// the allowlist (§8.2) before anything is written.
+    ReadFrame {
+        id: String,
+        dir: PathBuf,
+    },
+    /// A frame handed over, in a file the caller wrote. A path and not
+    /// the content: §5 says the socket speaks intent and never scene
+    /// content, and a frame with ink in it would not fit the frame
+    /// anyway.
+    AddFrame {
+        path: PathBuf,
+    },
+}
+
+impl Request {
+    /// The op this request goes by on the wire. One mapping, read both
+    /// by the line that carries it and by a denial that has to name it.
+    pub fn op(&self) -> &'static str {
+        match self {
+            Request::Ping => "ping",
+            Request::New => "new",
+            Request::Raise => "raise",
+            Request::Shutdown => "shutdown",
+            Request::Open { .. } => "open",
+            Request::OpenFile { .. } => "open_file",
+            Request::Export { .. } => "export",
+            Request::Theme { .. } => "theme",
+            Request::Frames => "frames",
+            Request::ReadFrame { .. } => "read_frame",
+            Request::AddFrame { .. } => "add_frame",
+        }
+    }
+
+    /// Whether the answer to this request *is* the work: the three an
+    /// agent asks (§8), which the event loop does rather than acks.
+    pub fn is_asked(&self) -> bool {
+        matches!(
+            self,
+            Request::Frames | Request::ReadFrame { .. } | Request::AddFrame { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,7 +121,7 @@ pub struct ThemeColors {
 
 /// App → plugin. `Saved`/`Exported` belong to the §5 contract; the app
 /// starts emitting them with autosave and export (§15 items 4–5).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "ev", rename_all = "lowercase")]
 #[allow(dead_code)]
 pub enum Event {
@@ -80,6 +130,37 @@ pub enum Event {
     Exported { files: Vec<String> },
     Denied { op: String, reason: String },
     Exited { code: i32 },
+    /// The frames the open board has, in paint order.
+    Frames { frames: Vec<Card> },
+    /// A frame an agent handed over is on the board, under the id and
+    /// the name it now goes by — enough to read it straight back.
+    Framed { id: String, name: String },
+}
+
+/// `ev`, or `denied` in its place when it would not fit a frame. An
+/// answer cut short in silence would be a lie about the board, and the
+/// cap is the one §5 states.
+pub fn fits(ev: Event, op: &str) -> Event {
+    if event_line(&ev).len() <= MAX_FRAME_BYTES {
+        return ev;
+    }
+    Event::Denied {
+        op: op.to_owned(),
+        reason: format!("the answer is above the {MAX_FRAME_BYTES} byte frame"),
+    }
+}
+
+/// Reads a reply line. The CLI is a client of this protocol as much as
+/// the plugin is, and reading its own replies by poking at a `Value`
+/// would be a second, looser parser for the schema this module owns.
+/// `v` is checked; the event's own fields are serde's.
+pub fn parse_event(line: &str) -> anyhow::Result<Event> {
+    let value: Value = serde_json::from_str(line).context("invalid JSON")?;
+    match value.get("v").and_then(Value::as_u64) {
+        Some(PROTOCOL_VERSION) => {}
+        other => anyhow::bail!("reply speaks v {other:?}, not {PROTOCOL_VERSION}"),
+    }
+    serde_json::from_value(value).context("unknown reply")
 }
 
 /// Deserializes a request line, enforcing the closed schema.
@@ -119,6 +200,18 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         "theme" => Request::Theme {
             colors: take_colors(&mut map)?,
         },
+        "frames" => Request::Frames,
+        // Absolute, unlike `export`'s: the caller's working directory is
+        // not the running instance's, so a relative destination would be
+        // resolved against the wrong one. The CLI, which does know the
+        // caller's, is where a relative `--to` becomes absolute.
+        "read_frame" => Request::ReadFrame {
+            id: take_string(&mut map, "id")?,
+            dir: absolute(take_string(&mut map, "dir")?)?,
+        },
+        "add_frame" => Request::AddFrame {
+            path: absolute(take_string(&mut map, "path")?)?,
+        },
         other => anyhow::bail!("unknown op: {other:?}"),
     };
 
@@ -131,27 +224,19 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
 pub fn request_line(req: &Request) -> String {
     let mut map = Map::new();
     map.insert("v".into(), PROTOCOL_VERSION.into());
-    let op = match req {
-        Request::Ping => "ping",
-        Request::New => "new",
-        Request::Raise => "raise",
-        Request::Shutdown => "shutdown",
+    let path = |p: &PathBuf| Value::from(p.to_string_lossy().into_owned());
+    match req {
+        Request::Ping | Request::New | Request::Raise | Request::Shutdown | Request::Frames => {}
         Request::Open { id } => {
             map.insert("id".into(), id.clone().into());
-            "open"
         }
-        Request::OpenFile { path } => {
-            map.insert(
-                "path".into(),
-                path.to_string_lossy().into_owned().into(),
-            );
-            "open_file"
+        Request::OpenFile { path: at } => {
+            map.insert("path".into(), path(at));
         }
         Request::Export { dir, formats } => {
-            map.insert("dir".into(), dir.to_string_lossy().into_owned().into());
+            map.insert("dir".into(), path(dir));
             let formats: Vec<Value> = formats.iter().map(|f| Value::from(f.as_str())).collect();
             map.insert("formats".into(), formats.into());
-            "export"
         }
         Request::Theme { colors } => {
             if let Some(colors) = colors {
@@ -161,10 +246,16 @@ pub fn request_line(req: &Request) -> String {
                 c.insert("accent".into(), colors.accent.clone().into());
                 map.insert("colors".into(), Value::Object(c));
             }
-            "theme"
         }
-    };
-    map.insert("op".into(), op.into());
+        Request::ReadFrame { id, dir } => {
+            map.insert("id".into(), id.clone().into());
+            map.insert("dir".into(), path(dir));
+        }
+        Request::AddFrame { path: at } => {
+            map.insert("path".into(), path(at));
+        }
+    }
+    map.insert("op".into(), req.op().into());
     let mut line = Value::Object(map).to_string();
     line.push('\n');
     line
@@ -483,6 +574,14 @@ mod tests {
                 }),
             },
             Request::Theme { colors: None },
+            Request::Frames,
+            Request::ReadFrame {
+                id: "01JABC".into(),
+                dir: PathBuf::from("/home/you/Work/foo"),
+            },
+            Request::AddFrame {
+                path: PathBuf::from("/home/you/Work/foo/frame.json"),
+            },
         ];
         for req in all {
             let line = request_line(&req);
@@ -512,5 +611,105 @@ mod tests {
         let big = vec![b'a'; MAX_FRAME_BYTES + 1024];
         let mut input = std::io::Cursor::new(big);
         assert!(read_frame(&mut input).is_err());
+    }
+
+    fn card(id: &str) -> Card {
+        Card {
+            id: id.into(),
+            name: "Auth Flow".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+            elements: 3,
+        }
+    }
+
+    #[test]
+    fn parses_the_ops_an_agent_asks() {
+        assert_eq!(
+            parse_request(r#"{ "v": 1, "op": "frames" }"#).unwrap(),
+            Request::Frames
+        );
+        assert_eq!(
+            parse_request(r#"{ "v": 1, "op": "read_frame", "id": "01J", "dir": "/tmp/w" }"#)
+                .unwrap(),
+            Request::ReadFrame {
+                id: "01J".into(),
+                dir: PathBuf::from("/tmp/w"),
+            }
+        );
+        assert_eq!(
+            parse_request(r#"{ "v": 1, "op": "add_frame", "path": "/tmp/w/f.json" }"#).unwrap(),
+            Request::AddFrame {
+                path: PathBuf::from("/tmp/w/f.json"),
+            }
+        );
+    }
+
+    #[test]
+    fn an_agents_op_refuses_a_path_that_means_two_things() {
+        // A relative destination would be resolved against the running
+        // instance's working directory, which is not the caller's.
+        for line in [
+            r#"{ "v": 1, "op": "read_frame", "id": "01J", "dir": "docs" }"#,
+            r#"{ "v": 1, "op": "read_frame", "id": "01J", "dir": "/tmp/../etc" }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "f.json" }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/tmp/../etc/f.json" }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn an_agents_op_is_as_closed_as_every_other() {
+        for line in [
+            r#"{ "v": 1, "op": "frames", "of": "board" }"#,
+            r#"{ "v": 1, "op": "read_frame", "id": "01J", "dir": "/tmp", "scale": 2 }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/tmp/f.json", "at": [0, 0] }"#,
+            // A missing field is not a shorter sentence, it is an error.
+            r#"{ "v": 1, "op": "read_frame", "id": "01J" }"#,
+            r#"{ "v": 1, "op": "add_frame" }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn the_agents_events_match_the_wire_format() {
+        let line = event_line(&Event::Frames {
+            frames: vec![card("01J")],
+        });
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["ev"], "frames");
+        assert_eq!(v["v"], 1);
+        assert_eq!(v["frames"][0]["id"], "01J");
+        assert_eq!(v["frames"][0]["name"], "Auth Flow");
+        assert_eq!(v["frames"][0]["elements"], 3);
+
+        let line = event_line(&Event::Framed {
+            id: "01K".into(),
+            name: "Auth Flow".into(),
+        });
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["ev"], "framed");
+        assert_eq!(v["id"], "01K");
+    }
+
+    #[test]
+    fn an_answer_too_big_for_a_frame_is_denied_rather_than_cut_short() {
+        let small = Event::Frames {
+            frames: vec![card("01J")],
+        };
+        assert_eq!(fits(small.clone(), "frames"), small);
+
+        let many = Event::Frames {
+            frames: (0..5000).map(|n| card(&format!("{n:020}"))).collect(),
+        };
+        let Event::Denied { op, reason } = fits(many, "frames") else {
+            panic!("a listing past the frame is denied, never trimmed");
+        };
+        assert_eq!(op, "frames");
+        assert!(reason.contains(&MAX_FRAME_BYTES.to_string()), "{reason}");
     }
 }

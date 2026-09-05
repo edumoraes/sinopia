@@ -352,7 +352,11 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: Option<u32>) -> anyh
 }
 
 /// sha256 of `bytes`, in lowercase hex — a blob's name.
-fn sha256_hex(bytes: &[u8]) -> String {
+/// The name bytes are kept under. Public so a caller can ask what a
+/// file *would* be called before writing it — [`crate::graft`]'s images
+/// arrive named, and bytes that are not what they claim never reach the
+/// store.
+pub fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     Sha256::digest(bytes)

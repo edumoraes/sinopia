@@ -12,7 +12,25 @@ use anyhow::Context as _;
 
 use crate::ipc::proto::{Request, read_frame, request_line};
 
+/// How long to wait for a reply. Every op the loop merely acks answers
+/// at once, so two seconds is a ceiling on a dead instance and nothing
+/// else.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The three an agent asks are answered by *doing* them — a picture is
+/// rendered before the line comes back — so they are given room the
+/// others do not need. Longer than the loop's own `ASK_TIMEOUT`, so what
+/// comes back is a denial that says what went wrong rather than a socket
+/// dying under the caller.
+const WORKING_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long `req` is given to answer.
+fn deadline(req: &Request) -> Duration {
+    match req.is_asked() {
+        true => WORKING_TIMEOUT,
+        false => REPLY_TIMEOUT,
+    }
+}
 
 /// Tries to forward `req` to a live instance.
 ///
@@ -27,8 +45,9 @@ pub fn try_forward(socket_path: &Path, req: &Request) -> anyhow::Result<Option<S
         }
         Err(e) => return Err(e).with_context(|| format!("connecting to {socket_path:?}")),
     };
-    stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
-    stream.set_write_timeout(Some(REPLY_TIMEOUT))?;
+    let deadline = deadline(req);
+    stream.set_read_timeout(Some(deadline))?;
+    stream.set_write_timeout(Some(deadline))?;
     stream.write_all(request_line(req).as_bytes())?;
 
     let mut reader = BufReader::new(stream);

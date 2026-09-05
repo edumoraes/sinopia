@@ -7,7 +7,7 @@
 //! assembles frames, so it stays thin and the logic stays testable.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use anyhow::Context as _;
@@ -33,8 +33,9 @@ use crate::geom::Corner;
 use crate::gestures;
 use crate::history::History;
 use crate::gfx::Gfx;
+use crate::graft;
 use crate::grid;
-use crate::ipc::proto::{Event, Request};
+use crate::ipc::proto::{Event, Request, fits};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::omarchy::{self, Style};
@@ -71,6 +72,13 @@ const SAFETY_DELAY: std::time::Duration = std::time::Duration::from_millis(1200)
 /// How close two presses on one card have to be to be a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// How long the socket thread waits for the loop to answer one of an
+/// agent's three (§8). Generous, because the answer is real work — a
+/// picture is rendered before the line goes back — and it is a ceiling
+/// on a failure, never a cost on the ordinary path. The client waits
+/// longer still, so an agent reads a denial rather than a timeout.
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// State the server thread reads (replies to `ping`).
 struct SharedState {
     board_id: String,
@@ -79,6 +87,12 @@ struct SharedState {
 #[derive(Debug)]
 enum UserEvent {
     Request(Request),
+    /// A request whose answer *is* the work — an agent's three (§8).
+    /// The socket thread waits on the channel while the loop does it,
+    /// because the live document and the GPU are both the loop's and
+    /// neither can be read from the shared state the other ops are
+    /// acked from.
+    Ask(Request, mpsc::Sender<Event>),
     Gesture(Gesture),
     /// One step of the tablet's pen, straight off the protocol.
     Pen(Pen),
@@ -1371,9 +1385,26 @@ impl App {
             s if s.is_empty() => anyhow::bail!("the page needs a name"),
             s => s,
         };
-        let bounds = export::bounds(self.doc(), &sending.scope)
-            .context("there is nothing in the selection to send")?;
-        let sub = export::sub_document(self.doc(), &sending.scope);
+        let cwd = PathBuf::from(&agent.cwd);
+        let files = self.write_page(&sending.scope, &cwd, &slug)?;
+        log::info!("exported {} files to {}", files.len(), agent.cwd);
+        agents::send(agent, &agents::prompt(&line, &agents::relative(&files, &cwd)))
+    }
+
+    /// The page a scope makes, written under `dir`: the picture, the same
+    /// objects in the board's own schema, the inventory, and a copy of
+    /// every blob the json names (§8). Both doors go through here — the
+    /// `Ctrl+E` that hands a page to an agent's session, and the
+    /// `read_frame` an agent asks for itself.
+    fn write_page(
+        &mut self,
+        scope: &export::Scope,
+        dir: &Path,
+        slug: &str,
+    ) -> anyhow::Result<Vec<PathBuf>> {
+        let bounds =
+            export::bounds(self.doc(), scope).context("there is nothing there to export")?;
+        let sub = export::sub_document(self.doc(), scope);
         let md = export::inventory(&sub, &bounds);
         let blobs = self.blobs_of(&sub);
         let theme_bg = self.theme.bg;
@@ -1407,10 +1438,7 @@ impl App {
             h,
             image::ExtendedColorType::Rgba8,
         )?;
-        let cwd = std::path::Path::new(&agent.cwd);
-        let files = export::write(cwd, &slug, &png, &sub, &md, &blobs)?;
-        log::info!("exported {} files to {}", files.len(), agent.cwd);
-        agents::send(agent, &agents::prompt(&line, &agents::relative(&files, cwd)))
+        export::write(dir, slug, &png, &sub, &md, &blobs)
     }
 
     /// The bytes behind every image the sub-document names, so the json
@@ -1424,6 +1452,115 @@ impl App {
             })
             .filter_map(|hash| Some((hash.clone(), self.store.read_blob(&hash).ok()?)))
             .collect()
+    }
+
+    /// The three an agent asks (§8), answered here because the live
+    /// document and the GPU are both the loop's. A failure comes back as
+    /// `denied` carrying the whole chain of it: the caller is a program,
+    /// and a program cannot read a log.
+    fn answer(&mut self, req: Request) -> Event {
+        let op = req.op();
+        let denied = |e: &anyhow::Error| Event::Denied {
+            op: op.to_owned(),
+            reason: format!("{e:#}"),
+        };
+        match req {
+            Request::Frames => fits(
+                Event::Frames {
+                    frames: export::frames(self.doc()),
+                },
+                op,
+            ),
+            Request::ReadFrame { id, dir } => match self.read_frame(&id, &dir) {
+                Ok(files) => fits(
+                    Event::Exported {
+                        files: files
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect(),
+                    },
+                    op,
+                ),
+                Err(e) => denied(&e),
+            },
+            Request::AddFrame { path } => match self.add_frame(&path) {
+                Ok((id, name)) => Event::Framed { id, name },
+                Err(e) => denied(&e),
+            },
+            // The server only asks the three; every other op is acked
+            // and forwarded, and never arrives here.
+            other => Event::Denied {
+                op: other.op().to_owned(),
+                reason: "not an op the board answers".into(),
+            },
+        }
+    }
+
+    /// One frame of the open board, written under `dir` as the page §8
+    /// describes. The folder is the frame's own name slugged, exactly as
+    /// `Ctrl+E` writes it, so two frames sharing a name share a folder
+    /// and re-reading one replaces its page rather than stacking up.
+    fn read_frame(&mut self, id: &str, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        anyhow::ensure!(
+            self.doc().frame(id).is_some(),
+            "no frame {id:?} on the board that is open"
+        );
+        let scope = export::Scope::Frame(id.to_owned());
+        let name = export::named(self.doc(), &scope).unwrap_or_default();
+        // `free_name` against nothing taken is the slug, or the fallback
+        // word where a name slugs away to nothing.
+        let slug = export::free_name(&name, &[]);
+        self.write_page(&scope, dir, &slug)
+    }
+
+    /// A frame an agent handed over, on the board. It lands as a scene
+    /// change like any other, so it is one undo step and a draft owes
+    /// the disk a save for it.
+    fn add_frame(&mut self, path: &Path) -> anyhow::Result<(String, String)> {
+        let fragment = read_fragment(path)?;
+        // The bytes first: an image whose blob nobody has would paint a
+        // placeholder for as long as the board lives.
+        self.keep_blobs(&fragment, path)?;
+        let planted = graft::plant(self.active().1, &fragment)?;
+        // The same door a reopened board goes through: bytes in the
+        // store are not a texture, and an image nobody uploaded paints
+        // a placeholder for as long as the board is open.
+        self.load_images();
+        self.apply(Change::Scene);
+        Ok(planted)
+    }
+
+    /// Every image the fragment names, in the store before its frame is
+    /// on the board. Already there, nothing to do; otherwise the bytes
+    /// beside the json it arrived in, checked the way a paste is — the
+    /// header before a texel is allocated — and content-addressed, so
+    /// bytes that are not what they are named by never land.
+    fn keep_blobs(&self, fragment: &Document, from: &Path) -> anyhow::Result<()> {
+        let beside = from.parent().unwrap_or(Path::new(".")).join("blobs");
+        for el in &fragment.elements {
+            let Element::Image(i) = el else { continue };
+            // Checked before it is a path, and before it is anything
+            // else: 64 hex characters can only ever name a file directly
+            // inside `blobs/` (§9.3).
+            anyhow::ensure!(crate::doc::is_blob_hash(&i.blob), "not a blob name: {:?}", i.blob);
+            if self.store.read_blob(&i.blob).is_ok() {
+                continue;
+            }
+            let at = beside.join(&i.blob);
+            let bytes = std::fs::read(&at).with_context(|| {
+                format!(
+                    "image {} is neither in the store nor at {at:?}",
+                    &i.blob[..8]
+                )
+            })?;
+            anyhow::ensure!(
+                store::sha256_hex(&bytes) == i.blob,
+                "the bytes at {at:?} are not the image they are named by"
+            );
+            bitmap::decode(&bytes).with_context(|| format!("image {}", &i.blob[..8]))?;
+            self.store.write_blob(&bytes)?;
+        }
+        Ok(())
     }
 
     /// A key that adjusts the brush, while the brush tool is selected:
@@ -2526,6 +2663,14 @@ impl App {
     fn handle_user_event(&mut self, ev: UserEvent) {
         let req = match ev {
             UserEvent::Request(req) => req,
+            UserEvent::Ask(req, back) => {
+                let ev = self.answer(req);
+                // The socket thread may have given up waiting; the work
+                // is done either way, and a board it changed stays
+                // changed.
+                let _ = back.send(ev);
+                return;
+            }
             UserEvent::Gesture(g) => return self.gestured(g),
             UserEvent::Pen(p) => return self.pen(p),
             UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
@@ -2582,6 +2727,9 @@ impl App {
             },
             // The server answers `denied` without forwarding; never reaches here.
             Request::Export { .. } | Request::Ping => {}
+            // An agent's three go the other way: the loop *does* them,
+            // on the `Ask` path, and the answer is what goes back.
+            Request::Frames | Request::ReadFrame { .. } | Request::AddFrame { .. } => {}
         }
     }
 }
@@ -2594,6 +2742,25 @@ fn face(style: &Style) -> Font {
         .as_deref()
         .and_then(Font::from_file)
         .unwrap_or_else(Font::bundled)
+}
+
+/// How long a fragment may be. What arrives is one page of a board, and
+/// a page is small; a file past this is a mistake or an attack, and
+/// either way not a frame.
+const MAX_FRAGMENT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The fragment `add_frame` names, read and parsed. The parse is the
+/// board's own — closed schema, settled layers, blob names checked — so
+/// nothing that would not open as a board can be grafted onto one.
+fn read_fragment(path: &Path) -> anyhow::Result<Document> {
+    let meta = std::fs::metadata(path).with_context(|| format!("reading {path:?}"))?;
+    anyhow::ensure!(
+        meta.len() <= MAX_FRAGMENT_BYTES,
+        "the fragment is {} bytes, over the {MAX_FRAGMENT_BYTES} a page may be",
+        meta.len()
+    );
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
+    Document::from_json(&text).with_context(|| format!("parsing {path:?}"))
 }
 
 /// The pages `docs/boards/` in `cwd` already holds. A directory that is
@@ -2626,6 +2793,28 @@ pub fn run(
     let server = Server::bind(&socket_path)?;
     let shared_for_server = shared.clone();
     server.serve(move |req| {
+        // An agent's three are answered by *doing* them, which only the
+        // loop can: the live document and the GPU are both over there.
+        // So the thread hands the request across and waits — a loop that
+        // is gone, or a deadline that passes, is a denial the caller can
+        // read rather than a socket dying under it.
+        if req.is_asked() {
+            let op = req.op().to_owned();
+            let (back, wait) = mpsc::channel();
+            if proxy.send_event(UserEvent::Ask(req, back)).is_err() {
+                return Event::Denied {
+                    op,
+                    reason: "the board is closing".into(),
+                };
+            }
+            return wait.recv_timeout(ASK_TIMEOUT).unwrap_or(Event::Denied {
+                op,
+                reason: format!(
+                    "the board did not answer within {}s",
+                    ASK_TIMEOUT.as_secs()
+                ),
+            });
+        }
         let reply = match &req {
             Request::Shutdown => Event::Exited { code: 0 },
             Request::Export { .. } => Event::Denied {
