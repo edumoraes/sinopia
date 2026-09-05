@@ -38,9 +38,9 @@ const ROW_GAP: f32 = 6.0;
 /// The two buttons are this square.
 const BUTTON: f32 = 22.0;
 /// One seat: the row it takes, the box drawn in it, and the icon
-/// centered in that. The row is wider than the box so the number has a
-/// gutter of its own — written over the art, it would be lost against
-/// half the icons Sketchbook ships.
+/// centered in that. The row is wider than the box so the key that
+/// reaches the seat has a gutter of its own beside it — written over the
+/// art, it would be lost against half the icons Sketchbook ships.
 const CELL: f32 = 36.0;
 const BOX: f32 = 36.0;
 const SLOT_ICON: f32 = 28.0;
@@ -48,8 +48,8 @@ const CELL_RADIUS: f32 = 6.0;
 const CELL_INSET: f32 = 1.0;
 /// How thick the ring around the brush in the hand is.
 const HELD_RING: f32 = 1.5;
-/// Between a seat's number and the box it belongs to.
-const NUMBER_GAP: f32 = 8.0;
+/// Between a seat's box and the key written beside it.
+const KBD_GAP: f32 = 8.0;
 const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
 const ICON_BOX: f32 = 15.0;
@@ -71,11 +71,21 @@ pub enum Hit {
     Panel,
 }
 
-/// One seat, and the number written on it.
+/// One seat: the row a click or a drop lands on, the box the brush's
+/// art is drawn in, and where the key that reaches it is written.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Seat {
     pub n: usize,
     pub rect: ScreenRect,
+    pub art: ScreenRect,
+    pub kbd: ScreenRect,
+}
+
+/// The key that takes a seat, written the way the layers handle writes
+/// its own: in full. The digit alone would be a keybind that is not one
+/// — `1` on its own is the opacity, and has been all along.
+pub fn key_of(n: usize) -> String {
+    format!("Shift+{n}")
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,14 +146,30 @@ impl Strip {
         // Numbered 1..=9 down the column, and then slot 0 at its foot:
         // the overflow is the one nobody put there, so it stands apart.
         let seats = (0..SLOTS)
-            .map(|i| Seat {
-                n: (i + 1) % SLOTS,
-                rect: ScreenRect {
+            .map(|i| {
+                let rect = ScreenRect {
                     x: inner_x,
                     y: column_y + i as f32 * CELL * s,
                     w: inner_w,
                     h: CELL * s,
-                },
+                };
+                let side = BOX * s;
+                Seat {
+                    n: (i + 1) % SLOTS,
+                    rect,
+                    art: ScreenRect {
+                        x: rect.x,
+                        y: rect.y + (rect.h - side) / 2.0,
+                        w: side,
+                        h: side,
+                    },
+                    kbd: ScreenRect {
+                        x: rect.x + side + KBD_GAP * s,
+                        y: rect.y,
+                        w: (rect.w - side - KBD_GAP * s).max(0.0),
+                        h: rect.h,
+                    },
+                }
             })
             .collect();
 
@@ -316,14 +342,7 @@ impl Strip {
         let cell = theme.corner(CELL_RADIUS, s);
         for seat in &self.seats {
             let at = slots.get(seat.n).copied().flatten();
-            let side = BOX * s;
-            let box_ = ScreenRect {
-                x: seat.rect.x + (seat.rect.w - side) / 2.0,
-                y: seat.rect.y + (seat.rect.h - side) / 2.0,
-                w: side,
-                h: side,
-            }
-            .inset(CELL_INSET * s);
+            let box_ = seat.art.inset(CELL_INSET * s);
 
             // The brush in the hand wears a ring, which is a filled
             // rounded box with the panel's own color laid back inside it.
@@ -350,19 +369,12 @@ impl Strip {
                 out.push(Prim::sprite(art, icon_uv(preset.icon), icons).clipped(self.band));
             }
 
-            // The number is read, never clicked, so it is drawn muted —
-            // and in the gutter beside the box rather than over the art,
-            // which is the only place it is legible on every icon.
-            let digit = seat.n.to_string();
-            let w = atlas.measure(&digit);
-            let row = ScreenRect {
-                x: box_.x - NUMBER_GAP * s - w,
-                y: seat.rect.y,
-                w,
-                h: seat.rect.h,
-            };
-            let baseline = atlas.baseline_in(row);
-            for g in atlas.layout(&digit, row.x, baseline) {
+            // The key is read, never clicked, so it is drawn muted —
+            // and beside the box rather than over the art, which is the
+            // only place it is legible on every icon.
+            let key = key_of(seat.n);
+            let baseline = atlas.baseline_in(seat.kbd);
+            for g in atlas.layout(&atlas.truncate(&key, seat.kbd.w), seat.kbd.x, baseline) {
                 out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(self.band));
             }
         }
@@ -513,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_seat_draws_its_number_and_no_icon() {
+    fn an_empty_seat_still_says_which_key_reaches_it() {
         let lib = Library::default();
         let s = strip(TALL, 1.0);
         let prims = paint(&s, &lib, lib.selected(), None);
@@ -527,9 +539,38 @@ mod tests {
         assert!(
             prims
                 .iter()
-                .any(|q| q.slot == 7 && zero.rect.contains_rect(&q.bounds())),
-            "but it is still numbered"
+                .any(|q| q.slot == 7 && zero.kbd.contains_rect(&q.bounds())),
+            "but the key that reaches it is written all the same"
         );
+    }
+
+    #[test]
+    fn every_seat_names_the_whole_key_and_never_an_ellipsis() {
+        let atlas = atlas();
+        let s = strip(TALL, 1.0);
+        for seat in &s.seats {
+            let key = key_of(seat.n);
+            assert_eq!(key, format!("Shift+{}", seat.n), "the modifier is spelled");
+            assert!(
+                atlas.measure(&key) <= seat.kbd.w,
+                "{key} does not fit the {}px beside the box",
+                seat.kbd.w
+            );
+            assert_eq!(atlas.truncate(&key, seat.kbd.w), key, "so it is never cut");
+        }
+    }
+
+    #[test]
+    fn the_art_lines_up_with_the_header_icon_and_the_key_stands_beside_it() {
+        let s = strip(TALL, 1.0);
+        for seat in &s.seats {
+            assert_eq!(seat.art.x, s.header.x, "one left edge down the panel");
+            assert!(seat.kbd.x >= seat.art.x + seat.art.w, "clear of the art");
+            assert!(
+                seat.rect.contains_rect(&seat.art) && seat.rect.contains_rect(&seat.kbd),
+                "both inside the row that is clicked"
+            );
+        }
     }
 
     #[test]
