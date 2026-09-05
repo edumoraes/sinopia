@@ -160,7 +160,26 @@ The plugin speaks intent. The child does not send strokes over the socket.
 { "v": 1, "op": "theme", "colors": { "bg": "#1a1a1a", "fg": "#eee", "accent": "#7aa" } }
 { "v": 1, "op": "theme" }
 { "v": 1, "op": "shutdown" }
+{ "v": 1, "op": "frames" }
+{ "v": 1, "op": "read_frame", "id": "01J…", "dir": "/home/you/Work/foo" }
+{ "v": 1, "op": "add_frame", "path": "/home/you/Work/foo/frame.json" }
 ```
+
+The last three are a **code agent's** own door, and they are unlike
+everything above them: their answer *is* the work — a listing wants the
+live document and a picture wants the GPU — so they are not acked and
+forgotten, they are handed to the event loop and waited on. A frame is
+the unit both ways: the only thing on a board that is named, bounded and
+addressed. `read_frame` takes an **id** and never a name, for the reason
+`open` and `open_file` are two ops; resolving a name is the CLI's own
+round trip, outside the schema. `add_frame` takes a **path** and never
+the content, because the socket speaks intent and never scene content —
+and because a frame with ink in it does not fit 64 KiB. What it names is
+a *fragment*: one frame plus what stands on that frame's own layers,
+which is exactly what a `read_frame` writes, so a page read off the board
+can be handed straight back. It arrives as a new frame — every id minted
+again — and the board picks where it lands, an agent having no way to see
+what it would land on.
 
 `colors` is optional, and its absence is not a missing field but a
 different sentence: with colours a host is dressing the board in its
@@ -178,7 +197,13 @@ error. `omawhite --theme` is the CLI half, and an Omarchy
 { "v": 1, "ev": "exported", "files": ["…/board.png", "…/board.json", "…/board.md"] }
 { "v": 1, "ev": "denied", "op": "export", "reason": "path-outside-allowlist" }
 { "v": 1, "ev": "exited", "code": 0 }
+{ "v": 1, "ev": "frames", "frames": [ { "id": "01J…", "name": "Auth Flow", "x": 0, "y": 0, "w": 400, "h": 240, "elements": 3 } ] }
+{ "v": 1, "ev": "framed", "id": "01J…", "name": "Auth Flow" }
 ```
+
+An answer that would not fit a frame is `denied` naming the cap, never a
+listing quietly cut short: the caller is a program, and a short list is a
+lie about the board rather than a smaller truth.
 
 Rules:
 
@@ -195,7 +220,17 @@ omawhite --new
 omawhite --open <id>
 omawhite --export <dir>
 omawhite --shutdown
+
+omawhite agent frames                     # what frames the open board has
+omawhite agent read <frame> [--to DIR]    # export one, by id or by name
+omawhite agent add <fragment.json>        # graft a frame onto the board
 ```
+
+The `agent` verbs are a subcommand and not three more flags: everything
+above them is window intent — open this, raise that, shut down — and what
+an agent asks is a different kind of sentence. All three need a live
+instance, because it is the board that is *open* they read and write,
+with the work nobody has saved yet inside it.
 
 ---
 

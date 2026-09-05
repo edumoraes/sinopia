@@ -7,10 +7,10 @@ the real architecture emerges from development.
 ## Status
 
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
-selection, navigation, pasted images, projects in tabs, frames, and
-export to the agent:
+selection, navigation, pasted images, projects in tabs, frames,
+export to the agent and the CLI an agent asks the board through:
 
-- `cargo build` clean, `cargo test` with 733 tests.
+- `cargo build` clean, `cargo test` with 780 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -234,6 +234,31 @@ export to the agent:
   says which half is missing. A layer's name is now the person's to
   give: a second press on a card opens it for editing, and a frame is
   born `Frame 1` rather than `Layer 3`.
+- The CLI an agent asks the board through: `Ctrl+E` pushes a page at an
+  agent; this is the way back, and a **frame** is the whole of what
+  travels either way. `omawhite agent frames` lists what the open board
+  has — id, name, box and how much is standing in each.
+  `omawhite agent read <frame> --to <dir>` writes one of them into that
+  directory as the same three files `Ctrl+E` writes, so an agent
+  exports a picture to itself; a name is resolved against the listing
+  and an ambiguous one is refused naming both ids, because the protocol
+  itself speaks only ids. `omawhite agent add <fragment.json>` puts a
+  frame **on** the board: the fragment is exactly what `read` writes —
+  one frame plus what stands on its own layers — so a page read off the
+  board can be handed straight back, and it arrives as a new frame
+  rather than over the one it came from, since every id is minted
+  again. The board picks where it lands, to the right of everything,
+  because an agent cannot see the board it is drawing on; the frame's
+  size is the agent's. What it can draw is what the canvas already
+  draws — rects, ink paths, and images whose bytes ride in `blobs/`
+  beside the json — so a label today is a picture the agent rendered,
+  the canvas having no text of its own yet. It lands as one undo step:
+  `Ctrl+Z` takes an agent's frame back off. All three need the board to
+  be **open** — it is the live document, unsaved work included — and
+  their answer is real work rather than an ack, so they go over the
+  socket on a path of their own and wait for the loop to do it. The
+  skill that teaches an agent all of this is `skills/omawhite/`, one
+  markdown file and an installer.
 - Layers: every element is on one; the document lists them bottom to
   top, and paint order is the layers' order, then document order within
   a layer. A handle on the header's line pulls the panel out and puts it
@@ -374,7 +399,9 @@ export to the agent:
   that drops one, so a project on a drive nobody has mounted keeps its
   place.
 - CLI: `--new`, `--open <id>`, `--open-file <path>`, `--export <dir>`,
-  `--shutdown`, `--socket <path>`.
+  `--shutdown`, `--socket <path>`, and the `agent` verb — `agent
+  frames`, `agent read <frame> [--to <dir>]`, `agent add <file>` —
+  which answers one line of JSON and exits non-zero on a refusal.
 - Omarchy plugin (`plugin/`, §10.2): a bar widget whose popout holds the
   two ways in — `n` for a new board, `o` for the recent projects, newest
   first, opened by `Enter` or a click. The list shows twenty and marks
@@ -556,6 +583,7 @@ src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
 src/field.rs     a one-line editable value: the string, the caret, the keys that move it (pure, tested)
 src/export.rs    what leaves the board: the scope, its box, its sub-document, the slug, the inventory, the write (pure, tested)
+src/graft.rs     what comes back: the fragment, the ids minted anew, the free spot, the graft (pure, tested)
 src/agents.rs    the agents running here: herdr, tmux and /proc parsed into one list, and reaching one (pure, tested)
 src/send.rs      the export panel: the targets, the folder, the instruction (pure, tested)
 src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch a group is composited in
@@ -566,6 +594,7 @@ src/clipboard.rs selection reads (wl_data_device) → event loop bridge
 src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
 assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
 plugin/          the Omarchy bar widget (QML): manifest, BarWidget, install notes
+skills/omawhite/ the skill an agent installs to read and write frames: SKILL.md and an installer
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay +
