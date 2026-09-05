@@ -165,6 +165,9 @@ struct App {
     /// pointer until the button comes up, so a drag off the track still
     /// moves it — as every slider does.
     grab: Option<usize>,
+    /// Where the dock's illustrated RGBA sheet was uploaded. `None`
+    /// keeps its built-in line-art fallback alive until the upload lands.
+    dock_icon_slot: Option<u32>,
     /// Where the brush icon sheet was uploaded, once it has been.
     icon_slot: u32,
     /// Where each nib shape sits on the shape sheet, once it has been
@@ -1368,13 +1371,21 @@ impl App {
         true
     }
 
-    /// The brush icon sheet, built into the binary. Uploaded once: it is
-    /// raster art, the same at every scale, unlike the glyph atlas.
-    /// The two sheets the binary ships: the brush icons the palette
-    /// draws its grid with, and the nib shapes the canvas stamps. Both
-    /// are raster art, the same at every scale, so each is uploaded
-    /// once into a slot of its own and never replaced.
+    /// The three image sheets the binary ships: illustrated dock tools,
+    /// brush icons for the library, and nib shapes for the canvas. They
+    /// are raster art, the same at every scale, so each is uploaded once
+    /// into a slot of its own and never replaced like the glyph atlas is.
     fn ensure_sheets(&mut self) {
+        if self.dock_icon_slot.is_none() {
+            const DOCK_ICONS: &[u8] = include_bytes!("../assets/dock/icons.png");
+            // A failed upload leaves the pure dock's line-art fallback.
+            self.upload_sheet(
+                "dock icons",
+                DOCK_ICONS,
+                Gfx::upload_dock_icons,
+                |app, slot| app.dock_icon_slot = Some(slot),
+            );
+        }
         if self.icon_slot == 0 {
             const ICONS: &[u8] = include_bytes!("../assets/brushes/icons.png");
             // Without it the palette draws no icons and the grid is
@@ -1504,7 +1515,12 @@ impl App {
                 ink,
             ));
         }
-        frame.extend(self.dock(view).prims(self.editor().tool(), self.ink, &self.theme));
+        frame.extend(self.dock(view).prims(
+            self.editor().tool(),
+            self.ink,
+            self.dock_icon_slot,
+            &self.theme,
+        ));
         if let (Some(pal), Some(atlas)) = (self.palette(view), self.atlas.as_ref()) {
             frame.extend(pal.prims(
                 self.brushes.sets(),
@@ -2510,6 +2526,7 @@ pub fn run(
         ink,
         brushes_dirty: false,
         grab: None,
+        dock_icon_slot: None,
         icon_slot: 0,
         shapes: Shapes::default(),
         shown_brush: None,

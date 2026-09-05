@@ -243,6 +243,8 @@ pub struct Gfx {
     /// the binary and the same at every scale, so unlike the glyph atlas
     /// it is uploaded once and never replaced.
     icons: Option<u32>,
+    /// The six illustrated dock tools, on their own small RGBA sheet.
+    dock_icons: Option<u32>,
     /// The sheet of nib shapes, on the same terms as the icons.
     shapes: Option<u32>,
     /// The window-sized texture a group is composited in, once a frame
@@ -444,6 +446,7 @@ impl Gfx {
             textures: vec![blank],
             slots: ImageSlots::new(),
             icons: None,
+            dock_icons: None,
             shapes: None,
             atlas: None,
             scratch: None,
@@ -573,6 +576,18 @@ impl Gfx {
         }
         let slot = self.upload_sheet(bmp)?;
         self.icons = Some(slot);
+        Ok(slot)
+    }
+
+    /// Uploads the dock's illustrated tool sheet and answers its stable
+    /// slot. It stays separate from the generated brush sheet: rebuilding
+    /// the imported library must not erase the application's own art.
+    pub fn upload_dock_icons(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        if let Some(slot) = self.dock_icons {
+            return Ok(slot);
+        }
+        let slot = self.upload_sheet(bmp)?;
+        self.dock_icons = Some(slot);
         Ok(slot)
     }
 

@@ -10,7 +10,7 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames, and
 export to the agent:
 
-- `cargo build` clean, `cargo test` with 728 tests.
+- `cargo build` clean, `cargo test` with 733 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -296,8 +296,10 @@ export to the agent:
   degrees since it was created; paths still bake transforms into their
   curves, the field only turns their box and anchors the snap.
 - Tool dock centered at the bottom — Select `V`, Hand `H`, Pencil `P`,
-  Brush `B`, Frame `F`, Zoom `Z`; `Esc` cancels the stroke, gesture or drag in
-  progress.
+  Brush `B`, Frame `F`, Zoom `Z` — with six original RGBA illustrations
+  cut from one 80 px-per-cell sheet, in the tactile style of the brush
+  library's thumbnails. The former line icons remain the load-failure
+  fallback. `Esc` cancels the stroke, gesture or drag in progress.
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
   wheel and two-finger scroll pan (Shift: horizontally); a three-finger
   swipe pans on the trackpad.
@@ -514,6 +516,7 @@ src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
 src/brush.rs     the brush library: sets, presets, a brush's body, its properties, the tip a stroke carries, the pointer's ring (pure, tested)
 tools/import-skbrushes.py  Sketchbook `.skbrushes` -> assets/brushes/ (parameters + icon sheet)
 assets/brushes/  library.json (17 sets, 211 brushes) and icons.png (211 cells), built into the binary
+assets/dock/     six RGBA tool illustrations and their 6 x 1 icon sheet, built into the binary
 src/scene.rs     View (camera + viewport + scale), document → SDF prims, frames, groups and passes (pure, tested)
 src/geom.rs      affine maps, corners and oriented frames (pure, tested)
 src/select.rs    selection: element frames, hit-testing, handles, transforms, overlay prims (pure, tested)
@@ -522,7 +525,7 @@ src/theme.rs     palette: light default, derived from op: theme or from the desk
 src/omarchy.rs   the desktop's look: colors.toml, shell.toml, the monospace face, Hyprland's rounding (parsing pure, tested)
 contrib/omarchy/omawhite  a theme-set / font-set hook, installed by hand
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer (pure, tested)
-src/dock.rs      bottom tool dock: layout, hit-test, icons (pure, tested)
+src/dock.rs      bottom tool dock: layout, hit-test, illustrated icons + line fallback (pure, tested)
 src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)
 src/palette.rs   brush library on the left: the shelves, the grid of icons, the preview (pure, tested)
 src/props.rs     brush properties bar under the strip: the basic pair, and the Advanced layout it drops (pure, tested)

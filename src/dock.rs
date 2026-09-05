@@ -18,8 +18,14 @@ pub const PADDING: f32 = 6.0;
 pub const BOTTOM_MARGIN: f32 = 20.0;
 pub const PANEL_RADIUS: f32 = 12.0;
 pub const BUTTON_RADIUS: f32 = 8.0;
-/// The 24-unit icon grid maps onto a box this big, centered in the button.
-pub const ICON_BOX: f32 = 20.0;
+/// One illustrated tool icon, in the sheet built into the binary.
+pub const ICON_PX: u32 = 80;
+/// The icon's transparent cell maps onto a box this big, centered in the
+/// button. It is the same apparent size as a brush thumbnail: the art
+/// itself leaves a little room inside the cell.
+pub const ICON_BOX: f32 = 30.0;
+/// The simpler fallback keeps the size it had before the RGBA art.
+const LINE_ICON_BOX: f32 = 20.0;
 pub const ICON_STROKE: f32 = 1.75;
 const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
@@ -130,8 +136,16 @@ impl Dock {
     }
 
     /// Paint order: shadow, border, panel, then per button the active
-    /// highlight and the icon.
-    pub fn prims(&self, active: Tool, ink: usize, theme: &Theme) -> Vec<Prim> {
+    /// highlight and the icon. `icons` is the slot holding the RGBA
+    /// illustration sheet; until it exists the old line art is a quiet
+    /// fallback, so a broken asset never turns the buttons into blanks.
+    pub fn prims(
+        &self,
+        active: Tool,
+        ink: usize,
+        icons: Option<u32>,
+        theme: &Theme,
+    ) -> Vec<Prim> {
         let s = self.scale;
         let b = theme.edge(s);
         let corner = theme.corner(PANEL_RADIUS, s);
@@ -154,12 +168,27 @@ impl Dock {
                     theme.active_bg,
                 ));
             }
-            let color = if is_active {
-                theme.icon_active
+            if let Some(slot) = icons {
+                let side = ICON_BOX * s;
+                let (cx, cy) = rect.center();
+                out.push(Prim::sprite(
+                    ScreenRect {
+                        x: cx - side / 2.0,
+                        y: cy - side / 2.0,
+                        w: side,
+                        h: side,
+                    },
+                    icon_uv(*tool),
+                    slot,
+                ));
             } else {
-                theme.icon
-            };
-            out.extend(icon_prims(*tool, *rect, s, color));
+                let color = if is_active {
+                    theme.icon_active
+                } else {
+                    theme.icon
+                };
+                out.extend(icon_prims(*tool, *rect, s, color));
+            }
         }
         if let Some(first) = self.inks.first() {
             // The divider stands halfway between the last tool and the
@@ -204,9 +233,35 @@ impl Dock {
     }
 }
 
+/// The six illustrations stand in dock order on one 6 x 1 sheet.
+fn icon_uv(tool: Tool) -> [f32; 4] {
+    let col = match tool {
+        Tool::Select => 0,
+        Tool::Hand => 1,
+        Tool::Pencil => 2,
+        Tool::Brush => 3,
+        Tool::Frame => 4,
+        Tool::Zoom => 5,
+    } as f32;
+    let cols = Tool::ALL.len() as f32;
+    // Stay half a texel inside the cell, so linear filtering at a scaled
+    // edge samples transparency from this icon rather than its neighbour.
+    let du = 0.5 / (ICON_PX as f32 * cols);
+    let dv = 0.5 / ICON_PX as f32;
+    [col / cols + du, dv, (col + 1.0) / cols - du, 1.0 - dv]
+}
+
 /// Maps a tool's icon from the 24-unit grid into its button.
 fn icon_prims(tool: Tool, button: ScreenRect, scale: f32, color: Rgba) -> Vec<Prim> {
-    scene::icon_prims(icon(tool), button, 24.0, ICON_BOX, ICON_STROKE, scale, color)
+    scene::icon_prims(
+        icon(tool),
+        button,
+        24.0,
+        LINE_ICON_BOX,
+        ICON_STROKE,
+        scale,
+        color,
+    )
 }
 
 /// Icons as polylines on a 24×24 grid (Lucide-style coordinates), drawn
@@ -403,7 +458,7 @@ mod tests {
         theme.rounding = 0.0;
         theme.border_px = 3.0;
         let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
-        let prims = d.prims(Tool::Pencil, 0, &theme);
+        let prims = d.prims(Tool::Pencil, 0, None, &theme);
 
         let body = prims
             .iter()
@@ -429,7 +484,7 @@ mod tests {
         let mut theme = Theme::light();
         theme.rounding = 0.0;
         let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
-        let prims = d.prims(Tool::Pencil, 2, &theme);
+        let prims = d.prims(Tool::Pencil, 2, None, &theme);
         let (cx, cy) = d.inks[2].center();
         let dot = prims
             .iter()
@@ -448,7 +503,7 @@ mod tests {
             Theme::from_hex("#101010", "#e6e6e6", "#7aa2f7"),
         ] {
             let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
-            let prims = d.prims(Tool::Pencil, 0, &theme);
+            let prims = d.prims(Tool::Pencil, 0, None, &theme);
             for cell in &d.inks {
                 let at = cell.center();
                 let edge = prims
@@ -473,7 +528,7 @@ mod tests {
     fn the_chosen_ink_wears_a_ring_and_every_dot_is_its_own_colour() {
         let theme = Theme::light();
         let d = Dock::layout(VP, 1.0, &TOOLS, INKS.len());
-        let prims = d.prims(Tool::Pencil, 2, &theme);
+        let prims = d.prims(Tool::Pencil, 2, None, &theme);
         for (i, cell) in d.inks.iter().enumerate() {
             let (cx, cy) = cell.center();
             let want = scene::parse_color(INKS[i]);
@@ -513,7 +568,7 @@ mod tests {
     fn prims_paint_shadow_panel_highlight_and_icons_in_place() {
         let theme = Theme::light();
         let d = Dock::layout(VP, 1.0, &TOOLS, 0);
-        let prims = d.prims(Tool::Pencil, 0, &theme);
+        let prims = d.prims(Tool::Pencil, 0, Some(7), &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
         assert!(
@@ -533,22 +588,59 @@ mod tests {
             "only the active tool is highlighted"
         );
 
-        let icons: Vec<&Prim> = prims.iter().filter(|p| p.kind == KIND_SEGMENT).collect();
-        assert!(!icons.is_empty());
-        for p in icons {
+        let icons: Vec<&Prim> = prims
+            .iter()
+            .filter(|p| p.kind == scene::KIND_IMAGE)
+            .collect();
+        assert_eq!(icons.len(), TOOLS.len());
+        for (i, p) in icons.into_iter().enumerate() {
             let b = p.bounds();
             let owner = d
                 .buttons
                 .iter()
                 .find(|(_, r)| r.contains_rect(&b))
-                .unwrap_or_else(|| panic!("icon segment {b:?} spills out of its button"));
+                .unwrap_or_else(|| panic!("icon sprite {b:?} spills out of its button"));
+            assert_eq!(owner.0, TOOLS[i]);
+            assert_eq!(p.slot, 7);
+            assert_eq!(p.uv, icon_uv(owner.0));
+        }
+    }
+
+    #[test]
+    fn line_icons_remain_as_the_missing_sheet_fallback() {
+        let theme = Theme::light();
+        let d = Dock::layout(VP, 1.0, &TOOLS, 0);
+        let prims = d.prims(Tool::Pencil, 0, None, &theme);
+        let icons: Vec<&Prim> = prims.iter().filter(|p| p.kind == KIND_SEGMENT).collect();
+        assert!(!icons.is_empty());
+        for p in icons {
+            let owner = d
+                .buttons
+                .iter()
+                .find(|(_, r)| r.contains_rect(&p.bounds()))
+                .expect("fallback stays in its button");
             let expected = if owner.0 == Tool::Pencil {
                 theme.icon_active
             } else {
                 theme.icon
             };
-            assert_eq!(p.color, expected, "icon color follows the active state");
+            assert_eq!(p.color, expected);
         }
+    }
+
+    #[test]
+    fn shipped_icon_sheet_is_one_rgba_cell_per_tool() {
+        let bmp = crate::bitmap::decode(include_bytes!("../assets/dock/icons.png")).unwrap();
+        assert_eq!(bmp.w, ICON_PX * Tool::ALL.len() as u32);
+        assert_eq!(bmp.h, ICON_PX);
+        assert!(
+            bmp.rgba.chunks_exact(4).any(|px| px[3] == 0),
+            "the sheet carries transparent ground"
+        );
+        assert!(
+            bmp.rgba.chunks_exact(4).any(|px| px[3] > 0),
+            "and visible illustrations"
+        );
     }
 
     #[test]
