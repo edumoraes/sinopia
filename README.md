@@ -297,9 +297,10 @@ export to the agent:
   curves, the field only turns their box and anchors the snap.
 - Tool dock centered at the bottom — Select `V`, Hand `H`, Pencil `P`,
   Brush `B`, Frame `F`, Zoom `Z` — with six original RGBA illustrations
-  cut from one 80 px-per-cell sheet, in the tactile style of the brush
-  library's thumbnails. The former line icons remain the load-failure
-  fallback. `Esc` cancels the stroke, gesture or drag in progress.
+  cut from one 80 px-per-cell sheet: matte retro-industrial controls in
+  warm ivory, charcoal and restrained orange/green. The former line icons
+  remain the load-failure fallback. `Esc` cancels the stroke, gesture or
+  drag in progress.
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
   wheel and two-finger scroll pan (Shift: horizontally); a three-finger
   swipe pans on the trackpad.
