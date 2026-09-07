@@ -10,7 +10,7 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames,
 export to the agent and the CLI an agent asks the board through:
 
-- `cargo build` clean, `cargo test` with 781 tests.
+- `cargo build` clean, `cargo test` with 789 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.

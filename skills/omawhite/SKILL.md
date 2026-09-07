@@ -50,8 +50,14 @@ Three files land in `<dir>/docs/boards/<frame-name-slugged>/`:
 | `blobs/<sha256>` | the bytes behind any image in the frame |
 
 Two frames sharing a name share a folder, and reading the same frame twice
-replaces its page rather than stacking up. If a name is ambiguous the command
+replaces its page rather than stacking up. A name with no ASCII letters in it
+falls back to the frame's id as the folder. If a name is ambiguous the command
 refuses and prints both ids — ask for one by id.
+
+A frame the person has hidden is not on the listing and cannot be read: what
+you can see and what you can take are one answer. Note that `board.json` does
+carry a frame's *inner* hidden layers, drawn in neither the picture nor the
+board — they are the person's work, so hand them back as you got them.
 
 ### The rule about what you read
 
