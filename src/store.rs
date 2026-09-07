@@ -284,16 +284,28 @@ pub fn load_document_from(path: &Path) -> anyhow::Result<Document> {
 
 /// A file, read whole, refused past `max`.
 ///
-/// The handle answers, never the path. Stat-then-open lets a FIFO
-/// through — it reports no length and then blocks whoever reads it for
-/// as long as nobody writes, which on the event loop's own thread is the
-/// window gone with the board's unsaved work in it — and it lets a plain
-/// file grow between the two calls. The cap is on the read for the same
-/// reason: a character device has no length either, and `/dev/zero`
-/// delivers NUL, which is valid UTF-8 all the way to an OOM.
+/// The handle answers, never the path: stat-then-open lets a plain file
+/// grow between the two calls, and the handle is where the kind of file
+/// can be asked about without a second lookup.
+///
+/// The open is `O_NONBLOCK` because opening is itself a blocking call —
+/// a FIFO with no writer parks the *opener*, so asking the handle what
+/// it is would never get to run. On the event loop's own thread that is
+/// the window gone, with the board's unsaved work in it and nothing left
+/// but SIGKILL. The flag costs a regular file nothing and is the whole
+/// of what lets the check below happen at all.
+///
+/// The cap is on the read rather than on a length for the same family of
+/// reason: a character device reports none, and `/dev/zero` delivers NUL
+/// — valid UTF-8, all the way to an OOM.
 pub fn read_capped(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
     use std::io::Read as _;
-    let file = std::fs::File::open(path).with_context(|| format!("reading {path:?}"))?;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .with_context(|| format!("reading {path:?}"))?;
     let meta = file.metadata().with_context(|| format!("reading {path:?}"))?;
     anyhow::ensure!(meta.is_file(), "{path:?} is not a regular file");
     let mut bytes = Vec::new();
@@ -423,19 +435,26 @@ mod tests {
 
     #[test]
     fn a_capped_read_refuses_anything_that_is_not_a_regular_file() {
-        // What the length of a path cannot answer. A character device
-        // reports none and goes on delivering — `/dev/zero` to an OOM,
-        // since NUL is valid UTF-8 — and a FIFO reports none and then
-        // blocks the reader for as long as nobody writes, which on the
-        // event loop's own thread is the window gone with the board's
-        // unsaved work in it. The check is on the open handle, so there
-        // is no gap between asking and reading either.
+        // A FIFO with no writer parks whoever *opens* it, so this has
+        // to come back rather than hang: on the event loop's own thread
+        // a hang is the window gone with the board's unsaved work in it.
+        // The test runs on a plain thread and would hang the suite, which
+        // is the same failure said out loud.
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.to_str().expect("utf-8 path")).expect("no NUL");
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        let err = read_capped(&fifo, 1024).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+
+        // A character device reports no length and goes on delivering —
+        // `/dev/zero` to an OOM, since NUL is valid UTF-8.
         let dev = Path::new("/dev/zero");
         if dev.exists() {
             let err = read_capped(dev, 1024).unwrap_err().to_string();
             assert!(err.contains("not a regular file"), "{err}");
         }
-        let dir = tempfile::tempdir().unwrap();
+
         assert!(
             read_capped(dir.path(), 1024).is_err(),
             "and a directory is not one either"

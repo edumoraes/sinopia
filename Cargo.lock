@@ -1578,6 +1578,7 @@ dependencies = [
  "env_logger",
  "fontdue",
  "image",
+ "libc",
  "log",
  "pollster 1.0.1",
  "raw-window-handle",

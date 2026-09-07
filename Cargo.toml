@@ -10,6 +10,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 env_logger = "0.11.11"
 fontdue = { version = "0.9.4", features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+libc = "0.2.189"
 log = "0.4.34"
 pollster = "1.0.1"
 raw-window-handle = "0.6.2"
