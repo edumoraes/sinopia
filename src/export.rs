@@ -110,17 +110,32 @@ pub fn sub_document(doc: &Document, scope: &Scope) -> Document {
     let mut out = Document::new(&doc.title);
     out.id = doc.id.clone();
     let mut elements: Vec<Element> = Vec::new();
-    for p in doc.painted() {
-        let id = p.element.id();
-        let held = match scope {
-            // A frame brings what stands inside it, which `within`
-            // already answers — the same seam the renderer and the
-            // pointer read, so a picture and its json cannot disagree.
-            Scope::Frame(f) => id == f || p.within.is_some_and(|w| &w.id == f),
-            Scope::Selection(_) => wanted.iter().any(|w| w == id),
-        };
-        if held {
-            elements.push(p.element.clone());
+    match scope {
+        // A frame brings what stands inside it: the frame itself, then
+        // its own stack bottom to top, which is the order `painted()`
+        // walks — *without* its visibility filter. A hidden layer has to
+        // travel hidden rather than be dropped, for the reason
+        // `graft::plant` reads `elements` on the way back: what a person
+        // put away is still their work, and a read that quietly left it
+        // behind would hand the agent a frame to edit that is missing
+        // half of what it says it holds.
+        Scope::Frame(f) => {
+            if let Some(fr) = doc.frame(f) {
+                elements.push(Element::Frame(fr.clone()));
+                for inner in &fr.layers {
+                    let on_it = doc.elements.iter().filter(|el| el.layer() == inner.id);
+                    elements.extend(on_it.cloned());
+                }
+            }
+        }
+        // A selection is what is on show and picked, which is what the
+        // pointer could reach to pick it.
+        Scope::Selection(_) => {
+            for p in doc.painted() {
+                if wanted.iter().any(|w| w == p.element.id()) {
+                    elements.push(p.element.clone());
+                }
+            }
         }
     }
     let mut layers: Vec<Layer> = Vec::new();
@@ -404,6 +419,27 @@ mod tests {
         doc.elements
             .push(Element::Rect(rect("outside", "l0", 500.0, 500.0, 10.0, 10.0)));
         doc
+    }
+
+    #[test]
+    fn a_hidden_layer_inside_a_frame_is_read_rather_than_dropped() {
+        // The other half of what `graft::plant` already promises. A
+        // person who put a layer away still owns what is on it, and the
+        // agent is told to read, edit and hand back — so a read that
+        // walked `painted()` would delete that work on the round trip
+        // with nothing said.
+        let mut doc = board();
+        let Element::Frame(f) = &mut doc.elements[0] else {
+            panic!("not a frame");
+        };
+        f.layers[0].visible = false;
+        let sub = sub_document(&doc, &Scope::Frame("f1".into()));
+        let ids: Vec<&str> = sub.elements.iter().map(Element::id).collect();
+        assert_eq!(ids, ["f1", "inside"], "the hidden layer's rect travelled");
+        let Element::Frame(f) = &sub.elements[0] else {
+            panic!("not a frame");
+        };
+        assert!(!f.layers[0].visible, "and it travelled hidden");
     }
 
     #[test]
