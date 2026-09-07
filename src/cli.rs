@@ -110,9 +110,43 @@ pub enum Action {
 }
 
 impl Cli {
+    /// Parsed, then checked for the one conflict clap's own `ArgGroup`
+    /// cannot see: a group reaches args and never a subcommand. Without
+    /// it `omawhite --shutdown agent frames` parsed clean and quietly
+    /// did the verb, dropping the flag — so a wrapper that appends
+    /// `--new` to whatever it is handed would silently do something
+    /// else, while `--new --shutdown` has always been a hard error.
+    pub fn checked() -> Cli {
+        match Cli::parse().verified() {
+            Ok(cli) => cli,
+            Err(e) => e.exit(),
+        }
+    }
+
+    fn verified(self) -> Result<Cli, clap::Error> {
+        let flag = [
+            self.new.then_some("--new"),
+            self.open.is_some().then_some("--open"),
+            self.open_file.is_some().then_some("--open-file"),
+            self.export.is_some().then_some("--export"),
+            self.shutdown.then_some("--shutdown"),
+            self.theme.then_some("--theme"),
+        ]
+        .into_iter()
+        .flatten()
+        .next();
+        match (flag, &self.command) {
+            (Some(flag), Some(Command::Agent { .. })) => Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("the argument '{flag}' cannot be used with 'agent'\n"),
+            )),
+            _ => Ok(self),
+        }
+    }
+
     pub fn action(&self) -> Action {
-        // A verb is explicit and a flag is not, so a line carrying both
-        // means the verb. Combining them is nonsense input either way.
+        // A line carrying both is refused by `verified`, so the verb is
+        // the whole of the action whenever there is one.
         if let Some(Command::Agent { verb }) = &self.command {
             return match verb {
                 Verb::Frames => Action::Frames,
@@ -147,6 +181,7 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(std::iter::once("omawhite").chain(args.iter().copied()))
+            .and_then(Cli::verified)
     }
 
     #[test]
@@ -186,9 +221,24 @@ mod tests {
             &["--theme", "--shutdown"][..],
             &["--open", "x", "--open-file", "/tmp/a"][..],
             &["--new", "--open-file", "/tmp/a"][..],
+            // A verb is an action too, and clap's `ArgGroup` cannot see
+            // one — so these used to parse clean and drop the flag.
+            &["--shutdown", "agent", "frames"][..],
+            &["--new", "agent", "frames"][..],
+            &["--export", "/tmp", "agent", "frames"][..],
+            &["--theme", "agent", "add", "/tmp/f.json"][..],
         ] {
             assert!(parse(args).is_err(), "combination {args:?} should fail");
         }
+    }
+
+    #[test]
+    fn a_verb_still_takes_the_arguments_that_are_not_actions() {
+        // `--socket` says *which* board, not what to do with it, so it
+        // belongs beside a verb and must not be caught by the check.
+        let cli = parse(&["--socket", "/tmp/s.sock", "agent", "frames"]).unwrap();
+        assert_eq!(cli.action(), Action::Frames);
+        assert_eq!(cli.socket.as_deref(), Some(std::path::Path::new("/tmp/s.sock")));
     }
 
     #[test]

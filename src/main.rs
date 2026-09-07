@@ -39,7 +39,6 @@ mod text;
 mod theme;
 
 use anyhow::Context as _;
-use clap::Parser as _;
 
 use cli::{Action, Cli};
 use ipc::client::try_forward;
@@ -49,7 +48,7 @@ use store::Store;
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let cli = Cli::parse();
+    let cli = Cli::checked();
 
     let socket_path = match &cli.socket {
         Some(p) => p.clone(),
@@ -83,11 +82,13 @@ fn main() -> anyhow::Result<()> {
 
     // §5: a second omawhite becomes a command on the socket, not a second window.
     if let Some(reply) = try_forward(&socket_path, &request)? {
+        // Read through the module that owns the schema. Poking at a
+        // `Value` was a second, looser parser — and it failed open: a
+        // line that will not parse printed and exited 0, which a script
+        // reading `$?` takes for work that landed.
+        let ev = parse_event(&reply).with_context(|| format!("the board answered {reply:?}"))?;
         println!("{reply}");
-        let denied = serde_json::from_str::<serde_json::Value>(&reply)
-            .map(|v| v["ev"] == "denied")
-            .unwrap_or(false);
-        if denied {
+        if matches!(ev, Event::Denied { .. }) {
             std::process::exit(1);
         }
         return Ok(());
