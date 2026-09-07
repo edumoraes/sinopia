@@ -1418,8 +1418,14 @@ impl App {
                 Some(gfx) => export::view_for(&bounds, gfx.max_dimension()),
                 None => (export::view_for(&bounds, 1).0, 1, 1),
             };
+            // The sub-document, not the board: the json beside the
+            // picture is the scope, and the box the picture is taken
+            // through is the scope's plus `EXPORT_MARGIN` — so drawing
+            // the whole board put a neighbour's ink in the margin of a
+            // picture whose json says nothing about it. What leaves the
+            // board is one thing, said twice.
             (
-                scene::document_prims(self.doc(), &view, images, &shapes, edge, None),
+                scene::document_prims(&sub, &view, images, &shapes, edge, None),
                 w,
                 h,
             )
