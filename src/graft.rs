@@ -101,8 +101,18 @@ pub fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(Strin
 
     // Every id is minted anew: what arrives is a *new* frame, so handing
     // back the page just read plants a sibling rather than writing over
-    // the frame it was read from.
-    let stem = Layer::of(&name, Kind::Frame);
+    // the frame it was read from. The id is all that is minted — the
+    // rest of the layer is the fragment's own, so a frame staged hidden
+    // arrives hidden, exactly as the layers inside it already do.
+    let stem = Layer {
+        id: new_id(),
+        ..fragment
+            .layers
+            .iter()
+            .find(|l| l.id == frame.layer)
+            .cloned()
+            .expect("only_frame checked the frame stands on a layer of the fragment")
+    };
     let id = new_id();
     let inner: Vec<(String, String)> = frame
         .layers
@@ -143,6 +153,18 @@ pub fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(Strin
             }
         }
         select::transform(&mut el, &by);
+        // The board picks the spot, so the agent's coordinates are added
+        // to the board's: a fragment far enough out overflows to
+        // infinity, `to_json` writes that as `null`, and the draft the
+        // autosave then keeps never opens again. The check is on the
+        // result because that is the invariant — what goes on the board
+        // has to be able to come back off the disk. Nothing has been
+        // pushed yet, so a refusal leaves the board as it was.
+        anyhow::ensure!(
+            placed(&el),
+            "element {:?} lands outside the numbers a board can hold",
+            el.id()
+        );
         planted.push(el);
     }
 
@@ -151,6 +173,26 @@ pub fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(Strin
     board.layers.push(stem);
     board.elements.extend(planted);
     Ok((id, name))
+}
+
+/// Whether every number [`select::transform`] touched is still one.
+/// Its field set is this one: what a map moves is what a map can move
+/// out of the finite range.
+fn placed(el: &Element) -> bool {
+    let ok = |v: &f64| v.is_finite();
+    match el {
+        Element::Path(p) => p.curves.iter().flatten().flatten().all(ok) && ok(&p.rotation),
+        Element::Paint(p) => {
+            p.strokes
+                .iter()
+                .flat_map(|s| s.curves.iter().flatten().flatten())
+                .all(ok)
+                && ok(&p.rotation)
+        }
+        Element::Rect(r) => [r.x, r.y, r.w, r.h, r.rotation].iter().all(ok),
+        Element::Image(i) => [i.x, i.y, i.w, i.h, i.rotation].iter().all(ok),
+        Element::Frame(f) => [f.x, f.y, f.w, f.h].iter().all(ok),
+    }
 }
 
 /// The id a layer of the fragment was minted as.
@@ -408,5 +450,38 @@ mod tests {
         let frag = fragment();
         let f = only_frame(&frag).unwrap();
         assert_eq!(name_of(&frag, f), "Auth Flow");
+    }
+
+    #[test]
+    fn a_frame_staged_hidden_arrives_hidden() {
+        // The layers *inside* a frame already travel with their
+        // visibility; the frame's own layer was being rebuilt from
+        // scratch, so it arrived drawn over the person's board.
+        let mut frag = fragment();
+        frag.layers[0].visible = false;
+        let mut board = Document::new("board");
+        plant(&mut board, &frag).unwrap();
+        let stem = board.layers.last().unwrap();
+        assert_eq!(stem.kind, Kind::Frame);
+        assert_eq!(stem.name, "Auth Flow");
+        assert!(!stem.visible, "hiding is the fragment's to say, not the graft's");
+    }
+
+    #[test]
+    fn a_fragment_that_would_overflow_the_board_is_refused_whole() {
+        // `to_json` writes a non-finite coordinate as `null`, and a
+        // draft the autosave keeps that way never opens again — so the
+        // refusal has to come before the board is touched at all.
+        let mut frag = fragment();
+        let Element::Frame(f) = &mut frag.elements[0] else {
+            panic!("not a frame");
+        };
+        f.x = -1e308;
+        frag.elements[1] = rect("far", "in", 1.5e308, 0.0, 10.0, 10.0);
+        let mut board = Document::new("board");
+        let err = plant(&mut board, &frag).unwrap_err().to_string();
+        assert!(err.contains("outside the numbers"), "{err}");
+        assert!(board.elements.is_empty(), "the board is as it was");
+        assert_eq!(board.layers.len(), 1, "and so is its stack");
     }
 }
