@@ -180,7 +180,7 @@ pub fn slug(name: &str) -> String {
 }
 
 /// The fallback when a name slugs to nothing.
-const UNNAMED: &str = "board";
+pub const UNNAMED: &str = "board";
 
 /// A slug of `base` that nothing in `taken` already holds, counting up
 /// from 2 as a file manager does. `taken` is what `docs/boards/` already

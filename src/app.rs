@@ -1501,15 +1501,23 @@ impl App {
     /// `Ctrl+E` writes it, so two frames sharing a name share a folder
     /// and re-reading one replaces its page rather than stacking up.
     fn read_frame(&mut self, id: &str, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-        anyhow::ensure!(
-            self.doc().frame(id).is_some(),
-            "no frame {id:?} on the board that is open"
-        );
+        // Through the listing, which walks `painted()`: a frame on a
+        // layer the person hid is not on the board an agent can see, and
+        // reading it would answer `exported` over a blank page. The two
+        // doors must agree about what is there.
+        let card = export::frames(self.doc())
+            .into_iter()
+            .find(|c| c.id == id)
+            .with_context(|| format!("no frame {id:?} on the board that is open"))?;
         let scope = export::Scope::Frame(id.to_owned());
-        let name = export::named(self.doc(), &scope).unwrap_or_default();
-        // `free_name` against nothing taken is the slug, or the fallback
-        // word where a name slugs away to nothing.
-        let slug = export::free_name(&name, &[]);
+        // The id where the name slugs away to nothing, which every
+        // non-Latin name does — a slug is ASCII. Two such frames would
+        // otherwise share one folder and overwrite each other's page,
+        // and an id is what is both unique and the same on every read.
+        let slug = [export::slug(&card.name), export::slug(&card.id)]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or_else(|| export::UNNAMED.to_owned());
         self.write_page(&scope, dir, &slug)
     }
 
