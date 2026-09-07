@@ -282,6 +282,32 @@ pub fn load_document_from(path: &Path) -> anyhow::Result<Document> {
     Document::from_json(&s).with_context(|| format!("parsing {path:?}"))
 }
 
+/// A file, read whole, refused past `max`.
+///
+/// The handle answers, never the path. Stat-then-open lets a FIFO
+/// through — it reports no length and then blocks whoever reads it for
+/// as long as nobody writes, which on the event loop's own thread is the
+/// window gone with the board's unsaved work in it — and it lets a plain
+/// file grow between the two calls. The cap is on the read for the same
+/// reason: a character device has no length either, and `/dev/zero`
+/// delivers NUL, which is valid UTF-8 all the way to an OOM.
+pub fn read_capped(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).with_context(|| format!("reading {path:?}"))?;
+    let meta = file.metadata().with_context(|| format!("reading {path:?}"))?;
+    anyhow::ensure!(meta.is_file(), "{path:?} is not a regular file");
+    let mut bytes = Vec::new();
+    let read = file
+        .take(max + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {path:?}"))?;
+    anyhow::ensure!(
+        read as u64 <= max,
+        "{path:?} is over the {max} bytes it may be"
+    );
+    Ok(bytes)
+}
+
 /// Ids become file names: alphanumeric, `-` and `_` only, bounded length.
 fn validate_id(id: &str) -> anyhow::Result<()> {
     let ok = !id.is_empty()
@@ -383,6 +409,37 @@ mod tests {
 
     fn mode_of(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().mode() & 0o777
+    }
+
+    #[test]
+    fn a_capped_read_takes_a_file_and_refuses_one_that_is_too_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = dir.path().join("f");
+        std::fs::write(&at, b"hello").unwrap();
+        assert_eq!(read_capped(&at, 5).unwrap(), b"hello");
+        let err = read_capped(&at, 4).unwrap_err().to_string();
+        assert!(err.contains("over the 4 bytes"), "{err}");
+    }
+
+    #[test]
+    fn a_capped_read_refuses_anything_that_is_not_a_regular_file() {
+        // What the length of a path cannot answer. A character device
+        // reports none and goes on delivering — `/dev/zero` to an OOM,
+        // since NUL is valid UTF-8 — and a FIFO reports none and then
+        // blocks the reader for as long as nobody writes, which on the
+        // event loop's own thread is the window gone with the board's
+        // unsaved work in it. The check is on the open handle, so there
+        // is no gap between asking and reading either.
+        let dev = Path::new("/dev/zero");
+        if dev.exists() {
+            let err = read_capped(dev, 1024).unwrap_err().to_string();
+            assert!(err.contains("not a regular file"), "{err}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            read_capped(dir.path(), 1024).is_err(),
+            "and a directory is not one either"
+        );
     }
 
     fn doc_with_title(title: &str) -> Document {

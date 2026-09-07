@@ -26,13 +26,7 @@ pub struct Bitmap {
 /// thing and deliver another. The size is checked before any texel is
 /// allocated, so a few KiB cannot become gigabytes.
 pub fn decode(bytes: &[u8]) -> anyhow::Result<Bitmap> {
-    let (w, h) = reader(bytes)?
-        .into_dimensions()
-        .context("reading the image size")?;
-    anyhow::ensure!(
-        w <= MAX_SIDE && h <= MAX_SIDE,
-        "image is too large: {w}x{h} px, over the {MAX_SIDE} px limit"
-    );
+    checked_size(bytes)?;
     let rgba = reader(bytes)?
         .decode()
         .context("decoding the image")?
@@ -42,6 +36,21 @@ pub fn decode(bytes: &[u8]) -> anyhow::Result<Bitmap> {
         h: rgba.height(),
         rgba: rgba.into_raw(),
     })
+}
+
+/// What the header says the image measures, refused past the ceiling.
+/// It is the question [`decode`] asks before it allocates, and the whole
+/// of the question where the pixels are not wanted — checking bytes that
+/// are about to be stored rather than drawn.
+pub fn checked_size(bytes: &[u8]) -> anyhow::Result<(u32, u32)> {
+    let (w, h) = reader(bytes)?
+        .into_dimensions()
+        .context("reading the image size")?;
+    anyhow::ensure!(
+        w <= MAX_SIDE && h <= MAX_SIDE,
+        "image is too large: {w}x{h} px, over the {MAX_SIDE} px limit"
+    );
+    Ok((w, h))
 }
 
 /// A reader over `bytes` with the format taken from the content. The

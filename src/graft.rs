@@ -93,9 +93,31 @@ pub fn spot(board: &Document) -> [f64; 2] {
     }
 }
 
-/// Plants `fragment`'s frame on `board` and answers the id and the name
-/// it now goes by.
-pub fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(String, String)> {
+/// A frame worked out but not yet on the board.
+///
+/// The split is what lets everything that can refuse a fragment run
+/// before a byte of it is committed: the images an agent hands over go
+/// into the store on the way in, and a graft that is then turned down
+/// would leave bytes there that nothing on the board names — which the
+/// store has no way to collect.
+pub struct Planned {
+    stem: Layer,
+    elements: Vec<Element>,
+    id: String,
+    name: String,
+}
+
+/// The frame [`planned`] worked out, on the board. On top: a frame an
+/// agent hands over arrives over the work that is already there, never
+/// under it.
+pub fn apply(board: &mut Document, planned: Planned) -> (String, String) {
+    board.layers.push(planned.stem);
+    board.elements.extend(planned.elements);
+    (planned.id, planned.name)
+}
+
+/// Everything [`plant`] does except touching the board.
+pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned> {
     let frame = only_frame(fragment)?;
     let name = name_of(fragment, frame);
 
@@ -168,11 +190,12 @@ pub fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(Strin
         planted.push(el);
     }
 
-    // On top: a frame an agent hands over arrives over the work that is
-    // already there, never under it.
-    board.layers.push(stem);
-    board.elements.extend(planted);
-    Ok((id, name))
+    Ok(Planned {
+        stem,
+        elements: planted,
+        id,
+        name,
+    })
 }
 
 /// Whether every number [`select::transform`] touched is still one.
@@ -206,6 +229,14 @@ fn minted(pairs: &[(String, String)], was: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`planned`] and [`apply`] in one call. Production keeps them
+    /// apart — the images go into the store between the two — but every
+    /// test here is about what lands, not about when.
+    fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(String, String)> {
+        let planned = planned(board, fragment)?;
+        Ok(apply(board, planned))
+    }
     use crate::doc::Rect;
     use crate::export::{self, Scope};
 

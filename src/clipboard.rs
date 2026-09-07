@@ -43,9 +43,11 @@ pub type Sink = Arc<dyn Fn(Paste) -> bool + Send + Sync>;
 /// choice for a board.
 const IMAGE_MIMES: [&str; 3] = ["image/png", "image/webp", "image/jpeg"];
 
-/// How many bytes a paste may bring in. Past this the read gives up
-/// instead of following a hostile or broken owner forever.
-const MAX_PASTE_BYTES: u64 = 128 * 1024 * 1024;
+/// How many bytes one image may bring in. Past this the read gives up
+/// instead of following a hostile or broken owner forever. It is the
+/// ceiling for image bytes however they arrive — the clipboard here, and
+/// the `blobs/` an agent hands over beside a fragment.
+pub const MAX_PASTE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// The mime types on offer, filled in as they arrive and read when the
 /// selection settles.

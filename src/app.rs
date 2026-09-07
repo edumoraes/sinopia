@@ -1518,10 +1518,14 @@ impl App {
     /// the disk a save for it.
     fn add_frame(&mut self, path: &Path) -> anyhow::Result<(String, String)> {
         let fragment = read_fragment(path)?;
-        // The bytes first: an image whose blob nobody has would paint a
+        // Worked out before anything is committed: the bytes below go
+        // into the store on the way in, and a fragment refused after
+        // that would leave images there that nothing on the board names.
+        let planned = graft::planned(self.active().1, &fragment)?;
+        // Then the bytes: an image whose blob nobody has would paint a
         // placeholder for as long as the board lives.
         self.keep_blobs(&fragment, path)?;
-        let planted = graft::plant(self.active().1, &fragment)?;
+        let planted = graft::apply(self.active().1, planned);
         // The same door a reopened board goes through: bytes in the
         // store are not a texture, and an image nobody uploaded paints
         // a placeholder for as long as the board is open.
@@ -1547,7 +1551,11 @@ impl App {
                 continue;
             }
             let at = beside.join(&i.blob);
-            let bytes = std::fs::read(&at).with_context(|| {
+            // Capped on the way in, the way a paste is and at the same
+            // ceiling: a bare `read` of a path an agent named would
+            // follow a 200 MB file — or a `/dev/zero` — into the loop
+            // thread's memory before either guard below could refuse it.
+            let bytes = store::read_capped(&at, clipboard::MAX_PASTE_BYTES).with_context(|| {
                 format!(
                     "image {} is neither in the store nor at {at:?}",
                     &i.blob[..8]
@@ -1557,7 +1565,10 @@ impl App {
                 store::sha256_hex(&bytes) == i.blob,
                 "the bytes at {at:?} are not the image they are named by"
             );
-            bitmap::decode(&bytes).with_context(|| format!("image {}", &i.blob[..8]))?;
+            // The header, not the pixels: this asks whether the bytes
+            // are an image the board could draw, and `load_images` is
+            // what actually decodes them.
+            bitmap::checked_size(&bytes).with_context(|| format!("image {}", &i.blob[..8]))?;
             self.store.write_blob(&bytes)?;
         }
         Ok(())
@@ -2745,21 +2756,19 @@ fn face(style: &Style) -> Font {
 }
 
 /// How long a fragment may be. What arrives is one page of a board, and
-/// a page is small; a file past this is a mistake or an attack, and
-/// either way not a frame.
-const MAX_FRAGMENT_BYTES: u64 = 4 * 1024 * 1024;
+/// a page is a document written out pretty-printed: a real hand-drawn
+/// frame of a few hundred brush strokes measures a couple of megabytes,
+/// so the ceiling is well above what `agent read` itself writes — a cap
+/// the documented round trip trips over would be worse than none, since
+/// the agent only finds it after doing the work.
+const MAX_FRAGMENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The fragment `add_frame` names, read and parsed. The parse is the
 /// board's own — closed schema, settled layers, blob names checked — so
 /// nothing that would not open as a board can be grafted onto one.
 fn read_fragment(path: &Path) -> anyhow::Result<Document> {
-    let meta = std::fs::metadata(path).with_context(|| format!("reading {path:?}"))?;
-    anyhow::ensure!(
-        meta.len() <= MAX_FRAGMENT_BYTES,
-        "the fragment is {} bytes, over the {MAX_FRAGMENT_BYTES} a page may be",
-        meta.len()
-    );
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {path:?}"))?;
+    let text = String::from_utf8(store::read_capped(path, MAX_FRAGMENT_BYTES)?)
+        .with_context(|| format!("reading {path:?}"))?;
     Document::from_json(&text).with_context(|| format!("parsing {path:?}"))
 }
 
