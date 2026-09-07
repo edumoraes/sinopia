@@ -14,7 +14,9 @@ use crate::ipc::proto::{Request, read_frame, request_line};
 
 /// How long to wait for a reply. Every op the loop merely acks answers
 /// at once, so two seconds is a ceiling on a dead instance and nothing
-/// else.
+/// else — and it stays one because the server takes a thread to a
+/// connection: an ordinary op never queues behind an agent's, which
+/// parks on the event loop for as long as its own deadline.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The three an agent asks are answered by *doing* them — a picture is

@@ -35,7 +35,7 @@ use crate::history::History;
 use crate::gfx::Gfx;
 use crate::graft;
 use crate::grid;
-use crate::ipc::proto::{Event, Request, fits};
+use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::omarchy::{self, Style};
@@ -1465,22 +1465,16 @@ impl App {
             reason: format!("{e:#}"),
         };
         match req {
-            Request::Frames => fits(
-                Event::Frames {
-                    frames: export::frames(self.doc()),
-                },
-                op,
-            ),
+            Request::Frames => Event::Frames {
+                frames: export::frames(self.doc()),
+            },
             Request::ReadFrame { id, dir } => match self.read_frame(&id, &dir) {
-                Ok(files) => fits(
-                    Event::Exported {
-                        files: files
-                            .iter()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .collect(),
-                    },
-                    op,
-                ),
+                Ok(files) => Event::Exported {
+                    files: files
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                },
                 Err(e) => denied(&e),
             },
             Request::AddFrame { path } => match self.add_frame(&path) {
@@ -2824,13 +2818,29 @@ pub fn run(
                     reason: "the board is closing".into(),
                 };
             }
-            return wait.recv_timeout(ASK_TIMEOUT).unwrap_or(Event::Denied {
-                op,
-                reason: format!(
-                    "the board did not answer within {}s",
-                    ASK_TIMEOUT.as_secs()
-                ),
-            });
+            return match wait.recv_timeout(ASK_TIMEOUT) {
+                Ok(ev) => ev,
+                // A deadline that passes is not the work undone: the
+                // loop finishes what it started, and a board it changed
+                // stays changed. `add_frame` is not idempotent, so an
+                // agent told a flat "no" retries and plants the frame
+                // twice — the denial has to say what it actually knows.
+                Err(mpsc::RecvTimeoutError::Timeout) => Event::Denied {
+                    op,
+                    reason: format!(
+                        "the board did not answer within {}s; it may still be doing \
+                         the work, so look before asking again",
+                        ASK_TIMEOUT.as_secs()
+                    ),
+                },
+                // The loop went away with the request still in its
+                // queue, which is a different thing and comes back at
+                // once rather than after the deadline.
+                Err(mpsc::RecvTimeoutError::Disconnected) => Event::Denied {
+                    op,
+                    reason: "the board closed before it answered".into(),
+                },
+            };
         }
         let reply = match &req {
             Request::Shutdown => Event::Exited { code: 0 },

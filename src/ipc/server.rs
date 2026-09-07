@@ -5,11 +5,12 @@
 use std::io::{BufReader, ErrorKind, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
 
-use crate::ipc::proto::{Event, Request, event_line, parse_request, read_frame};
+use crate::ipc::proto::{Event, Request, event_line, fits, parse_request, read_frame};
 
 /// A stalled client must not hold the server hostage (§9.2): a connection
 /// idle beyond this is closed — the plugin reconnects whenever it wants.
@@ -56,18 +57,29 @@ impl Server {
         &self.path
     }
 
-    /// Consumes the server and serves connections on its own thread (one
-    /// connection at a time — the plugin is the only expected client in the MVP).
-    /// `on_request` runs on the server thread and returns the reply event.
+    /// Consumes the server and serves connections on its own thread, one
+    /// thread to a connection. `on_request` runs on that thread and
+    /// returns the reply event.
+    ///
+    /// A connection at a time was enough while every op was acked and
+    /// forwarded. An agent's three are *answered by doing them*, which
+    /// only the event loop can, so the thread parks on the loop for as
+    /// long as `ASK_TIMEOUT` — five times the deadline an ordinary op
+    /// gives itself. Single file, that made `raise`, `ping`, `theme` and
+    /// `shutdown` fail outright for the length of a graft or a render.
     pub fn serve(
         self,
-        on_request: impl Fn(Request) -> Event + Send + 'static,
+        on_request: impl Fn(Request) -> Event + Send + Sync + 'static,
     ) -> std::thread::JoinHandle<()> {
+        let on_request = Arc::new(on_request);
         std::thread::spawn(move || {
             for conn in self.listener.incoming() {
                 let Ok(stream) = conn else { continue };
+                let answer = Arc::clone(&on_request);
                 // An error on one connection does not bring the server down (§9.2).
-                let _ = handle_conn(stream, &on_request);
+                std::thread::spawn(move || {
+                    let _ = handle_conn(stream, &*answer);
+                });
             }
         })
     }
@@ -81,12 +93,25 @@ fn handle_conn(stream: UnixStream, on_request: &impl Fn(Request) -> Event) -> an
     loop {
         match read_frame(&mut reader) {
             Ok(Some(line)) => match parse_request(&line) {
-                Ok(req) => writer.write_all(event_line(&on_request(req)).as_bytes())?,
+                // The cap is here, where the bytes go out, and not at
+                // each of the places an answer is built: an op that
+                // slipped past one of those wrote a line no client can
+                // read, which for a listing is a lie about the board.
+                Ok(req) => {
+                    let op = req.op().to_owned();
+                    let reply = fits(on_request(req), &op);
+                    writer.write_all(event_line(&reply).as_bytes())?
+                }
                 Err(e) => {
-                    let denied = Event::Denied {
-                        op: "?".into(),
-                        reason: e.to_string(),
-                    };
+                    let denied = fits(
+                        Event::Denied {
+                            op: "?".into(),
+                            // The offending value is echoed back, so this
+                            // is as long as the caller made it.
+                            reason: e.to_string(),
+                        },
+                        "?",
+                    );
                     writer.write_all(event_line(&denied).as_bytes())?;
                     break; // closed schema: a connection that speaks wrong is dropped
                 }
@@ -120,6 +145,48 @@ mod tests {
         assert_eq!(server.path(), path);
         let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(mode, 0o600, "socket must be 0600");
+    }
+
+    #[test]
+    fn an_ordinary_op_does_not_wait_behind_one_the_loop_is_answering() {
+        // An agent's three are answered by *doing* them, so the
+        // connection parks on the event loop — up to `ASK_TIMEOUT`, five
+        // times the deadline `raise` and `ping` give themselves. Those
+        // two are what the launcher and the Omarchy plugin send, and
+        // single file they simply failed for the length of a graft or a
+        // render.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("omawhite.sock");
+        let server = Server::bind(&path).unwrap();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let started = std::sync::Mutex::new(started);
+        server.serve(move |req| {
+            if req.is_asked() {
+                let _ = started.lock().expect("lock").send(());
+                std::thread::sleep(Duration::from_millis(500));
+                return Event::Frames { frames: Vec::new() };
+            }
+            Event::Ready {
+                id: "01J".into(),
+                pid: 1,
+            }
+        });
+
+        let busy = path.clone();
+        let slow = std::thread::spawn(move || try_forward(&busy, &Request::Frames));
+        waiting
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the loop took the agent's op");
+
+        let began = std::time::Instant::now();
+        let reply = try_forward(&path, &Request::Ping).unwrap().unwrap();
+        assert!(reply.contains("\"ready\""), "{reply}");
+        assert!(
+            began.elapsed() < Duration::from_millis(250),
+            "a raise waited {:?} behind the agent",
+            began.elapsed()
+        );
+        slow.join().unwrap().unwrap();
     }
 
     #[test]
