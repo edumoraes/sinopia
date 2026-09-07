@@ -634,11 +634,11 @@ mod tests {
         assert_eq!(bmp.w, ICON_PX * Tool::ALL.len() as u32);
         assert_eq!(bmp.h, ICON_PX);
         assert!(
-            bmp.rgba.chunks_exact(4).any(|px| px[3] == 0),
+            bmp.rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 0),
             "the sheet carries transparent ground"
         );
         assert!(
-            bmp.rgba.chunks_exact(4).any(|px| px[3] > 0),
+            bmp.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0),
             "and visible illustrations"
         );
     }
