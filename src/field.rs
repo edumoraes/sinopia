@@ -54,17 +54,6 @@ fn line_of(lines: &[Line], i: usize) -> usize {
     lines.iter().rposition(|l| l.start <= i).unwrap_or(0)
 }
 
-/// The furthest a caret goes along line `k`: its end, or — where it broke
-/// without a newline, so that its end is the next line's start — the
-/// place before the space it broke at.
-fn last_index(lines: &[Line], k: usize) -> usize {
-    let line = lines[k];
-    match lines.get(k + 1) {
-        Some(next) if next.start == line.end && line.end > line.start => line.end - 1,
-        _ => line.end,
-    }
-}
-
 /// Where a box `view_h` px tall has to be scrolled to, in px, for line
 /// `k` of lines `line_h` tall to be in sight: as little as it takes, and
 /// not at all when it already is.
@@ -176,6 +165,24 @@ impl Field {
         atlas.wrap(&self.value, width)
     }
 
+    /// The furthest a caret goes along line `k`: its end — or, where the
+    /// line broke at a space that hangs past the edge, the place before
+    /// that space, since past it is the next line's start and End would
+    /// take the caret down a line. A word broken mid-word has no space to
+    /// hang, and its end is between its two halves.
+    fn last_index(&self, lines: &[Line], k: usize) -> usize {
+        let line = lines[k];
+        let soft = lines.get(k + 1).is_some_and(|next| next.start == line.end);
+        let hangs = soft
+            && line.end > line.start
+            && self
+                .value
+                .chars()
+                .nth(line.end - 1)
+                .is_some_and(char::is_whitespace);
+        if hangs { line.end - 1 } else { line.end }
+    }
+
     /// How far along `line` character `i` stands, in px.
     fn x_at(&self, atlas: &Atlas, line: Line, i: usize) -> f32 {
         atlas.measure(&self.value[self.byte(line.start)..self.byte(i)])
@@ -186,7 +193,7 @@ impl Field {
     /// text means the end of it.
     pub fn index_at(&self, atlas: &Atlas, lines: &[Line], k: usize, x: f32) -> usize {
         let k = k.min(lines.len().saturating_sub(1));
-        let (line, last) = (lines[k], last_index(lines, k));
+        let (line, last) = (lines[k], self.last_index(lines, k));
         let mut pen = 0.0;
         let along = self.value.chars().enumerate().skip(line.start);
         for (i, c) in along.take(last - line.start) {
@@ -230,7 +237,7 @@ impl Field {
     /// The end of the line the caret is on, as the box shows it.
     pub fn line_end(&mut self, lines: &[Line], extend: bool) {
         let k = line_of(lines, self.caret);
-        self.go(last_index(lines, k), extend);
+        self.go(self.last_index(lines, k), extend);
     }
 
     fn len(&self) -> usize {
@@ -783,6 +790,24 @@ mod tests {
         f.go(2, false);
         f.line_end(&lines, false);
         assert_eq!(f.caret(), 7, "after `two`");
+    }
+
+    #[test]
+    fn the_end_of_a_word_broken_mid_word_is_after_its_last_character() {
+        // With no space to hang past the edge, the line's end is the
+        // next line's start: the place between the two halves of the
+        // word, which is what End and a press past the line mean.
+        let a = atlas();
+        let mut f = Field::lines(&"a".repeat(14));
+        let lines = f.wrap(&a, a.measure("aaaaaaa") + 0.5);
+        assert_eq!(lines[0], Line { start: 0, end: 7 });
+        f.go(2, false);
+        f.line_end(&lines, false);
+        assert_eq!(f.caret(), 7);
+        f.go(2, false);
+        f.line_end(&lines, true);
+        assert_eq!(f.selected(), "aaaaa");
+        assert_eq!(f.index_at(&a, &lines, 0, 999.0), 7);
     }
 
     #[test]
