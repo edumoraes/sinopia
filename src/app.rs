@@ -209,6 +209,9 @@ struct App {
     carry: Option<Carry>,
     /// A press on a card that has not travelled far enough to lift it.
     pressed: Option<Press>,
+    /// The layers bar's strength is being dragged: the pointer is its
+    /// until the button comes up, and the board is not at rest.
+    fading: bool,
     /// A brush the pointer is carrying out of the library, if any. It
     /// does not outlive the release: there is nothing to settle.
     drag: Option<Dragging>,
@@ -603,7 +606,7 @@ impl App {
     /// reorders the document on every pointer move while the editor sits
     /// perfectly still.
     fn settled(&self) -> bool {
-        !self.editor().busy() && !self.carry.as_ref().is_some_and(|c| c.held)
+        !self.editor().busy() && !self.carry.as_ref().is_some_and(|c| c.held) && !self.fading
     }
 
     /// Writes down where a change left things.
@@ -1501,7 +1504,12 @@ impl App {
             PanelHit::Group => editor.add_group(doc),
             PanelHit::Add => editor.add_layer(doc),
             PanelHit::Remove => editor.remove_layers(doc),
-            PanelHit::Rename(_) | PanelHit::Panel => Change::None,
+            PanelHit::LockPicked => editor.toggle_lock(doc),
+            // The strength is read off the pointer, which is the press's
+            // own business, and the blend menu is the window's.
+            PanelHit::Opacity | PanelHit::Blend | PanelHit::Rename(_) | PanelHit::Panel => {
+                Change::None
+            }
         };
         self.apply(change);
     }
@@ -2053,8 +2061,17 @@ impl App {
                 .into_iter()
                 .map(str::to_owned)
                 .collect();
+            let doc = self.doc();
+            let active = self.editor().active(doc);
+            let (blend, opacity, locked) = doc.layer(active).map_or(
+                (crate::doc::BlendMode::Normal, 1.0, false),
+                |l| (l.blend, l.opacity as f32, l.locked),
+            );
             let showing = layers::Showing {
-                active: self.editor().active(self.doc()),
+                blend: blend.name(),
+                opacity,
+                locked,
+                active,
                 picked: &picked,
                 lift: lift.as_ref(),
                 drop: self
@@ -2225,6 +2242,16 @@ impl App {
                 // is the window's. A press on a card that is already
                 // selected, soon enough after the last one, is what
                 // makes a Select a Rename.
+                // The strength's slider has the pointer to itself from the
+                // press to the release, wherever it wanders.
+                if hit == PanelHit::Opacity {
+                    self.fading = true;
+                    let (editor, doc) = self.active();
+                    let change = editor.set_opacity(doc, whole_percent(panel.opacity_at(x)));
+                    self.apply(change);
+                    self.redraw();
+                    return self.update_cursor_icon();
+                }
                 let hit = self.second_press(hit);
                 self.panel_hit(hit.clone());
                 // A card taken by its name may be about to be carried off,
@@ -2361,6 +2388,13 @@ impl App {
         if button == Button::Left {
             self.pressed = None;
         }
+        // The strength let go of is where the layers rest: one step back
+        // undoes the whole drag.
+        if button == Button::Left && std::mem::take(&mut self.fading) {
+            self.remember();
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A carried layer lands where the drop says; the canvas never saw
         // the press, so it has nothing to end. The card runs the lift
         // backwards into its new row from here.
@@ -2461,6 +2495,18 @@ impl App {
             if let Some(carry) = &mut self.carry {
                 carry.y = y as f32 - carry.grab_dy;
                 carry.aim = aim;
+            }
+            self.redraw();
+            return self.update_cursor_icon();
+        }
+        // So does the layers' strength, read off the pointer as it goes.
+        if self.fading {
+            if let Some(view) = self.view()
+                && let Some(panel) = self.panel(&view)
+            {
+                let (editor, doc) = self.active();
+                let change = editor.set_opacity(doc, whole_percent(panel.opacity_at(x)));
+                self.apply(change);
             }
             self.redraw();
             return self.update_cursor_icon();
@@ -2770,6 +2816,19 @@ impl App {
             self.redraw();
             return;
         }
+        // With a tool that does not paint, a digit is the picked layers'
+        // strength, as in Photoshop: `1` is 10% and `0` is all of it. The
+        // brush keeps the digits for its own opacity.
+        if !shift
+            && matches!(self.editor().tool(), Tool::Select | Tool::Hand | Tool::Frame | Tool::Zoom)
+            && let Some(d) = c.to_digit(10)
+        {
+            let strength = if d == 0 { 1.0 } else { f64::from(d) / 10.0 };
+            let (editor, doc) = self.active();
+            let change = editor.set_opacity(doc, strength);
+            self.apply(change);
+            return;
+        }
         if shift && c.eq_ignore_ascii_case(&'l') {
             self.layers_shown = !self.layers_shown;
             self.redraw();
@@ -2841,6 +2900,7 @@ impl App {
         // came from: it was never seated, and the hand it is in was the
         // press's doing, not the drag's.
         self.drag = None;
+        self.fading = false;
         // A card the pointer was carrying goes back where it came from:
         // nothing moves until a drop, and losing the window is not one.
         // The card still has to settle.
@@ -3232,6 +3292,12 @@ impl App {
     }
 }
 
+/// A strength read off the slider, to the whole percent the bar writes it
+/// as: a board keeps `0.19`, not the float the pointer's x made of it.
+fn whole_percent(fraction: f32) -> f64 {
+    (f64::from(fraction) * 100.0).round() / 100.0
+}
+
 /// The face the desktop letters itself with, or the bundled one where
 /// there is none this build can read.
 fn face(style: &Style) -> Font {
@@ -3455,6 +3521,7 @@ pub fn run(
         shown_brush: None,
         carry: None,
         pressed: None,
+        fading: false,
         drag: None,
         renaming: None,
         last_card: None,
@@ -3496,6 +3563,14 @@ pub fn run(
 mod tests {
     use super::*;
     use winit::keyboard::ModifiersState;
+
+    #[test]
+    fn a_strength_off_the_slider_is_a_whole_percent() {
+        assert_eq!(whole_percent(0.193_548_38), 0.19);
+        assert_eq!(whole_percent(1.0), 1.0);
+        assert_eq!(whole_percent(0.0), 0.0);
+        assert_eq!(whole_percent(0.506), 0.51);
+    }
 
     #[test]
     fn a_held_key_that_finishes_something_does_not_repeat() {

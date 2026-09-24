@@ -811,6 +811,29 @@ impl Editor {
         Change::Scene
     }
 
+    /// Gives the picked layers a strength, 0 to 1 — the bar's slider and,
+    /// with a tool that does not paint, the digits. A locked layer keeps
+    /// how it draws; what is not a number changes nothing.
+    pub fn set_opacity(&mut self, doc: &mut Document, opacity: f64) -> Change {
+        if opacity.is_nan() {
+            return Change::None;
+        }
+        let opacity = opacity.clamp(0.0, 1.0);
+        let mut changed = false;
+        for id in self.picked_ids(doc) {
+            if doc.locked(&id) {
+                continue;
+            }
+            if let Some(l) = doc.layer_mut(&id)
+                && l.opacity != opacity
+            {
+                l.opacity = opacity;
+                changed = true;
+            }
+        }
+        if changed { Change::Scene } else { Change::None }
+    }
+
     /// Hides the picked layers — all of them while any shows, and shows
     /// them all once every one is hidden: `Ctrl+,`. What is hidden is no
     /// longer held.
@@ -1646,13 +1669,11 @@ impl Editor {
                 }));
                 return Change::Scene;
             }
-            // A raster layer holds one painting: the stroke joins the
-            // paint already on it, and opens one only when there is none.
-            let onto = doc
-                .elements
-                .iter()
-                .position(|el| matches!(el, Element::Paint(p) if p.layer == layer));
-            if let Some(i) = onto
+            // A raster layer accumulates: the stroke joins the paint on
+            // top of it — where it was painted while it was drawn — and
+            // opens one on top when the top of the layer is not a paint.
+            let top = doc.elements.iter().rposition(|el| el.layer() == layer);
+            if let Some(i) = top
                 && let Element::Paint(p) = &mut doc.elements[i]
             {
                 p.strokes.push(laid);
@@ -4427,6 +4448,54 @@ mod tests {
         let _ = e.pick_layer(&doc, "G", Pick::Only, &[]);
         assert_eq!(e.remove_layers(&mut doc), Change::Scene);
         assert!(doc.layer("G").is_none());
+    }
+
+    #[test]
+    fn a_brush_stroke_joins_the_paint_on_top_of_its_layer_or_goes_on_top() {
+        // A layer holding a paint under an image: the stroke lands over
+        // the image, where it was painted while it was drawn — not in the
+        // paint under it.
+        let mut doc = Document::new("t");
+        let layer = doc.layers[0].id.clone();
+        let mut e = tool(Tool::Brush);
+        let v = view();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        doc.elements.push(Element::Image(Image {
+            id: "img".into(),
+            layer: layer.clone(),
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            rotation: 0.0,
+            blob: BLOB.into(),
+        }));
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
+        let on: Vec<&Element> = doc.elements.iter().filter(|el| el.layer() == layer).collect();
+        assert_eq!(on.len(), 3, "a paint of its own, over the image");
+        assert!(matches!(on[2], Element::Paint(p) if p.strokes.len() == 1));
+        assert!(matches!(on[0], Element::Paint(p) if p.strokes.len() == 1));
+        // And the next stroke joins that one, the paint on top.
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 8.0), (9.0, 8.0));
+        let on: Vec<&Element> = doc.elements.iter().filter(|el| el.layer() == layer).collect();
+        assert!(matches!(on[2], Element::Paint(p) if p.strokes.len() == 2));
+    }
+
+    #[test]
+    fn the_picked_layers_take_a_strength_and_a_locked_one_keeps_its_own() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "G", Pick::Toggle, &ROWS);
+        doc.layer_mut("G").unwrap().locked = true;
+        assert_eq!(e.set_opacity(&mut doc, 0.4), Change::Scene);
+        assert_eq!(doc.layer("A").unwrap().opacity, 0.4);
+        assert_eq!(doc.layer("G").unwrap().opacity, 1.0, "a lock keeps how a layer draws");
+        assert_eq!(e.set_opacity(&mut doc, 0.4), Change::None, "already so");
+        let _ = e.set_opacity(&mut doc, 7.0);
+        assert_eq!(doc.layer("A").unwrap().opacity, 1.0, "a strength is a fraction");
+        let _ = e.set_opacity(&mut doc, f64::NAN);
+        assert_eq!(doc.layer("A").unwrap().opacity, 1.0, "and a number");
     }
 
     /// A board of one group holding one raster layer: `G[R]`.

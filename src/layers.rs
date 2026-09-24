@@ -21,6 +21,15 @@ pub const HEADER: f32 = 34.0;
 pub const ROW: f32 = 34.0;
 /// The panel's foot, where its own buttons stand.
 pub const FOOTER: f32 = 34.0;
+/// The bar under the header: how the picked layers blend, how strong
+/// they are, and whether they are locked.
+pub const PROPS: f32 = 30.0;
+/// The blend mode's button, the room the strength's number takes, and
+/// the track's thickness.
+const BLEND_W: f32 = 92.0;
+const VALUE_W: f32 = 36.0;
+const TRACK_H: f32 = 4.0;
+const KNOB: f32 = 5.0;
 pub const PADDING: f32 = 6.0;
 /// The footer's buttons and the eye are this square.
 pub const BUTTON: f32 = 24.0;
@@ -126,6 +135,11 @@ pub enum PanelHit {
     Group,
     Add,
     Remove,
+    /// The bar's: the blend mode's menu, the strength — read off the
+    /// pointer's x with [`Panel::opacity_at`] — and the lock.
+    Blend,
+    Opacity,
+    LockPicked,
     /// Panel chrome between controls: swallowed, never reaches the canvas.
     Panel,
 }
@@ -265,6 +279,11 @@ pub struct Showing<'a> {
     /// Where a carried card would land if let go of now.
     pub drop: Option<&'a Place>,
     pub slides: &'a Slides,
+    /// What the bar says of the active layer: its blend mode's name, its
+    /// strength, whether it is locked.
+    pub blend: &'a str,
+    pub opacity: f32,
+    pub locked: bool,
 }
 
 /// One row of the tree, with everything already measured.
@@ -310,6 +329,12 @@ pub struct Row {
 pub struct Panel {
     pub rect: ScreenRect,
     pub header: ScreenRect,
+    /// The bar under the header, and its three: the blend mode's button,
+    /// the strength's slider and number, the lock.
+    pub props: ScreenRect,
+    pub blend: ScreenRect,
+    pub opacity: ScreenRect,
+    pub lock: ScreenRect,
     /// Where the cards are shown and cut off: as much of the tree as the
     /// window has room for.
     pub band: ScreenRect,
@@ -357,8 +382,33 @@ impl Panel {
             h: HEADER * s,
         };
         let side = BUTTON * s;
+        let props = ScreenRect {
+            x: inner_x,
+            y: header.y + header.h,
+            w: inner_w,
+            h: PROPS * s,
+        };
+        let by = props.y + (props.h - side) / 2.0;
+        let blend = ScreenRect {
+            x: inner_x,
+            y: by,
+            w: BLEND_W * s,
+            h: side,
+        };
+        let lock = ScreenRect {
+            x: inner_x + inner_w - side,
+            y: by,
+            w: side,
+            h: side,
+        };
+        let opacity = ScreenRect {
+            x: blend.x + blend.w + LABEL_GAP * s,
+            y: by,
+            w: lock.x - LABEL_GAP * s - (blend.x + blend.w + LABEL_GAP * s),
+            h: side,
+        };
 
-        let band_y = header.y + header.h;
+        let band_y = props.y + props.h;
         let room =
             (viewport.h as f32 - (MARGIN + PADDING + FOOTER) * s - band_y).max(0.0);
         let content = tree.len() as f32 * ROW * s;
@@ -428,11 +478,15 @@ impl Panel {
             x,
             y,
             w: WIDTH * s,
-            h: (2.0 * PADDING + HEADER + FOOTER) * s + band.h,
+            h: (2.0 * PADDING + HEADER + PROPS + FOOTER) * s + band.h,
         };
         Panel {
             rect,
             header,
+            props,
+            blend,
+            opacity,
+            lock,
             band,
             rows,
             footer,
@@ -561,6 +615,28 @@ impl Panel {
         want.clamp(0.0, self.max_scroll())
     }
 
+    /// The slider's track, left of the strength's number.
+    pub fn track(&self) -> ScreenRect {
+        let s = self.scale;
+        let o = self.opacity;
+        ScreenRect {
+            x: o.x + KNOB * s,
+            y: o.y + (o.h - TRACK_H * s) / 2.0,
+            w: (o.w - VALUE_W * s - 2.0 * KNOB * s).max(0.0),
+            h: TRACK_H * s,
+        }
+    }
+
+    /// The strength a press or a drag at `x` asks for, 0 to 1 along the
+    /// track — held past either end, that end.
+    pub fn opacity_at(&self, x: f64) -> f32 {
+        let t = self.track();
+        if t.w <= 0.0 {
+            return 1.0;
+        }
+        ((x as f32 - t.x) / t.w).clamp(0.0, 1.0)
+    }
+
     pub fn hit(&self, x: f64, y: f64) -> Option<PanelHit> {
         if !self.rect.contains(x, y) {
             return None;
@@ -569,6 +645,9 @@ impl Panel {
             (self.group, PanelHit::Group),
             (self.add, PanelHit::Add),
             (self.remove, PanelHit::Remove),
+            (self.blend, PanelHit::Blend),
+            (self.opacity, PanelHit::Opacity),
+            (self.lock, PanelHit::LockPicked),
         ];
         if let Some((_, hit)) = buttons.iter().find(|(r, _)| r.contains(x, y)) {
             return Some(hit.clone());
@@ -664,6 +743,7 @@ impl Panel {
         for g in atlas.layout(TITLE, self.header.x + PADDING * s, baseline) {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
         }
+        out.extend(self.bar_prims(showing, atlas, slot, theme));
         let carried = showing.lift.map(|l| l.id.as_str());
         for row in self.rows.iter().filter(|r| Some(r.id.as_str()) != carried) {
             let dy = showing.slides.offset(&row.id);
@@ -691,6 +771,51 @@ impl Panel {
         ] {
             out.extend(icon_prims(icon, rect, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
         }
+        out
+    }
+
+    /// The bar: the blend mode's button — its name and a chevron — the
+    /// strength as a track filled as far as it goes with its number
+    /// beside it, and the lock, shut or open.
+    fn bar_prims(&self, showing: &Showing, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
+        let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(ROW_RADIUS, s);
+        let mut out = vec![
+            Prim::rounded(self.blend.inset(-b), corner + b, theme.border),
+            Prim::rounded(self.blend, corner, theme.panel),
+        ];
+        let chevron = ScreenRect {
+            x: self.blend.x + self.blend.w - (ICON_BOX + PADDING) * s,
+            y: self.blend.y + (self.blend.h - ICON_BOX * s) / 2.0,
+            w: ICON_BOX * s,
+            h: ICON_BOX * s,
+        };
+        out.extend(icon_prims(CHEVRON_DOWN, chevron, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
+        let name_x = self.blend.x + PADDING * s;
+        let name = atlas.truncate(showing.blend, (chevron.x - name_x).max(0.0));
+        let baseline = atlas.baseline_in(self.blend);
+        for g in atlas.layout(&name, name_x, baseline) {
+            out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
+        }
+        let t = self.track();
+        let v = showing.opacity.clamp(0.0, 1.0);
+        out.push(Prim::rounded(t, t.h / 2.0, theme.muted));
+        let fill = ScreenRect { w: t.w * v, ..t };
+        if fill.w > 0.0 {
+            out.push(Prim::rounded(fill, t.h / 2.0, theme.ink));
+        }
+        out.push(Prim::circle(t.x + t.w * v, t.y + t.h / 2.0, KNOB * s, theme.ink));
+        let number = format!("{}%", (v * 100.0).round() as u32);
+        // Right-aligned a little way in: a glyph's ink can reach past its
+        // advance, and the number is not to touch the lock.
+        let right = self.opacity.x + self.opacity.w - PADDING / 2.0 * s;
+        let baseline = atlas.baseline_in(self.opacity);
+        for g in atlas.layout(&number, right - atlas.measure(&number), baseline) {
+            out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
+        }
+        let lock = if showing.locked { LOCK } else { UNLOCK };
+        out.extend(icon_prims(lock, self.lock, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
         out
     }
 
@@ -1112,6 +1237,12 @@ const LOCK: &[&[(f32, f32)]] = &[
     ],
 ];
 
+/// A padlock, open: the bar's lock while the active layer is not locked.
+const UNLOCK: &[&[(f32, f32)]] = &[
+    &[(6.0, 11.0), (18.0, 11.0), (18.0, 20.0), (6.0, 20.0), (6.0, 11.0)],
+    &[(8.0, 11.0), (8.0, 6.0), (9.0, 4.0), (12.0, 3.0), (15.0, 4.0), (16.0, 6.0), (16.0, 7.0)],
+];
+
 /// A frame: the crop marks of an area, as design tools draw one.
 const FRAME: &[&[(f32, f32)]] = &[
     &[(8.0, 3.0), (8.0, 21.0)],
@@ -1184,7 +1315,7 @@ mod tests {
                 1200.0 - MARGIN - WIDTH,
                 34.0 + MARGIN,
                 WIDTH,
-                2.0 * PADDING + HEADER + 2.0 * ROW + FOOTER
+                2.0 * PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER
             )
         );
     }
@@ -1194,7 +1325,7 @@ mod tests {
         let p = panel(VP, 1.0, 3);
         assert_eq!(ids(&p), ["L3", "L2", "L1"]);
         assert_eq!(p.rows[0].label, "Layer 3");
-        assert_eq!(p.rows[0].rect.y, p.header.y + p.header.h);
+        assert_eq!(p.rows[0].rect.y, p.props.y + p.props.h, "under the bar");
         assert_eq!(p.rows[1].rect.y, p.rows[0].rect.y + ROW);
         assert_eq!(p.rows[0].rect.h, ROW);
         for r in &p.rows {
@@ -1303,11 +1434,11 @@ mod tests {
     #[test]
     fn the_band_is_as_much_of_the_tree_as_there_is_room_for() {
         // Room for the header, one row and the footer above the margin.
-        let h = (34.0 + MARGIN + PADDING + HEADER + ROW + FOOTER + PADDING + MARGIN) as u32;
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + ROW + FOOTER + PADDING + MARGIN) as u32;
         let p = panel(Viewport { w: 1200, h }, 1.0, 3);
         assert_eq!(p.band.h, ROW);
         assert_eq!(ids(&p), ["L3"], "the top layer is what the band starts on");
-        assert_eq!(p.rect.h, 2.0 * PADDING + HEADER + ROW + FOOTER);
+        assert_eq!(p.rect.h, 2.0 * PADDING + HEADER + PROPS + ROW + FOOTER);
         assert_eq!(p.max_scroll(), 2.0 * ROW, "two rows below the band");
         assert!(p.bar.is_some(), "and a thumb to say so");
 
@@ -1327,7 +1458,7 @@ mod tests {
 
     #[test]
     fn scrolling_slides_the_tree_under_the_band() {
-        let h = (34.0 + MARGIN + PADDING + HEADER + 2.0 * ROW + FOOTER + PADDING + MARGIN) as u32;
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER + PADDING + MARGIN) as u32;
         let vp = Viewport { w: 1200, h };
         let doc = flat(4);
         let at = |scroll: f32| laid(&doc, &[], vp, 1.0, scroll);
@@ -1360,7 +1491,7 @@ mod tests {
 
     #[test]
     fn scroll_showing_moves_as_little_as_it_can() {
-        let h = (34.0 + MARGIN + PADDING + HEADER + 2.0 * ROW + FOOTER + PADDING + MARGIN) as u32;
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER + PADDING + MARGIN) as u32;
         let vp = Viewport { w: 1200, h };
         let doc = flat(4);
         let at = |scroll: f32| laid(&doc, &[], vp, 1.0, scroll);
@@ -1402,7 +1533,7 @@ mod tests {
         // overshoots the list still lands where it was headed.
         assert_eq!(at(0.0), Some("L3"));
         assert_eq!(at(10_000.0), Some("L1"));
-        let h = (34.0 + MARGIN + PADDING + HEADER + FOOTER + PADDING + MARGIN) as u32;
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + FOOTER + PADDING + MARGIN) as u32;
         let p = panel(Viewport { w: 1200, h }, 1.0, 3);
         assert!(p.rows.is_empty());
         assert!(p.drop_row(100.0).is_none(), "nothing on show, nowhere to drop");
@@ -1707,6 +1838,9 @@ mod tests {
             lift,
             drop: None,
             slides: &STILL,
+            blend: "Normal",
+            opacity: 1.0,
+            locked: false,
         }
     }
 
@@ -1837,6 +1971,9 @@ mod tests {
             lift: None,
             drop: None,
             slides: &s,
+            blend: "Normal",
+            opacity: 1.0,
+            locked: false,
         };
         let prims = p.prims(&showing, &a, 7, &theme);
         for row in &p.rows {
@@ -1917,6 +2054,9 @@ mod tests {
             lift: None,
             drop: None,
             slides: &Slides::default(),
+            blend: "Normal",
+            opacity: 1.0,
+            locked: false,
         };
         let prims = p.prims(&show, &a, 7, &theme);
 
@@ -2118,6 +2258,79 @@ mod tests {
         };
         assert!(!segs(g_lock).is_empty() && segs(g_lock).iter().all(|q| q.color == theme.icon));
         assert!(!segs(b_lock).is_empty() && segs(b_lock).iter().all(|q| q.color == theme.muted));
+    }
+
+    #[test]
+    fn the_properties_bar_stands_between_the_header_and_the_rows() {
+        let p = panel(VP, 1.0, 2);
+        assert_eq!(p.props.y, p.header.y + p.header.h);
+        assert_eq!(p.props.h, PROPS);
+        assert_eq!(p.band.y, p.props.y + p.props.h, "the rows start under it");
+        for r in [p.blend, p.opacity, p.lock] {
+            assert!(p.props.contains_rect(&r), "{r:?} is on the bar");
+        }
+        assert!(p.blend.x + p.blend.w <= p.opacity.x && p.opacity.x + p.opacity.w <= p.lock.x);
+        assert_eq!(p.rect.h, 2.0 * PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER);
+    }
+
+    #[test]
+    fn a_press_on_the_opacity_asks_for_the_strength_under_it() {
+        let p = panel(VP, 1.0, 2);
+        let (x, y) = mid(p.opacity);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Opacity));
+        let t = p.track();
+        assert_eq!(p.opacity_at(f64::from(t.x)), 0.0);
+        assert_eq!(p.opacity_at(f64::from(t.x + t.w)), 1.0);
+        assert_eq!(p.opacity_at(f64::from(t.x + t.w / 2.0)), 0.5);
+        assert_eq!(p.opacity_at(-100.0), 0.0, "held past either end, the end");
+        assert_eq!(p.opacity_at(1e6), 1.0);
+        let (x, y) = mid(p.lock);
+        assert_eq!(p.hit(x, y), Some(PanelHit::LockPicked));
+        let (x, y) = mid(p.blend);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Blend));
+    }
+
+    #[test]
+    fn the_bar_shows_the_active_layers_strength_and_lock() {
+        let theme = Theme::light();
+        let a = atlas();
+        let p = panel(VP, 1.0, 2);
+        let at = |opacity: f32, locked: bool| {
+            let show = Showing {
+                opacity,
+                locked,
+                ..showing("L1", None)
+            };
+            p.prims(&show, &a, 7, &theme)
+        };
+        // The track is filled as far as the strength goes.
+        let t = p.track();
+        let fill = |prims: &[Prim]| -> f32 {
+            prims
+                .iter()
+                .filter(|q| q.color == theme.ink && q.bounds().y >= t.y - 2.0 && q.bounds().y <= t.y + t.h)
+                .map(|q| q.bounds().w)
+                .fold(0.0, f32::max)
+        };
+        let half = fill(&at(0.5, false));
+        let full = fill(&at(1.0, false));
+        assert!((half - t.w / 2.0).abs() < 1.0, "{half}");
+        assert!((full - t.w).abs() < 1.0, "{full}");
+        // And the number is written.
+        let glyphs_in = |prims: &[Prim], r: ScreenRect| {
+            prims.iter().filter(|q| q.kind == KIND_IMAGE && q.slot == 7 && r.contains_rect(&q.bounds())).count()
+        };
+        assert_eq!(glyphs_in(&at(0.5, false), p.opacity), "50%".len());
+        assert_eq!(glyphs_in(&at(1.0, false), p.opacity), "100%".len());
+        // The lock reads as shut or open.
+        let drawing = |prims: &[Prim]| -> Vec<[i32; 2]> {
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_SEGMENT && p.lock.contains_rect(&q.bounds()))
+                .map(|q| [q.bounds().x as i32, q.bounds().y as i32])
+                .collect()
+        };
+        assert_ne!(drawing(&at(1.0, true)), drawing(&at(1.0, false)));
     }
 
     #[test]
