@@ -237,14 +237,18 @@ fn scan_proc() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The most a line may carry. A prompt is a direction, not a document.
-pub const PROMPT_MAX: usize = 2000;
+/// The most an instruction may carry. A prompt is a direction, not a
+/// document — but a box that scrolls past twenty lines is room for a
+/// pasted trace or a list, and the cap is well past that.
+pub const PROMPT_MAX: usize = 16 * 1024;
 
 /// The one new power this feature has is writing bytes into a live
-/// terminal, so the line is printable characters and nothing else: no
-/// C0, no ESC, not even a tab or a newline. Anything else is refused
-/// rather than stripped — an instruction the person cannot see being
-/// altered is worse than one that does not go.
+/// terminal, so the instruction is printable characters and newlines and
+/// nothing else: no ESC, no carriage return, not even a tab. It goes in
+/// as a bracketed paste, where a newline is a line of the same message
+/// and never an early submit; the rest of C0 has no such frame around
+/// it. Anything else is refused rather than stripped — an instruction the
+/// person cannot see being altered is worse than one that does not go.
 pub fn sanitize(line: &str) -> anyhow::Result<String> {
     let line = line.trim();
     anyhow::ensure!(!line.is_empty(), "the instruction is empty");
@@ -252,7 +256,7 @@ pub fn sanitize(line: &str) -> anyhow::Result<String> {
         line.len() <= PROMPT_MAX,
         "the instruction is longer than {PROMPT_MAX} bytes"
     );
-    if let Some(c) = line.chars().find(|c| c.is_control()) {
+    if let Some(c) = line.chars().find(|&c| c.is_control() && c != '\n') {
         anyhow::bail!(
             "the instruction holds a control character (U+{:04X})",
             c as u32
@@ -499,12 +503,33 @@ mod tests {
         // not go.
         assert!(sanitize("clear\x1b[2J").is_err());
         assert!(sanitize("a\x07b").is_err());
-        assert!(sanitize("two\nlines").is_err(), "a line is one line");
         assert!(sanitize("two\ttabs").is_err(), "not even a tab");
+        assert!(
+            sanitize("carriage\rreturn").is_err(),
+            "a break is a newline"
+        );
         // What sits at either end is whitespace the trim takes, exactly
         // as a leading space is: the line is measured after it, so what
         // is refused is what would actually have been sent.
         assert_eq!(sanitize("\t tab \n").unwrap(), "tab");
+    }
+
+    #[test]
+    fn an_instruction_goes_on_to_another_line_with_a_newline() {
+        // It is pasted, bracketed, into the agent's box: a newline in it
+        // is a line of the same message, never an early submit.
+        assert_eq!(
+            sanitize("draw the flow\n\nthen wire it").unwrap(),
+            "draw the flow\n\nthen wire it"
+        );
+    }
+
+    #[test]
+    fn an_instruction_is_room_for_more_than_the_box_shows_at_once() {
+        // The box scrolls past twenty lines; the cap is well past that.
+        let long = "a line of an instruction, eighty characters wide or so, give or take\n";
+        let long = long.repeat(40);
+        assert!(sanitize(&long).is_ok());
     }
 
     #[test]
