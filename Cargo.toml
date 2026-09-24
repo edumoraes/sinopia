@@ -26,4 +26,7 @@ wgpu = "30.0.1"
 winit = "0.30.13"
 
 [dev-dependencies]
+# The same naga wgpu compiles the shader with: the suite parses and
+# validates the WGSL, which otherwise fails only at the first window.
+naga = { version = "30.0.1", features = ["wgsl-in"] }
 tempfile = "3.27.0"

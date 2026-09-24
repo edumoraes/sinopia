@@ -17,12 +17,15 @@ use anyhow::Context as _;
 use wgpu::util::DeviceExt as _;
 
 use crate::bitmap::Bitmap;
+use crate::doc::BlendMode;
 use crate::scene::{self, Blend, Frame, ImageSlots, Onto, Prim, Rgba, ScreenRect, Viewport};
 
 const SHADER: &str = r#"
 struct Globals {
     viewport: vec2<f32>,
-    _pad: vec2<f32>,
+    // x: 1 when the target stores sRGB, so a blend mode is worked out on
+    // the values a person picked rather than on light, as Photoshop does.
+    flags: vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -61,6 +64,9 @@ const KIND_GRAIN: u32 = 3u;
 
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
+// What a surface laid with a mode is laid on, copied out just before.
+@group(2) @binding(0) var under: texture_2d<f32>;
+@group(2) @binding(1) var under_samp: sampler;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
@@ -203,7 +209,220 @@ fn shade(in: VsOut) -> vec4<f32> {
     let coverage = edge * clamp(0.5 - cut, 0.0, 1.0);
     return vec4<f32>(rgba.rgb, rgba.a * coverage);
 }
+
+// The sRGB curve, both ways: a mode is worked out on the numbers a
+// person picked, and the target holds light.
+fn to_gamma(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+fn to_light(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+// The W3C Compositing and Blending helpers for the modes that are not
+// channel by channel.
+fn lum(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.3, 0.59, 0.11));
+}
+
+fn clip_color(c: vec3<f32>) -> vec3<f32> {
+    let l = lum(c);
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    var o = c;
+    if (n < 0.0) {
+        o = l + (o - l) * l / (l - n);
+    }
+    if (x > 1.0) {
+        o = l + (o - l) * (1.0 - l) / (x - l);
+    }
+    return o;
+}
+
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    return clip_color(c + (l - lum(c)));
+}
+
+fn sat(c: vec3<f32>) -> f32 {
+    return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+}
+
+fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    if (x <= n) {
+        return vec3<f32>(0.0);
+    }
+    return (c - n) * s / (x - n);
+}
+
+fn burn(b: f32, s: f32) -> f32 {
+    if (b >= 1.0) {
+        return 1.0;
+    }
+    if (s <= 0.0) {
+        return 0.0;
+    }
+    return 1.0 - min(1.0, (1.0 - b) / s);
+}
+
+fn dodge(b: f32, s: f32) -> f32 {
+    if (b <= 0.0) {
+        return 0.0;
+    }
+    if (s >= 1.0) {
+        return 1.0;
+    }
+    return min(1.0, b / (1.0 - s));
+}
+
+fn soft(b: f32, s: f32) -> f32 {
+    if (s <= 0.5) {
+        return b - (1.0 - 2.0 * s) * b * (1.0 - b);
+    }
+    var d = sqrt(b);
+    if (b <= 0.25) {
+        d = ((16.0 * b - 12.0) * b + 4.0) * b;
+    }
+    return b + (2.0 * s - 1.0) * (d - b);
+}
+
+fn hard(b: f32, s: f32) -> f32 {
+    if (s <= 0.5) {
+        return b * 2.0 * s;
+    }
+    let t = 2.0 * s - 1.0;
+    return b + t - b * t;
+}
+
+// One channel of a separable mode: `b` what is under, `s` what is laid.
+fn separable(mode: u32, b: f32, s: f32) -> f32 {
+    switch mode {
+        case MODE_DARKEN: { return min(b, s); }
+        case MODE_MULTIPLY: { return b * s; }
+        case MODE_COLOR_BURN: { return burn(b, s); }
+        case MODE_LINEAR_BURN: { return max(0.0, b + s - 1.0); }
+        case MODE_LIGHTEN: { return max(b, s); }
+        case MODE_SCREEN: { return b + s - b * s; }
+        case MODE_COLOR_DODGE: { return dodge(b, s); }
+        case MODE_LINEAR_DODGE: { return min(1.0, b + s); }
+        case MODE_OVERLAY: { return hard(s, b); }
+        case MODE_SOFT_LIGHT: { return soft(b, s); }
+        case MODE_HARD_LIGHT: { return hard(b, s); }
+        case MODE_VIVID_LIGHT: {
+            if (s <= 0.5) {
+                return burn(b, 2.0 * s);
+            }
+            return dodge(b, 2.0 * s - 1.0);
+        }
+        case MODE_LINEAR_LIGHT: { return clamp(b + 2.0 * s - 1.0, 0.0, 1.0); }
+        case MODE_PIN_LIGHT: {
+            if (s <= 0.5) {
+                return min(b, 2.0 * s);
+            }
+            return max(b, 2.0 * s - 1.0);
+        }
+        case MODE_HARD_MIX: { return select(0.0, 1.0, b + s >= 1.0); }
+        case MODE_DIFFERENCE: { return abs(b - s); }
+        case MODE_EXCLUSION: { return b + s - 2.0 * b * s; }
+        case MODE_SUBTRACT: { return max(0.0, b - s); }
+        case MODE_DIVIDE: {
+            if (s <= 0.0) {
+                return select(0.0, 1.0, b > 0.0);
+            }
+            return min(1.0, b / s);
+        }
+        default: { return s; }
+    }
+}
+
+// What `mode` makes of `s` laid on `b`, both unpremultiplied.
+fn blended(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
+    switch mode {
+        case MODE_DARKER_COLOR: { return select(b, s, s.r + s.g + s.b < b.r + b.g + b.b); }
+        case MODE_LIGHTER_COLOR: { return select(b, s, s.r + s.g + s.b > b.r + b.g + b.b); }
+        case MODE_HUE: { return set_lum(set_sat(s, sat(b)), lum(b)); }
+        case MODE_SATURATION: { return set_lum(set_sat(b, sat(s)), lum(b)); }
+        case MODE_COLOR: { return set_lum(s, lum(b)); }
+        case MODE_LUMINOSITY: { return set_lum(b, lum(s)); }
+        default: {
+            return vec3<f32>(
+                separable(mode, b.r, s.r),
+                separable(mode, b.g, s.g),
+                separable(mode, b.b, s.b),
+            );
+        }
+    }
+}
+
+// A surface laid with a mode: what it is read against is the copy in
+// group 2, at the same place. The answer is premultiplied and meets the
+// target as a plain over, so the W3C formula is the whole of it.
+@fragment
+fn fs_blend(in: VsOut) -> @location(0) vec4<f32> {
+    let half = in.geom.zw * 0.5;
+    let p = in.px - (in.geom.xy + half);
+    let t = (p + half) / max(in.geom.zw, vec2<f32>(1e-6));
+    let uv = mix(in.uv.xy, in.uv.zw, t);
+    let s = textureSampleLevel(tex, samp, uv, 0.0) * in.color;
+    let b = textureSampleLevel(under, under_samp, uv, 0.0);
+    if (s.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    // The mode rides one past its number where a dab carries its paper.
+    let mode = u32(in.paper.x) - 1u;
+    let cs = s.rgb / s.a;
+    if (mode == MODE_DISSOLVE) {
+        // Each pixel all of it or none of it, as likely as it is strong.
+        let n = fract(sin(dot(floor(in.px), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        if (n < s.a) {
+            return vec4<f32>(cs, 1.0);
+        }
+        return vec4<f32>(0.0);
+    }
+    var cb = vec3<f32>(0.0);
+    if (b.a > 0.0) {
+        cb = b.rgb / b.a;
+    }
+    var made = blended(mode, cb, cs);
+    if (globals.flags.x > 0.5) {
+        made = to_light(blended(mode, to_gamma(cb), to_gamma(cs)));
+    }
+    return vec4<f32>(s.a * ((1.0 - b.a) * cs + b.a * made), s.a);
+}
 "#;
+
+/// The shader, with a constant for every blend mode: its number is where
+/// it stands in [`BlendMode::ALL`], the same number a composite carries,
+/// so the two cannot come to disagree.
+fn shader() -> String {
+    let mut out = String::from(SHADER);
+    for mode in BlendMode::ALL {
+        out.push_str(&format!(
+            "const MODE_{}: u32 = {}u;\n",
+            shouted(&format!("{mode:?}")),
+            scene::mode_number(mode)
+        ));
+    }
+    out
+}
+
+/// `ColorBurn` as `COLOR_BURN`.
+fn shouted(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
+}
 
 pub struct Gfx {
     surface: wgpu::Surface<'static>,
@@ -232,6 +451,9 @@ pub struct Gfx {
     build: wgpu::RenderPipeline,
     wipe: wgpu::RenderPipeline,
     blit: wgpu::RenderPipeline,
+    /// A surface laid with a blend mode, read against the copy of what it
+    /// is laid on.
+    blend: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     /// Layout every texture bind group is built with.
@@ -269,6 +491,8 @@ pub struct Gfx {
     /// What the window is drawn onto before it is shown: a texture the
     /// frame can copy regions of, which a swapchain image need not be.
     canvas: Option<Surface>,
+    /// Where what a mode is laid on is copied to, to be read under it.
+    backdrop: Option<Surface>,
 }
 
 /// How many sheets deep the renderer goes. A frame asking for more gets
@@ -289,6 +513,7 @@ enum Which {
     Scratch,
     Sheet(usize),
     Canvas,
+    Backdrop,
 }
 
 impl Gfx {
@@ -321,7 +546,7 @@ impl Gfx {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("omawhite-prims"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader().into()),
         });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -334,7 +559,7 @@ impl Gfx {
             label: Some("globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -449,6 +674,21 @@ impl Gfx {
             }),
         );
         let blit = pipeline("blit", "fs_main", None);
+        // A mode reads a second texture, what it is laid on.
+        let blend_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blend"),
+            bind_group_layouts: &[Some(&bgl), Some(&tex_bgl), Some(&tex_bgl)],
+            immediate_size: 0,
+        });
+        let blend = self::pipeline(
+            &device,
+            &blend_layout,
+            &shader,
+            config.format,
+            "blend",
+            "fs_blend",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
 
         // Slot 0: what the runs with no image bind. White and opaque, so
         // the shader path is the same whatever it lands on.
@@ -478,6 +718,7 @@ impl Gfx {
             build,
             wipe,
             blit,
+            blend,
             globals_buf,
             bind_group,
             tex_bgl,
@@ -493,6 +734,7 @@ impl Gfx {
             scratch: None,
             sheets: Vec::new(),
             canvas: None,
+            backdrop: None,
         })
     }
 
@@ -504,6 +746,7 @@ impl Gfx {
             Which::Scratch => self.scratch.as_ref(),
             Which::Sheet(d) => self.sheets.get(d).and_then(Option::as_ref),
             Which::Canvas => self.canvas.as_ref(),
+            Which::Backdrop => self.backdrop.as_ref(),
         };
         // A surface of the right size is already there; one of the
         // wrong size keeps its slot and gives up its texture.
@@ -516,6 +759,7 @@ impl Gfx {
             Which::Scratch => "scratch",
             Which::Sheet(_) => "sheet",
             Which::Canvas => "canvas",
+            Which::Backdrop => "backdrop",
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -564,6 +808,7 @@ impl Gfx {
                 self.sheets[d] = surface;
             }
             Which::Canvas => self.canvas = surface,
+            Which::Backdrop => self.backdrop = surface,
         }
         slot
     }
@@ -926,11 +1171,17 @@ impl Gfx {
         let sheets: Vec<u32> = (0..deep)
             .map(|d| self.ensure_surface(Which::Sheet(d), size))
             .collect();
-        let globals: [f32; 4] = [viewport.w as f32, viewport.h as f32, 0.0, 0.0];
+        let srgb = if self.config.format.is_srgb() { 1.0 } else { 0.0 };
+        let globals: [f32; 4] = [viewport.w as f32, viewport.h as f32, srgb, 0.0];
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::cast_slice(&globals));
 
         let (prims, passes) = scene::passes(frame, viewport, scratch, &sheets);
+        // What a mode is laid on is copied here first, when any is.
+        let backdrop = passes
+            .iter()
+            .any(|p| p.copy.is_some_and(|c| c.to == Onto::Backdrop))
+            .then(|| self.ensure_surface(Which::Backdrop, size));
         // A buffer per frame is the simplest thing that works; reuse and
         // per-element caching come with real profiling (§3).
         let instance_buf = self
@@ -971,6 +1222,10 @@ impl Gfx {
                             .expect("every sheet planned was ensured");
                         (&s.texture, &s.view)
                     }
+                    Onto::Backdrop => {
+                        let s = self.backdrop.as_ref().expect("the backdrop was ensured");
+                        (&s.texture, &s.view)
+                    }
                 }
             };
             if let Some(copy) = pass.copy {
@@ -993,7 +1248,7 @@ impl Gfx {
                     ("window", load)
                 }
                 Onto::Sheet(_) => ("sheet", wgpu::LoadOp::Load),
-                Onto::Scratch => ("scratch", wgpu::LoadOp::Load),
+                Onto::Scratch | Onto::Backdrop => ("scratch", wgpu::LoadOp::Load),
             };
             let (_, view) = surface(pass.onto);
             let pipeline = match (pass.onto, pass.blend) {
@@ -1002,7 +1257,7 @@ impl Gfx {
                 // lands the way a composite does.
                 (Onto::Window, _) => &self.direct,
                 (Onto::Scratch, Blend::Union) => &self.union,
-                (Onto::Sheet(_) | Onto::Scratch, _) => &self.build,
+                (Onto::Sheet(_) | Onto::Scratch | Onto::Backdrop, _) => &self.build,
             };
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(label),
@@ -1041,8 +1296,12 @@ impl Gfx {
                 rp.set_pipeline(match lay.blend {
                     Blend::Erase => &self.erase,
                     Blend::Mix => &self.mix,
+                    Blend::Mode(_) => &self.blend,
                     _ => &self.composite,
                 });
+                if let (Blend::Mode(_), Some(under)) = (lay.blend, backdrop) {
+                    rp.set_bind_group(2, &self.textures[under as usize], &[]);
+                }
                 // The box says which surface it samples.
                 let from = laid.slot as usize;
                 rp.set_bind_group(1, self.textures.get(from).unwrap_or(&self.textures[0]), &[]);
@@ -1238,4 +1497,43 @@ fn bind_group(
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shader is only compiled when a window opens, so without this
+    /// a WGSL mistake passes the whole suite and fails at the first frame.
+    #[test]
+    fn the_shader_parses_and_validates() {
+        let module = naga::front::wgsl::parse_str(&shader()).expect("the WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .expect("and validates");
+        for entry in ["vs_main", "fs_main", "fs_premul", "fs_blend"] {
+            assert!(
+                module.entry_points.iter().any(|e| e.name == entry),
+                "{entry} is in it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_mode_is_a_constant_of_the_shader_under_its_own_number() {
+        let source = shader();
+        for mode in BlendMode::ALL {
+            let line = format!(
+                "const MODE_{}: u32 = {}u;",
+                shouted(&format!("{mode:?}")),
+                scene::mode_number(mode)
+            );
+            assert!(source.contains(&line), "{line}");
+        }
+        assert_eq!(shouted("ColorBurn"), "COLOR_BURN");
+        assert_eq!(shouted("Normal"), "NORMAL");
+    }
 }

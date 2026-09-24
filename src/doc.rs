@@ -95,6 +95,39 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
+    /// Every mode, in the order Photoshop's menu lists them, pass-through
+    /// last: it is a group's alone.
+    pub const ALL: [BlendMode; 28] = [
+        BlendMode::Normal,
+        BlendMode::Dissolve,
+        BlendMode::Darken,
+        BlendMode::Multiply,
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::DarkerColor,
+        BlendMode::Lighten,
+        BlendMode::Screen,
+        BlendMode::ColorDodge,
+        BlendMode::LinearDodge,
+        BlendMode::LighterColor,
+        BlendMode::Overlay,
+        BlendMode::SoftLight,
+        BlendMode::HardLight,
+        BlendMode::VividLight,
+        BlendMode::LinearLight,
+        BlendMode::PinLight,
+        BlendMode::HardMix,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Subtract,
+        BlendMode::Divide,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+        BlendMode::PassThrough,
+    ];
+
     fn is_normal(&self) -> bool {
         *self == BlendMode::Normal
     }

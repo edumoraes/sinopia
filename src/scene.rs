@@ -750,6 +750,27 @@ impl Prim {
         Prim::glyph(r, uv, slot, [opacity; 4])
     }
 
+    /// The same composite, laid with `mode`. The mode rides where a dab
+    /// carries its paper, one past its number so that nothing is none: a
+    /// composite is never dragged over a paper, and the shader reads the
+    /// paper only where the weave says it bites.
+    pub fn in_mode(self, mode: BlendMode) -> Prim {
+        Prim {
+            paper: [(mode_number(mode) + 1) as f32, 0.0, 0.0, 0.0],
+            weave: [0.0; 4],
+            ..self
+        }
+    }
+
+    /// The mode a composite is laid with, when it is laid with one.
+    #[allow(dead_code)] // the planner's tests read it back
+    pub fn mode(&self) -> Option<BlendMode> {
+        if self.kind != KIND_IMAGE || self.weave[3] > 0.0 || self.paper[0] < 1.0 {
+            return None;
+        }
+        BlendMode::ALL.get(self.paper[0] as usize - 1).copied()
+    }
+
     /// The painted area plus the edge ramp: what the shader rasterizes,
     /// and so what a wipe has to cover. A prim that is cut answers only
     /// the part the cut lets through — a stroke mostly outside a frame
@@ -1337,6 +1358,15 @@ pub enum Blend {
     /// A mix with what is there, at the lay's strength: what a group that
     /// passes through is laid back as, over the copy it was opened on.
     Mix,
+    /// Laid with a blend mode: it reads what it is laid on, from a copy
+    /// taken just before, and meets it as the mode says.
+    Mode(BlendMode),
+}
+
+/// A blend mode's number: where it stands in [`BlendMode::ALL`], which is
+/// what the shader's own table is built from.
+pub fn mode_number(mode: BlendMode) -> u32 {
+    BlendMode::ALL.iter().position(|m| *m == mode).unwrap_or(0) as u32
 }
 
 /// A stretch of a frame's prims that is composited as one shape: drawn
@@ -1518,6 +1548,9 @@ pub enum Onto {
     Sheet(u8),
     /// The scratch one stroke is composited in.
     Scratch,
+    /// A copy of what a surface laid with a mode is about to be laid on:
+    /// what the mode reads.
+    Backdrop,
 }
 
 /// What a previous pass drew offscreen, laid down now: which prim
@@ -1674,7 +1707,17 @@ impl Plan<'_> {
                 self.wipe = Some(self.box_at(Prim::rect(bounds, [0.0; 4])));
             }
             self.span(child, depth + 1, s.end, sheets, groups);
-            let prim = Prim::composite(bounds, self.viewport, slot, s.opacity);
+            let mut prim = Prim::composite(bounds, self.viewport, slot, s.opacity);
+            // A mode reads what it is laid on: that is copied out just
+            // before the pass that lays it, and the mode rides on the box.
+            if let Blend::Mode(mode) = s.lays {
+                prim = prim.in_mode(mode);
+                self.copy = Some(Copy {
+                    from: onto,
+                    to: Onto::Backdrop,
+                    rect: bounds,
+                });
+            }
             let prim = self.box_at(prim);
             self.pending = Some(Lay {
                 prim,
@@ -1815,18 +1858,15 @@ struct Walk<'a> {
     live_cut: Option<ScreenRect>,
 }
 
-/// How a layer asks to be composited, when it asks at all: its strength,
-/// how it is laid, and whether it opens on what is under it. A group
-/// passing through at full strength asks for nothing — its layers go
-/// straight onto what is under it — and below full strength works on a
-/// copy of that and is mixed back. Everything else asks only when it is
-/// below full strength.
-fn composited(layer: &Layer) -> Option<(f32, Blend, bool)> {
-    let opacity = layer.opacity as f32;
-    match (layer.kind, layer.blend) {
-        (Kind::Group, BlendMode::PassThrough) => (opacity < 1.0).then_some((opacity, Blend::Mix, true)),
-        _ => (opacity < 1.0).then_some((opacity, Blend::Over, false)),
-    }
+/// Whether anything in `layers` blends with what is under it through
+/// them: a layer with a mode, or a group passing through that holds one.
+/// A group that isolates keeps its own layers' modes to itself.
+fn blends(layers: &[Layer]) -> bool {
+    layers.iter().filter(|l| l.visible).any(|l| match l.blend {
+        BlendMode::Normal => false,
+        BlendMode::PassThrough => blends(&l.layers),
+        _ => true,
+    })
 }
 
 impl Walk<'_> {
@@ -1845,10 +1885,36 @@ impl Walk<'_> {
                 }
                 Kind::Raster | Kind::Vector => self.leaf(f, &layer.id, cut, live),
             };
-            match composited(layer) {
+            match self.composited(layer) {
                 Some((opacity, lays, backdrop)) => frame.layer(opacity, lays, backdrop, draw),
                 None => draw(frame),
             }
+        }
+    }
+
+    /// How a layer asks to be composited, when it asks at all: its
+    /// strength, how it is laid, and whether it opens on what is under
+    /// it. A mode always asks, being read against what is under it. A
+    /// group passing through at full strength asks for nothing — its
+    /// layers go straight onto what is under it — and below full strength
+    /// works on a copy of that and is mixed back. A normal group or frame
+    /// asks below full strength, or when what it holds blends: it is what
+    /// keeps its layers' modes to themselves.
+    fn composited(&self, layer: &Layer) -> Option<(f32, Blend, bool)> {
+        let opacity = layer.opacity as f32;
+        match (layer.kind, layer.blend) {
+            (Kind::Group, BlendMode::PassThrough) => {
+                (opacity < 1.0).then_some((opacity, Blend::Mix, true))
+            }
+            (_, BlendMode::Normal) => {
+                let inside = match layer.kind {
+                    Kind::Group => blends(&layer.layers),
+                    Kind::Frame => self.doc.frame_on(&layer.id).is_some_and(|f| blends(&f.layers)),
+                    Kind::Raster | Kind::Vector => false,
+                };
+                (opacity < 1.0 || inside).then_some((opacity, Blend::Over, false))
+            }
+            (_, mode) => Some((opacity, Blend::Mode(mode), false)),
         }
     }
 
@@ -3400,6 +3466,64 @@ mod tests {
         let s = f.sheets[0];
         assert_eq!(s.end, f.prims.len() as u32, "the live ink is the last of it");
         assert!(s.end - s.start >= 2 + n, "inside, at the layer's strength");
+    }
+
+    #[test]
+    fn a_layer_that_blends_is_laid_with_its_mode() {
+        let mut doc = faded(1.0);
+        doc.layers[0].blend = BlendMode::Multiply;
+        let f = drawn(&doc);
+        assert_eq!(f.sheets.len(), 1, "a mode is composited as one, whatever the strength");
+        let s = f.sheets[0];
+        assert_eq!((s.opacity, s.lays, s.backdrop), (1.0, Blend::Mode(BlendMode::Multiply), false));
+    }
+
+    #[test]
+    fn a_normal_group_holding_a_layer_that_blends_is_isolated() {
+        // Its layers blend with each other and not with what is under
+        // the group, however strong the group is.
+        let mut doc = grouped(1.0, BlendMode::Normal);
+        doc.layers[0].layers[0].blend = BlendMode::Screen;
+        let f = drawn(&doc);
+        assert_eq!(f.sheets.len(), 2);
+        assert_eq!(f.sheets[0].lays, Blend::Over, "the group, isolated");
+        assert_eq!(f.sheets[1].lays, Blend::Mode(BlendMode::Screen));
+        // Passing through, its layers blend with the board itself.
+        let mut doc = grouped(1.0, BlendMode::PassThrough);
+        doc.layers[0].layers[0].blend = BlendMode::Screen;
+        let f = drawn(&doc);
+        assert_eq!(f.sheets.len(), 1, "no surface for the group");
+        // And a group that blends is isolated and laid with its mode.
+        let f = drawn(&grouped(1.0, BlendMode::Difference));
+        assert_eq!(f.sheets[0].lays, Blend::Mode(BlendMode::Difference));
+    }
+
+    #[test]
+    fn a_mode_is_laid_over_a_copy_of_what_is_under_it_carrying_its_mode() {
+        let mut f = Frame::new();
+        f.extend([flat()]);
+        f.layer(0.75, Blend::Mode(BlendMode::Overlay), false, |f| f.extend([flat()]));
+        let (prims, plan) = passes(&f, VP, 9, &[7]);
+        let laid = plan[2];
+        assert_eq!(laid.onto, Onto::Window);
+        let lay = laid.lay.expect("the surface is laid down");
+        assert_eq!(lay.blend, Blend::Mode(BlendMode::Overlay));
+        // What it is laid on is copied out first, to be read under it.
+        let copy = laid.copy.expect("a copy of what it is laid on");
+        assert_eq!((copy.from, copy.to), (Onto::Window, Onto::Backdrop));
+        assert_eq!(copy.rect, flat().painted_bounds().snapped());
+        let p = prims[lay.prim as usize];
+        assert_eq!(p.color, [0.75; 4], "at its strength");
+        assert_eq!(p.mode(), Some(BlendMode::Overlay), "and its mode rides on the prim");
+        assert_eq!(flat().mode(), None);
+    }
+
+    #[test]
+    fn every_mode_has_a_number_and_the_number_gives_it_back() {
+        for (i, mode) in BlendMode::ALL.iter().enumerate() {
+            assert_eq!(mode_number(*mode) as usize, i);
+            assert_eq!(BlendMode::ALL.get(mode_number(*mode) as usize), Some(mode));
+        }
     }
 
     #[test]
