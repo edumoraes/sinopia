@@ -299,6 +299,20 @@ pub fn load_document_from(path: &Path) -> anyhow::Result<Document> {
 /// reason: a character device reports none, and `/dev/zero` delivers NUL
 /// — valid UTF-8, all the way to an OOM.
 pub fn read_capped(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
+    let bytes = read_head(path, max + 1)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= max,
+        "{path:?} is over the {max} bytes it may be"
+    );
+    Ok(bytes)
+}
+
+/// The first `max` bytes of the file at `path`, and nothing past them —
+/// for a file whose head is all that is wanted of it, as a `SKILL.md`'s
+/// frontmatter is. It opens the way [`read_capped`] does and for the
+/// same reasons: never blocking on the open, and refusing whatever is
+/// not a regular file.
+pub fn read_head(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
     use std::io::Read as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let file = std::fs::OpenOptions::new()
@@ -309,14 +323,9 @@ pub fn read_capped(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
     let meta = file.metadata().with_context(|| format!("reading {path:?}"))?;
     anyhow::ensure!(meta.is_file(), "{path:?} is not a regular file");
     let mut bytes = Vec::new();
-    let read = file
-        .take(max + 1)
+    file.take(max)
         .read_to_end(&mut bytes)
         .with_context(|| format!("reading {path:?}"))?;
-    anyhow::ensure!(
-        read as u64 <= max,
-        "{path:?} is over the {max} bytes it may be"
-    );
     Ok(bytes)
 }
 
@@ -431,6 +440,29 @@ mod tests {
         assert_eq!(read_capped(&at, 5).unwrap(), b"hello");
         let err = read_capped(&at, 4).unwrap_err().to_string();
         assert!(err.contains("over the 4 bytes"), "{err}");
+    }
+
+    #[test]
+    fn a_head_is_the_first_bytes_of_a_file_however_long_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("long.md");
+        let text = "---\nname: x\n---\n".to_owned() + &"body ".repeat(100);
+        std::fs::write(&file, text).unwrap();
+        assert_eq!(read_head(&file, 7).unwrap(), b"---\nnam");
+        assert_eq!(read_head(&file, 1 << 20).unwrap().len(), 16 + 500);
+    }
+
+    #[test]
+    fn a_head_is_not_read_from_anything_but_a_regular_file() {
+        // The same door as a capped read: a FIFO opened without
+        // O_NONBLOCK parks the opener before any check can run.
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let c = std::ffi::CString::new(fifo.to_str().expect("utf-8 path")).expect("no NUL");
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        let err = read_head(&fifo, 1024).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+        assert!(read_head(dir.path(), 1024).is_err());
     }
 
     #[test]

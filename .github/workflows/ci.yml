@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A second push to the same branch makes the run before it moot.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A warning is an error here, as it is on the desk: a build that grows
+  # one is a build nobody can read the next one from.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # The window, the GPU and the Wayland protocols are all loaded at
+      # run time (`dlopen`), and the suite never opens a window, so the
+      # runner needs nothing past the toolchain.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - run: cargo clippy --locked --all-targets
+      - run: cargo test --locked

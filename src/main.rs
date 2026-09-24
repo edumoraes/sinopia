@@ -31,6 +31,7 @@ mod props;
 mod scene;
 mod select;
 mod send;
+mod skills;
 mod slots;
 mod store;
 mod tablet;

@@ -28,7 +28,7 @@ use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
-use crate::field::Field;
+use crate::field::{self, Field};
 use crate::geom::Corner;
 use crate::gestures;
 use crate::history::History;
@@ -48,10 +48,11 @@ use crate::scene::{
 };
 use crate::select::{self, Handle};
 use crate::send;
+use crate::skills;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
-use crate::text::{Atlas, Font};
+use crate::text::{self, Atlas, Font};
 use crate::theme::{INKS, Theme};
 
 /// The longest step the panel's easing takes in one frame. A window
@@ -102,6 +103,8 @@ enum UserEvent {
         bytes: Vec<u8>,
         bitmap: Bitmap,
     },
+    /// Clipboard text, for the field that asked for it.
+    PastedText(String),
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
 }
@@ -191,6 +194,8 @@ struct App {
     dock_icon_slot: Option<u32>,
     /// Where the brush icon sheet was uploaded, once it has been.
     icon_slot: u32,
+    /// Where the agents' logos were uploaded, once they have been.
+    agent_logo_slot: Option<u32>,
     /// Where each nib shape sits on the shape sheet, once it has been
     /// uploaded. Empty until then, and a stroke that names a shape lays
     /// a plain round nib meanwhile.
@@ -262,22 +267,72 @@ struct Sending {
     scope: export::Scope,
     agents: Vec<agents::Agent>,
     target: usize,
-    /// The folder, when the scope has no name of its own.
-    folder: Option<Field>,
+    /// The instruction, the dialog's one field.
     line: Field,
-    /// Which field the keyboard is writing into. The line, until a press
-    /// says otherwise — the folder's prefill is usually right and the
-    /// line never is.
-    focus: send::Hit,
+    /// How far down its lines the instruction is scrolled, in physical
+    /// px: past twenty lines the box keeps its height and moves them.
+    scroll: f32,
+    /// A press in the box is being dragged, selecting as it goes.
+    selecting: bool,
+    /// The target's skills, read when it became the target.
+    skills: Vec<skills::Skill>,
+    /// Which of the skills answering the call being typed is picked.
+    pick: usize,
+    /// Where the call started whose menu `Esc` put away: it stays away
+    /// for that call, and comes back for the next one.
+    dismissed: Option<usize>,
+    /// The shape of what leaves, known before its picture is taken.
+    shape: Option<f32>,
+    /// The picture of it at the dialog's foot: the slot it was uploaded
+    /// to, and the size in px it was last taken at — or tried at, so a
+    /// picture that will not render is not tried again every frame.
+    picture: Option<u32>,
+    pictured: Option<(u32, u32)>,
 }
 
 impl Sending {
-    /// The field the keyboard is writing into.
-    fn writing(&mut self) -> &mut Field {
-        match (self.focus, self.folder.as_mut()) {
-            (send::Hit::Folder, Some(folder)) => folder,
-            _ => &mut self.line,
+    /// The call being typed in the instruction and the skills answering
+    /// it, best first — when the target's harness takes skills, anything
+    /// answers, and `Esc` has not put this call's menu away.
+    fn menu(&self) -> Option<(skills::Token, Vec<usize>, skills::Call)> {
+        let call = skills::harness(&self.agents.get(self.target)?.kind)?.call;
+        let token = skills::token(self.line.value(), self.line.caret(), call)?;
+        if self.dismissed == Some(token.start) {
+            return None;
         }
+        let matches = skills::matching(&self.skills, &token.query);
+        (!matches.is_empty()).then_some((token, matches, call))
+    }
+
+    /// The target is another agent: its own skills, and a fresh menu.
+    fn aim(&mut self, target: usize) {
+        self.target = target;
+        self.skills = self
+            .agents
+            .get(target)
+            .map(|a| skills::list(&a.kind, &a.cwd))
+            .unwrap_or_default();
+        self.pick = 0;
+        self.dismissed = None;
+    }
+
+    /// After an edit: a call no longer being typed lets go of the
+    /// menu it put away, and the pick stays on a row that exists.
+    fn settle(&mut self, edited: bool) {
+        let typing_a_call = self.agents.get(self.target).is_some_and(|a| {
+            skills::harness(&a.kind).is_some_and(|h| {
+                skills::token(self.line.value(), self.line.caret(), h.call).is_some()
+            })
+        });
+        if !typing_a_call {
+            self.dismissed = None;
+        }
+        let n = self.menu().map_or(0, |(_, m, _)| m.len());
+        self.pick = if edited || n == 0 {
+            0
+        } else {
+            self.pick.min(n - 1)
+        };
     }
 }
 
@@ -963,6 +1018,134 @@ impl App {
         }
     }
 
+    /// The export dialog as it stands this frame, and the lines its
+    /// instruction wraps to: how many there are is what decides how tall
+    /// the box stands, so the two are only ever worked out together.
+    fn send_panel(&self, view: &View) -> Option<(send::Panel, Vec<text::Line>)> {
+        let (sending, atlas) = (self.sending.as_ref()?, self.atlas.as_ref()?);
+        let scale = self.chrome(view);
+        let width = send::Panel::text_width(view.viewport, scale);
+        let lines = sending.line.wrap(atlas, width);
+        let spec = send::Spec {
+            rows: sending.agents.len(),
+            lines: lines.len(),
+            line_h: atlas.line_height(),
+            picture: sending.shape,
+        };
+        Some((send::Panel::layout(view.viewport, scale, &spec), lines))
+    }
+
+    /// Keeps the instruction's scroll inside what the text allows, and —
+    /// while the box has the keyboard — just far enough along for the
+    /// caret's line to be in sight.
+    fn follow_caret(&mut self) {
+        let Some(view) = self.view() else { return };
+        let Some((panel, lines)) = self.send_panel(&view) else {
+            return;
+        };
+        let Some(sending) = self.sending.as_mut() else {
+            return;
+        };
+        let k = sending.line.caret_line(&lines);
+        let shown = panel.shown as f32 * panel.line_h;
+        sending.scroll = field::follow(sending.scroll, k, panel.line_h, shown)
+            .clamp(0.0, panel.max_scroll(lines.len()));
+    }
+
+    /// Writes the call to the `at`th skill answering the call being
+    /// typed over what was typed of it.
+    fn take_skill(&mut self, at: usize) {
+        let Some(sending) = self.sending.as_mut() else {
+            return;
+        };
+        let Some((token, matches, call)) = sending.menu() else {
+            return;
+        };
+        let Some(skill) = matches.get(at).and_then(|&i| sending.skills.get(i)) else {
+            return;
+        };
+        let name = skill.name.clone();
+        skills::accept(&mut sending.line, &token, call, &name);
+        sending.settle(true);
+        self.follow_caret();
+        self.redraw();
+    }
+
+    /// Whether a field has the keyboard.
+    fn typing(&self) -> bool {
+        self.sending.is_some() || self.renaming.is_some()
+    }
+
+    /// The field the keyboard is writing into, if one is: the export
+    /// dialog's, or a layer's name being typed.
+    fn field_in_hand(&mut self) -> Option<&mut Field> {
+        if let Some(sending) = self.sending.as_mut() {
+            return Some(&mut sending.line);
+        }
+        self.renaming.as_mut().map(|(_, field)| field)
+    }
+
+    /// `Ctrl+C`, `Ctrl+X` or `Ctrl+V` with a field in hand: what is
+    /// selected goes to the clipboard, and with `X` out of the field;
+    /// what the clipboard holds comes back into it. Nothing selected is
+    /// nothing to copy, and the clipboard keeps what it had.
+    fn clipboard_key(&mut self, c: &str) {
+        let key = c.to_ascii_lowercase();
+        if key == "v" {
+            return self.paste_text();
+        }
+        // With no clipboard a copy has nowhere to go, and a cut would
+        // only be a delete that looked like something else.
+        if self.clipboard.is_none() {
+            return log::debug!("copy: no clipboard on this display");
+        }
+        let cut = key == "x";
+        let copied = match key.as_str() {
+            "c" => self.field_in_hand().map(|f| f.selected().to_owned()),
+            "x" => self.field_in_hand().and_then(Field::cut),
+            _ => None,
+        };
+        let Some(text) = copied.filter(|t| !t.is_empty()) else {
+            return;
+        };
+        if let Some(clipboard) = &self.clipboard {
+            clipboard.copy_text(&text);
+        }
+        // A cut is an edit like any other: the box may now be shorter
+        // than it was scrolled, and the call the menu was for may be gone.
+        if cut {
+            if let Some(sending) = self.sending.as_mut() {
+                sending.settle(true);
+            }
+            self.follow_caret();
+        }
+        self.redraw();
+    }
+
+    /// Asks the clipboard for text, for the field in hand. It arrives
+    /// later, as [`UserEvent::PastedText`].
+    fn paste_text(&self) {
+        match &self.clipboard {
+            Some(clipboard) => {
+                clipboard.paste_text();
+            }
+            None => log::debug!("paste: no clipboard on this display"),
+        }
+    }
+
+    /// Clipboard text came back. The field that asked for it may have
+    /// closed since, and then the text has nowhere to go and goes nowhere.
+    fn pasted_text(&mut self, text: &str) {
+        if let Some(field) = self.field_in_hand() {
+            field.paste(text);
+            if let Some(sending) = self.sending.as_mut() {
+                sending.settle(true);
+            }
+            self.follow_caret();
+            self.redraw();
+        }
+    }
+
     /// Asks the clipboard for an image. The bytes arrive later, as
     /// [`UserEvent::Pasted`].
     fn paste(&mut self) {
@@ -1294,7 +1477,7 @@ impl App {
                 .get(i)
                 .map(|l| l.name.clone())
                 .unwrap_or_default();
-            self.renaming = Some((i, Field::new(&name)));
+            self.renaming = Some((i, Field::name(&name)));
             return;
         }
         let (editor, doc) = self.active();
@@ -1340,23 +1523,28 @@ impl App {
             log::info!("no agent is running: export to the agent needs one");
             return;
         }
-        // A frame brings its name; a loose selection is asked for one,
-        // counted past whatever the folder already holds.
-        let folder = match export::named(self.doc(), &scope) {
-            Some(_) => None,
-            None => {
-                let taken = taken_names(&found[0].cwd);
-                Some(Field::new(&export::free_name(&self.doc().title, &taken)))
-            }
-        };
+        let shape = export::bounds(self.doc(), &scope).map(|b| export::shape(&b) as f32);
+        // What the page is called is not asked: `send_to` names it after
+        // what owns the scope, or else after the tab.
         self.sending = Some(Sending {
             scope,
             agents: found,
             target: 0,
-            folder,
-            line: Field::new(""),
-            focus: send::Hit::Line,
+            // No longer than the send would take: a field never holds
+            // what the thing it feeds would refuse.
+            line: Field::lines("").limited(agents::PROMPT_MAX),
+            scroll: 0.0,
+            selecting: false,
+            skills: Vec::new(),
+            pick: 0,
+            dismissed: None,
+            shape,
+            picture: None,
+            pictured: None,
         });
+        if let Some(sending) = self.sending.as_mut() {
+            sending.aim(0);
+        }
         self.redraw();
     }
 
@@ -1378,13 +1566,11 @@ impl App {
 
     fn send_to(&mut self, agent: &agents::Agent, sending: &Sending) -> anyhow::Result<()> {
         let line = agents::sanitize(sending.line.value())?;
-        let name = export::named(self.doc(), &sending.scope)
-            .or_else(|| sending.folder.as_ref().map(|f| f.value().to_owned()))
-            .unwrap_or_default();
-        let slug = match export::slug(&name) {
-            s if s.is_empty() => anyhow::bail!("the page needs a name"),
-            s => s,
-        };
+        // Named here and not when the dialog opened: a selection across
+        // layers is counted past what this agent's folder holds, and the
+        // agent may have been changed since.
+        let taken = taken_names(&agent.cwd);
+        let slug = export::page_slug(self.doc(), &sending.scope, &self.project().label(), &taken);
         let cwd = PathBuf::from(&agent.cwd);
         let files = self.write_page(&sending.scope, &cwd, &slug)?;
         log::info!("exported {} files to {}", files.len(), agent.cwd);
@@ -1407,36 +1593,9 @@ impl App {
         let sub = export::sub_document(self.doc(), scope);
         let md = export::inventory(&sub, &bounds);
         let blobs = self.blobs_of(&sub);
-        let theme_bg = self.theme.bg;
-        let edge = self.theme.muted;
-        let shapes = std::mem::take(&mut self.shapes);
-        let picture = {
-            let images = self.gfx.as_ref().map(Gfx::image_slots);
-            let none = ImageSlots::new();
-            let images = images.unwrap_or(&none);
-            let (view, w, h) = match &self.gfx {
-                Some(gfx) => export::view_for(&bounds, gfx.max_dimension()),
-                None => (export::view_for(&bounds, 1).0, 1, 1),
-            };
-            // The sub-document, not the board: the json beside the
-            // picture is the scope, and the box the picture is taken
-            // through is the scope's plus `EXPORT_MARGIN` — so drawing
-            // the whole board put a neighbour's ink in the margin of a
-            // picture whose json says nothing about it. What leaves the
-            // board is one thing, said twice.
-            (
-                scene::document_prims(&sub, &view, images, &shapes, edge, None),
-                w,
-                h,
-            )
-        };
-        self.shapes = shapes;
-        let (picture, w, h) = picture;
-        let gfx = self
-            .gfx
-            .as_mut()
-            .context("there is no window to draw with")?;
-        let rgba = gfx.render_offscreen(w, h, theme_bg, &picture)?;
+        let most = self.gfx.as_ref().map_or(1, Gfx::max_dimension);
+        let (view, w, h) = export::view_for(&bounds, most);
+        let rgba = self.render_sub(&sub, &view, w, h)?;
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png).write_image(
             &rgba,
@@ -1445,6 +1604,79 @@ impl App {
             image::ExtendedColorType::Rgba8,
         )?;
         export::write(dir, slug, &png, &sub, &md, &blobs)
+    }
+
+    /// What `view` shows of `sub`, drawn offscreen on the board's own
+    /// ground: `w` by `h` px of tight RGBA8. The page and the dialog's
+    /// picture of it both come through here, so the two cannot differ.
+    ///
+    /// The sub-document, not the board: the json beside the picture is
+    /// the scope, and the box the picture is taken through is the
+    /// scope's plus `EXPORT_MARGIN` — so drawing the whole board put a
+    /// neighbour's ink in the margin of a picture whose json says nothing
+    /// about it. What leaves the board is one thing, said twice.
+    fn render_sub(
+        &mut self,
+        sub: &Document,
+        view: &View,
+        w: u32,
+        h: u32,
+    ) -> anyhow::Result<Vec<u8>> {
+        let (ground, edge) = (self.theme.bg, self.theme.muted);
+        let shapes = std::mem::take(&mut self.shapes);
+        let frame = {
+            let none = ImageSlots::new();
+            let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
+            scene::document_prims(sub, view, images, &shapes, edge, None)
+        };
+        self.shapes = shapes;
+        let gfx = self
+            .gfx
+            .as_mut()
+            .context("there is no window to draw with")?;
+        gfx.render_offscreen(w, h, ground, &frame)
+    }
+
+    /// Takes the dialog's picture of what is leaving again when its place
+    /// has changed size — it opened, the window was resized, the scale
+    /// changed — at that size in px, so it is drawn one to one. Like the
+    /// atlas, it is made here and never while a frame is being built.
+    fn ensure_picture(&mut self) {
+        let Some(view) = self.view() else { return };
+        let Some((panel, _)) = self.send_panel(&view) else {
+            return;
+        };
+        let Some(rect) = panel.picture else { return };
+        let want = (rect.w.round() as u32, rect.h.round() as u32);
+        let Some(sending) = self.sending.as_ref() else {
+            return;
+        };
+        if sending.pictured == Some(want) {
+            return;
+        }
+        let scope = sending.scope.clone();
+        let taken = export::bounds(self.doc(), &scope)
+            .context("there is nothing there to picture")
+            .and_then(|bounds| {
+                let sub = export::sub_document(self.doc(), &scope);
+                let (view, w, h) = panel
+                    .picture_view(&bounds)
+                    .context("there is no place for the picture")?;
+                let rgba = self.render_sub(&sub, &view, w, h)?;
+                let gfx = self
+                    .gfx
+                    .as_mut()
+                    .context("there is no window to draw with")?;
+                gfx.upload_picture(&Bitmap { w, h, rgba })
+            });
+        let Some(sending) = self.sending.as_mut() else {
+            return;
+        };
+        sending.pictured = Some(want);
+        match taken {
+            Ok(slot) => sending.picture = Some(slot),
+            Err(e) => log::warn!("the dialog's picture: {e:#}"),
+        }
     }
 
     /// The bytes behind every image the sub-document names, so the json
@@ -1509,15 +1741,11 @@ impl App {
             .into_iter()
             .find(|c| c.id == id)
             .with_context(|| format!("no frame {id:?} on the board that is open"))?;
-        let scope = export::Scope::Frame(id.to_owned());
-        // The id where the name slugs away to nothing, which every
-        // non-Latin name does — a slug is ASCII. Two such frames would
-        // otherwise share one folder and overwrite each other's page,
-        // and an id is what is both unique and the same on every read.
-        let slug = [export::slug(&card.name), export::slug(&card.id)]
-            .into_iter()
-            .find(|s| !s.is_empty())
-            .unwrap_or_else(|| export::UNNAMED.to_owned());
+        let scope = export::Scope::Frame(card.id);
+        // Named the way `Ctrl+E` names it — its layer's name, or its id
+        // where the name slugs away to nothing, as every non-Latin name
+        // does — so a frame keeps one page whichever door it leaves by.
+        let slug = export::page_slug(self.doc(), &scope, &self.project().label(), &[]);
         self.write_page(&scope, dir, &slug)
     }
 
@@ -1603,10 +1831,11 @@ impl App {
         true
     }
 
-    /// The three image sheets the binary ships: illustrated dock tools,
-    /// brush icons for the library, and nib shapes for the canvas. They
-    /// are raster art, the same at every scale, so each is uploaded once
-    /// into a slot of its own and never replaced like the glyph atlas is.
+    /// The four image sheets the binary ships: illustrated dock tools,
+    /// brush icons for the library, the agents' logos for the export
+    /// dialog, and nib shapes for the canvas. They are raster art, the
+    /// same at every scale, so each is uploaded once into a slot of its
+    /// own and never replaced like the glyph atlas is.
     fn ensure_sheets(&mut self) {
         if self.dock_icon_slot.is_none() {
             const DOCK_ICONS: &[u8] = include_bytes!("../assets/dock/icons.png");
@@ -1626,6 +1855,16 @@ impl App {
             self.upload_sheet("brush icons", ICONS, Gfx::upload_icons, |app, slot| {
                 app.icon_slot = slot;
             });
+        }
+        if self.agent_logo_slot.is_none() {
+            const LOGOS: &[u8] = include_bytes!("../assets/agents/logos.png");
+            // Without it a row keeps its logo's place and says the rest.
+            self.upload_sheet(
+                "agent logos",
+                LOGOS,
+                Gfx::upload_agent_logos,
+                |app, slot| app.agent_logo_slot = Some(slot),
+            );
         }
         if self.shapes.cells.is_empty() {
             const SHAPES: &[u8] = include_bytes!("../assets/brushes/shapes.png");
@@ -1838,22 +2077,30 @@ impl App {
         }
         // The send panel is modal, so it is drawn last of everything —
         // over the strip the way it is pressed before it.
-        if let (Some(sending), Some(atlas)) = (&self.sending, self.atlas.as_ref()) {
-            let panel = send::Panel::layout(
-                view.viewport,
-                self.chrome(view),
-                sending.agents.len(),
-                sending.folder.is_some(),
-            );
-            frame.extend(panel.prims(
-                &sending.agents,
-                sending.target,
-                sending.folder.as_ref(),
-                &sending.line,
+        if let (Some(sending), Some(atlas), Some((panel, _))) =
+            (&self.sending, self.atlas.as_ref(), self.send_panel(view))
+        {
+            let menu = sending.menu();
+            let look = send::Look {
+                agents: &sending.agents,
+                target: sending.target,
+                line: &sending.line,
+                scroll: sending.scroll,
+                menu: menu.as_ref().map(|(_, matches, call)| send::Menu {
+                    skills: &sending.skills,
+                    matches,
+                    pick: sending.pick,
+                    call: *call,
+                }),
+                picture: sending.picture,
+            };
+            let ink = send::Ink {
                 atlas,
-                self.atlas_slot,
-                &self.theme,
-            ));
+                slot: self.atlas_slot,
+                logos: self.agent_logo_slot,
+                theme: &self.theme,
+            };
+            frame.extend(panel.prims(&look, &ink));
         }
         frame
     }
@@ -1890,27 +2137,42 @@ impl App {
         // The send panel is modal and over everything, the strip
         // included: it is the one thing in this window that is finished
         // by leaving it.
-        if let Some(sending) = &self.sending {
-            let panel = send::Panel::layout(
-                view.viewport,
-                self.chrome(&view),
-                sending.agents.len(),
-                sending.folder.is_some(),
-            );
+        if self.sending.is_some() {
+            let Some((panel, lines)) = self.send_panel(&view) else {
+                return;
+            };
             if button == Button::Left {
-                match panel.hit(x, y) {
-                    Some(send::Hit::Target(i)) => {
-                        if let Some(s) = self.sending.as_mut() {
-                            s.target = i;
+                // The menu stands over the dialog, so it is pressed first.
+                let on_menu = self.sending.as_ref().and_then(|s| {
+                    let (_, matches, _) = s.menu()?;
+                    let k = s.line.caret_line(&lines);
+                    let m = panel.menu(&panel.boxed(&lines, s.scroll), k, matches.len(), s.pick)?;
+                    m.hit(x, y)
+                });
+                if let Some(at) = on_menu {
+                    self.take_skill(at);
+                    return self.update_cursor_icon();
+                }
+                let shift = self.modifiers.state().shift_key();
+                match (panel.hit(x, y), self.sending.as_mut(), self.atlas.as_ref()) {
+                    (Some(send::Hit::Target(i)), Some(s), _) => {
+                        if i != s.target {
+                            s.aim(i);
                         }
                     }
-                    Some(hit) => {
-                        if let Some(s) = self.sending.as_mut() {
-                            s.focus = hit;
-                        }
+                    // A press in the box puts the caret under it — with
+                    // Shift, carries the selection there — and a drag
+                    // from it goes on selecting.
+                    (Some(send::Hit::Line), Some(s), Some(atlas)) if panel.line.contains(x, y) => {
+                        let (k, along) = panel.boxed(&lines, s.scroll).at(x, y);
+                        let to = s.line.index_at(atlas, &lines, k, along);
+                        s.line.go(to, shift);
+                        s.selecting = true;
+                        s.settle(false);
                     }
                     // A press outside a modal panel closes it.
-                    None => self.sending = None,
+                    (None, ..) => self.sending = None,
+                    _ => {}
                 }
                 self.redraw();
             }
@@ -2061,6 +2323,11 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        // The box's own drag: the canvas never saw its press.
+        if let Some(s) = self.sending.as_mut().filter(|s| s.selecting) {
+            s.selecting = false;
+            return self.update_cursor_icon();
+        }
         // A brush carried out of the library is seated where it was let
         // go of, if that was a seat that can be written. Dropped
         // anywhere else it is simply the brush in the hand, which the
@@ -2110,6 +2377,22 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
+        // A press in the instruction's box is selecting for as long as
+        // it is held, wherever the pointer wanders — past the box's top
+        // or bottom edge it runs on into the lines scrolled out of sight.
+        if self.sending.as_ref().is_some_and(|s| s.selecting) {
+            if let Some(view) = self.view()
+                && let Some((panel, lines)) = self.send_panel(&view)
+                && let (Some(s), Some(atlas)) = (self.sending.as_mut(), self.atlas.as_ref())
+            {
+                let (k, along) = panel.boxed(&lines, s.scroll).at(x, y);
+                let to = s.line.index_at(atlas, &lines, k, along);
+                s.line.go(to, true);
+            }
+            self.follow_caret();
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A brush out of the library has the pointer to itself once it
         // has moved far enough to mean it, and the canvas sees nothing.
         if self.drag.is_some() {
@@ -2181,6 +2464,23 @@ impl App {
             f64::from(view.viewport.w) / 2.0,
             f64::from(view.viewport.h) / 2.0,
         ));
+        // The dialog is modal for the wheel as it is for everything else:
+        // over the instruction the wheel moves its lines, and anywhere
+        // else it moves nothing — least of all the board behind it.
+        if self.sending.is_some() {
+            if let Some((panel, lines)) = self.send_panel(&view)
+                && panel.line.contains(cursor.0, cursor.1)
+                && let Some(s) = self.sending.as_mut()
+            {
+                let most = panel.max_scroll(lines.len());
+                let next = (s.scroll - delta.1 as f32).clamp(0.0, most);
+                if next != s.scroll {
+                    s.scroll = next;
+                    self.redraw();
+                }
+            }
+            return;
+        }
         // The panel takes the wheel when the pointer is over it: the
         // wheel away from the user shows what is further up the stack.
         if self
@@ -2213,39 +2513,111 @@ impl App {
     fn key(&mut self, key: &Key, bare: &Key, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
+            // The clipboard's keys come first for whichever field has the
+            // keyboard: they are the window's to answer, not the field's.
+            Key::Character(c)
+                if pressed
+                    && self.field_in_hand().is_some()
+                    && self.modifiers.state().control_key()
+                    && ["c", "x", "v"].iter().any(|k| c.eq_ignore_ascii_case(k)) =>
+            {
+                self.clipboard_key(c);
+            }
             // The send panel is modal: it takes the keyboard before
             // anything else, including the rename that cannot be open
             // under it.
             _ if self.sending.is_some() && pressed => {
+                let mods = self.modifiers.state();
+                let laid = self.view().and_then(|view| self.send_panel(&view));
                 let Some(sending) = self.sending.as_mut() else {
                     return;
                 };
+                // While a menu of skills is up, the arrows walk it, Tab
+                // or Enter takes the pick, and Esc puts the menu away —
+                // the dialog stays. Up means on screen: a menu the wheel
+                // scrolled away with its line takes no keys.
+                let shown = |s: &Sending, n: usize| {
+                    laid.as_ref().is_some_and(|(panel, lines)| {
+                        let b = panel.boxed(lines, s.scroll);
+                        let k = s.line.caret_line(lines);
+                        panel.menu(&b, k, n, s.pick).is_some()
+                    })
+                };
+                let menu = sending.menu().filter(|(_, m, _)| shown(sending, m.len()));
+                if let Some((token, matches, _)) = menu {
+                    let n = matches.len();
+                    match key {
+                        Key::Named(NamedKey::ArrowDown) => {
+                            sending.pick = (sending.pick + 1) % n;
+                            return self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            sending.pick = (sending.pick + n - 1) % n;
+                            return self.redraw();
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            sending.dismissed = Some(token.start);
+                            return self.redraw();
+                        }
+                        Key::Named(NamedKey::Tab) => {
+                            let pick = sending.pick;
+                            return self.take_skill(pick);
+                        }
+                        Key::Named(NamedKey::Enter) if !mods.shift_key() => {
+                            let pick = sending.pick;
+                            return self.take_skill(pick);
+                        }
+                        _ => {}
+                    }
+                }
+                // Whether the key changed the text or moved the caret:
+                // only then is the menu's pick back at its first row. A
+                // modifier pressed on its own is neither.
+                let mut edited = false;
                 match key {
                     Key::Named(NamedKey::Escape) => self.sending = None,
+                    // Shift+Enter breaks the line, as it does in the
+                    // agent's own box; Enter alone sends.
+                    Key::Named(NamedKey::Enter) if mods.shift_key() => {
+                        sending.line.newline();
+                        edited = true;
+                    }
                     Key::Named(NamedKey::Enter) => self.do_send(),
                     Key::Named(NamedKey::Tab) => {
                         // Tab walks the targets when there is more than
                         // one, since the fields are two at most and the
                         // list is the thing being chosen from.
-                        let n = sending.agents.len();
-                        sending.target = (sending.target + 1) % n.max(1);
-                    }
-                    Key::Named(NamedKey::Backspace) => sending.writing().backspace(),
-                    Key::Named(NamedKey::ArrowLeft) => sending.writing().left(),
-                    Key::Named(NamedKey::ArrowRight) => sending.writing().right(),
-                    Key::Named(NamedKey::Home) => sending.writing().home(),
-                    Key::Named(NamedKey::End) => sending.writing().end(),
-                    // A space is a named key and never a character, so
-                    // without this an instruction is one word long.
-                    Key::Named(NamedKey::Space) => sending.writing().insert(' '),
-                    Key::Character(text) => {
-                        let field = sending.writing();
-                        for c in text.chars().filter(|c| !c.is_control()) {
-                            field.insert(c);
+                        let next = (sending.target + 1) % sending.agents.len().max(1);
+                        if next != sending.target {
+                            sending.aim(next);
                         }
                     }
-                    _ => {}
+                    // In the box the arrows and Home and End walk the
+                    // lines as it shows them; with Ctrl, Home and End
+                    // are the whole text's, which `edit` answers.
+                    Key::Named(
+                        named @ (NamedKey::ArrowUp
+                        | NamedKey::ArrowDown
+                        | NamedKey::Home
+                        | NamedKey::End),
+                    ) if !mods.control_key() => {
+                        if let (Some((_, lines)), Some(atlas)) = (&laid, self.atlas.as_ref()) {
+                            let shift = mods.shift_key();
+                            match named {
+                                NamedKey::ArrowUp => sending.line.up(atlas, lines, shift),
+                                NamedKey::ArrowDown => sending.line.down(atlas, lines, shift),
+                                NamedKey::Home => sending.line.line_home(lines, shift),
+                                _ => sending.line.line_end(lines, shift),
+                            }
+                            edited = true;
+                        }
+                    }
+                    _ => edited = edit(&mut sending.line, key, mods),
                 }
+                if let Some(sending) = self.sending.as_mut() {
+                    sending.settle(edited);
+                }
+                self.follow_caret();
                 self.redraw();
             }
             // A field being typed into takes the keyboard whole, and so
@@ -2258,18 +2630,9 @@ impl App {
                 match key {
                     Key::Named(NamedKey::Escape) => self.renaming = None,
                     Key::Named(NamedKey::Enter) => self.commit_rename(),
-                    Key::Named(NamedKey::Backspace) => field.backspace(),
-                    Key::Named(NamedKey::ArrowLeft) => field.left(),
-                    Key::Named(NamedKey::ArrowRight) => field.right(),
-                    Key::Named(NamedKey::Home) => field.home(),
-                    Key::Named(NamedKey::End) => field.end(),
-                    Key::Named(NamedKey::Space) => field.insert(' '),
-                    Key::Character(text) => {
-                        for c in text.chars().filter(|c| !c.is_control()) {
-                            field.insert(c);
-                        }
+                    _ => {
+                        edit(field, key, self.modifiers.state());
                     }
-                    _ => {}
                 }
                 self.redraw();
             }
@@ -2399,6 +2762,9 @@ impl App {
     /// Keys can't be released into a window that lost focus: drop the held
     /// overrides and whatever gesture they were driving.
     fn focus_lost(&mut self) {
+        if let Some(s) = self.sending.as_mut() {
+            s.selecting = false;
+        }
         // A brush half-carried out of the library is put down where it
         // came from: it was never seated, and the hand it is in was the
         // press's doing, not the drag's.
@@ -2443,7 +2809,20 @@ impl App {
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
-        let icon = if held || self.editor().is_panning() {
+        // Over the dialog's box the pointer is the I-beam that says a
+        // press there puts the caret down; over the rest of it, and over
+        // the board behind it, an arrow.
+        let over_text = match (self.cursor, self.view()) {
+            (Some((x, y)), Some(view)) => {
+                self.send_panel(&view).map(|(p, _)| p.line.contains(x, y))
+            }
+            _ => None,
+        };
+        let icon = if over_text == Some(true) {
+            CursorIcon::Text
+        } else if over_text == Some(false) {
+            CursorIcon::Default
+        } else if held || self.editor().is_panning() {
             CursorIcon::Grabbing
         } else if self.editor().is_drawing() {
             CursorIcon::Crosshair
@@ -2500,6 +2879,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let proxy = self.proxy.clone();
                 let sink: clipboard::Sink = std::sync::Arc::new(move |p: Paste| {
+                    if clipboard::is_text(&p.mime) {
+                        let text = String::from_utf8_lossy(&p.bytes).into_owned();
+                        return proxy.send_event(UserEvent::PastedText(text)).is_ok();
+                    }
                     // Decoding a 4K screenshot is tens of milliseconds:
                     // it happens here, on the paste thread, not on the loop.
                     match bitmap::decode(&p.bytes) {
@@ -2619,8 +3002,16 @@ impl App {
                     if found.is_empty() {
                         self.sending = None;
                     } else {
-                        sending.target = sending.target.min(found.len() - 1);
+                        // Aimed at the same agent, wherever the list now
+                        // puts it — it comes back with the focused one
+                        // first — or at that one, if it has gone.
+                        let aimed = sending
+                            .agents
+                            .get(sending.target)
+                            .and_then(|a| agents::find(&found, a))
+                            .unwrap_or(0);
                         sending.agents = found;
+                        sending.aim(aimed);
                     }
                     self.redraw();
                 }
@@ -2640,7 +3031,14 @@ impl App {
             }
             WindowEvent::MouseWheel { delta, .. } => self.scrolled(delta),
             WindowEvent::ModifiersChanged(m) => self.modifiers_changed(m),
-            WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
+            // A key held down repeats inside a field, as it does in any
+            // text box — and nowhere else, where a repeat would redo a
+            // tool change or a command every thirtieth of a second.
+            WindowEvent::KeyboardInput { event, .. }
+                if !event.repeat
+                    || (self.typing()
+                        && repeats(&event.logical_key, self.modifiers.state().shift_key())) =>
+            {
                 self.key(&event.logical_key, &event.key_without_modifiers(), event.state);
             }
             WindowEvent::RedrawRequested => {
@@ -2655,6 +3053,7 @@ impl App {
                 // reads: an atlas nobody put back would leave every
                 // lettered surface drawing nothing at all.
                 self.ensure_atlas();
+                self.ensure_picture();
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
@@ -2693,6 +3092,7 @@ impl App {
             UserEvent::Gesture(g) => return self.gestured(g),
             UserEvent::Pen(p) => return self.pen(p),
             UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
+            UserEvent::PastedText(text) => return self.pasted_text(&text),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
         };
         match req {
@@ -2774,6 +3174,54 @@ const MAX_FRAGMENT_BYTES: u64 = 64 * 1024 * 1024;
 /// The fragment `add_frame` names, read and parsed. The parse is the
 /// board's own — closed schema, settled layers, blob names checked — so
 /// nothing that would not open as a board can be grafted onto one.
+/// Whether a key held down in a field may repeat: the ones that write or
+/// move, and none that finishes something — Enter sends, Tab changes the
+/// target, Esc closes — since a repeat of those does again what the hand
+/// asked for once. A held Enter that took a skill off the menu would send
+/// the unfinished prompt on its first repeat. `Shift+Enter` writes.
+fn repeats(key: &Key, shift: bool) -> bool {
+    match key {
+        Key::Named(NamedKey::Enter) => shift,
+        Key::Named(NamedKey::Tab | NamedKey::Escape) => false,
+        _ => true,
+    }
+}
+
+/// What a key does to the field that has the keyboard, and whether it
+/// did anything. Shift carries a selection along with the caret and Ctrl
+/// walks a word at a time; a letter held with Ctrl or Super is a command
+/// and never text, so `Ctrl+A` selects everything rather than typing an
+/// `a` — and the ones this does not know type nothing at all.
+fn edit(field: &mut Field, key: &Key, mods: winit::keyboard::ModifiersState) -> bool {
+    let (shift, ctrl) = (mods.shift_key(), mods.control_key());
+    match key {
+        Key::Named(NamedKey::Backspace) => field.backspace(),
+        Key::Named(NamedKey::Delete) => field.delete(),
+        Key::Named(NamedKey::ArrowLeft) if ctrl => field.word_left(shift),
+        Key::Named(NamedKey::ArrowRight) if ctrl => field.word_right(shift),
+        Key::Named(NamedKey::ArrowLeft) => field.left(shift),
+        Key::Named(NamedKey::ArrowRight) => field.right(shift),
+        Key::Named(NamedKey::Home) => field.home(shift),
+        Key::Named(NamedKey::End) => field.end(shift),
+        // A space is a named key and never a character, so without this
+        // an instruction is one word long.
+        Key::Named(NamedKey::Space) => field.insert(' '),
+        Key::Character(text) if ctrl || mods.super_key() => {
+            if !text.eq_ignore_ascii_case("a") {
+                return false;
+            }
+            field.select_all();
+        }
+        Key::Character(text) => {
+            for c in text.chars().filter(|c| !c.is_control()) {
+                field.insert(c);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn read_fragment(path: &Path) -> anyhow::Result<Document> {
     let text = String::from_utf8(store::read_capped(path, MAX_FRAGMENT_BYTES)?)
         .with_context(|| format!("reading {path:?}"))?;
@@ -2923,6 +3371,7 @@ pub fn run(
         grab: None,
         dock_icon_slot: None,
         icon_slot: 0,
+        agent_logo_slot: None,
         shapes: Shapes::default(),
         shown_brush: None,
         carry: None,
@@ -2961,5 +3410,37 @@ pub fn run(
     match app.exit_error {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::keyboard::ModifiersState;
+
+    #[test]
+    fn a_held_key_that_finishes_something_does_not_repeat() {
+        // Enter sends, Tab changes the target, Esc closes: a repeat of
+        // any of them does again what the hand asked for once — a held
+        // Enter taking a skill would send the prompt on its first repeat.
+        // Shift+Enter writes a line, and writing repeats.
+        assert!(!repeats(&Key::Named(NamedKey::Enter), false));
+        assert!(!repeats(&Key::Named(NamedKey::Tab), false));
+        assert!(!repeats(&Key::Named(NamedKey::Escape), false));
+        assert!(repeats(&Key::Named(NamedKey::Enter), true));
+        assert!(repeats(&Key::Named(NamedKey::Backspace), false));
+        assert!(repeats(&Key::Named(NamedKey::ArrowLeft), false));
+        assert!(repeats(&Key::Character("a".into()), false));
+    }
+
+    #[test]
+    fn a_letter_held_with_ctrl_is_a_command_and_never_text() {
+        let mut f = Field::new("ab");
+        let v = Key::Character("v".into());
+        assert!(!edit(&mut f, &v, ModifiersState::CONTROL));
+        assert_eq!(f.value(), "ab", "Ctrl+V used to type a v");
+        let a = Key::Character("a".into());
+        assert!(edit(&mut f, &a, ModifiersState::CONTROL));
+        assert_eq!(f.selected(), "ab");
     }
 }

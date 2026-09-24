@@ -41,18 +41,49 @@ pub fn bounds(doc: &Document, scope: &Scope) -> Option<Frame> {
     select::frame_of(doc, &scope.ids())
 }
 
-/// The name the scope exports under, when it has one. A frame's name is
-/// its layer's, since a frame layer and its frame are one thing. A loose
-/// selection has none and the panel asks for one.
-pub fn named(doc: &Document, scope: &Scope) -> Option<String> {
-    let Scope::Frame(id) = scope else {
-        return None;
-    };
-    let frame = doc.frame(id)?;
-    doc.layers
-        .iter()
-        .find(|l| l.id == frame.layer)
-        .map(|l| l.name.clone())
+/// What owns what the scope covers, as its name and an id to fall back
+/// on: a frame's layer, since a frame layer and its frame are one thing,
+/// with the frame's own id — and, since a layer is the object it holds,
+/// the one layer everything a selection names stands on. A selection
+/// across layers has no owner.
+pub fn owner(doc: &Document, scope: &Scope) -> Option<(String, String)> {
+    match scope {
+        Scope::Frame(id) => {
+            let frame = doc.frame(id)?;
+            let layer = doc.layers.iter().find(|l| l.id == frame.layer)?;
+            Some((layer.name.clone(), id.clone()))
+        }
+        Scope::Selection(ids) => {
+            let mut layers = ids
+                .iter()
+                .filter_map(|id| doc.elements.iter().find(|e| e.id() == id))
+                .map(Element::layer);
+            let first = layers.next()?;
+            if !layers.all(|l| l == first) {
+                return None;
+            }
+            let (frame, at) = doc.locate(first)?;
+            let layer = doc.stack(frame).get(at)?;
+            Some((layer.name.clone(), layer.id.clone()))
+        }
+    }
+}
+
+/// The folder under `docs/boards/` a scope's page is written to. An owned
+/// scope is written under its owner's name — so a frame or a layer sent
+/// again updates its own page, whichever door it left by — and under its
+/// id where the name slugs away to nothing, as every non-Latin name does.
+/// A selection across layers has no one name: it takes `fallback`'s, the
+/// tab's, with a counter past what `taken` holds, so it never writes over
+/// a page it did not make.
+pub fn page_slug(doc: &Document, scope: &Scope, fallback: &str, taken: &[String]) -> String {
+    match owner(doc, scope) {
+        Some((name, id)) => [slug(&name), slug(&id)]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or_else(|| UNNAMED.to_owned()),
+        None => free_name(fallback, taken),
+    }
 }
 
 /// One frame, as an agent is told about it: what to ask for it by, what
@@ -342,20 +373,45 @@ pub const EXPORT_SCALE: f64 = 2.0;
 /// How much room is left around the box, in world units.
 pub const EXPORT_MARGIN: f64 = 24.0;
 
+/// How much of the world a picture of `bounds` shows, margin and all.
+fn pictured(bounds: &Frame) -> (f64, f64) {
+    (
+        (bounds.half[0] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0),
+        (bounds.half[1] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0),
+    )
+}
+
+/// The shape of a picture of `bounds` — its width over its height, the
+/// margin counted — which is known before the picture is taken, and is
+/// what a place for it is laid out by.
+pub fn shape(bounds: &Frame) -> f64 {
+    let (w, h) = pictured(bounds);
+    w / h
+}
+
 /// The camera and the size a picture of `bounds` is taken with, clamped
 /// to `max_dim` — the device's largest texture. Past that the zoom gives
 /// way rather than the frame: a picture of part of a diagram is a lie,
 /// and a smaller one is only smaller.
 pub fn view_for(bounds: &Frame, max_dim: u32) -> (View, u32, u32) {
-    let world_w = (bounds.half[0] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0);
-    let world_h = (bounds.half[1] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0);
-    let max = f64::from(max_dim);
-    let scale = EXPORT_SCALE
-        .min(max / world_w)
-        .min(max / world_h)
+    fit_view(bounds, max_dim, max_dim, EXPORT_SCALE)
+}
+
+/// The camera and the size a picture of `bounds` and its margin is taken
+/// with to fit `max_w` by `max_h` px: as large as fits, keeping its
+/// shape, and never more than `ceiling` px to a world unit — the page is
+/// the export scale fitted into the device, and the dialog's thumbnail
+/// is the same picture fitted into its foot, so that what the dialog
+/// shows is what will be written.
+pub fn fit_view(bounds: &Frame, max_w: u32, max_h: u32, ceiling: f64) -> (View, u32, u32) {
+    let (world_w, world_h) = pictured(bounds);
+    let (max_w, max_h) = (max_w.max(1), max_h.max(1));
+    let scale = ceiling
+        .min(f64::from(max_w) / world_w)
+        .min(f64::from(max_h) / world_h)
         .max(f64::MIN_POSITIVE);
-    let w = ((world_w * scale).ceil() as u32).clamp(1, max_dim);
-    let h = ((world_h * scale).ceil() as u32).clamp(1, max_dim);
+    let w = ((world_w * scale).ceil() as u32).clamp(1, max_w);
+    let h = ((world_h * scale).ceil() as u32).clamp(1, max_h);
     let view = View {
         camera: crate::doc::Camera {
             x: bounds.center[0],
@@ -463,14 +519,49 @@ mod tests {
         assert!(bounds(&doc, &Scope::Selection(vec![])).is_none());
     }
 
+    fn picked(ids: &[&str]) -> Scope {
+        Scope::Selection(ids.iter().map(|id| (*id).to_owned()).collect())
+    }
+
     #[test]
-    fn a_frame_is_named_by_its_layer_and_a_selection_is_not_named() {
-        let doc = board();
-        assert_eq!(
-            named(&doc, &Scope::Frame("f1".into())).as_deref(),
-            Some("Auth Flow")
-        );
-        assert_eq!(named(&doc, &Scope::Selection(vec!["outside".into()])), None);
+    fn a_frame_and_what_stands_on_one_layer_are_owned_by_that_layer() {
+        let mut doc = board();
+        doc.layers[0].name = "Sketch".into();
+        let frame = owner(&doc, &Scope::Frame("f1".into()));
+        assert_eq!(frame, Some(("Auth Flow".into(), "f1".into())));
+        // A layer is the object it holds: what stands on one is its, the
+        // way what a frame holds is the frame's.
+        let one = owner(&doc, &picked(&["outside"]));
+        assert_eq!(one, Some(("Sketch".into(), "l0".into())));
+        // Inside a frame too, since a layer there is a layer.
+        let inner = owner(&doc, &picked(&["inside"]));
+        assert_eq!(inner, Some(("Layer 1".into(), "in".into())));
+        // And across two layers, nothing.
+        assert_eq!(owner(&doc, &picked(&["outside", "inside"])), None);
+    }
+
+    #[test]
+    fn a_page_is_named_after_its_owner_or_else_after_the_tab() {
+        let mut doc = board();
+        doc.layers[0].name = "Sketch".into();
+        let taken = vec!["sketches".to_owned(), "sketch".to_owned()];
+        let frame = Scope::Frame("f1".into());
+        assert_eq!(page_slug(&doc, &frame, "sketches", &taken), "auth-flow");
+        // An owned page is the owner's to write again, taken or not:
+        // sending the same layer twice updates its page.
+        let one = picked(&["outside"]);
+        assert_eq!(page_slug(&doc, &one, "sketches", &taken), "sketch");
+        // Nothing owns a selection across layers, so it never writes over
+        // a page it did not make.
+        let both = picked(&["outside", "inside"]);
+        assert_eq!(page_slug(&doc, &both, "sketches", &taken), "sketches-2");
+    }
+
+    #[test]
+    fn an_owner_whose_name_slugs_away_names_its_page_by_its_id() {
+        let mut doc = board();
+        doc.layers[0].name = "図".into();
+        assert_eq!(page_slug(&doc, &picked(&["outside"]), "x", &[]), "l0");
     }
 
     #[test]
@@ -750,6 +841,44 @@ mod tests {
             view.px_per_world() < EXPORT_SCALE,
             "the zoom gives way, not the frame"
         );
+    }
+
+    #[test]
+    fn a_picture_fitted_into_a_box_keeps_its_shape_and_stays_inside() {
+        // 148 x 98 world units with the margin: wider than tall.
+        let b = Frame::spanning([0.0, 0.0], [100.0, 50.0]);
+        let (view, w, h) = fit_view(&b, 600, 160, 100.0);
+        assert!(w <= 600 && h <= 160, "{w}x{h}");
+        assert_eq!(h, 160, "the height is what binds");
+        let (world_w, world_h) = (100.0 + 2.0 * EXPORT_MARGIN, 50.0 + 2.0 * EXPORT_MARGIN);
+        let k = view.px_per_world();
+        assert!((f64::from(w) - world_w * k).abs() <= 1.0);
+        assert!((f64::from(h) - world_h * k).abs() <= 1.0);
+        assert_eq!(view.camera.x, 50.0, "centred on it");
+        assert_eq!(view.camera.y, 25.0);
+    }
+
+    #[test]
+    fn the_shape_of_a_picture_is_its_box_and_margin_width_over_height() {
+        let b = Frame::spanning([0.0, 0.0], [100.0, 50.0]);
+        let expect = (100.0 + 2.0 * EXPORT_MARGIN) / (50.0 + 2.0 * EXPORT_MARGIN);
+        assert!((shape(&b) - expect).abs() < 1e-9);
+        let (_, w, h) = fit_view(&b, 4000, 4000, 1000.0);
+        assert!((f64::from(w) / f64::from(h) - shape(&b)).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_small_scope_is_not_blown_up_past_the_ceiling() {
+        let b = Frame::spanning([0.0, 0.0], [4.0, 4.0]);
+        let (view, w, h) = fit_view(&b, 600, 160, 3.0);
+        assert_eq!(view.px_per_world(), 3.0);
+        assert!(w < 600 && h < 160);
+    }
+
+    #[test]
+    fn the_page_is_a_fit_into_the_device_at_the_export_scale() {
+        let b = Frame::spanning([0.0, 0.0], [300.0, 70.0]);
+        assert_eq!(view_for(&b, 4096), fit_view(&b, 4096, 4096, EXPORT_SCALE));
     }
 
     #[test]

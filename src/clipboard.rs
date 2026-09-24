@@ -1,4 +1,4 @@
-//! Reading the clipboard over `wl_data_device` (ARCHITECTURE.md §7.1).
+//! The clipboard over `wl_data_device` (ARCHITECTURE.md §7.1).
 //!
 //! The same guest-client trick as `gestures`: this joins the window's
 //! Wayland connection instead of opening one of its own, so the compositor
@@ -9,10 +9,17 @@
 //! bytes are read on a short-lived thread, so a slow or dead clipboard
 //! owner cannot stall a frame.
 //!
-//! Not on Wayland, or no `wl_data_device_manager`: no paste, nothing else
-//! lost.
+//! A copy goes the other way: the board offers a `wl_data_source`, and
+//! whoever pastes it is written the text on a thread of its own. Setting
+//! the selection answers an input event by its serial, which winit keeps
+//! to itself, so the same queue holds a keyboard and a pointer of its own
+//! on the seat — only to note the last serial either one was handed.
+//!
+//! Not on Wayland, or no `wl_data_device_manager`: no paste, no copy,
+//! nothing else lost.
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
@@ -22,6 +29,9 @@ use wayland_client::protocol::{
     wl_data_device::{self, WlDataDevice},
     wl_data_device_manager::WlDataDeviceManager,
     wl_data_offer::{self, WlDataOffer},
+    wl_data_source::{self, WlDataSource},
+    wl_keyboard::{self, WlKeyboard},
+    wl_pointer::{self, WlPointer},
     wl_registry, wl_seat,
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop};
@@ -43,6 +53,28 @@ pub type Sink = Arc<dyn Fn(Paste) -> bool + Send + Sync>;
 /// choice for a board.
 const IMAGE_MIMES: [&str; 3] = ["image/png", "image/webp", "image/jpeg"];
 
+/// Text as a clipboard owner may name it, best first: the MIME type with
+/// its charset said, then the UTF-8 atom X11 programs offer, then plain
+/// text, which on Wayland is UTF-8 in practice.
+const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+
+/// How many bytes of text one paste may bring in. Every field that takes
+/// one is capped far below this; the ceiling is for the read.
+const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+
+/// The first of `wanted` that is on offer.
+fn best(offered: &[String], wanted: &[&'static str]) -> Option<&'static str> {
+    wanted
+        .iter()
+        .find(|w| offered.iter().any(|m| m == *w))
+        .copied()
+}
+
+/// Whether a paste that arrived as `mime` is text, and not an image.
+pub fn is_text(mime: &str) -> bool {
+    TEXT_MIMES.contains(&mime)
+}
+
 /// How many bytes one image may bring in. Past this the read gives up
 /// instead of following a hostile or broken owner forever. It is the
 /// ceiling for image bytes however they arrive — the clipboard here, and
@@ -59,6 +91,14 @@ pub struct Clipboard {
     /// The offer the compositor last announced as the selection.
     selection: Arc<Mutex<Option<WlDataOffer>>>,
     sink: Sink,
+    /// What a copy is made through: a source comes from the manager and
+    /// is set as the selection on the device, and its events are
+    /// dispatched on the clipboard's own queue.
+    manager: WlDataDeviceManager,
+    device: WlDataDevice,
+    queue: QueueHandle<State>,
+    /// The last input serial the seat handed this client.
+    serial: Arc<AtomicU32>,
 }
 
 impl Clipboard {
@@ -89,15 +129,23 @@ impl Clipboard {
         // Kept alive for as long as the thread runs: dropping the device
         // ends the selection events.
         let device = manager.get_data_device(&seat, &qh, ());
+        // Heard only for their serials: a selection is set in answer to
+        // an input event, and a keyboard of our own on the seat is told
+        // of every key the window is.
+        let keyboard = seat.get_keyboard(&qh, ());
+        let pointer = seat.get_pointer(&qh, ());
 
         let selection = Arc::new(Mutex::new(None));
+        let serial = Arc::new(AtomicU32::new(0));
         let mut state = State {
             selection: selection.clone(),
+            serial: serial.clone(),
         };
+        let held = device.clone();
         std::thread::Builder::new()
             .name("clipboard".into())
             .spawn(move || {
-                let _device = device;
+                let _held = (held, keyboard, pointer);
                 loop {
                     if let Err(e) = queue.blocking_dispatch(&mut state) {
                         log::warn!("clipboard: {e:#}");
@@ -110,15 +158,48 @@ impl Clipboard {
             conn,
             selection,
             sink,
+            manager,
+            device,
+            queue: qh,
+            serial,
         })
+    }
+
+    /// Offers `text` as the selection, for any client to paste — this
+    /// window's own fields included. The text is held by the source
+    /// until another selection replaces it.
+    pub fn copy_text(&self, text: &str) {
+        let source = self
+            .manager
+            .create_data_source(&self.queue, Arc::new(text.as_bytes().to_vec()));
+        for mime in TEXT_MIMES {
+            source.offer(mime.to_owned());
+        }
+        self.device
+            .set_selection(Some(&source), self.serial.load(Ordering::Relaxed));
+        if let Err(e) = self.conn.flush() {
+            log::warn!("clipboard: {e}");
+        }
     }
 
     /// Asks for the selection as an image. Returns whether anything was
     /// asked for — the bytes themselves arrive on the sink, later. Nothing
     /// happens, and nothing is reported, when the clipboard holds no image.
     pub fn paste_image(&self) -> bool {
-        let Some((offer, mime)) = self.image_on_offer() else {
-            log::debug!("clipboard: no image in the selection");
+        self.receive(&IMAGE_MIMES, MAX_PASTE_BYTES)
+    }
+
+    /// Asks for the selection as text, on the same terms: the text
+    /// arrives on the sink, and a clipboard holding none asks nothing.
+    pub fn paste_text(&self) -> bool {
+        self.receive(&TEXT_MIMES, MAX_TEXT_BYTES)
+    }
+
+    /// Asks the owner for the selection as the best of `wanted` it offers
+    /// and reads the answer, at most `cap` bytes of it, off the loop.
+    fn receive(&self, wanted: &[&'static str], cap: u64) -> bool {
+        let Some((offer, mime)) = self.on_offer(wanted) else {
+            log::debug!("clipboard: nothing of {wanted:?} in the selection");
             return false;
         };
         let (reader, writer) = match std::io::pipe() {
@@ -140,7 +221,7 @@ impl Clipboard {
         let sink = self.sink.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("paste".into())
-            .spawn(move || match read_all(reader) {
+            .spawn(move || match read_all(reader, cap) {
                 Ok(bytes) => {
                     sink(Paste { mime, bytes });
                 }
@@ -153,35 +234,103 @@ impl Clipboard {
         true
     }
 
-    /// The current offer and the best image type it lists.
-    fn image_on_offer(&self) -> Option<(WlDataOffer, String)> {
+    /// The current offer and the best of `wanted` it lists.
+    fn on_offer(&self, wanted: &[&'static str]) -> Option<(WlDataOffer, String)> {
         let guard = self.selection.lock().ok()?;
         let offer = guard.as_ref()?;
         let mimes = offer.data::<Mimes>()?.0.lock().ok()?;
-        let best = IMAGE_MIMES
-            .iter()
-            .find(|want| mimes.iter().any(|m| m == *want))
-            .map(|m| (*m).to_owned())?;
-        Some((offer.clone(), best))
+        let mime = best(&mimes, wanted)?;
+        Some((offer.clone(), mime.to_owned()))
     }
 }
 
 use std::os::fd::AsFd as _;
 
-fn read_all(mut reader: std::io::PipeReader) -> anyhow::Result<Vec<u8>> {
+fn read_all(mut reader: std::io::PipeReader, cap: u64) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let read = std::io::Read::by_ref(&mut reader)
-        .take(MAX_PASTE_BYTES + 1)
+        .take(cap + 1)
         .read_to_end(&mut bytes)?;
     anyhow::ensure!(
-        read as u64 <= MAX_PASTE_BYTES,
-        "clipboard offered more than {MAX_PASTE_BYTES} bytes"
+        read as u64 <= cap,
+        "clipboard offered more than {cap} bytes"
     );
     Ok(bytes)
 }
 
 struct State {
     selection: Arc<Mutex<Option<WlDataOffer>>>,
+    serial: Arc<AtomicU32>,
+}
+
+impl Dispatch<WlDataSource, Arc<Vec<u8>>> for State {
+    fn event(
+        _: &mut State,
+        source: &WlDataSource,
+        event: wl_data_source::Event,
+        text: &Arc<Vec<u8>>,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        match event {
+            // Someone is pasting. The write goes on a thread of its own,
+            // so a reader that never reads cannot stall the queue every
+            // other clipboard event arrives on.
+            wl_data_source::Event::Send { fd, .. } => {
+                let text = text.clone();
+                let written = std::thread::Builder::new()
+                    .name("copy".into())
+                    .spawn(move || {
+                        let mut out = std::fs::File::from(fd);
+                        if let Err(e) = out.write_all(&text) {
+                            log::warn!("clipboard: writing the copy: {e}");
+                        }
+                    });
+                if let Err(e) = written {
+                    log::warn!("clipboard: {e}");
+                }
+            }
+            // Another selection took its place: nothing will ask again.
+            wl_data_source::Event::Cancelled => source.destroy(),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut State,
+        _: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        match event {
+            wl_keyboard::Event::Enter { serial, .. } | wl_keyboard::Event::Key { serial, .. } => {
+                state.serial.store(serial, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for State {
+    fn event(
+        state: &mut State,
+        _: &WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter { serial, .. } | wl_pointer::Event::Button { serial, .. } => {
+                state.serial.store(serial, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Dispatch<WlDataDevice, ()> for State {
@@ -241,3 +390,39 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
 
 delegate_noop!(State: ignore wl_seat::WlSeat);
 delegate_noop!(State: WlDataDeviceManager);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offered(mimes: &[&str]) -> Vec<String> {
+        mimes.iter().map(|m| (*m).to_owned()).collect()
+    }
+
+    #[test]
+    fn text_is_asked_for_as_utf8_first() {
+        let all = offered(&[
+            "TEXT",
+            "text/plain",
+            "UTF8_STRING",
+            "text/plain;charset=utf-8",
+        ]);
+        assert_eq!(best(&all, &TEXT_MIMES), Some("text/plain;charset=utf-8"));
+        let x11 = offered(&["STRING", "UTF8_STRING"]);
+        assert_eq!(best(&x11, &TEXT_MIMES), Some("UTF8_STRING"));
+    }
+
+    #[test]
+    fn an_image_on_offer_is_no_text_to_paste() {
+        let png = offered(&["image/png"]);
+        assert_eq!(best(&png, &TEXT_MIMES), None);
+        assert_eq!(best(&png, &IMAGE_MIMES), Some("image/png"));
+    }
+
+    #[test]
+    fn only_a_text_mime_reads_as_text() {
+        assert!(is_text("text/plain;charset=utf-8"));
+        assert!(is_text("UTF8_STRING"));
+        assert!(!is_text("image/png"));
+    }
+}
