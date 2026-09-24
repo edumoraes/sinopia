@@ -3053,7 +3053,11 @@ impl App {
             // A key held down repeats inside a field, as it does in any
             // text box — and nowhere else, where a repeat would redo a
             // tool change or a command every thirtieth of a second.
-            WindowEvent::KeyboardInput { event, .. } if !event.repeat || self.typing() => {
+            WindowEvent::KeyboardInput { event, .. }
+                if !event.repeat
+                    || (self.typing()
+                        && repeats(&event.logical_key, self.modifiers.state().shift_key())) =>
+            {
                 self.key(&event.logical_key, &event.key_without_modifiers(), event.state);
             }
             WindowEvent::RedrawRequested => {
@@ -3189,6 +3193,19 @@ const MAX_FRAGMENT_BYTES: u64 = 64 * 1024 * 1024;
 /// The fragment `add_frame` names, read and parsed. The parse is the
 /// board's own — closed schema, settled layers, blob names checked — so
 /// nothing that would not open as a board can be grafted onto one.
+/// Whether a key held down in a field may repeat: the ones that write or
+/// move, and none that finishes something — Enter sends, Tab changes the
+/// target, Esc closes — since a repeat of those does again what the hand
+/// asked for once. A held Enter that took a skill off the menu would send
+/// the unfinished prompt on its first repeat. `Shift+Enter` writes.
+fn repeats(key: &Key, shift: bool) -> bool {
+    match key {
+        Key::Named(NamedKey::Enter) => shift,
+        Key::Named(NamedKey::Tab | NamedKey::Escape) => false,
+        _ => true,
+    }
+}
+
 /// What a key does to the field that has the keyboard, and whether it
 /// did anything. Shift carries a selection along with the caret and Ctrl
 /// walks a word at a time; a letter held with Ctrl or Super is a command
@@ -3412,5 +3429,37 @@ pub fn run(
     match app.exit_error {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::keyboard::ModifiersState;
+
+    #[test]
+    fn a_held_key_that_finishes_something_does_not_repeat() {
+        // Enter sends, Tab changes the target, Esc closes: a repeat of
+        // any of them does again what the hand asked for once — a held
+        // Enter taking a skill would send the prompt on its first repeat.
+        // Shift+Enter writes a line, and writing repeats.
+        assert!(!repeats(&Key::Named(NamedKey::Enter), false));
+        assert!(!repeats(&Key::Named(NamedKey::Tab), false));
+        assert!(!repeats(&Key::Named(NamedKey::Escape), false));
+        assert!(repeats(&Key::Named(NamedKey::Enter), true));
+        assert!(repeats(&Key::Named(NamedKey::Backspace), false));
+        assert!(repeats(&Key::Named(NamedKey::ArrowLeft), false));
+        assert!(repeats(&Key::Character("a".into()), false));
+    }
+
+    #[test]
+    fn a_letter_held_with_ctrl_is_a_command_and_never_text() {
+        let mut f = Field::new("ab");
+        let v = Key::Character("v".into());
+        assert!(!edit(&mut f, &v, ModifiersState::CONTROL));
+        assert_eq!(f.value(), "ab", "Ctrl+V used to type a v");
+        let a = Key::Character("a".into());
+        assert!(edit(&mut f, &a, ModifiersState::CONTROL));
+        assert_eq!(f.selected(), "ab");
     }
 }
