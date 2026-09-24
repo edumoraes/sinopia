@@ -22,6 +22,8 @@ const SHADOW_OFFSET: f32 = 3.0;
 const SHADOW_FEATHER: f32 = 14.0;
 const ICON_STROKE: f32 = 1.5;
 const MIN_W: f32 = 120.0;
+/// Between a label and the shortcut that stands at its line's far end.
+const HINT_GAP: f32 = 24.0;
 
 /// One line of a menu.
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +38,9 @@ pub struct Item {
     pub rule: bool,
     /// A colour it is about, as a dot before the label.
     pub dot: Option<Rgba>,
+    /// The keys that do the same, at the line's far end: a menu is where
+    /// a shortcut is learnt.
+    pub hint: Option<String>,
 }
 
 impl Item {
@@ -46,6 +51,7 @@ impl Item {
             checked: false,
             rule: false,
             dot: None,
+            hint: None,
         }
     }
 
@@ -55,6 +61,17 @@ impl Item {
 
     pub fn ruled(self) -> Item {
         Item { rule: true, ..self }
+    }
+
+    pub fn hint(self, keys: &str) -> Item {
+        Item {
+            hint: Some(keys.to_owned()),
+            ..self
+        }
+    }
+
+    pub fn enabled(self, enabled: bool) -> Item {
+        Item { enabled, ..self }
     }
 
     pub fn dot(self, color: Rgba) -> Item {
@@ -91,7 +108,13 @@ impl Menu {
         scroll: f32,
     ) -> Menu {
         let s = scale as f32;
-        let widest = items.iter().map(|i| atlas.measure(&i.label)).fold(0.0, f32::max);
+        let widest = items
+            .iter()
+            .map(|i| {
+                let hint = i.hint.as_ref().map_or(0.0, |h| HINT_GAP * s + atlas.measure(h));
+                atlas.measure(&i.label) + hint
+            })
+            .fold(0.0, f32::max);
         let w = (widest + (2.0 * PADDING + MARK + PADDING) * s).max(MIN_W * s);
         let content: f32 = items
             .iter()
@@ -228,6 +251,12 @@ impl Menu {
             for g in atlas.layout(&item.label, x, baseline) {
                 out.push(Prim::glyph(g.rect, g.uv, slot, ink).clipped(inner));
             }
+            if let Some(hint) = &item.hint {
+                let x = row.x + row.w - PADDING * s - atlas.measure(hint);
+                for g in atlas.layout(hint, x, baseline) {
+                    out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(inner));
+                }
+            }
         }
         out
     }
@@ -302,11 +331,7 @@ mod tests {
     #[test]
     fn only_an_item_that_can_be_taken_answers_the_pointer() {
         let a = atlas();
-        let off = Item {
-            enabled: false,
-            ..Item::new("Off")
-        };
-        let list = vec![Item::new("On"), off];
+        let list = vec![Item::new("On"), Item::new("Off").enabled(false)];
         let m = Menu::layout(VP, 1.0, button(100.0, 100.0), &a, &list, 0.0);
         let mid = |r: ScreenRect| {
             let (x, y) = r.center();
@@ -335,20 +360,41 @@ mod tests {
     }
 
     #[test]
+    fn a_hint_stands_at_the_far_end_muted_and_the_menu_makes_room_for_it() {
+        let theme = Theme::light();
+        let a = atlas();
+        let list = vec![Item::new("Duplicate").hint("Ctrl+Shift+J"), Item::new("Rename")];
+        let m = Menu::layout(VP, 1.0, button(100.0, 100.0), &a, &list, 0.0);
+        let bare = Menu::layout(VP, 1.0, button(100.0, 100.0), &a, &[Item::new("Duplicate")], 0.0);
+        assert!(m.rect.w >= a.measure("Duplicate") + a.measure("Ctrl+Shift+J") + HINT_GAP);
+        assert!(m.rect.w > bare.rect.w || bare.rect.w == MIN_W);
+        let prims = m.prims(&list, None, &a, 7, &theme);
+        let (row, _) = m.rows[0];
+        let muted: Vec<&Prim> = prims
+            .iter()
+            .filter(|q| q.kind == KIND_IMAGE && q.color == theme.muted && row.contains_rect(&q.bounds()))
+            .collect();
+        assert_eq!(muted.len(), "Ctrl+Shift+J".len());
+        let label_end = prims
+            .iter()
+            .filter(|q| q.kind == KIND_IMAGE && q.color == theme.ink && row.contains_rect(&q.bounds()))
+            .map(|q| q.bounds().x + q.bounds().w)
+            .fold(0.0, f32::max);
+        assert!(muted.iter().all(|q| q.bounds().x > label_end), "after the label");
+        let right = muted.iter().map(|q| q.bounds().x + q.bounds().w).fold(0.0, f32::max);
+        assert!(right <= row.x + row.w, "inside its row");
+        assert!(right > row.x + row.w - PADDING * 2.0, "at its far end");
+    }
+
+    #[test]
     fn a_menu_draws_its_labels_its_check_its_dots_and_the_row_under_the_pointer() {
         let theme = Theme::light();
         let a = atlas();
         let red = [1.0, 0.0, 0.0, 1.0];
         let list = vec![
             Item::new("Normal").checked(true),
-            Item {
-                dot: Some(red),
-                ..Item::new("Red")
-            },
-            Item {
-                enabled: false,
-                ..Item::new("Off")
-            },
+            Item::new("Red").dot(red),
+            Item::new("Off").enabled(false),
         ];
         let m = Menu::layout(VP, 1.0, button(100.0, 100.0), &a, &list, 0.0);
         let prims = m.prims(&list, Some(1), &a, 7, &theme);

@@ -303,7 +303,7 @@ pub enum Pick {
     Range,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Editor {
     tool: Tool,
     space: bool,
@@ -342,6 +342,22 @@ pub struct Editor {
     /// shown whole and the filter waits as it was left.
     filter: Filter,
     filtering: bool,
+}
+
+/// A command on the picked layers: what a shortcut, a row's menu and
+/// the command line all ask for, so the three cannot come to disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Group,
+    Ungroup,
+    Duplicate,
+    /// Takes the picked layers away, with everything on them.
+    Remove,
+    /// Locks them all while any is open, and opens them all once every
+    /// one is locked; `Show` does the same with what shows.
+    Lock,
+    Show,
+    Arrange(Arrange),
 }
 
 /// What a new frame is born with until `app` says otherwise: white, the
@@ -953,6 +969,26 @@ impl Editor {
         self.layer = Some(id);
         self.picked.clear();
         Change::Scene
+    }
+
+    /// Does `command` to the picked layers.
+    pub fn run(&mut self, doc: &mut Document, command: Command) -> Change {
+        match command {
+            Command::Group => self.group_layers(doc),
+            Command::Ungroup => self.ungroup(doc),
+            Command::Duplicate => self.duplicate_layers(doc),
+            Command::Remove => self.remove_layers(doc),
+            Command::Lock => self.toggle_lock(doc),
+            Command::Show => self.toggle_shown(doc),
+            Command::Arrange(how) => self.arrange(doc, how),
+        }
+    }
+
+    /// Whether `command` would change anything, found out by doing it to
+    /// copies: the one answer that cannot disagree with the doing.
+    pub fn can(&self, doc: &Document, command: Command) -> bool {
+        let mut doc = doc.clone();
+        self.clone().run(&mut doc, command) != Change::None
     }
 
     /// Tags layer `id` with `tag` — and every picked layer with it, when
@@ -4584,6 +4620,34 @@ mod tests {
         let _ = e.set_blend(&mut doc, BlendMode::Multiply);
         assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen, "a lock keeps how it draws");
         assert_eq!(e.set_blend(&mut doc, BlendMode::Multiply), Change::None, "already so");
+    }
+
+    #[test]
+    fn a_command_runs_and_can_says_whether_it_would_change_anything() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "B", Pick::Only, &ROWS);
+        let (before, at) = (doc.clone(), e.at());
+        assert!(e.can(&doc, Command::Group));
+        assert!(e.can(&doc, Command::Duplicate));
+        assert!(!e.can(&doc, Command::Ungroup), "B is no group");
+        assert_eq!((&doc, e.at()), (&before, at), "asking changes nothing");
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert!(e.can(&doc, Command::Ungroup));
+        assert_eq!(e.run(&mut doc, Command::Ungroup), Change::Scene);
+        assert!(doc.layer("G").is_none());
+        // Inside a locked group nothing comes or goes.
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("H").unwrap().locked = true;
+        let _ = e.pick_layer(&doc, "C", Pick::Only, &ROWS);
+        assert!(!e.can(&doc, Command::Duplicate));
+        assert!(!e.can(&doc, Command::Group));
+        assert!(e.can(&doc, Command::Show), "what shows is still the layer's");
+        assert_eq!(e.run(&mut doc, Command::Show), Change::Scene);
+        assert!(!doc.layer("C").unwrap().visible);
+        assert_eq!(e.run(&mut doc, Command::Lock), Change::Scene);
+        assert!(doc.layer("C").unwrap().locked);
+        assert_eq!(e.run(&mut doc, Command::Arrange(Arrange::Front)), Change::None, "alone in its stack");
     }
 
     #[test]

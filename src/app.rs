@@ -24,9 +24,9 @@ use crate::bitmap::{self, Bitmap};
 use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
-use crate::doc::{BlendMode, Document, Element, Tag};
+use crate::doc::{BlendMode, Document, Element, Layer, Tag};
 use crate::dock::{Dock, Hit};
-use crate::editor::{Button, Change, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
+use crate::editor::{Button, Change, Command, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
 use crate::field::{self, Field};
 use crate::geom::Corner;
@@ -411,6 +411,8 @@ enum Purpose {
     /// The colour a layer is tagged with — and the picked with it, when
     /// it is one of them — and the tag on each line.
     Tag { id: String, tags: Vec<Tag> },
+    /// A row's own menu: the row, and what each line does.
+    Row { id: String, lines: Vec<layers::RowLine> },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -1503,6 +1505,42 @@ impl App {
         self.redraw();
     }
 
+    /// Opens row `id`'s menu at the pointer, on the picked layers — the
+    /// row taken into the pick first unless it is already in it, as a
+    /// right click does in Photoshop.
+    fn open_row_menu(&mut self, id: String, (x, y): (f64, f64)) {
+        let (editor, doc) = self.active();
+        if !editor.picked(doc).contains(&id.as_str()) {
+            let rows = editor.rows(doc);
+            let order: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
+            let change = editor.pick_layer(doc, &id, Pick::Only, &order);
+            self.apply(change);
+        }
+        let doc = self.doc();
+        let editor = self.editor();
+        let picked: Vec<&Layer> = editor.picked(doc).into_iter().filter_map(|p| doc.layer(p)).collect();
+        let state = layers::RowState {
+            locked: picked.iter().all(|l| l.locked),
+            hidden: picked.iter().all(|l| !l.visible),
+            tag: doc.layer(&id).map_or(Tag::None, |l| l.color),
+        };
+        let (items, lines) = layers::row_menu(|c| editor.can(doc, c), state);
+        let at = ScreenRect {
+            x: x as f32,
+            y: y as f32,
+            w: 0.0,
+            h: 0.0,
+        };
+        self.menu = Some(Opened {
+            purpose: Purpose::Row { id, lines },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
     /// Opens the colours' menu beside `at` for layer `id`.
     fn open_tag_menu(&mut self, id: String, at: ScreenRect) {
         let current = self.doc().layer(&id).map_or(Tag::None, |l| l.color);
@@ -1580,6 +1618,14 @@ impl App {
     /// one step; none put back leaves the board as the menu found it.
     fn close_menu(&mut self, take: Option<usize>) {
         let Some(opened) = self.menu.take() else { return };
+        // A name opens a field rather than changing the board.
+        if let Purpose::Row { id, lines } = &opened.purpose
+            && take.and_then(|i| lines.get(i)) == Some(&layers::RowLine::Rename)
+        {
+            self.panel_hit(PanelHit::Rename(id.clone()));
+            self.redraw();
+            return;
+        }
         let (editor, doc) = self.active();
         let change = match opened.purpose {
             Purpose::Blend { modes, was } => {
@@ -1592,6 +1638,11 @@ impl App {
             Purpose::Tag { id, tags } => match take.and_then(|i| tags.get(i).copied()) {
                 Some(tag) => editor.set_tag(doc, &id, tag),
                 None => Change::None,
+            },
+            Purpose::Row { id, lines } => match take.and_then(|i| lines.get(i).copied()) {
+                Some(layers::RowLine::Run(command)) => editor.run(doc, command),
+                Some(layers::RowLine::Tag(tag)) => editor.set_tag(doc, &id, tag),
+                Some(layers::RowLine::Rename) | None => Change::None,
             },
         };
         self.apply(change);
@@ -2493,12 +2544,17 @@ impl App {
                     });
                 }
                 self.redraw();
-            } else if button == Button::Right
-                // The eye's own menu is its colours, as in Photoshop.
-                && let PanelHit::Toggle(id) = hit
-                && let Some(row) = panel.rows.iter().find(|r| r.id == id)
-            {
-                self.open_tag_menu(id, row.eye);
+            } else if button == Button::Right {
+                match hit {
+                    // The eye's own menu is its colours, as in Photoshop.
+                    PanelHit::Toggle(id) => {
+                        if let Some(row) = panel.rows.iter().find(|r| r.id == id) {
+                            self.open_tag_menu(id, row.eye);
+                        }
+                    }
+                    PanelHit::Pick(id) => self.open_row_menu(id, (x, y)),
+                    _ => {}
+                }
             }
             return self.update_cursor_icon();
         }
@@ -3049,18 +3105,13 @@ impl App {
     fn layer_command(&mut self, bare: &Key, shift: bool) {
         let Key::Character(c) = bare else { return };
         let (editor, doc) = self.active();
-        let change = match (c.to_ascii_lowercase().as_str(), shift) {
-            ("g", false) => editor.group_layers(doc),
-            ("g", true) => editor.ungroup(doc),
-            ("j", false) => editor.duplicate_layers(doc),
+        let key = c.to_ascii_lowercase();
+        let change = match (key.as_str(), shift) {
             ("n", true) => editor.add_layer(doc),
-            ("]", false) => editor.arrange(doc, Arrange::Forward),
-            ("]", true) => editor.arrange(doc, Arrange::Front),
-            ("[", false) => editor.arrange(doc, Arrange::Backward),
-            ("[", true) => editor.arrange(doc, Arrange::Back),
-            ("/", false) => editor.toggle_lock(doc),
-            (",", false) => editor.toggle_shown(doc),
-            _ => Change::None,
+            _ => match layer_key(&key, shift) {
+                Some(command) => editor.run(doc, command),
+                None => Change::None,
+            },
         };
         self.apply(change);
     }
@@ -3568,6 +3619,23 @@ impl App {
     }
 }
 
+/// The command a layer shortcut asks for: `Ctrl` with `key`, and `Shift`
+/// when `shift`.
+fn layer_key(key: &str, shift: bool) -> Option<Command> {
+    Some(match (key, shift) {
+        ("g", false) => Command::Group,
+        ("g", true) => Command::Ungroup,
+        ("j", false) => Command::Duplicate,
+        ("]", false) => Command::Arrange(Arrange::Forward),
+        ("]", true) => Command::Arrange(Arrange::Front),
+        ("[", false) => Command::Arrange(Arrange::Backward),
+        ("[", true) => Command::Arrange(Arrange::Back),
+        ("/", false) => Command::Lock,
+        (",", false) => Command::Show,
+        _ => return None,
+    })
+}
+
 /// Puts back the blend modes `was` says every layer had.
 fn restore_blends(doc: &mut Document, was: &[(String, BlendMode)]) {
     for (id, mode) in was {
@@ -3857,6 +3925,38 @@ mod tests {
         assert_eq!(whole_percent(1.0), 1.0);
         assert_eq!(whole_percent(0.0), 0.0);
         assert_eq!(whole_percent(0.506), 0.51);
+    }
+
+    #[test]
+    fn the_layer_shortcuts_ask_for_the_commands_the_menu_teaches() {
+        assert_eq!(layer_key("g", false), Some(Command::Group));
+        assert_eq!(layer_key("g", true), Some(Command::Ungroup));
+        assert_eq!(layer_key("j", false), Some(Command::Duplicate));
+        assert_eq!(layer_key("/", false), Some(Command::Lock));
+        assert_eq!(layer_key(",", false), Some(Command::Show));
+        assert_eq!(layer_key("]", true), Some(Command::Arrange(Arrange::Front)));
+        assert_eq!(layer_key("[", false), Some(Command::Arrange(Arrange::Backward)));
+        assert_eq!(layer_key("q", false), None);
+        // Every key a row's menu writes beside a command is that command's.
+        let (items, lines) = layers::row_menu(|_| true, layers::RowState {
+            locked: false,
+            hidden: false,
+            tag: Tag::None,
+        });
+        for (item, line) in items.iter().zip(&lines) {
+            let (Some(hint), layers::RowLine::Run(command)) = (&item.hint, line) else {
+                continue;
+            };
+            let Some(keys) = hint.strip_prefix("Ctrl+") else {
+                assert_eq!(hint, "Del", "the one key without Ctrl");
+                continue;
+            };
+            let (shift, key) = match keys.strip_prefix("Shift+") {
+                Some(k) => (true, k),
+                None => (false, keys),
+            };
+            assert_eq!(layer_key(&key.to_lowercase(), shift), Some(*command), "{hint}");
+        }
     }
 
     #[test]

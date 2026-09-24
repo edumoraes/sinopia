@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use crate::doc::{BlendMode, Kind, Tag};
+use crate::editor::Command;
 use crate::field::Field;
 use crate::menu::Item;
 use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix, parse_color};
@@ -225,6 +226,52 @@ pub fn tag_color(tag: Tag) -> Option<Rgba> {
         Tag::Gray => "#8b949e",
     };
     Some(parse_color(hex))
+}
+
+/// What a line of a row's menu does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLine {
+    /// Opens the row's name to be typed.
+    Rename,
+    Run(Command),
+    Tag(Tag),
+}
+
+/// What a row's menu says of the picked layers: whether every one is
+/// locked, and hidden — the toggles say what they would do — and the
+/// row's own tag, checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowState {
+    pub locked: bool,
+    pub hidden: bool,
+    pub tag: Tag,
+}
+
+/// A row's menu: its name, then the commands on the picked layers with
+/// the keys that do the same — each offered only where `can` says it
+/// would change something — then the colours, as in Photoshop.
+pub fn row_menu(can: impl Fn(Command) -> bool, state: RowState) -> (Vec<Item>, Vec<RowLine>) {
+    let commands = [
+        ("Duplicate", "Ctrl+J", Command::Duplicate, false),
+        ("Delete", "Del", Command::Remove, false),
+        ("Group", "Ctrl+G", Command::Group, true),
+        ("Ungroup", "Ctrl+Shift+G", Command::Ungroup, false),
+        (if state.locked { "Unlock" } else { "Lock" }, "Ctrl+/", Command::Lock, true),
+        (if state.hidden { "Show" } else { "Hide" }, "Ctrl+,", Command::Show, false),
+    ];
+    let mut items = vec![Item::new("Rename")];
+    let mut lines = vec![RowLine::Rename];
+    for (label, keys, command, rule) in commands {
+        let item = Item::new(label).hint(keys).enabled(can(command));
+        items.push(if rule { item.ruled() } else { item });
+        lines.push(RowLine::Run(command));
+    }
+    let (tags, marks) = tag_menu(state.tag);
+    for (i, (item, tag)) in tags.into_iter().zip(marks).enumerate() {
+        items.push(if i == 0 { item.ruled() } else { item });
+        lines.push(RowLine::Tag(tag));
+    }
+    (items, lines)
 }
 
 /// The colours' menu, and the tag on each of its lines: no colour, then
@@ -2752,6 +2799,43 @@ mod tests {
             .map(|(_, t)| *t)
             .collect();
         assert_eq!(checked, [Tag::Green]);
+    }
+
+    #[test]
+    fn a_rows_menu_offers_what_would_change_something_and_teaches_its_keys() {
+        let state = RowState {
+            locked: false,
+            hidden: false,
+            tag: Tag::Red,
+        };
+        let (items, lines) = row_menu(|c| c != Command::Ungroup, state);
+        assert_eq!(items.len(), lines.len());
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels[..7],
+            ["Rename", "Duplicate", "Delete", "Group", "Ungroup", "Lock", "Hide"]
+        );
+        assert_eq!(&labels[7..], ["No Color", "Red", "Orange", "Yellow", "Green", "Blue", "Violet", "Gray"]);
+        let line = |label: &str| labels.iter().position(|l| *l == label).unwrap();
+        assert_eq!(lines[line("Rename")], RowLine::Rename);
+        assert_eq!(lines[line("Ungroup")], RowLine::Run(Command::Ungroup));
+        assert!(!items[line("Ungroup")].enabled, "nothing there to take apart");
+        assert!(items[line("Group")].enabled);
+        assert_eq!(items[line("Duplicate")].hint.as_deref(), Some("Ctrl+J"));
+        assert_eq!(lines[line("Red")], RowLine::Tag(Tag::Red));
+        assert!(items[line("Red")].checked);
+        assert!(items[line("Group")].rule && items[line("Lock")].rule && items[line("No Color")].rule);
+        // The toggles say what they would do.
+        let (items, _) = row_menu(
+            |_| true,
+            RowState {
+                locked: true,
+                hidden: true,
+                tag: Tag::None,
+            },
+        );
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Unlock") && labels.contains(&"Show"));
     }
 
     #[test]
