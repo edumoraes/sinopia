@@ -38,6 +38,7 @@ mod tablet;
 mod tabs;
 mod text;
 mod theme;
+mod tree;
 
 use anyhow::Context as _;
 

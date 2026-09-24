@@ -1258,14 +1258,9 @@ impl App {
     }
 
     /// What a frame's card is called: the name of the layer it is the
-    /// object of.
-    fn frame_name(&self, id: &str) -> Option<&str> {
-        let doc = self.doc();
-        let layer = &doc.frame(id)?.layer;
-        doc.layers
-            .iter()
-            .find(|l| &l.id == layer)
-            .map(|l| l.name.as_str())
+    /// object of, which is also what the panel stands in.
+    fn frame_name(&self, layer: &str) -> Option<&str> {
+        self.doc().layer(layer).map(|l| l.name.as_str())
     }
 
     /// The panel's handle, once there is an atlas to letter it with. It
@@ -1491,8 +1486,8 @@ impl App {
             PanelHit::Enter(i) => match doc
                 .stack(editor.inside())
                 .get(i)
-                .and_then(|l| doc.frame_on(&l.id))
-                .map(|f| f.id.clone())
+                .filter(|l| doc.frame_on(&l.id).is_some())
+                .map(|l| l.id.clone())
             {
                 Some(frame) => editor.enter_frame(doc, &frame),
                 None => Change::None,

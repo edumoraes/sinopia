@@ -62,8 +62,7 @@ pub fn owner(doc: &Document, scope: &Scope) -> Option<(String, String)> {
             if !layers.all(|l| l == first) {
                 return None;
             }
-            let (frame, at) = doc.locate(first)?;
-            let layer = doc.stack(frame).get(at)?;
+            let layer = doc.layer(first)?;
             Some((layer.name.clone(), layer.id.clone()))
         }
     }

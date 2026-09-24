@@ -1284,11 +1284,6 @@ impl Document {
             })
     }
 
-    /// The index of `id` in the stack `frame` names.
-    pub fn layer_index(&self, frame: Option<&str>, id: &str) -> Option<usize> {
-        self.stack(frame).iter().position(|l| l.id == id)
-    }
-
     /// The frame element `id` names.
     pub fn frame(&self, id: &str) -> Option<&Frame> {
         self.elements.iter().find_map(|el| match el {
@@ -1310,175 +1305,6 @@ impl Document {
             Element::Frame(f) if f.layer == layer => Some(f),
             _ => None,
         })
-    }
-
-    /// The layers of the frame `frame` names, or the board's own when it
-    /// names none. An empty slice for a frame that is not there.
-    pub fn stack(&self, frame: Option<&str>) -> &[Layer] {
-        match frame {
-            None => &self.layers,
-            Some(id) => self.frame(id).map_or(&[], |f| &f.layers),
-        }
-    }
-
-    pub fn stack_mut(&mut self, frame: Option<&str>) -> Option<&mut Vec<Layer>> {
-        match frame {
-            None => Some(&mut self.layers),
-            Some(id) => self.frame_mut(id).map(|f| &mut f.layers),
-        }
-    }
-
-    /// Where a layer lives: the frame holding it — none for the board's
-    /// own stack — and its index in that stack. A layer id is unique
-    /// across the whole document, so this is the whole answer.
-    pub fn locate(&self, layer: &str) -> Option<(Option<&str>, usize)> {
-        if let Some(i) = self.layers.iter().position(|l| l.id == layer) {
-            return Some((None, i));
-        }
-        self.elements.iter().find_map(|el| match el {
-            Element::Frame(f) => f
-                .layers
-                .iter()
-                .position(|l| l.id == layer)
-                .map(|i| (Some(f.id.as_str()), i)),
-            _ => None,
-        })
-    }
-
-    /// The topmost frame whose area holds `p`, or none for the open
-    /// board. A hidden frame claims nothing: what is not painted is not
-    /// there, for the pointer as for the eye.
-    pub fn frame_at(&self, p: [f64; 2]) -> Option<&str> {
-        self.layers
-            .iter()
-            .rev()
-            .filter(|l| l.visible && l.kind == Kind::Frame)
-            .find_map(|l| {
-                self.frame_on(&l.id)
-                    .filter(|f| f.contains(p))
-                    .map(|f| f.id.as_str())
-            })
-    }
-
-    /// Adds a layer of `kind` just above `above` (on top when that is
-    /// past the end) in the stack `frame` names, and answers its index.
-    /// It is named for its kind, with N past every number in use under
-    /// that word **in that stack**, so a frame's first layer is
-    /// `Layer 1` however many the board has. None when the stack is not
-    /// there.
-    pub fn add_layer(&mut self, frame: Option<&str>, above: usize, kind: Kind) -> Option<usize> {
-        let name = self.next_layer_name(frame, kind);
-        let layers = self.stack_mut(frame)?;
-        let at = above.saturating_add(1).min(layers.len());
-        layers.insert(at, Layer::of(&name, kind));
-        Some(at)
-    }
-
-    /// The name a new layer of `kind` takes: one past the highest number
-    /// already carried under that kind's own word. A frame is not a gap
-    /// in the layers' numbering and a layer is not a gap in the frames'.
-    fn next_layer_name(&self, frame: Option<&str>, kind: Kind) -> String {
-        let word = match kind {
-            Kind::Frame => "Frame",
-            Kind::Group => "Group",
-            Kind::Raster | Kind::Vector => "Layer",
-        };
-        let prefix = format!("{word} ");
-        let highest = self
-            .stack(frame)
-            .iter()
-            .filter_map(|l| l.name.strip_prefix(&prefix)?.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
-        format!("{word} {}", highest.saturating_add(1))
-    }
-
-    /// Removes layer `index` of the stack `frame` names, and every
-    /// element on it. A stack keeps its last layer: false then, and for
-    /// an index past the end. A frame layer takes its frame's whole
-    /// stack with it, since a frame's object *is* a stack.
-    pub fn remove_layer(&mut self, frame: Option<&str>, index: usize) -> bool {
-        let Some(layers) = self.stack_mut(frame) else {
-            return false;
-        };
-        if layers.len() < 2 || index >= layers.len() {
-            return false;
-        }
-        let gone = layers.remove(index);
-        let held: Vec<String> = self
-            .frame_on(&gone.id)
-            .map(|f| f.layers.iter().map(|l| l.id.clone()).collect())
-            .unwrap_or_default();
-        self.elements
-            .retain(|el| el.layer() != gone.id && !held.iter().any(|id| id == el.layer()));
-        true
-    }
-
-    /// Swaps layer `index` with the one above it (`up`) or below, and
-    /// answers where it went. Nothing moves past the edge.
-    pub fn move_layer(&mut self, frame: Option<&str>, index: usize, up: bool) -> Option<usize> {
-        let to = if up {
-            index.checked_add(1)?
-        } else {
-            index.checked_sub(1)?
-        };
-        self.reorder_layer(frame, index, to).then_some(to)
-    }
-
-    /// Takes layer `from` out of the stack `frame` names and puts it back
-    /// at `to`, shifting whatever lies between and leaving their order
-    /// alone — what a row dragged several places down does. False when
-    /// either index is past the end, or the layer is already there.
-    pub fn reorder_layer(&mut self, frame: Option<&str>, from: usize, to: usize) -> bool {
-        let Some(layers) = self.stack_mut(frame) else {
-            return false;
-        };
-        if from >= layers.len() || to >= layers.len() || from == to {
-            return false;
-        }
-        let layer = layers.remove(from);
-        layers.insert(to, layer);
-        true
-    }
-
-    /// Moves the layer `layer` — and so the object on it — to the top of
-    /// the stack `to` names. A layer holds one object, so the two are one
-    /// move: the element goes on naming its layer, and its layer changes
-    /// stacks. False when the layer is a frame's own (a frame does not
-    /// nest), when it is already there, or when either end is missing.
-    pub fn rehome_layer(&mut self, layer: &str, to: Option<&str>) -> bool {
-        let Some((from, index)) = self.locate(layer) else {
-            return false;
-        };
-        let from = from.map(|s| s.to_owned());
-        if from.as_deref() == to {
-            return false;
-        }
-        if self.stack(from.as_deref())[index].kind == Kind::Frame {
-            return false;
-        }
-        if self.stack_mut(to).is_none() {
-            return false;
-        }
-        let Some(layers) = self.stack_mut(from.as_deref()) else {
-            return false;
-        };
-        let taken = layers.remove(index);
-        // The stack it came from may now be empty, and a stack is never
-        // empty: it gets a fresh layer, as the parse would have given it.
-        if layers.is_empty() {
-            let name = self.next_layer_name(from.as_deref(), Kind::Raster);
-            if let Some(layers) = self.stack_mut(from.as_deref()) {
-                layers.push(Layer::new(&name));
-            }
-        }
-        match self.stack_mut(to) {
-            Some(layers) => {
-                layers.push(taken);
-                true
-            }
-            None => false,
-        }
     }
 }
 
@@ -2472,13 +2298,6 @@ mod tests {
     }
 
     #[test]
-    fn layer_index_finds_a_layer_by_id() {
-        let doc = three_layers();
-        assert_eq!(doc.layer_index(None, "middle"), Some(1));
-        assert_eq!(doc.layer_index(None, "nope"), None);
-    }
-
-    #[test]
     fn add_layer_inserts_above_and_names_past_the_highest_number() {
         let mut doc = Document::new("t");
         assert_eq!(doc.add_layer(None, 0, Kind::Raster).unwrap(), 1);
@@ -2950,9 +2769,10 @@ mod tests {
     fn stack_answers_the_board_or_one_frame() {
         let doc = framed();
         assert_eq!(doc.stack(None).len(), 2, "the board's own");
-        let ids: Vec<&str> = doc.stack(Some("fr")).iter().map(|l| l.id.as_str()).collect();
+        let ids: Vec<&str> = doc.stack(Some("fl")).iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["in"]);
         assert!(doc.stack(Some("nobody")).is_empty());
+        assert!(doc.stack(Some("in")).is_empty(), "a raster layer holds none");
     }
 
     #[test]
@@ -2960,7 +2780,7 @@ mod tests {
         let doc = framed();
         assert_eq!(doc.locate("bottom"), Some((None, 0)));
         assert_eq!(doc.locate("fl"), Some((None, 1)));
-        assert_eq!(doc.locate("in"), Some((Some("fr"), 0)));
+        assert_eq!(doc.locate("in"), Some((Some("fl"), 0)), "held by the frame's own layer");
         assert_eq!(doc.locate("nobody"), None);
     }
 
@@ -2973,10 +2793,10 @@ mod tests {
     }
 
     #[test]
-    fn frame_at_names_the_topmost_frame_over_a_point_and_skips_hidden_ones() {
+    fn stack_at_names_the_topmost_frame_over_a_point_and_skips_hidden_ones() {
         let mut doc = framed();
-        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr"));
-        assert_eq!(doc.frame_at([500.0, 500.0]), None, "the open board");
+        assert_eq!(doc.stack_at([50.0, 50.0]), Some("fl"), "by the frame's layer");
+        assert_eq!(doc.stack_at([500.0, 500.0]), None, "the open board");
 
         // A second frame over the same place, higher up, wins.
         doc.layers.push(Layer {
@@ -2993,11 +2813,11 @@ mod tests {
             background: None,
             layers: vec![layer("in2", "Layer 1")],
         }));
-        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr2"));
+        assert_eq!(doc.stack_at([50.0, 50.0]), Some("fl2"));
 
         // A hidden frame claims nothing.
         doc.layers[2].visible = false;
-        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr"));
+        assert_eq!(doc.stack_at([50.0, 50.0]), Some("fl"));
     }
 
     /// A board holding a frame layer that no frame is on is not a
@@ -3070,8 +2890,8 @@ mod tests {
                             "x": 0, "y": 0, "w": 10, "h": 10, "layers": [] } ]
         }"##;
         let doc = Document::from_json(json).unwrap();
-        assert_eq!(doc.stack(Some("fr")).len(), 1);
-        assert_eq!(doc.stack(Some("fr"))[0].name, "Layer 1");
+        assert_eq!(doc.stack(Some("fl")).len(), 1);
+        assert_eq!(doc.stack(Some("fl"))[0].name, "Layer 1");
     }
 
     /// An area of no size is not an area.
@@ -3096,12 +2916,12 @@ mod tests {
     #[test]
     fn a_layer_added_inside_a_frame_stays_inside_it() {
         let mut doc = framed();
-        let at = doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
+        let at = doc.add_layer(Some("fl"), 0, Kind::Raster).unwrap();
         assert_eq!(at, 1);
-        assert_eq!(doc.stack(Some("fr")).len(), 2);
+        assert_eq!(doc.stack(Some("fl")).len(), 2);
         assert_eq!(doc.layers.len(), 2, "the board's stack did not grow");
         assert_eq!(
-            doc.stack(Some("fr"))[1].name,
+            doc.stack(Some("fl"))[1].name,
             "Layer 2",
             "named within its own stack"
         );
@@ -3110,15 +2930,15 @@ mod tests {
     #[test]
     fn removing_the_last_layer_of_a_frame_is_refused_like_the_boards() {
         let mut doc = framed();
-        assert!(!doc.remove_layer(Some("fr"), 0));
-        assert_eq!(doc.stack(Some("fr")).len(), 1);
+        assert!(!doc.remove_layer(Some("fl"), 0));
+        assert_eq!(doc.stack(Some("fl")).len(), 1);
     }
 
     #[test]
     fn removing_a_frames_layer_takes_the_elements_on_it() {
         let mut doc = framed();
-        doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
-        assert!(doc.remove_layer(Some("fr"), 0));
+        doc.add_layer(Some("fl"), 0, Kind::Raster).unwrap();
+        assert!(doc.remove_layer(Some("fl"), 0));
         assert!(
             !doc.elements.iter().any(|el| el.id() == "inside"),
             "the rect on it went too"
@@ -3140,10 +2960,10 @@ mod tests {
     #[test]
     fn rehoming_a_layer_moves_it_and_its_object_between_stacks() {
         let mut doc = framed();
-        assert!(doc.rehome_layer("bottom", Some("fr")));
+        assert!(doc.rehome_layer("bottom", Some("fl")));
         assert_eq!(
             doc.locate("bottom"),
-            Some((Some("fr"), 1)),
+            Some((Some("fl"), 1)),
             "on top of the frame's stack"
         );
         // The element did not move — it named its layer, and its layer
@@ -3161,21 +2981,21 @@ mod tests {
     fn rehoming_never_leaves_a_stack_empty() {
         let mut doc = framed();
         assert!(doc.rehome_layer("in", None));
-        assert_eq!(doc.stack(Some("fr")).len(), 1);
-        assert_ne!(doc.stack(Some("fr"))[0].id, "in");
+        assert_eq!(doc.stack(Some("fl")).len(), 1);
+        assert_ne!(doc.stack(Some("fl"))[0].id, "in");
     }
 
     #[test]
     fn a_frames_own_layer_never_rehomes() {
         let mut doc = framed();
-        assert!(!doc.rehome_layer("fl", Some("fr")), "a frame does not nest");
+        assert!(!doc.rehome_layer("fl", Some("fl")), "a frame does not nest");
     }
 
     #[test]
     fn rehoming_where_it_already_is_does_nothing() {
         let mut doc = framed();
         assert!(!doc.rehome_layer("bottom", None));
-        assert!(!doc.rehome_layer("nobody", Some("fr")));
+        assert!(!doc.rehome_layer("nobody", Some("fl")));
         assert!(!doc.rehome_layer("bottom", Some("nobody")));
     }
 

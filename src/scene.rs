@@ -1670,9 +1670,7 @@ pub fn document_prims(
     // becomes agreeing about which boundary they are under.
     let live_cut = live
         .as_ref()
-        .and_then(|l| doc.locate(l.layer))
-        .and_then(|(within, _)| within)
-        .and_then(|id| doc.frame(id))
+        .and_then(|l| doc.frame_holding(l.layer))
         .map(|f| frame_rect(f, view));
     for painted in doc.painted() {
         let element = painted.element;
