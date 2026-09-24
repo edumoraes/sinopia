@@ -316,6 +316,30 @@ pub fn typed_call(kind: &str, prompt: &str) -> (Option<String>, String) {
     (None, prompt.to_owned())
 }
 
+/// What herdr's `agent list` says the agent in `pane` is doing — `idle`,
+/// `working`, `blocked`, `done` or `unknown` — or nothing, for a pane it
+/// does not list or an answer that will not parse.
+pub fn status_of(list: &str, pane: &str) -> Option<String> {
+    parse_herdr(list)
+        .into_iter()
+        .find(|a| a.reach == Reach::Herdr(pane.to_owned()))
+        .and_then(|a| a.status)
+}
+
+/// Whether a call may be typed at an agent doing `status`. herdr's
+/// `agent prompt` refuses a blocked agent before any input is sent, but
+/// the keys a call is typed with go ahead of it and ask nothing — into
+/// the question the agent is holding open, where a digit in a name can
+/// pick one of its options. So a blocked agent is not typed at, and
+/// neither is one herdr cannot say anything about.
+pub fn free(status: Option<&str>) -> anyhow::Result<()> {
+    match status {
+        Some("blocked") => anyhow::bail!("the agent is waiting on an answer; nothing was sent"),
+        Some(_) => Ok(()),
+        None => anyhow::bail!("herdr could not say whether the agent is free; nothing was sent"),
+    }
+}
+
 /// How long the paste is given before the Enter that submits it. Gemini
 /// CLI takes an Enter within 40 ms of a paste for a newline in it; herdr
 /// waits this long before its own, and tmux is made to.
@@ -332,6 +356,10 @@ pub fn send(agent: &Agent, text: &str) -> anyhow::Result<()> {
         Reach::None => anyhow::bail!("nothing here knows how to reach that agent"),
         Reach::Herdr(pane) => {
             if let Some(typed) = &typed {
+                // Asked as late as it can be: the dialog's own list may be
+                // minutes old.
+                let listed = run("herdr", &["agent", "list"]).unwrap_or_default();
+                free(status_of(&listed, pane).as_deref())?;
                 // Raw text, never bracketed, and no Enter.
                 let out = Command::new("herdr")
                     .args(["pane", "send-text", pane, typed])
@@ -537,6 +565,30 @@ mod tests {
             Agent::at("codex", "/home/e/Work/board", Reach::None),
         ];
         assert_eq!(folders(&agents), ["board", "board"]);
+    }
+
+    #[test]
+    fn herdr_says_what_the_agent_in_a_pane_is_doing() {
+        let list = r#"{"result":{"agents":[
+          {"agent":"claude","pane_id":"w1:p1","agent_status":"blocked","cwd":"/a"},
+          {"agent":"codex","pane_id":"w2:p1","agent_status":"idle","cwd":"/b"}
+        ]}}"#;
+        assert_eq!(status_of(list, "w1:p1").as_deref(), Some("blocked"));
+        assert_eq!(status_of(list, "w2:p1").as_deref(), Some("idle"));
+        assert_eq!(status_of(list, "w9:p9"), None, "a pane herdr does not list");
+        assert_eq!(status_of("not json", "w1:p1"), None);
+    }
+
+    #[test]
+    fn nothing_is_typed_at_an_agent_waiting_on_an_answer() {
+        // A blocked agent is holding a question open, and the call typed
+        // into it would be its answer. An agent herdr cannot say anything
+        // about is not typed at either.
+        assert!(free(Some("blocked")).is_err());
+        assert!(free(None).is_err());
+        for status in ["idle", "working", "done", "unknown"] {
+            assert!(free(Some(status)).is_ok(), "{status}");
+        }
     }
 
     #[test]
