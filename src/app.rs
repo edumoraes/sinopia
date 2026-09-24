@@ -260,10 +260,6 @@ struct App {
     exit_error: Option<anyhow::Error>,
 }
 
-/// The most px to a world unit the dialog's picture is drawn at: a
-/// scope of two strokes is shown whole, not blown up to fill the foot.
-const PICTURE_CEILING: f64 = 4.0;
-
 /// A send being composed. It holds the agents as they were when the
 /// panel opened: a list that changed under the person mid-sentence would
 /// move the row they were about to press.
@@ -1678,9 +1674,10 @@ impl App {
     /// atlas, it is made here and never while a frame is being built.
     fn ensure_picture(&mut self) {
         let Some(view) = self.view() else { return };
-        let Some(rect) = self.send_panel(&view).and_then(|(p, _)| p.picture) else {
+        let Some((panel, _)) = self.send_panel(&view) else {
             return;
         };
+        let Some(rect) = panel.picture else { return };
         let want = (rect.w.round() as u32, rect.h.round() as u32);
         let Some(sending) = self.sending.as_ref() else {
             return;
@@ -1693,7 +1690,9 @@ impl App {
             .context("there is nothing there to picture")
             .and_then(|bounds| {
                 let sub = export::sub_document(self.doc(), &scope);
-                let (view, w, h) = export::fit_view(&bounds, want.0, want.1, PICTURE_CEILING);
+                let (view, w, h) = panel
+                    .picture_view(&bounds)
+                    .context("there is no place for the picture")?;
                 let rgba = self.render_sub(&sub, &view, w, h)?;
                 let gfx = self
                     .gfx

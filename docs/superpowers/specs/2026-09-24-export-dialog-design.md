@@ -109,7 +109,8 @@ for Gemini's 40 ms.
 At the foot: the scope's sub-document drawn offscreen through the same
 path `board.png` is (`App::render_sub`, which both call now), fitted
 into the foot at the size it is shown in px (`export::fit_view`, never
-past 4 px a world unit), uploaded into a slot of its own replaced in
+past 4 logical px a world unit — logical, so a small scope is as sharp
+at scale 2 as at 1), uploaded into a slot of its own replaced in
 place, and taken again when that size changes. The layout knows the
 shape before the picture exists (`export::shape`): as wide as the dialog
 for a wide scope, at most 160 px tall, and in a short window it gives

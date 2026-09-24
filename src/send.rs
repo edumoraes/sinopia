@@ -5,8 +5,10 @@
 //! holds no state: `app` owns the fields and lends them for a frame.
 
 use crate::agents::Agent;
+use crate::export;
 use crate::field::{self, Boxed, Field};
-use crate::scene::{Prim, ScreenRect, Viewport};
+use crate::geom::Frame;
+use crate::scene::{Prim, ScreenRect, View, Viewport};
 use crate::skills::{self, Call, Skill};
 use crate::text::{Atlas, Line};
 use crate::theme::Theme;
@@ -55,6 +57,10 @@ const THUMB_H: f32 = 160.0;
 const THUMB_MIN: f32 = 48.0;
 const THUMB_GAP: f32 = 10.0;
 const THUMB_RADIUS: f32 = 6.0;
+
+/// The most logical px to a world unit the picture is drawn at: a scope
+/// of two strokes is shown whole, not blown up to fill the foot.
+pub const PICTURE_CEILING: f64 = 4.0;
 
 /// The most skills the menu shows at once; the pick scrolls the rest in.
 pub const MENU_ROWS: usize = 6;
@@ -350,6 +356,18 @@ impl Panel {
             })
             .collect();
         Some(MenuLayout { rect, rows, first })
+    }
+
+    /// The camera and the size the picture of `bounds` is taken with to
+    /// fill its place at the foot, a texel to a px. The ceiling is a
+    /// density, and like every length here it is in logical px: at scale
+    /// 2 a small scope is drawn as sharp as at 1, rather than taken at
+    /// half the size and stretched over its place.
+    pub fn picture_view(&self, bounds: &Frame) -> Option<(View, u32, u32)> {
+        let rect = self.picture?;
+        let (w, h) = (rect.w.round() as u32, rect.h.round() as u32);
+        let ceiling = PICTURE_CEILING * f64::from(self.scale);
+        Some(export::fit_view(bounds, w, h, ceiling))
     }
 
     /// The instruction's box as the field draws itself into it, with
@@ -836,6 +854,31 @@ mod tests {
             Panel::layout(tiny, 1.0, &pictured(1.0)).picture.is_none(),
             "a picture too small to read is no picture"
         );
+    }
+
+    #[test]
+    fn a_small_scope_fills_its_picture_at_every_scale() {
+        // The ceiling is a density, and a density here is in logical px:
+        // at scale 2 a scope of two strokes is as sharp as at 1, not a
+        // smaller picture stretched over its place.
+        let b = crate::geom::Frame::spanning([0.0, 0.0], [4.0, 4.0]);
+        for scale in [1.0, 2.0] {
+            let vp = Viewport {
+                w: (1200.0 * scale) as u32,
+                h: (900.0 * scale) as u32,
+            };
+            let spec = Spec {
+                picture: Some(crate::export::shape(&b) as f32),
+                ..lines(2)
+            };
+            let p = Panel::layout(vp, scale, &spec);
+            let rect = p.picture.unwrap();
+            let (_, w, h) = p.picture_view(&b).unwrap();
+            assert!(
+                (w as f32 - rect.w).abs() <= 1.0 && (h as f32 - rect.h).abs() <= 1.0,
+                "scale {scale}: {w}x{h} in {rect:?}"
+            );
+        }
     }
 
     #[test]
