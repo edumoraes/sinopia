@@ -69,7 +69,6 @@ impl Document {
         Some((owner.map(|l| l.id.as_str()), index))
     }
 
-
     /// The layers holding `id`, nearest first.
     pub fn ancestors(&self, id: &str) -> Vec<&Layer> {
         let mut trail = self.trail(id).unwrap_or_default();
@@ -87,8 +86,6 @@ impl Document {
             .then(|| self.frame_on(&top.id))
             .flatten()
     }
-
-
 
     /// Whether `id` is on show: it and everything holding it visible.
     pub fn shown(&self, id: &str) -> bool {
@@ -292,6 +289,126 @@ impl Document {
         true
     }
 
+    /// The stack and the index a [`Place`] names, as the stacks stand:
+    /// on top of what a group or a frame holds, or right above or under a
+    /// layer in its own stack. None for a place that is not there.
+    pub fn place(&self, place: &Place) -> Option<(Option<&str>, usize)> {
+        match place {
+            Place::Into(id) => {
+                let holder = self.layer(id)?;
+                matches!(holder.kind, Kind::Group | Kind::Frame)
+                    .then(|| (Some(holder.id.as_str()), self.inner(holder).len()))
+            }
+            Place::Above(id) => self.locate(id).map(|(o, i)| (o, i + 1)),
+            Place::Below(id) => self.locate(id),
+        }
+    }
+
+    /// Whether `ids` may go into the stack `owner` holds: it is a stack,
+    /// none of them would go inside itself, and a frame would not leave
+    /// the board's root.
+    pub fn can_move(&self, ids: &[String], owner: Option<&str>) -> bool {
+        let Some(o) = owner else {
+            return true;
+        };
+        let Some(holder) = self.layer(o) else {
+            return false;
+        };
+        if !matches!(holder.kind, Kind::Group | Kind::Frame) {
+            return false;
+        }
+        let around: Vec<&str> = self.ancestors(o).iter().map(|a| a.id.as_str()).collect();
+        !ids.iter().any(|m| {
+            m == o
+                || around.contains(&m.as_str())
+                || self.layer(m).is_some_and(|l| l.kind == Kind::Frame)
+        })
+    }
+
+    /// Moves `ids` — each with everything under it — into the stack
+    /// `owner` holds, at `index` as that stack stands before the move:
+    /// the block lands where the layer now at `index` is, under it, or on
+    /// top past the end. They keep their paint order, and a layer that
+    /// goes with something holding it moves once, with it. Refused, with
+    /// nothing moved, when a layer would go inside itself, when a frame
+    /// would leave the board's root, or when nothing would change. What
+    /// the move leaves empty the board or a frame gets a fresh layer in;
+    /// a group may stand empty.
+    pub fn move_layers(&mut self, ids: &[String], owner: Option<&str>, index: usize) -> bool {
+        let mut moving: Vec<String> = Vec::new();
+        for id in ids {
+            let held = self.ancestors(id).iter().any(|a| ids.contains(&a.id));
+            if self.layer(id).is_some() && !held && !moving.contains(id) {
+                moving.push(id.clone());
+            }
+        }
+        if moving.is_empty() || !self.can_move(&moving, owner) {
+            return false;
+        }
+        // Paint order is the panel's, the other way up.
+        let order: Vec<String> = self
+            .rows(|_| true)
+            .iter()
+            .rev()
+            .map(|r| r.layer.id.clone())
+            .collect();
+        moving.sort_by_key(|m| order.iter().position(|o| o == m));
+        // What the block lands under, found before anything moves: the
+        // first layer at or past `index` that is not itself moving.
+        let anchor: Option<String> = self
+            .stack(owner)
+            .iter()
+            .skip(index)
+            .map(|l| l.id.clone())
+            .find(|id| !moving.contains(id));
+        let before = self.stacks();
+        let mut block: Vec<Layer> = Vec::new();
+        for m in &moving {
+            let Some((from, i)) = self.locate(m).map(|(o, i)| (o.map(str::to_owned), i)) else {
+                continue;
+            };
+            if let Some(stack) = self.stack_mut(from.as_deref()) {
+                block.push(stack.remove(i));
+            }
+        }
+        let Some(stack) = self.stack_mut(owner) else {
+            return false;
+        };
+        let at = anchor
+            .and_then(|a| stack.iter().position(|l| l.id == a))
+            .unwrap_or(stack.len());
+        for (k, layer) in block.into_iter().enumerate() {
+            stack.insert(at + k, layer);
+        }
+        self.fill_empty_stacks();
+        self.stacks() != before
+    }
+
+    /// The board's stack and every frame's, as they stand.
+    fn stacks(&self) -> Vec<Vec<Layer>> {
+        let mut out = vec![self.layers.clone()];
+        out.extend(self.elements.iter().filter_map(|el| match el {
+            Element::Frame(f) => Some(f.layers.clone()),
+            _ => None,
+        }));
+        out
+    }
+
+    /// Gives the board and every frame a fresh layer where they stand
+    /// empty, as the parse would: neither is ever without one.
+    fn fill_empty_stacks(&mut self) {
+        if self.layers.is_empty() {
+            self.layers.push(Layer::new("Layer 1"));
+        }
+        for el in &mut self.elements {
+            if let Element::Frame(f) = el
+                && f.layers.is_empty()
+            {
+                f.layers.push(Layer::new("Layer 1"));
+            }
+        }
+    }
+
     /// Moves the layer `layer` — and so the object on it — to the top of
     /// the stack of frame layer `to`, or of the board's root. A layer
     /// holds one object, so the two are one move: the element goes on
@@ -338,9 +455,19 @@ impl Document {
         }
     }
 
-
 }
 
+/// A place in the tree, told by a row: where a layer let go of over the
+/// panel lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// Inside this group or frame, on top of what it holds.
+    Into(String),
+    /// Right above this layer, in its own stack.
+    Above(String),
+    /// Right under it.
+    Below(String),
+}
 
 /// One line of the panel's tree: the layer, the layer holding its stack
 /// (none on the board's root), how deep it stands, and what the layers
@@ -470,7 +597,6 @@ pub(crate) mod tests {
         assert_eq!(doc.locate("nope"), None);
     }
 
-
     #[test]
     fn ancestors_come_nearest_first() {
         let doc = nested();
@@ -560,6 +686,103 @@ pub(crate) mod tests {
         assert!(doc.locked("E"), "locked with its frame");
     }
 
+    fn stack_ids(doc: &Document, owner: Option<&str>) -> Vec<String> {
+        doc.stack(owner).iter().map(|l| l.id.clone()).collect()
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn layers_move_together_keeping_their_order_and_land_where_asked() {
+        let mut doc = nested();
+        // A from the root and C from deep in G, into G at the bottom:
+        // they arrive in paint order, A under C, and take index 0.
+        assert!(doc.move_layers(&ids(&["C", "A"]), Some("G"), 0));
+        assert_eq!(stack_ids(&doc, Some("G")), ["A", "C", "B", "H"]);
+        assert!(doc.stack(Some("H")).is_empty(), "a group may stand empty");
+        assert_eq!(stack_ids(&doc, None), ["G", "F"]);
+        // The objects went with their layers, untouched.
+        assert!(doc.elements.iter().any(|el| el.id() == "a" && el.layer() == "A"));
+        Document::from_json(&doc.to_json().unwrap()).expect("still a board");
+    }
+
+    #[test]
+    fn an_index_counts_the_stack_as_it_stands_before_the_move() {
+        let mut doc = nested();
+        // G to the top of the root: index 3 is past F, the end.
+        assert!(doc.move_layers(&ids(&["G"]), None, 3));
+        assert_eq!(stack_ids(&doc, None), ["A", "F", "G"]);
+        // And back down under F: index 1 in the stack as it stands, so
+        // between A and F.
+        assert!(doc.move_layers(&ids(&["G"]), None, 1));
+        assert_eq!(stack_ids(&doc, None), ["A", "G", "F"]);
+        // Nowhere to go is no move.
+        assert!(!doc.move_layers(&ids(&["G"]), None, 1));
+        assert!(!doc.move_layers(&ids(&["G"]), None, 2), "right above itself is where it is");
+    }
+
+    #[test]
+    fn a_group_does_not_go_inside_itself() {
+        let mut doc = nested();
+        assert!(!doc.move_layers(&ids(&["G"]), Some("H"), 0));
+        assert!(!doc.move_layers(&ids(&["G"]), Some("G"), 0));
+        assert_eq!(stack_ids(&doc, None), ["A", "G", "F"], "nothing moved");
+    }
+
+    #[test]
+    fn a_frame_moves_only_on_the_boards_root() {
+        let mut doc = nested();
+        assert!(!doc.move_layers(&ids(&["F"]), Some("G"), 0));
+        assert!(!doc.move_layers(&ids(&["F", "A"]), Some("G"), 0), "not even in company");
+        assert!(doc.move_layers(&ids(&["F"]), None, 0));
+        assert_eq!(stack_ids(&doc, None), ["F", "A", "G"]);
+    }
+
+    #[test]
+    fn what_leaves_a_frame_empty_leaves_it_a_fresh_layer() {
+        let mut doc = nested();
+        assert!(doc.move_layers(&ids(&["D", "K"]), None, 0));
+        let stack = doc.stack(Some("F"));
+        assert_eq!(stack.len(), 1, "a frame's stack is never empty");
+        assert_eq!(stack[0].kind, Kind::Raster);
+        assert_eq!(stack_ids(&doc, None)[..2], ["D", "K"], "and they left for the root");
+        assert_eq!(doc.context("E"), None, "E came out of the frame with its group");
+    }
+
+    #[test]
+    fn a_layer_moved_with_what_holds_it_moves_once() {
+        let mut doc = nested();
+        // G and C together: C is in G, and goes where G goes.
+        assert!(doc.move_layers(&ids(&["G", "C"]), None, 0));
+        assert_eq!(stack_ids(&doc, None), ["G", "A", "F"]);
+        assert_eq!(doc.locate("C"), Some((Some("H"), 0)), "still in its own group");
+    }
+
+    #[test]
+    fn a_place_is_a_stack_and_an_index_in_it() {
+        let doc = nested();
+        let at = |p: Place| doc.place(&p).map(|(o, i)| (o.map(str::to_owned), i));
+        assert_eq!(at(Place::Into("G".into())), Some((Some("G".into()), 2)), "on top of it");
+        assert_eq!(at(Place::Above("B".into())), Some((Some("G".into()), 1)));
+        assert_eq!(at(Place::Below("B".into())), Some((Some("G".into()), 0)));
+        assert_eq!(at(Place::Above("F".into())), Some((None, 3)));
+        assert_eq!(at(Place::Into("A".into())), None, "a layer holds none");
+        assert_eq!(at(Place::Above("nobody".into())), None);
+    }
+
+    #[test]
+    fn whether_layers_may_go_somewhere_is_asked_before_they_do() {
+        let doc = nested();
+        assert!(doc.can_move(&ids(&["A"]), Some("G")));
+        assert!(doc.can_move(&ids(&["A"]), Some("F")), "into a frame's stack");
+        assert!(!doc.can_move(&ids(&["G"]), Some("H")), "not inside itself");
+        assert!(!doc.can_move(&ids(&["F"]), Some("G")), "a frame stays on the root");
+        assert!(!doc.can_move(&ids(&["A"]), Some("A")), "a layer holds none");
+        assert!(doc.can_move(&ids(&["F"]), None));
+    }
+
     #[test]
     fn the_frame_holding_a_layer_is_found_through_its_groups() {
         let doc = nested();
@@ -568,7 +791,5 @@ pub(crate) mod tests {
         assert!(doc.frame_holding("C").is_none(), "a group on the board");
         assert!(doc.frame_holding("F").is_none(), "a frame's own layer is the board's");
     }
-
-
 
 }

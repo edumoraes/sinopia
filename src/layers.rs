@@ -11,7 +11,7 @@ use crate::doc::Kind;
 use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix};
 use crate::text::Atlas;
 use crate::theme::Theme;
-use crate::tree;
+use crate::tree::{self, Place};
 
 // Logical px.
 pub const WIDTH: f32 = 248.0;
@@ -68,6 +68,8 @@ const LIFT_REACH: f32 = LIFT_LEFT + WIDTH * LIFT_SCALE;
 const BAR_W: f32 = 4.0;
 const BAR_GAP: f32 = 3.0;
 const BAR_MIN: f32 = 24.0;
+/// The drop's line, and the outline round a holder a card would go into.
+const DROP_LINE: f32 = 2.0;
 /// How long the lift takes to come on, and to go off again.
 pub const LIFT_SECONDS: f32 = 0.14;
 const BUTTON_GAP: f32 = 2.0;
@@ -251,12 +253,14 @@ impl Slides {
 }
 
 /// What the panel shows beyond the layers themselves: which one is
-/// active, which are picked, which is in the pointer's hand, and what is
-/// still moving.
+/// active, which are picked, which is in the pointer's hand and where it
+/// would land, and what is still moving.
 pub struct Showing<'a> {
     pub active: &'a str,
     pub picked: &'a [String],
     pub lift: Option<&'a Lift>,
+    /// Where a carried card would land if let go of now.
+    pub drop: Option<&'a Place>,
     pub slides: &'a Slides,
 }
 
@@ -582,6 +586,28 @@ impl Panel {
         Some(self.rows.iter().find(|r| y < r.rect.y + r.rect.h).unwrap_or(last))
     }
 
+    /// Where a card let go of at `y` lands, read off the row under the
+    /// pointer — or the nearest, once the drag has left the list: the
+    /// middle third of a group's or a frame's row is inside it; the half
+    /// of a row nearer the top is above it and the other half under it —
+    /// except under an open holder, which is the top of what it holds,
+    /// since that is the row drawn there.
+    pub fn aim(&self, y: f64) -> Option<Place> {
+        let row = self.drop_row(y)?;
+        let f = ((y as f32 - row.rect.y) / row.rect.h).clamp(0.0, 1.0);
+        let holds = row.chevron.is_some();
+        let id = row.id.clone();
+        Some(if holds && (1.0 / 3.0..2.0 / 3.0).contains(&f) {
+            Place::Into(id)
+        } else if f < 0.5 {
+            Place::Above(id)
+        } else if holds && row.open {
+            Place::Into(id)
+        } else {
+            Place::Below(id)
+        })
+    }
+
     /// Where a carried card's top edge actually goes: what the pointer
     /// asks for, kept inside the band. It is the band that holds it, not
     /// the rows — a row can be part shown at either edge, and a card
@@ -619,6 +645,9 @@ impl Panel {
             let dy = showing.slides.offset(&row.id);
             self.card_prims(row, showing, None, dy, atlas, slot, theme, &mut out);
         }
+        if let Some(place) = showing.drop {
+            out.extend(self.drop_prims(place, theme));
+        }
         // A card in the hand is where the pointer put it, not where the
         // tree says: it takes no slide.
         if let Some(l) = showing.lift
@@ -639,6 +668,43 @@ impl Panel {
             out.extend(icon_prims(icon, rect, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
         }
         out
+    }
+
+    /// Where a card would land, in the lift's own blue: a line on the
+    /// boundary between two rows, as far in as the stack it lands in —
+    /// or, into a group or a frame, its card outlined all round.
+    fn drop_prims(&self, place: &Place, theme: &Theme) -> Vec<Prim> {
+        let s = self.scale;
+        let t = DROP_LINE * s;
+        let find = |id: &str| self.rows.iter().find(|r| r.id == id);
+        let line = |row: &Row, y: f32| {
+            let r = ScreenRect {
+                x: row.card.x,
+                y: y - t / 2.0,
+                w: row.card.w,
+                h: t,
+            };
+            vec![Prim::rounded(r, t / 2.0, theme.lifted).clipped(self.band.inset(-t))]
+        };
+        match place {
+            Place::Above(id) => find(id).map_or(Vec::new(), |r| line(r, r.rect.y)),
+            Place::Below(id) => find(id).map_or(Vec::new(), |r| line(r, r.rect.y + r.rect.h)),
+            Place::Into(id) => {
+                let Some(r) = find(id) else {
+                    return Vec::new();
+                };
+                let c = r.card.inset(-t / 2.0);
+                [
+                    (c.x, c.y, c.w, t),
+                    (c.x, c.y + c.h - t, c.w, t),
+                    (c.x, c.y + t, t, (c.h - 2.0 * t).max(0.0)),
+                    (c.x + c.w - t, c.y + t, t, (c.h - 2.0 * t).max(0.0)),
+                ]
+                .into_iter()
+                .map(|(x, y, w, h)| Prim::rect(ScreenRect { x, y, w, h }, theme.lifted).clipped(self.band))
+                .collect()
+            }
+        }
     }
 
     /// One row: its card — shadow, outline, body — then the chevron, the
@@ -1595,6 +1661,7 @@ mod tests {
             active,
             picked: &[],
             lift,
+            drop: None,
             slides: &STILL,
         }
     }
@@ -1724,6 +1791,7 @@ mod tests {
             active: "L1",
             picked: &[],
             lift: None,
+            drop: None,
             slides: &s,
         };
         let prims = p.prims(&showing, &a, 7, &theme);
@@ -1803,6 +1871,7 @@ mod tests {
             active: "B",
             picked: &picked,
             lift: None,
+            drop: None,
             slides: &Slides::default(),
         };
         let prims = p.prims(&show, &a, 7, &theme);
@@ -1902,6 +1971,81 @@ mod tests {
         let open = row(&p, "G").chevron.unwrap();
         let (_, y) = chevron_tip_in(&prims, open);
         assert!(y > open.center().1, "an open one points down");
+    }
+
+    fn into(id: &str) -> Place {
+        Place::Into(id.into())
+    }
+
+    fn above(id: &str) -> Place {
+        Place::Above(id.into())
+    }
+
+    fn below(id: &str) -> Place {
+        Place::Below(id.into())
+    }
+
+    #[test]
+    fn the_middle_of_a_holders_row_drops_into_it_and_its_edges_beside_it() {
+        let doc = crate::tree::tests::nested();
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let at = |id: &str, f: f32| {
+            let r = row(&p, id);
+            p.aim(f64::from(r.rect.y + r.rect.h * f))
+        };
+        assert_eq!(at("G", 0.5), Some(into("G")));
+        assert_eq!(at("G", 0.1), Some(above("G")));
+        // G is open: just under its row is the top of what it holds.
+        assert_eq!(at("G", 0.9), Some(into("G")));
+        // F is shut: under its row is under F.
+        assert_eq!(at("F", 0.9), Some(below("F")));
+        assert_eq!(at("F", 0.5), Some(into("F")));
+        // A layer holds none: its row is cut in two.
+        assert_eq!(at("A", 0.4), Some(above("A")));
+        assert_eq!(at("A", 0.6), Some(below("A")));
+        // Past either end, the nearest edge — so an overshoot still lands
+        // where it was headed.
+        assert_eq!(p.aim(0.0), Some(above("F")));
+        assert_eq!(p.aim(10_000.0), Some(below("A")));
+    }
+
+    #[test]
+    fn a_drop_is_a_line_at_the_depth_it_lands_or_an_outline_round_its_holder() {
+        let theme = Theme::light();
+        let a = atlas();
+        let doc = crate::tree::tests::nested();
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let drawn = |place: &Place| -> Vec<ScreenRect> {
+            let show = Showing {
+                drop: Some(place),
+                ..showing("A", None)
+            };
+            p.prims(&show, &a, 7, &theme)
+                .iter()
+                .filter(|q| q.color == theme.lifted)
+                .map(Prim::bounds)
+                .collect()
+        };
+        let nothing = p.prims(&showing("A", None), &a, 7, &theme);
+        assert!(!nothing.iter().any(|q| q.color == theme.lifted));
+
+        // Above B: one line on the boundary over B's row, starting where
+        // B's card does — the depth it lands at.
+        let b = row(&p, "B");
+        let line = drawn(&above("B"));
+        assert_eq!(line.len(), 1, "{line:?}");
+        assert_eq!(line[0].x, b.card.x);
+        assert!((line[0].center().1 - b.rect.y).abs() < 1.0);
+        // Under B: on the boundary under it.
+        let line = drawn(&below("B"));
+        assert!((line[0].center().1 - (b.rect.y + b.rect.h)).abs() < 1.0);
+        // Into H: its card, outlined all round.
+        let h = row(&p, "H");
+        let ring = drawn(&into("H"));
+        assert_eq!(ring.len(), 4, "four edges");
+        let around = ring.iter().fold(ring[0], |acc, r| acc.union(r));
+        assert!(around.contains_rect(&h.card));
+        assert!(h.card.inset(-4.0).contains_rect(&around), "and hugging it");
     }
 
     #[test]

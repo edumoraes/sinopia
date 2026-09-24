@@ -11,6 +11,7 @@ use crate::doc::{Camera, Document, Element, Envelope, Image, Kind, Layer, Paint,
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
+use crate::tree::Place;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -776,6 +777,23 @@ impl Editor {
         Change::Scene
     }
 
+    /// Drops the picked layers at `place` — what a card let go of over
+    /// the panel does — keeping their order. They stay picked, and what
+    /// holds them now is shown open.
+    pub fn drop_layers(&mut self, doc: &mut Document, place: &Place) -> Change {
+        let picked: Vec<String> = self.picked(doc).into_iter().map(str::to_owned).collect();
+        let Some((owner, index)) = doc.place(place).map(|(o, i)| (o.map(str::to_owned), i)) else {
+            return Change::None;
+        };
+        if !doc.move_layers(&picked, owner.as_deref(), index) {
+            return Change::None;
+        }
+        for id in &picked {
+            self.reveal(doc, id);
+        }
+        Change::Scene
+    }
+
     /// Moves the active layer one step up or down its own stack. It keeps
     /// its id, so it stays active.
     pub fn move_layer(&mut self, doc: &mut Document, up: bool) -> Change {
@@ -786,20 +804,6 @@ impl Editor {
         match doc.move_layer(owner.as_deref(), index, up) {
             Some(_) => Change::Scene,
             None => Change::None,
-        }
-    }
-
-    /// Drops the active layer at `index` of its own stack, however far
-    /// that is — what a row dragged in the panel does. It keeps its id,
-    /// so it stays active wherever it lands.
-    pub fn move_layer_to(&mut self, doc: &mut Document, index: usize) -> Change {
-        let a = self.active(doc).to_owned();
-        let Some((owner, from)) = doc.locate(&a).map(|(o, i)| (o.map(str::to_owned), i)) else {
-            return Change::None;
-        };
-        match doc.reorder_layer(owner.as_deref(), from, index) {
-            true => Change::Scene,
-            false => Change::None,
         }
     }
 
@@ -2214,22 +2218,6 @@ mod tests {
         assert_eq!(e.move_layer(&mut doc, false), Change::Scene);
         assert_eq!(active_at(&e, &doc), 0);
         assert_eq!(e.move_layer(&mut doc, false), Change::None);
-    }
-
-    #[test]
-    fn move_layer_to_drops_the_active_layer_at_an_index() {
-        let mut e = Editor::new();
-        let mut doc = layered_board();
-        doc.add_layer(None, 1, Kind::Raster);
-        let top = doc.layers[2].id.clone();
-        let _ = select_at(&mut e, &doc, 2);
-        assert_eq!(e.move_layer_to(&mut doc, 0), Change::Scene);
-        assert_eq!(active_at(&e, &doc), 0, "it stays active where it landed");
-        assert_eq!(doc.layers[0].id, top);
-        assert_eq!(doc.layers[1].id, "L1", "the others keep their order");
-        assert_eq!(doc.layers[2].id, "L2");
-        assert_eq!(e.move_layer_to(&mut doc, 0), Change::None, "already there");
-        assert_eq!(e.move_layer_to(&mut doc, 9), Change::None, "no such place");
     }
 
     /// 100×100 viewport looking at (50, 50) at zoom 1: screen px == world.
@@ -4036,6 +4024,24 @@ mod tests {
         let mut other = Editor::new();
         other.go(there);
         assert_eq!(picked(&other, &doc), ["A", "C"]);
+    }
+
+    #[test]
+    fn dropping_the_picked_layers_moves_them_all_and_opens_where_they_went() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        assert_eq!(e.drop_layers(&mut doc, &Place::Into("F".into())), Change::Scene);
+        assert_eq!(doc.context("A"), Some("F"));
+        assert_eq!(doc.context("B"), Some("F"));
+        assert_eq!(picked(&e, &doc), ["A", "B"], "still picked where they landed");
+        assert!(e.is_open("F"), "and the frame shows them");
+        assert_eq!(
+            e.drop_layers(&mut doc, &Place::Into("A".into())),
+            Change::None,
+            "a layer holds none"
+        );
     }
 
     /// A board of one group holding one raster layer: `G[R]`.

@@ -52,6 +52,7 @@ use crate::skills;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
+use crate::tree::Place;
 use crate::text::{self, Atlas, Font};
 use crate::theme::{INKS, Theme};
 
@@ -206,6 +207,8 @@ struct App {
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
+    /// A press on a card that has not travelled far enough to lift it.
+    pressed: Option<Press>,
     /// A brush the pointer is carrying out of the library, if any. It
     /// does not outlive the release: there is nothing to settle.
     drag: Option<Dragging>,
@@ -370,6 +373,19 @@ struct Carry {
     held: bool,
     /// The lift, 0 to 1, walked toward `held` by the clock.
     t: f32,
+    /// Where the card would land if let go of now: the row under the
+    /// pointer says, and a place the picked layers may not go is none.
+    aim: Option<Place>,
+}
+
+/// A press on a card that may yet be a drag. Nothing is lifted until the
+/// pointer has travelled past the slop: a click picks, a second click
+/// renames, and neither of them is a card leaving the tree.
+struct Press {
+    id: String,
+    from: (f64, f64),
+    /// Between the press and the card's top edge: what it is held by.
+    grab_dy: f32,
 }
 
 impl Carry {
@@ -2040,6 +2056,11 @@ impl App {
                 active: self.editor().active(self.doc()),
                 picked: &picked,
                 lift: lift.as_ref(),
+                drop: self
+                    .carry
+                    .as_ref()
+                    .filter(|c| c.held)
+                    .and_then(|c| c.aim.as_ref()),
                 slides: &self.slides,
             };
             frame.extend(panel.prims(&showing, atlas, self.atlas_slot, &self.theme));
@@ -2205,21 +2226,17 @@ impl App {
                 // makes a Select a Rename.
                 let hit = self.second_press(hit);
                 self.panel_hit(hit.clone());
-                // A card taken by its name is picked up by the grip the
-                // press made, and follows the pointer from there. A card
-                // whose name is open is not also lifted: a field is not
-                // dragged.
+                // A card taken by its name may be about to be carried off,
+                // by the grip the press made — once the pointer has gone
+                // far enough to mean it. A card whose name is open is not:
+                // a field is not dragged.
                 if let PanelHit::Pick(id) = hit
                     && let Some(row) = panel.rows.iter().find(|r| r.id == id)
                 {
-                    self.carry = Some(Carry {
+                    self.pressed = Some(Press {
                         id,
+                        from: (x, y),
                         grab_dy: y as f32 - row.card.y,
-                        y: row.card.y,
-                        held: true,
-                        // A card caught while it was still settling
-                        // carries on from where it had got to.
-                        t: self.carry.as_ref().map_or(0.0, |c| c.t),
                     });
                 }
                 self.redraw();
@@ -2339,13 +2356,22 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
-        // A carried layer is left where the pointer put it; the canvas
-        // never saw the press, so it has nothing to end. The card runs
-        // the lift backwards into its row from here.
+        // A press on a card that never went anywhere was a click.
+        if button == Button::Left {
+            self.pressed = None;
+        }
+        // A carried layer lands where the drop says; the canvas never saw
+        // the press, so it has nothing to end. The card runs the lift
+        // backwards into its new row from here.
         if button == Button::Left
             && let Some(carry) = self.carry.as_mut().filter(|c| c.held)
         {
             carry.held = false;
+            if let Some(place) = carry.aim.take() {
+                let (editor, doc) = self.active();
+                let change = editor.drop_layers(doc, &place);
+                self.apply(change);
+            }
             // The stack the card was let go of in is a state to step
             // back to, and this is the only place that can say so: the
             // canvas never saw the press, so no `Change` comes back
@@ -2397,27 +2423,43 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
-        // A carried layer has the pointer to itself: the card follows
-        // it, the stack opens at whichever row is under it, and the
-        // canvas sees nothing.
+        // A press on a card lifts it once it has gone far enough to be a
+        // drag, and not before: a click or a double click never lifts.
+        if let Some(press) = &self.pressed {
+            let slop = DRAG_SLOP * self.view().map_or(1.0, |v| self.chrome(&v));
+            if (x - press.from.0).hypot(y - press.from.1) > slop {
+                let press = self.pressed.take().expect("just read");
+                self.carry = Some(Carry {
+                    id: press.id,
+                    grab_dy: press.grab_dy,
+                    y: y as f32 - press.grab_dy,
+                    held: true,
+                    // A card caught while it was still settling carries
+                    // on from where it had got to.
+                    t: self.carry.as_ref().map_or(0.0, |c| c.t),
+                    aim: None,
+                });
+            }
+        }
+        // A carried layer has the pointer to itself: the card follows it,
+        // the drop is read off the row under it, and the canvas sees
+        // nothing. Nothing moves until the button comes up.
         if self.carry.as_ref().is_some_and(|c| c.held) {
+            let aim = self.view().and_then(|view| {
+                let place = self.panel(&view)?.aim(y)?;
+                let doc = self.doc();
+                let (owner, _) = doc.place(&place)?;
+                let picked: Vec<String> = self
+                    .editor()
+                    .picked(doc)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                doc.can_move(&picked, owner).then_some(place)
+            });
             if let Some(carry) = &mut self.carry {
                 carry.y = y as f32 - carry.grab_dy;
-            }
-            // Among its own siblings only, for now: the row under the
-            // pointer names the place, when it stands in the same stack.
-            let aim = self.view().and_then(|view| {
-                let panel = self.panel(&view)?;
-                let carried = self.carry.as_ref()?.id.clone();
-                let over = panel.drop_row(y)?;
-                let (owner, index) = self.doc().locate(&over.id)?;
-                let (from, _) = self.doc().locate(&carried)?;
-                (owner == from).then_some(index)
-            });
-            if let Some(index) = aim {
-                let (editor, doc) = self.active();
-                let change = editor.move_layer_to(doc, index);
-                self.apply(change);
+                carry.aim = aim;
             }
             self.redraw();
             return self.update_cursor_icon();
@@ -2630,6 +2672,17 @@ impl App {
                 self.redraw();
             }
             Key::Named(NamedKey::Space) => self.active().0.hold_space(pressed),
+            // A card in the hand is put back where it came from: Esc is
+            // the drop that does not happen.
+            Key::Named(NamedKey::Escape)
+                if pressed && self.carry.as_ref().is_some_and(|c| c.held) =>
+            {
+                if let Some(carry) = &mut self.carry {
+                    carry.held = false;
+                    carry.aim = None;
+                }
+                self.redraw();
+            }
             Key::Named(NamedKey::Escape) if pressed => {
                 let (editor, doc) = self.active();
                 if editor.escape(doc) {
@@ -2769,12 +2822,14 @@ impl App {
         // came from: it was never seated, and the hand it is in was the
         // press's doing, not the drag's.
         self.drag = None;
-        // A layer the pointer was carrying stays where the window last
-        // saw it: the reorder was applied as it went, so there is
-        // nothing half-done to put back. The card still has to settle.
+        // A card the pointer was carrying goes back where it came from:
+        // nothing moves until a drop, and losing the window is not one.
+        // The card still has to settle.
+        self.pressed = None;
         let carrying = match self.carry.as_mut().filter(|c| c.held) {
             Some(carry) => {
                 carry.held = false;
+                carry.aim = None;
                 true
             }
             None => false,
@@ -3375,6 +3430,7 @@ pub fn run(
         shapes: Shapes::default(),
         shown_brush: None,
         carry: None,
+        pressed: None,
         drag: None,
         renaming: None,
         last_card: None,
