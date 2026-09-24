@@ -191,6 +191,8 @@ struct App {
     dock_icon_slot: Option<u32>,
     /// Where the brush icon sheet was uploaded, once it has been.
     icon_slot: u32,
+    /// Where the agents' logos were uploaded, once they have been.
+    agent_logo_slot: Option<u32>,
     /// Where each nib shape sits on the shape sheet, once it has been
     /// uploaded. Empty until then, and a stroke that names a shape lays
     /// a plain round nib meanwhile.
@@ -1603,10 +1605,11 @@ impl App {
         true
     }
 
-    /// The three image sheets the binary ships: illustrated dock tools,
-    /// brush icons for the library, and nib shapes for the canvas. They
-    /// are raster art, the same at every scale, so each is uploaded once
-    /// into a slot of its own and never replaced like the glyph atlas is.
+    /// The four image sheets the binary ships: illustrated dock tools,
+    /// brush icons for the library, the agents' logos for the export
+    /// dialog, and nib shapes for the canvas. They are raster art, the
+    /// same at every scale, so each is uploaded once into a slot of its
+    /// own and never replaced like the glyph atlas is.
     fn ensure_sheets(&mut self) {
         if self.dock_icon_slot.is_none() {
             const DOCK_ICONS: &[u8] = include_bytes!("../assets/dock/icons.png");
@@ -1626,6 +1629,16 @@ impl App {
             self.upload_sheet("brush icons", ICONS, Gfx::upload_icons, |app, slot| {
                 app.icon_slot = slot;
             });
+        }
+        if self.agent_logo_slot.is_none() {
+            const LOGOS: &[u8] = include_bytes!("../assets/agents/logos.png");
+            // Without it a row keeps its logo's place and says the rest.
+            self.upload_sheet(
+                "agent logos",
+                LOGOS,
+                Gfx::upload_agent_logos,
+                |app, slot| app.agent_logo_slot = Some(slot),
+            );
         }
         if self.shapes.cells.is_empty() {
             const SHAPES: &[u8] = include_bytes!("../assets/brushes/shapes.png");
@@ -1852,6 +1865,7 @@ impl App {
                 &sending.line,
                 atlas,
                 self.atlas_slot,
+                self.agent_logo_slot,
                 &self.theme,
             ));
         }
@@ -2937,6 +2951,7 @@ pub fn run(
         grab: None,
         dock_icon_slot: None,
         icon_slot: 0,
+        agent_logo_slot: None,
         shapes: Shapes::default(),
         shown_brush: None,
         carry: None,

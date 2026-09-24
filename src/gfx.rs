@@ -247,6 +247,8 @@ pub struct Gfx {
     dock_icons: Option<u32>,
     /// The sheet of nib shapes, on the same terms as the icons.
     shapes: Option<u32>,
+    /// The agents' makers' marks, one cell each, for the export dialog.
+    agent_logos: Option<u32>,
     /// The window-sized texture a group is composited in, once a frame
     /// has needed one. Rebuilt when the window changes size; like the
     /// atlas, a slot of its own and never an entry in `slots`.
@@ -448,6 +450,7 @@ impl Gfx {
             icons: None,
             dock_icons: None,
             shapes: None,
+            agent_logos: None,
             atlas: None,
             scratch: None,
             sheet: None,
@@ -588,6 +591,16 @@ impl Gfx {
         }
         let slot = self.upload_sheet(bmp)?;
         self.dock_icons = Some(slot);
+        Ok(slot)
+    }
+
+    /// Uploads the sheet of agent logos and answers its stable slot.
+    pub fn upload_agent_logos(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        if let Some(slot) = self.agent_logos {
+            return Ok(slot);
+        }
+        let slot = self.upload_sheet(bmp)?;
+        self.agent_logos = Some(slot);
         Ok(slot)
     }
 

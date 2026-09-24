@@ -66,6 +66,13 @@ impl Agent {
         }
     }
 
+    /// Which cell of the logo sheet carries its maker's mark: the sheet
+    /// is laid out in [`KNOWN`]'s order. One herdr knows and this build
+    /// does not has none.
+    pub fn mark(&self) -> Option<usize> {
+        KNOWN.iter().position(|k| *k == self.kind)
+    }
+
     /// Whether a prompt can be handed to it.
     pub fn reachable(&self) -> bool {
         self.reach != Reach::None
@@ -423,6 +430,15 @@ mod tests {
         assert_eq!(called("opencode"), "OpenCode");
         assert_eq!(called("crush"), "Crush");
         assert_eq!(called("gemini"), "Gemini CLI");
+    }
+
+    #[test]
+    fn each_known_agent_has_a_cell_of_the_logo_sheet_in_the_order_it_is_known() {
+        let cell = |kind| Agent::at(kind, "/w/a", Reach::None).mark();
+        for (i, kind) in KNOWN.iter().enumerate() {
+            assert_eq!(cell(kind), Some(i));
+        }
+        assert_eq!(cell("pi"), None, "a mark nobody drew is no mark");
     }
 
     #[test]

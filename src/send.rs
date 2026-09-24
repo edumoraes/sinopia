@@ -13,7 +13,7 @@ use crate::theme::Theme;
 /// Logical px, all of them.
 const WIDTH: f32 = 640.0;
 const PADDING: f32 = 12.0;
-const ROW_H: f32 = 30.0;
+const ROW_H: f32 = 34.0;
 const FIELD_H: f32 = 28.0;
 const GAP: f32 = 6.0;
 const RADIUS: f32 = 12.0;
@@ -23,6 +23,20 @@ const TITLE_H: f32 = 24.0;
 const MARGIN: f32 = 24.0;
 /// Between an agent's name and the folder it is working in.
 const NAME_GAP: f32 = 10.0;
+/// A maker's mark on a row, square, and the room between it and the
+/// name. Half the sheet's 40 px cell, so scale 1 samples it at an exact
+/// halving and scale 2 one to one.
+const LOGO: f32 = 20.0;
+const LOGO_GAP: f32 = 10.0;
+/// A mark's tile, when an agent has no mark of its own to put on one.
+const TILE_RADIUS: f32 = 5.0;
+
+/// Cell `i` of the logo sheet, which holds one square per agent in
+/// [`crate::agents::KNOWN`]'s order.
+fn logo_uv(i: usize) -> [f32; 4] {
+    let n = crate::agents::KNOWN.len() as f32;
+    [i as f32 / n, 0.0, (i + 1) as f32 / n, 1.0]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -126,7 +140,10 @@ impl Panel {
 
     /// `target` is which row wears the ring; `folder` is the field when
     /// there is one, and `line` is the instruction. The panel holds
-    /// neither — `app` owns them, as it owns every other field.
+    /// neither — `app` owns them, as it owns every other field. `logos`
+    /// is where the sheet of makers' marks was uploaded, once it has
+    /// been: until then a row keeps the mark's place empty, so nothing
+    /// moves when it lands.
     #[allow(clippy::too_many_arguments)]
     pub fn prims(
         &self,
@@ -136,6 +153,7 @@ impl Panel {
         line: &Field,
         atlas: &Atlas,
         slot: u32,
+        logos: Option<u32>,
         theme: &Theme,
     ) -> Vec<Prim> {
         let corner = theme.corner(RADIUS, 1.0);
@@ -158,12 +176,55 @@ impl Panel {
             ));
             // An agent nothing can reach still takes the files; the row
             // says so by being muted rather than by being missing.
-            let ink = if a.reachable() { theme.ink } else { theme.muted };
+            let ink = if a.reachable() {
+                theme.ink
+            } else {
+                theme.muted
+            };
             let baseline = atlas.baseline_in(*r);
-            // What it is, then where: the name the person knows it by,
-            // and the project it is in, which is what tells two rows of
-            // one agent apart.
-            let at = r.x + PADDING * s;
+            // Its maker's mark first, which is what the eye finds before
+            // it reads anything. Dimmed with the row it stands on.
+            let mark = ScreenRect {
+                x: r.x + PADDING * s,
+                y: r.y + (r.h - LOGO * s) / 2.0,
+                w: LOGO * s,
+                h: LOGO * s,
+            };
+            let tint = if a.reachable() { 1.0 } else { 0.5 };
+            match (a.mark(), logos) {
+                (Some(cell), Some(sheet)) => {
+                    out.push(Prim::glyph(
+                        mark,
+                        logo_uv(cell),
+                        sheet,
+                        [1.0, 1.0, 1.0, tint],
+                    ));
+                }
+                (Some(_), None) => {}
+                // An agent herdr knows and nobody here drew a mark for
+                // still gets one: its initial, on a tile of its own.
+                (None, _) => {
+                    out.push(Prim::rounded(
+                        mark,
+                        theme.corner(TILE_RADIUS, s),
+                        theme.border,
+                    ));
+                    let initial: String = a
+                        .name()
+                        .chars()
+                        .take(1)
+                        .flat_map(char::to_uppercase)
+                        .collect();
+                    let x = mark.x + (mark.w - atlas.measure(&initial)) / 2.0;
+                    for g in atlas.layout(&initial, x, atlas.baseline_in(mark)) {
+                        out.push(Prim::glyph(g.rect, g.uv, slot, ink).clipped(*r));
+                    }
+                }
+            }
+            // Then what it is, and where: the name the person knows it
+            // by, and the project it is in, which is what tells two rows
+            // of one agent apart.
+            let at = mark.x + mark.w + LOGO_GAP * s;
             for g in atlas.layout(a.name(), at, baseline) {
                 out.push(Prim::glyph(g.rect, g.uv, slot, ink).clipped(*r));
             }
@@ -185,7 +246,11 @@ impl Panel {
             out.push(Prim::rounded(rect, theme.corner(ROW_RADIUS, 1.0), theme.bg));
             out.extend(field.prims(rect, atlas, slot, theme, false));
         }
-        out.push(Prim::rounded(self.line, theme.corner(ROW_RADIUS, 1.0), theme.bg));
+        out.push(Prim::rounded(
+            self.line,
+            theme.corner(ROW_RADIUS, 1.0),
+            theme.bg,
+        ));
         out.extend(line.prims(self.line, atlas, slot, theme, true));
         out
     }
@@ -278,8 +343,8 @@ mod tests {
             ..quiet.clone()
         };
         let p = Panel::layout(viewport(), 1.0, 1, false);
-        let without = p.prims(&[quiet], 0, None, &Field::new(""), &atlas, 0, &theme);
-        let with = p.prims(&[busy], 0, None, &Field::new(""), &atlas, 0, &theme);
+        let without = p.prims(&[quiet], 0, None, &Field::new(""), &atlas, 0, None, &theme);
+        let with = p.prims(&[busy], 0, None, &Field::new(""), &atlas, 0, None, &theme);
         assert!(
             with.len() > without.len(),
             "the status is written when there is one"
@@ -302,9 +367,10 @@ mod tests {
         let p = Panel::layout(viewport(), 1.0, agents.len(), false);
         let folders = crate::agents::folders(&agents);
         for ((a, folder), row) in agents.iter().zip(&folders).zip(&p.rows) {
-            // The name starts one padding in and the status ends one
-            // padding from the far edge, so both have to fit between.
-            let room = row.w - PADDING * 2.0 - atlas.measure("working") - PADDING;
+            // The mark and the name start one padding in and the status
+            // ends one padding from the far edge, so all of it has to
+            // fit between.
+            let room = row.w - PADDING * 2.0 - LOGO - LOGO_GAP - atlas.measure("working") - PADDING;
             let said = atlas.measure(a.name()) + NAME_GAP + atlas.measure(folder);
             assert!(said <= room, "{a:?} does not fit its row beside a status");
         }
@@ -329,11 +395,84 @@ mod tests {
             crate::agents::Reach::None,
         );
         let p = Panel::layout(viewport(), 1.0, 1, false);
-        let prims = p.prims(&[a], 0, None, &Field::new(""), &atlas, 7, &theme);
+        let prims = p.prims(&[a], 0, None, &Field::new(""), &atlas, 7, None, &theme);
         let inked = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
         assert_eq!(
             glyphs_in(&prims, p.rows[0], 7),
             inked("Claude Code") + inked("project")
+        );
+    }
+
+    #[test]
+    fn a_row_wears_its_agents_mark_from_the_logo_sheet() {
+        let atlas = Atlas::build(&crate::text::Font::bundled(), 13);
+        let theme = crate::theme::Theme::light();
+        let codex = crate::agents::Agent::at("codex", "/w/a", crate::agents::Reach::None);
+        let p = Panel::layout(viewport(), 1.0, 1, false);
+        let prims = p.prims(
+            &[codex],
+            0,
+            None,
+            &Field::new(""),
+            &atlas,
+            0,
+            Some(9),
+            &theme,
+        );
+        let marks: Vec<&Prim> = prims.iter().filter(|q| q.slot == 9).collect();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].uv, logo_uv(1), "codex is the second cell");
+        let m = marks[0].bounds();
+        assert!(p.rows[0].contains_rect(&m), "{m:?}");
+        assert_eq!((m.w, m.h), (LOGO, LOGO));
+        let (_, cy) = p.rows[0].center();
+        assert!((m.y + m.h / 2.0 - cy).abs() < 0.5, "centred on the row");
+    }
+
+    #[test]
+    fn the_name_stands_in_one_place_whatever_mark_is_beside_it() {
+        let atlas = Atlas::build(&crate::text::Font::bundled(), 13);
+        let theme = crate::theme::Theme::light();
+        let p = Panel::layout(viewport(), 1.0, 1, false);
+        let at = |kind, logos| {
+            let a = crate::agents::Agent::at(kind, "/w/a", crate::agents::Reach::None);
+            let prims = p.prims(&[a], 0, None, &Field::new(""), &atlas, 7, logos, &theme);
+            // The letters, not the tile: the tile is the mark's.
+            prims
+                .iter()
+                .filter(|q| {
+                    q.slot == 7 && q.clip == [p.rows[0].x, p.rows[0].y, p.rows[0].w, p.rows[0].h]
+                })
+                .filter(|q| q.bounds().x > p.rows[0].x + PADDING + LOGO)
+                .map(|q| q.bounds().x)
+                .fold(f32::INFINITY, f32::min)
+        };
+        let with = at("claude", Some(9));
+        assert!(
+            with >= p.rows[0].x + PADDING + LOGO + LOGO_GAP - 1.0,
+            "{with}"
+        );
+        assert_eq!(
+            at("claude", None),
+            with,
+            "a sheet not uploaded yet moves nothing"
+        );
+        assert_eq!(at("pi", Some(9)), with, "nor does a mark nobody drew");
+    }
+
+    #[test]
+    fn an_agent_nobody_drew_a_mark_for_gets_its_initial_on_a_tile() {
+        let atlas = Atlas::build(&crate::text::Font::bundled(), 13);
+        let theme = crate::theme::Theme::light();
+        let pi = crate::agents::Agent::at("pi", "/w/a", crate::agents::Reach::Herdr("p".into()));
+        let p = Panel::layout(viewport(), 1.0, 1, false);
+        let prims = p.prims(&[pi], 0, None, &Field::new(""), &atlas, 7, Some(9), &theme);
+        assert!(prims.iter().all(|q| q.slot != 9), "no cell of the sheet");
+        let inked = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
+        assert_eq!(
+            glyphs_in(&prims, p.rows[0], 7),
+            1 + inked("pi") + inked("a"),
+            "the initial, the name, the folder"
         );
     }
 }

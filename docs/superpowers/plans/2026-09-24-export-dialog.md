@@ -21,11 +21,11 @@ implemented.
 
 - [x] 0. CI: a workflow that builds, lints (`-D warnings`) and tests
 - [x] 1. Wider dialog: 640 logical px, never past the window's margin
-- [ ] 2. Agent rows: official logo + agent name + the cwd's last directory
+- [x] 2. Agent rows: official logo + agent name + the cwd's last directory
   - [x] 2a. `Agent::name`, `Agent::folder`
   - [x] 2b. rows draw name and folder (status kept at the far end)
-  - [ ] 2c. logos sourced from the vendors, sheet built by a tool, embedded
-  - [ ] 2d. a row draws its logo from the sheet
+  - [x] 2c. logos sourced from the vendors, sheet built by a tool, embedded
+  - [x] 2d. a row draws its logo from the sheet
 - [ ] 3. Copy and paste in the input
   - [x] 3a. `Field` selection: anchor, extend, select all, replace
   - [ ] 3b. pasted text cleaned for the field it lands in
