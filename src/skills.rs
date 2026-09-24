@@ -62,7 +62,8 @@ pub struct Harness {
     project: &'static [&'static str],
     walk: Walk,
     /// A skill is called by its folder's name, whatever its frontmatter
-    /// says — Claude Code's rule, where `name` is only a label.
+    /// says — Claude Code's rule, where `name` is only a label, for a
+    /// plugin's skills as much as for the person's own.
     by_folder: bool,
     /// Claude Code's plugins bring skills of their own.
     plugins: bool,
@@ -193,7 +194,7 @@ impl Harness {
     /// calls it — or none, when it may not be called from a prompt or its
     /// name could not be typed after the call's own mark.
     pub fn skill(&self, front: &Front, folder: &str, plugin: Option<&str>) -> Option<Skill> {
-        let own = if self.by_folder && plugin.is_none() {
+        let own = if self.by_folder {
             folder
         } else {
             front.name.as_deref().unwrap_or(folder)
@@ -717,13 +718,16 @@ mod tests {
     }
 
     #[test]
-    fn a_plugins_skill_is_called_through_the_plugin() {
-        let front = frontmatter("---\nname: skill-gen\ndescription: d\n---\n").unwrap();
+    fn a_plugins_skill_is_called_through_the_plugin_by_its_folder() {
+        // The case on this machine: firecrawl's `firecrawl-cli` folder
+        // says `name: firecrawl`, and Claude Code lists the skill as
+        // `firecrawl:firecrawl-cli`.
+        let front = frontmatter("---\nname: firecrawl\ndescription: d\n---\n").unwrap();
         let claude = harness("claude").unwrap();
         let s = claude
-            .skill(&front, "skill-gen", Some("firecrawl"))
+            .skill(&front, "firecrawl-cli", Some("firecrawl"))
             .unwrap();
-        assert_eq!(s.name, "firecrawl:skill-gen");
+        assert_eq!(s.name, "firecrawl:firecrawl-cli");
     }
 
     #[test]
