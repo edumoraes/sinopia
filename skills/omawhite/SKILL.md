@@ -6,16 +6,18 @@ description: |
   diagram they have drawn and wants you to look at it; when they ask what is
   on the board; or when they ask you to put a diagram, a flow, a layout or a
   drawing onto the board. Exports a frame to yourself as PNG + JSON + an
-  inventory, and grafts new frames back on. Triggers: omawhite, whiteboard,
-  the board, this frame, read my sketch, draw this on the board.
+  inventory, and grafts new frames back on; lists and arranges the board's
+  layers when the person asks. Triggers: omawhite, whiteboard, the board,
+  this frame, read my sketch, draw this on the board, the layers.
 ---
 
 # omawhite, from an agent's side
 
 omawhite is a local whiteboard. A **frame** is a named, bounded area on it
-holding drawings — that is the only unit you can read and the only unit you
-can write. You never touch the rest of the board, and you never draw into a
-frame someone else made.
+holding drawings — that is the unit you read and the unit you write, and you
+never draw into a frame someone else made. The **layers** that hold
+everything on the board can be listed and arranged with `omawhite layer`, but
+only for what the person asked: the board is theirs.
 
 Everything below needs a **board open on this desktop**. Without one every
 command exits non-zero saying so; do not try to start one, ask the person to
@@ -156,6 +158,42 @@ Prefer, in order: an image you rendered with the labels in it; shapes plus
 paths for structure; and a plain `board.md`-style summary in your reply for
 anything the picture cannot carry.
 
+## The layers, when the person asks
+
+`omawhite layer list` prints the whole tree, top first: each layer's `id`,
+`name`, `kind` (`raster`, `vector`, `group`, `frame`), the `owner` holding it
+(`null` on the board's root) and its `depth`, `visible` (its own eye) and
+`shown` (on show at all), `locked`, `opacity` (a fraction), `blend`,
+`color`, whether it is `active` or `picked`, and how many `elements` stand on
+it. Name a layer by its id, or by a name only it goes by — a name two layers
+share is refused, naming both ids.
+
+```sh
+omawhite layer list
+omawhite layer add --name "Notes" [--group] [--above <layer>]
+omawhite layer rename <layer> <name>
+omawhite layer move <layer>... --into <group|frame> | --above <layer> | --below <layer>
+omawhite layer move <layer>... --front | --forward | --backward | --back
+omawhite layer show|hide|lock|unlock <layer>...
+omawhite layer opacity 50 <layer>...          # percent
+omawhite layer blend multiply <layer>...      # normal, multiply, screen, overlay, … pass-through
+omawhite layer color red <layer>...           # none, red, orange, yellow, green, blue, violet, gray
+omawhite layer group|duplicate|remove <layer>...
+omawhite layer ungroup <group>...
+omawhite layer merge <layer>...               # siblings into the topmost, or a group into one
+omawhite layer merge-down <layer>
+omawhite layer merge-visible | flatten        # flatten drops what is hidden
+omawhite layer select|expand|collapse <layer>...
+```
+
+A change answers `{"ev":"done","ids":[…]}` — the layers it left picked: the
+new layer, the group, the copies, what a merge kept. It acts as the same
+click in the panel would, and each is one step the person can undo. What a
+lock keeps, a move the tree refuses, or a merge that merges nothing is
+`denied` with the reason, and nothing changed. `remove`, `merge` and
+`flatten` take work away: list first, and do them only when that is what was
+asked.
+
 ## Errors you will actually hit
 
 | reason | what to do |
@@ -166,9 +204,13 @@ anything the picture cannot carry.
 | `element "X" is on layer "Y", which is not one of frame …` | put it on a layer inside the frame |
 | `refusing to export into …` | pick a normal project directory for `--to` |
 | `image … is neither in the store nor at …` | write `blobs/<sha256>` beside the fragment |
+| `no layer "X" on the board that is open` | `omawhite layer list`, and name it by id |
+| `N layers go by "X"` | name the one you mean by its id |
+| `"X" is locked, and a lock keeps …` | the person locked it: ask before unlocking |
 
 ## Undo
 
 Anything you graft is one undo step for the person: `Ctrl+Z` takes your frame
-back off the board. You cannot undo from here, and you cannot delete or move
-anything. If you got it wrong, say so and graft a corrected frame.
+back off the board, and every `omawhite layer` change is one step too. You
+cannot undo from here. If you got it wrong, say so — and graft a corrected
+frame, or put the layers back the way the listing you took first had them.

@@ -163,6 +163,26 @@ The plugin speaks intent. The child does not send strokes over the socket.
 { "v": 1, "op": "frames" }
 { "v": 1, "op": "read_frame", "id": "01J…", "dir": "/home/you/Work/foo" }
 { "v": 1, "op": "add_frame", "path": "/home/you/Work/foo/frame.json" }
+{ "v": 1, "op": "layers" }
+{ "v": 1, "op": "add_layer", "kind": "group", "name": "Sky", "above": "01J…" }
+{ "v": 1, "op": "remove_layers", "ids": ["01J…"] }
+{ "v": 1, "op": "rename_layer", "id": "01J…", "name": "Sky" }
+{ "v": 1, "op": "move_layers", "ids": ["01J…"], "place": "into", "target": "01K…" }
+{ "v": 1, "op": "arrange_layers", "ids": ["01J…"], "how": "front" }
+{ "v": 1, "op": "show_layers", "ids": ["01J…"], "visible": false }
+{ "v": 1, "op": "lock_layers", "ids": ["01J…"], "locked": true }
+{ "v": 1, "op": "set_opacity", "ids": ["01J…"], "opacity": 0.5 }
+{ "v": 1, "op": "set_blend", "ids": ["01J…"], "blend": "multiply" }
+{ "v": 1, "op": "set_color", "ids": ["01J…"], "color": "red" }
+{ "v": 1, "op": "group_layers", "ids": ["01J…", "01K…"] }
+{ "v": 1, "op": "ungroup", "ids": ["01G…"] }
+{ "v": 1, "op": "duplicate_layers", "ids": ["01J…"] }
+{ "v": 1, "op": "merge_layers", "ids": ["01J…", "01K…"] }
+{ "v": 1, "op": "merge_down", "id": "01J…" }
+{ "v": 1, "op": "merge_visible" }
+{ "v": 1, "op": "flatten" }
+{ "v": 1, "op": "select_layers", "ids": ["01J…"] }
+{ "v": 1, "op": "open_layers", "ids": ["01G…"], "open": true }
 ```
 
 The last three are a **code agent's** own door, and they are unlike
@@ -180,6 +200,19 @@ which is exactly what a `read_frame` writes, so a page read off the board
 can be handed straight back. It arrives as a new frame — every id minted
 again — and the board picks where it lands, an agent having no way to see
 what it would land on.
+
+The **layer ops** are the command line's hold on the layers, and they
+go through the same door as an agent's three: handed to the event loop
+and waited on. `layers` answers the whole tree; every other one changes
+it, the way the panel would — the layers named are picked, then acted
+on — as one step of the history, and answers the layers it left picked.
+What a lock keeps, a move the tree refuses or a merge that merges
+nothing is `denied` with the reason: a script has to be able to tell
+that nothing happened. They speak **ids**, never names — two layers may
+go by one name — and `omawhite layer` resolves a name with a listing
+first, refusing one two layers go by. `place` is `into`, `above` or
+`below`, `how` is `front`, `forward`, `backward` or `back`, `blend` and
+`color` are written as a board writes them, and `opacity` is a fraction.
 
 `colors` is optional, and its absence is not a missing field but a
 different sentence: with colours a host is dressing the board in its
@@ -199,6 +232,8 @@ error. `omawhite --theme` is the CLI half, and an Omarchy
 { "v": 1, "ev": "exited", "code": 0 }
 { "v": 1, "ev": "frames", "frames": [ { "id": "01J…", "name": "Auth Flow", "x": 0, "y": 0, "w": 400, "h": 240, "elements": 3 } ] }
 { "v": 1, "ev": "framed", "id": "01J…", "name": "Auth Flow" }
+{ "v": 1, "ev": "layers", "layers": [ { "id": "01J…", "name": "Sky", "kind": "raster", "owner": null, "depth": 0, "visible": true, "shown": true, "locked": false, "opacity": 1.0, "blend": "normal", "color": "none", "active": true, "picked": true, "elements": 1 } ] }
+{ "v": 1, "ev": "done", "ids": ["01J…"] }
 ```
 
 An answer that would not fit a frame is `denied` naming the cap, never a
@@ -224,6 +259,12 @@ omawhite --shutdown
 omawhite agent frames                     # what frames the open board has
 omawhite agent read <frame> [--to DIR]    # export one, by id or by name
 omawhite agent add <fragment.json>        # graft a frame onto the board
+
+omawhite layer list                       # the whole tree, top first
+omawhite layer <verb> [<layer>...]        # add, remove, rename, move, show, hide, lock,
+                                          # unlock, opacity, blend, color, group, ungroup,
+                                          # duplicate, merge, merge-down, merge-visible,
+                                          # flatten, select, expand, collapse
 ```
 
 The `agent` verbs are a subcommand and not three more flags: everything
