@@ -28,8 +28,8 @@ implemented.
   - [x] 2d. a row draws its logo from the sheet
 - [ ] 3. Copy and paste in the input
   - [x] 3a. `Field` selection: anchor, extend, select all, replace
-  - [ ] 3b. pasted text cleaned for the field it lands in
-  - [ ] 3c. clipboard reads text (`Ctrl+V`), never types a `v`
+  - [x] 3b. pasted text cleaned for the field it lands in
+  - [x] 3c. clipboard reads text (`Ctrl+V`), never types a `v`
   - [ ] 3d. clipboard writes text (`Ctrl+C`, `Ctrl+X`)
 - [ ] 4. Multi-line input that grows, wraps at a maximum width, and
       scrolls past 20 lines

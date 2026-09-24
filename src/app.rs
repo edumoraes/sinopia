@@ -102,6 +102,8 @@ enum UserEvent {
         bytes: Vec<u8>,
         bitmap: Bitmap,
     },
+    /// Clipboard text, for the field that asked for it.
+    PastedText(String),
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
 }
@@ -965,6 +967,35 @@ impl App {
         }
     }
 
+    /// The field the keyboard is writing into, if one is: the export
+    /// dialog's, or a layer's name being typed.
+    fn field_in_hand(&mut self) -> Option<&mut Field> {
+        if let Some(sending) = self.sending.as_mut() {
+            return Some(sending.writing());
+        }
+        self.renaming.as_mut().map(|(_, field)| field)
+    }
+
+    /// Asks the clipboard for text, for the field in hand. It arrives
+    /// later, as [`UserEvent::PastedText`].
+    fn paste_text(&self) {
+        match &self.clipboard {
+            Some(clipboard) => {
+                clipboard.paste_text();
+            }
+            None => log::debug!("paste: no clipboard on this display"),
+        }
+    }
+
+    /// Clipboard text came back. The field that asked for it may have
+    /// closed since, and then the text has nowhere to go and goes nowhere.
+    fn pasted_text(&mut self, text: &str) {
+        if let Some(field) = self.field_in_hand() {
+            field.paste(text);
+            self.redraw();
+        }
+    }
+
     /// Asks the clipboard for an image. The bytes arrive later, as
     /// [`UserEvent::Pasted`].
     fn paste(&mut self) {
@@ -1356,7 +1387,9 @@ impl App {
             agents: found,
             target: 0,
             folder,
-            line: Field::new(""),
+            // No longer than the send would take: a field never holds
+            // what the thing it feeds would refuse.
+            line: Field::new("").limited(agents::PROMPT_MAX),
             focus: send::Hit::Line,
         });
         self.redraw();
@@ -2230,6 +2263,16 @@ impl App {
             // The send panel is modal: it takes the keyboard before
             // anything else, including the rename that cannot be open
             // under it.
+            // The clipboard's keys come first for whichever field has the
+            // keyboard: they are the window's to answer, not the field's.
+            Key::Character(c)
+                if pressed
+                    && self.field_in_hand().is_some()
+                    && self.modifiers.state().control_key()
+                    && c.eq_ignore_ascii_case("v") =>
+            {
+                self.paste_text();
+            }
             _ if self.sending.is_some() && pressed => {
                 let Some(sending) = self.sending.as_mut() else {
                     return;
@@ -2493,6 +2536,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let proxy = self.proxy.clone();
                 let sink: clipboard::Sink = std::sync::Arc::new(move |p: Paste| {
+                    if clipboard::is_text(&p.mime) {
+                        let text = String::from_utf8_lossy(&p.bytes).into_owned();
+                        return proxy.send_event(UserEvent::PastedText(text)).is_ok();
+                    }
                     // Decoding a 4K screenshot is tens of milliseconds:
                     // it happens here, on the paste thread, not on the loop.
                     match bitmap::decode(&p.bytes) {
@@ -2686,6 +2733,7 @@ impl App {
             UserEvent::Gesture(g) => return self.gestured(g),
             UserEvent::Pen(p) => return self.pen(p),
             UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
+            UserEvent::PastedText(text) => return self.pasted_text(&text),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
         };
         match req {

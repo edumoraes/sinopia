@@ -18,6 +18,33 @@ fn highlight(theme: &Theme) -> crate::scene::Rgba {
     crate::scene::with_alpha(theme.selection, 0.3)
 }
 
+/// What a paste leaves once it is in a field. A line breaks where the
+/// source broke it — as `\n`, however the source spelt it — in a field
+/// that holds lines, and runs on after a space in one that does not,
+/// where a break at the very end is only where the copy stopped. A tab
+/// is the spaces it stood for. Anything else that is not a printable
+/// character is dropped: a field holds only what it can show, and an
+/// escape pasted out of a terminal is not text anybody meant.
+fn clean(text: &str, lines: bool) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let text = if lines {
+        text.as_str()
+    } else {
+        text.trim_end_matches('\n')
+    };
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' if lines => out.push('\n'),
+            '\n' => out.push(' '),
+            '\t' => out.push_str("    "),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Field {
     value: String,
@@ -29,6 +56,10 @@ pub struct Field {
     /// selection is everything between it and the caret, whichever way
     /// round; `None`, or the caret's own place, is no selection at all.
     anchor: Option<usize>,
+    /// Whether it holds lines: what a paste's line breaks become.
+    lines: bool,
+    /// The most it holds, in bytes, when it has a most.
+    limit: Option<usize>,
 }
 
 impl Field {
@@ -39,6 +70,18 @@ impl Field {
             value: value.to_owned(),
             caret: value.chars().count(),
             anchor: None,
+            lines: false,
+            limit: None,
+        }
+    }
+
+    /// The same field, holding no more than `bytes`: whatever is typed or
+    /// pasted past that is not taken, so a field never holds what the
+    /// thing it feeds would refuse.
+    pub fn limited(self, bytes: usize) -> Field {
+        Field {
+            limit: Some(bytes),
+            ..self
         }
     }
 
@@ -91,12 +134,25 @@ impl Field {
     }
 
     /// `s` at the caret, over the selection if there is one, with the
-    /// caret after it — which is what a paste is.
+    /// caret after it — or as much of it as the limit leaves room for,
+    /// cut between two characters and never inside one.
     pub fn insert_str(&mut self, s: &str) {
         self.take_selection();
+        let room = self.limit.map_or(usize::MAX, |l| l.saturating_sub(self.value.len()));
+        let mut fits = s.len().min(room);
+        while !s.is_char_boundary(fits) {
+            fits -= 1;
+        }
+        let s = &s[..fits];
         let at = self.byte(self.caret);
         self.value.insert_str(at, s);
         self.caret += s.chars().count();
+    }
+
+    /// What the clipboard held, put in the way this field holds text:
+    /// see [`clean`].
+    pub fn paste(&mut self, text: &str) {
+        self.insert_str(&clean(text, self.lines));
     }
 
     pub fn backspace(&mut self) {
@@ -375,6 +431,39 @@ mod tests {
         assert_eq!(f.value(), "draw| the auth |flow");
         f.word_right(true);
         assert_eq!(f.selected(), " the");
+    }
+
+    #[test]
+    fn a_paste_into_a_line_runs_its_lines_on_with_a_space() {
+        let mut f = Field::new("");
+        f.paste("draw\nthe\r\nflow\tnow\n");
+        assert_eq!(f.value(), "draw the flow    now", "and no trailing break");
+    }
+
+    #[test]
+    fn a_paste_drops_what_a_field_cannot_show() {
+        // An escape pasted out of a terminal is not text anybody meant,
+        // and a field holds only what it can show.
+        let mut f = Field::new("");
+        f.paste("red\x1b[31m\x07bell\u{0}");
+        assert_eq!(f.value(), "red[31mbell");
+    }
+
+    #[test]
+    fn a_paste_past_the_limit_is_cut_between_characters() {
+        let mut f = Field::new("ab").limited(5);
+        f.paste("çççç");
+        assert_eq!(f.value(), "abç", "another ç would make six bytes");
+    }
+
+    #[test]
+    fn typing_at_the_limit_types_nothing_but_a_selection_makes_room() {
+        let mut f = Field::new("abcde").limited(5);
+        f.insert('f');
+        assert_eq!(f.value(), "abcde");
+        f.left(true);
+        f.insert('X');
+        assert_eq!(f.value(), "abcdX", "the selection is spent first");
     }
 
     #[test]

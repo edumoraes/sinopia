@@ -43,6 +43,28 @@ pub type Sink = Arc<dyn Fn(Paste) -> bool + Send + Sync>;
 /// choice for a board.
 const IMAGE_MIMES: [&str; 3] = ["image/png", "image/webp", "image/jpeg"];
 
+/// Text as a clipboard owner may name it, best first: the MIME type with
+/// its charset said, then the UTF-8 atom X11 programs offer, then plain
+/// text, which on Wayland is UTF-8 in practice.
+const TEXT_MIMES: [&str; 3] = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+
+/// How many bytes of text one paste may bring in. Every field that takes
+/// one is capped far below this; the ceiling is for the read.
+const MAX_TEXT_BYTES: u64 = 1024 * 1024;
+
+/// The first of `wanted` that is on offer.
+fn best(offered: &[String], wanted: &[&'static str]) -> Option<&'static str> {
+    wanted
+        .iter()
+        .find(|w| offered.iter().any(|m| m == *w))
+        .copied()
+}
+
+/// Whether a paste that arrived as `mime` is text, and not an image.
+pub fn is_text(mime: &str) -> bool {
+    TEXT_MIMES.contains(&mime)
+}
+
 /// How many bytes one image may bring in. Past this the read gives up
 /// instead of following a hostile or broken owner forever. It is the
 /// ceiling for image bytes however they arrive — the clipboard here, and
@@ -117,8 +139,20 @@ impl Clipboard {
     /// asked for — the bytes themselves arrive on the sink, later. Nothing
     /// happens, and nothing is reported, when the clipboard holds no image.
     pub fn paste_image(&self) -> bool {
-        let Some((offer, mime)) = self.image_on_offer() else {
-            log::debug!("clipboard: no image in the selection");
+        self.receive(&IMAGE_MIMES, MAX_PASTE_BYTES)
+    }
+
+    /// Asks for the selection as text, on the same terms: the text
+    /// arrives on the sink, and a clipboard holding none asks nothing.
+    pub fn paste_text(&self) -> bool {
+        self.receive(&TEXT_MIMES, MAX_TEXT_BYTES)
+    }
+
+    /// Asks the owner for the selection as the best of `wanted` it offers
+    /// and reads the answer, at most `cap` bytes of it, off the loop.
+    fn receive(&self, wanted: &[&'static str], cap: u64) -> bool {
+        let Some((offer, mime)) = self.on_offer(wanted) else {
+            log::debug!("clipboard: nothing of {wanted:?} in the selection");
             return false;
         };
         let (reader, writer) = match std::io::pipe() {
@@ -140,7 +174,7 @@ impl Clipboard {
         let sink = self.sink.clone();
         if let Err(e) = std::thread::Builder::new()
             .name("paste".into())
-            .spawn(move || match read_all(reader) {
+            .spawn(move || match read_all(reader, cap) {
                 Ok(bytes) => {
                     sink(Paste { mime, bytes });
                 }
@@ -153,29 +187,26 @@ impl Clipboard {
         true
     }
 
-    /// The current offer and the best image type it lists.
-    fn image_on_offer(&self) -> Option<(WlDataOffer, String)> {
+    /// The current offer and the best of `wanted` it lists.
+    fn on_offer(&self, wanted: &[&'static str]) -> Option<(WlDataOffer, String)> {
         let guard = self.selection.lock().ok()?;
         let offer = guard.as_ref()?;
         let mimes = offer.data::<Mimes>()?.0.lock().ok()?;
-        let best = IMAGE_MIMES
-            .iter()
-            .find(|want| mimes.iter().any(|m| m == *want))
-            .map(|m| (*m).to_owned())?;
-        Some((offer.clone(), best))
+        let mime = best(&mimes, wanted)?;
+        Some((offer.clone(), mime.to_owned()))
     }
 }
 
 use std::os::fd::AsFd as _;
 
-fn read_all(mut reader: std::io::PipeReader) -> anyhow::Result<Vec<u8>> {
+fn read_all(mut reader: std::io::PipeReader, cap: u64) -> anyhow::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let read = std::io::Read::by_ref(&mut reader)
-        .take(MAX_PASTE_BYTES + 1)
+        .take(cap + 1)
         .read_to_end(&mut bytes)?;
     anyhow::ensure!(
-        read as u64 <= MAX_PASTE_BYTES,
-        "clipboard offered more than {MAX_PASTE_BYTES} bytes"
+        read as u64 <= cap,
+        "clipboard offered more than {cap} bytes"
     );
     Ok(bytes)
 }
@@ -241,3 +272,39 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
 
 delegate_noop!(State: ignore wl_seat::WlSeat);
 delegate_noop!(State: WlDataDeviceManager);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offered(mimes: &[&str]) -> Vec<String> {
+        mimes.iter().map(|m| (*m).to_owned()).collect()
+    }
+
+    #[test]
+    fn text_is_asked_for_as_utf8_first() {
+        let all = offered(&[
+            "TEXT",
+            "text/plain",
+            "UTF8_STRING",
+            "text/plain;charset=utf-8",
+        ]);
+        assert_eq!(best(&all, &TEXT_MIMES), Some("text/plain;charset=utf-8"));
+        let x11 = offered(&["STRING", "UTF8_STRING"]);
+        assert_eq!(best(&x11, &TEXT_MIMES), Some("UTF8_STRING"));
+    }
+
+    #[test]
+    fn an_image_on_offer_is_no_text_to_paste() {
+        let png = offered(&["image/png"]);
+        assert_eq!(best(&png, &TEXT_MIMES), None);
+        assert_eq!(best(&png, &IMAGE_MIMES), Some("image/png"));
+    }
+
+    #[test]
+    fn only_a_text_mime_reads_as_text() {
+        assert!(is_text("text/plain;charset=utf-8"));
+        assert!(is_text("UTF8_STRING"));
+        assert!(!is_text("image/png"));
+    }
+}
