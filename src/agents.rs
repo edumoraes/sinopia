@@ -51,14 +51,56 @@ impl Agent {
         }
     }
 
-    /// What the panel writes on its row.
-    pub fn label(&self) -> String {
-        format!("{} · {}", self.kind, self.cwd)
+    /// What the people who made it call it. The kind is the process's
+    /// name, which is what `/proc` and herdr answer with, and nobody
+    /// calls Claude Code `claude` in a sentence. One this build has not
+    /// met keeps the name it came with.
+    pub fn name(&self) -> &str {
+        match self.kind.as_str() {
+            "claude" => "Claude Code",
+            "codex" => "Codex",
+            "opencode" => "OpenCode",
+            "crush" => "Crush",
+            "gemini" => "Gemini CLI",
+            other => other,
+        }
     }
 
     /// Whether a prompt can be handed to it.
     pub fn reachable(&self) -> bool {
         self.reach != Reach::None
+    }
+}
+
+/// What each row says for its folder: the last directory of where the
+/// agent is working — that is the project, and the path above it is the
+/// person's home on every row alike — and only as many directories above
+/// it as it takes for two different places not to read the same. Two
+/// agents in one place are one place, and say it alike.
+pub fn folders(agents: &[Agent]) -> Vec<String> {
+    let parts: Vec<Vec<&str>> = agents
+        .iter()
+        .map(|a| a.cwd.split('/').filter(|p| !p.is_empty()).collect())
+        .collect();
+    let tail = |p: &[&str], depth: usize| match p.len() {
+        0 => "/".to_owned(),
+        n => p[n - depth.min(n)..].join("/"),
+    };
+    let mut depth = vec![1usize; agents.len()];
+    loop {
+        let shown: Vec<String> = parts.iter().zip(&depth).map(|(p, &d)| tail(p, d)).collect();
+        let mut grew = false;
+        for i in 0..agents.len() {
+            let clash =
+                (0..agents.len()).any(|j| j != i && shown[j] == shown[i] && parts[j] != parts[i]);
+            if clash && depth[i] < parts[i].len() {
+                depth[i] += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            return shown;
+        }
     }
 }
 
@@ -374,9 +416,55 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_is_labelled_by_what_it_is_and_where_it_is_working() {
-        let a = Agent::at("claude", "/home/e/Work/board", Reach::None);
-        assert_eq!(a.label(), "claude · /home/e/Work/board");
+    fn an_agent_is_called_by_the_name_its_makers_gave_it() {
+        let called = |kind| Agent::at(kind, "/w/a", Reach::None).name().to_owned();
+        assert_eq!(called("claude"), "Claude Code");
+        assert_eq!(called("codex"), "Codex");
+        assert_eq!(called("opencode"), "OpenCode");
+        assert_eq!(called("crush"), "Crush");
+        assert_eq!(called("gemini"), "Gemini CLI");
+    }
+
+    #[test]
+    fn an_agent_this_build_has_not_met_is_called_what_herdr_calls_it() {
+        // herdr names agents of its own, and one nobody here has heard
+        // of is still an agent worth listing.
+        assert_eq!(
+            Agent::at("pi", "/w/a", Reach::Herdr("p".into())).name(),
+            "pi"
+        );
+    }
+
+    #[test]
+    fn an_agent_says_where_it_is_by_the_last_directory_of_its_path() {
+        let at = |cwd| folders(&[Agent::at("claude", cwd, Reach::None)]);
+        assert_eq!(at("/home/e/Work/board"), ["board"]);
+        assert_eq!(at("/home/e/Work/board/"), ["board"]);
+        assert_eq!(at("/"), ["/"]);
+    }
+
+    #[test]
+    fn two_folders_of_one_name_are_told_apart_by_what_is_above_them() {
+        // The last directory is the whole of what a row says, so two
+        // projects both called `app` would be two rows saying the same
+        // thing. Each goes up one directory at a time until it is not.
+        let agents = [
+            Agent::at("claude", "/home/e/Work/app", Reach::None),
+            Agent::at("codex", "/home/e/Play/app", Reach::None),
+            Agent::at("claude", "/home/e/Work/board", Reach::None),
+        ];
+        assert_eq!(folders(&agents), ["Work/app", "Play/app", "board"]);
+    }
+
+    #[test]
+    fn one_folder_seen_twice_is_one_folder() {
+        // Two agents in the same directory are not a clash: the folder
+        // is the same place, and saying more would say nothing.
+        let agents = [
+            Agent::at("claude", "/home/e/Work/board", Reach::None),
+            Agent::at("codex", "/home/e/Work/board", Reach::None),
+        ];
+        assert_eq!(folders(&agents), ["board", "board"]);
     }
 
     #[test]

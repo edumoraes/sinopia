@@ -21,6 +21,8 @@ const ROW_RADIUS: f32 = 7.0;
 const TITLE_H: f32 = 24.0;
 /// The least room left between the dialog and the window's edge.
 const MARGIN: f32 = 24.0;
+/// Between an agent's name and the folder it is working in.
+const NAME_GAP: f32 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -39,6 +41,9 @@ pub struct Panel {
     /// Where the page lands, shown only when the scope has no name.
     pub folder: Option<ScreenRect>,
     pub line: ScreenRect,
+    /// What the logical px above were laid out at, so what is drawn
+    /// inside the rects is measured the same way the rects were.
+    pub scale: f32,
 }
 
 impl Panel {
@@ -100,6 +105,7 @@ impl Panel {
             rows,
             folder,
             line,
+            scale: s,
         }
     }
 
@@ -141,7 +147,9 @@ impl Panel {
         for g in atlas.layout("Send to the agent", self.title.x, baseline) {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
         }
-        for (i, (r, a)) in self.rows.iter().zip(agents).enumerate() {
+        let s = self.scale;
+        let folders = crate::agents::folders(agents);
+        for (i, ((r, a), folder)) in self.rows.iter().zip(agents).zip(&folders).enumerate() {
             let picked = i == target;
             out.push(Prim::rounded(
                 *r,
@@ -152,14 +160,22 @@ impl Panel {
             // says so by being muted rather than by being missing.
             let ink = if a.reachable() { theme.ink } else { theme.muted };
             let baseline = atlas.baseline_in(*r);
-            for g in atlas.layout(&a.label(), r.x + PADDING, baseline) {
+            // What it is, then where: the name the person knows it by,
+            // and the project it is in, which is what tells two rows of
+            // one agent apart.
+            let at = r.x + PADDING * s;
+            for g in atlas.layout(a.name(), at, baseline) {
                 out.push(Prim::glyph(g.rect, g.uv, slot, ink).clipped(*r));
+            }
+            let at = at + atlas.measure(a.name()) + NAME_GAP * s;
+            for g in atlas.layout(folder, at, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(*r));
             }
             // What herdr says it is doing, written at the row's far end
             // in muted ink: a blocked agent will refuse the prompt, and
             // the row is where that is worth knowing before pressing.
             if let Some(status) = a.status.as_deref() {
-                let at = r.x + r.w - PADDING - atlas.measure(status);
+                let at = r.x + r.w - PADDING * s - atlas.measure(status);
                 for g in atlas.layout(status, at, baseline) {
                     out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(*r));
                 }
@@ -284,15 +300,40 @@ mod tests {
             ),
         ];
         let p = Panel::layout(viewport(), 1.0, agents.len(), false);
-        for (a, row) in agents.iter().zip(&p.rows) {
-            // The label starts one padding in and the status ends one
+        let folders = crate::agents::folders(&agents);
+        for ((a, folder), row) in agents.iter().zip(&folders).zip(&p.rows) {
+            // The name starts one padding in and the status ends one
             // padding from the far edge, so both have to fit between.
             let room = row.w - PADDING * 2.0 - atlas.measure("working") - PADDING;
-            assert!(
-                atlas.measure(&a.label()) <= room,
-                "{:?} does not fit its row beside a status",
-                a.label()
-            );
+            let said = atlas.measure(a.name()) + NAME_GAP + atlas.measure(folder);
+            assert!(said <= room, "{a:?} does not fit its row beside a status");
         }
+    }
+
+    /// The glyphs a row wrote: the atlas's prims, cut to that row.
+    fn glyphs_in(prims: &[Prim], row: ScreenRect, slot: u32) -> usize {
+        prims
+            .iter()
+            .filter(|p| p.kind == crate::scene::KIND_IMAGE && p.slot == slot)
+            .filter(|p| p.clip == [row.x, row.y, row.w, row.h])
+            .count()
+    }
+
+    #[test]
+    fn a_row_says_the_agents_name_and_its_last_directory_and_not_its_path() {
+        let atlas = Atlas::build(&crate::text::Font::bundled(), 13);
+        let theme = crate::theme::Theme::light();
+        let a = crate::agents::Agent::at(
+            "claude",
+            "/home/e/Work/a/very/deep/project",
+            crate::agents::Reach::None,
+        );
+        let p = Panel::layout(viewport(), 1.0, 1, false);
+        let prims = p.prims(&[a], 0, None, &Field::new(""), &atlas, 7, &theme);
+        let inked = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
+        assert_eq!(
+            glyphs_in(&prims, p.rows[0], 7),
+            inked("Claude Code") + inked("project")
+        );
     }
 }

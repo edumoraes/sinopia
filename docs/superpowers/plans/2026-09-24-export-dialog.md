@@ -19,11 +19,11 @@ implemented.
 
 ## Tasks
 
-- [ ] 0. CI: a workflow that builds, lints (`-D warnings`) and tests
-- [ ] 1. Wider dialog: 640 logical px, never past the window's margin
+- [x] 0. CI: a workflow that builds, lints (`-D warnings`) and tests
+- [x] 1. Wider dialog: 640 logical px, never past the window's margin
 - [ ] 2. Agent rows: official logo + agent name + the cwd's last directory
-  - [ ] 2a. `Agent::name`, `Agent::folder`
-  - [ ] 2b. rows draw name and folder (status kept at the far end)
+  - [x] 2a. `Agent::name`, `Agent::folder`
+  - [x] 2b. rows draw name and folder (status kept at the far end)
   - [ ] 2c. logos sourced from the vendors, sheet built by a tool, embedded
   - [ ] 2d. a row draws its logo from the sheet
 - [ ] 3. Copy and paste in the input
