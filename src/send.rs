@@ -312,14 +312,19 @@ impl Panel {
     /// of `b`: under that line, where it reads as the line's own — or
     /// over it, when the window has no room below — as wide as a call and
     /// a line of what it is for, and showing [`MENU_ROWS`] at most, with
-    /// `pick` among them.
-    pub fn menu(&self, b: &Boxed, k: usize, count: usize, pick: usize) -> MenuLayout {
+    /// `pick` among them. Nowhere while the wheel has that line out of
+    /// the box: a menu left where the line was would hang over the rows
+    /// and take the press meant for one of them.
+    pub fn menu(&self, b: &Boxed, k: usize, count: usize, pick: usize) -> Option<MenuLayout> {
+        let top = b.top(k);
+        if top < b.rect.y - 0.5 || top + b.line_h > b.rect.y + b.rect.h + 0.5 {
+            return None;
+        }
         let s = self.scale;
         let shown = count.min(MENU_ROWS);
         let row_h = MENU_ROW_H * s;
         let h = shown as f32 * row_h + MENU_PAD * 2.0 * s;
         let w = (MENU_W * s).min(b.rect.w - b.inset);
-        let top = b.top(k);
         let below = top + b.line_h;
         let floor = self.window.y + self.window.h - MARGIN * s;
         let y = if below + h <= floor {
@@ -344,7 +349,7 @@ impl Panel {
                 h: row_h,
             })
             .collect();
-        MenuLayout { rect, rows, first }
+        Some(MenuLayout { rect, rows, first })
     }
 
     /// The instruction's box as the field draws itself into it, with
@@ -555,7 +560,9 @@ impl Panel {
     fn menu_prims(&self, menu: &Menu, b: &Boxed, k: usize, ink: &Ink) -> Vec<Prim> {
         let (atlas, slot, theme) = (ink.atlas, ink.slot, ink.theme);
         let s = self.scale;
-        let m = self.menu(b, k, menu.matches.len(), menu.pick);
+        let Some(m) = self.menu(b, k, menu.matches.len(), menu.pick) else {
+            return Vec::new();
+        };
         let corner = theme.corner(ROW_RADIUS, 1.0);
         let mut out = vec![
             Prim::soft(m.rect, corner, 12.0, theme.shadow),
@@ -1030,7 +1037,7 @@ mod tests {
         let p = Panel::layout(viewport(), 1.0, &lines(3));
         let lines = [Line { start: 0, end: 0 }; 3];
         let b = p.boxed(&lines, 0.0);
-        let m = p.menu(&b, 1, 4, 0);
+        let m = p.menu(&b, 1, 4, 0).unwrap();
         let line_bottom = b.rect.y + b.inset + 2.0 * LINE_H;
         assert!((m.rect.y - line_bottom).abs() < 0.01, "{:?}", m.rect);
         assert_eq!(m.rows.len(), 4);
@@ -1043,7 +1050,7 @@ mod tests {
         let p = Panel::layout(short, 1.0, &lines(1));
         let lines = [Line { start: 0, end: 0 }];
         let b = p.boxed(&lines, 0.0);
-        let m = p.menu(&b, 0, MENU_ROWS, 0);
+        let m = p.menu(&b, 0, MENU_ROWS, 0).unwrap();
         assert!(
             m.rect.y + m.rect.h <= b.rect.y + b.inset + 0.01,
             "{:?}",
@@ -1053,11 +1060,25 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_goes_while_its_line_is_scrolled_out_of_sight() {
+        // The wheel can take the caret's line out of the box; a menu left
+        // hanging where the line was would stand over the agents' rows
+        // and take the press meant for one of them.
+        let p = Panel::layout(viewport(), 1.0, &lines(MAX_LINES + 10));
+        let lines = [Line { start: 0, end: 0 }; MAX_LINES + 10];
+        assert!(p.menu(&p.boxed(&lines, 0.0), 0, 3, 0).is_some());
+        let scrolled = p.boxed(&lines, 5.0 * LINE_H);
+        assert!(p.menu(&scrolled, 0, 3, 0).is_none(), "above the box");
+        assert!(p.menu(&scrolled, 6, 3, 0).is_some());
+        assert!(p.menu(&scrolled, MAX_LINES + 6, 3, 0).is_none(), "below it");
+    }
+
+    #[test]
     fn the_menu_shows_six_at_most_and_keeps_the_pick_in_sight() {
         let p = Panel::layout(viewport(), 1.0, &lines(1));
         let lines = [Line { start: 0, end: 0 }];
         let b = p.boxed(&lines, 0.0);
-        let m = p.menu(&b, 0, 10, 8);
+        let m = p.menu(&b, 0, 10, 8).unwrap();
         assert_eq!(m.rows.len(), MENU_ROWS);
         assert_eq!(m.first, 3, "the pick is the last row shown");
         let (x, y) = m.rows[MENU_ROWS - 1].center();
@@ -1088,7 +1109,7 @@ mod tests {
         );
         assert!(with.len() > without.len() + "/skill-2".len());
         let lines = [Line { start: 0, end: 0 }];
-        let m = p.menu(&p.boxed(&lines, 0.0), 0, 2, 1);
+        let m = p.menu(&p.boxed(&lines, 0.0), 0, 2, 1).unwrap();
         let picked = m.rows[1];
         assert!(
             with.iter().any(|q| q.kind == crate::scene::KIND_BOX

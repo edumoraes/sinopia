@@ -2168,7 +2168,7 @@ impl App {
                 let on_menu = self.sending.as_ref().and_then(|s| {
                     let (_, matches, _) = s.menu()?;
                     let k = s.line.caret_line(&lines);
-                    let m = panel.menu(&panel.boxed(&lines, s.scroll), k, matches.len(), s.pick);
+                    let m = panel.menu(&panel.boxed(&lines, s.scroll), k, matches.len(), s.pick)?;
                     m.hit(x, y)
                 });
                 if let Some(at) = on_menu {
@@ -2559,8 +2559,17 @@ impl App {
                 let in_box = sending.focus == send::Hit::Line;
                 // While a menu of skills is up, the arrows walk it, Tab
                 // or Enter takes the pick, and Esc puts the menu away —
-                // the dialog stays.
-                if let Some((token, matches, _)) = sending.menu() {
+                // the dialog stays. Up means on screen: a menu the wheel
+                // scrolled away with its line takes no keys.
+                let shown = |s: &Sending, n: usize| {
+                    laid.as_ref().is_some_and(|(panel, lines)| {
+                        let b = panel.boxed(lines, s.scroll);
+                        let k = s.line.caret_line(lines);
+                        panel.menu(&b, k, n, s.pick).is_some()
+                    })
+                };
+                let menu = sending.menu().filter(|(_, m, _)| shown(sending, m.len()));
+                if let Some((token, matches, _)) = menu {
                     let n = matches.len();
                     match key {
                         Key::Named(NamedKey::ArrowDown) => {
