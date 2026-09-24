@@ -952,9 +952,7 @@ mod tests {
         (1..=n)
             .map(|i| Layer {
                 id: format!("L{i}"),
-                name: format!("Layer {i}"),
-                visible: true,
-                kind: Kind::Raster,
+                ..Layer::of(&format!("Layer {i}"), Kind::Raster)
             })
             .collect()
     }

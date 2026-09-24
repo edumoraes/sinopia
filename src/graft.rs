@@ -261,9 +261,7 @@ mod tests {
         let mut doc = Document::new("page");
         doc.layers = vec![Layer {
             id: "fl".into(),
-            name: "Auth Flow".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Auth Flow", Kind::Frame)
         }];
         doc.elements = vec![
             Element::Frame(Frame {
@@ -276,9 +274,7 @@ mod tests {
                 background: Some("#ffffff".into()),
                 layers: vec![Layer {
                     id: "in".into(),
-                    name: "Layer 1".into(),
-                    visible: true,
-                    kind: Kind::Raster,
+                    ..Layer::of("Layer 1", Kind::Raster)
                 }],
             }),
             rect("r1", "in", 10.0, 10.0, 20.0, 20.0),
@@ -311,9 +307,7 @@ mod tests {
         let mut doc = fragment();
         doc.layers.push(Layer {
             id: "fl2".into(),
-            name: "Other".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Other", Kind::Frame)
         });
         doc.elements.push(Element::Frame(Frame {
             id: "f2".into(),

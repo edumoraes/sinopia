@@ -584,9 +584,7 @@ mod tests {
         ]);
         d.layers.push(Layer {
             id: "top".into(),
-            name: "Layer 2".into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         d.elements[0].set_layer("top");
         // `lower` comes later in `elements`, but its layer is underneath.
@@ -606,9 +604,8 @@ mod tests {
         ]);
         d.layers.push(Layer {
             id: "top".into(),
-            name: "Layer 2".into(),
             visible: false,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         d.elements[0].set_layer("top");
         assert_eq!(element_at(&d, [5.0, 5.0], 0.0), Some("lower"));

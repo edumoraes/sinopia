@@ -1495,9 +1495,7 @@ mod tests {
         let mut doc = board();
         doc.layers.push(Layer {
             id: "L2".into(),
-            name: "Layer 2".into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         doc.elements[1].set_layer("L2");
         doc
@@ -3418,9 +3416,7 @@ mod tests {
         doc.layers.insert(0, Layer::new("Layer 1"));
         doc.layers.push(Layer {
             id: "fl2".into(),
-            name: "Frame 2".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Frame 2", Kind::Frame)
         });
         doc.elements.push(Element::Frame(crate::doc::Frame {
             id: "fr2".into(),

@@ -451,9 +451,7 @@ mod tests {
         doc.layers[0].id = "l0".into();
         doc.layers.push(Layer {
             id: "fl".into(),
-            name: "Auth Flow".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Auth Flow", Kind::Frame)
         });
         doc.elements.push(Element::Frame(crate::doc::Frame {
             id: "f1".into(),
@@ -465,9 +463,7 @@ mod tests {
             background: Some("#ffffff".into()),
             layers: vec![Layer {
                 id: "in".into(),
-                name: "Layer 1".into(),
-                visible: true,
-                kind: Kind::Raster,
+                ..Layer::of("Layer 1", Kind::Raster)
             }],
         }));
         doc.elements
@@ -591,9 +587,7 @@ mod tests {
         let mut doc = board();
         doc.layers.push(Layer {
             id: "fl2".into(),
-            name: "Second".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Second", Kind::Frame)
         });
         doc.elements.push(Element::Frame(crate::doc::Frame {
             id: "f2".into(),

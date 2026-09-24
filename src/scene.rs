@@ -2930,9 +2930,7 @@ mod tests {
         // is where it will be once it is let go of.
         doc.layers.push(Layer {
             id: "top".into(),
-            name: "Layer 2".into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         let layer = doc.layers[0].id.clone();
         let f = document_prims(
@@ -3282,9 +3280,7 @@ mod tests {
         );
         doc.layers.push(Layer {
             id: "top".into(),
-            name: "Layer 2".into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         // The white rect is first in `elements` but on the top layer.
         doc.elements[0].set_layer("top");

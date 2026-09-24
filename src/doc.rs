@@ -48,10 +48,82 @@ impl Kind {
     }
 }
 
+/// How a layer meets what is under it: Photoshop's modes, in the order
+/// its menu lists them. The separable and non-separable ones are the W3C
+/// Compositing and Blending set; the rest are Photoshop's own. Normal is
+/// the default and absent on disk.
+///
+/// `PassThrough` is a group's alone: its children meet what is under the
+/// group as if the group were not there. Every other mode isolates what
+/// it is set on — composited on its own first, then laid down once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Dissolve,
+    Darken,
+    Multiply,
+    ColorBurn,
+    LinearBurn,
+    DarkerColor,
+    Lighten,
+    Screen,
+    ColorDodge,
+    LinearDodge,
+    LighterColor,
+    Overlay,
+    SoftLight,
+    HardLight,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Difference,
+    Exclusion,
+    Subtract,
+    Divide,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+    PassThrough,
+}
+
+impl BlendMode {
+    fn is_normal(&self) -> bool {
+        *self == BlendMode::Normal
+    }
+}
+
+/// A colour a layer is tagged with, to be found again: Photoshop's seven.
+/// It says nothing about how the layer draws. None is the default and
+/// absent on disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tag {
+    #[default]
+    None,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Blue,
+    Violet,
+    Gray,
+}
+
+impl Tag {
+    fn is_none(&self) -> bool {
+        *self == Tag::None
+    }
+}
+
 /// A layer: a name, what it holds, whether it shows, and a place in the
-/// order. Elements name it by id. `visible` is absent on disk when true
-/// and `kind` when raster, so boards that never hid anything — or never
-/// saw a vector layer — keep their shape.
+/// order. Elements name it by id. Every field past the kind is absent on
+/// disk at its default — full strength, normal, open, untagged — and so
+/// is `visible` when true and `kind` when raster, so a board that never
+/// used one of them keeps its shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: String,
@@ -60,6 +132,16 @@ pub struct Layer {
     pub visible: bool,
     #[serde(default, skip_serializing_if = "Kind::is_raster")]
     pub kind: Kind,
+    /// The layer composited as one, at this strength: 0–1.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f64,
+    #[serde(default, skip_serializing_if = "BlendMode::is_normal")]
+    pub blend: BlendMode,
+    /// Its content cannot be drawn on, picked, moved or merged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "Tag::is_none")]
+    pub color: Tag,
 }
 
 impl Layer {
@@ -70,6 +152,10 @@ impl Layer {
             name: name.to_owned(),
             visible: true,
             kind: Kind::Raster,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            locked: false,
+            color: Tag::None,
         }
     }
 
@@ -79,6 +165,18 @@ impl Layer {
             kind,
             ..Layer::new(name)
         }
+    }
+
+    /// Whether the board can draw what the layer says of itself: a
+    /// strength is a fraction, whatever wrote it.
+    fn checked(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            is_unit(self.opacity),
+            "layer {:?} has opacity {}, which is not between 0 and 1",
+            self.id,
+            self.opacity
+        );
+        Ok(())
     }
 }
 
@@ -936,6 +1034,7 @@ impl Document {
             if seen.contains(&layer.id.as_str()) {
                 anyhow::bail!("layer id {:?} is used twice", layer.id);
             }
+            layer.checked()?;
             seen.push(&layer.id);
         }
         for el in &self.elements {
@@ -944,6 +1043,7 @@ impl Document {
                 if layer.id.is_empty() {
                     anyhow::bail!("a layer of frame {:?} has no id", f.id);
                 }
+                layer.checked()?;
                 if layer.kind == Kind::Frame {
                     anyhow::bail!(
                         "layer {:?} is a frame inside frame {:?}; frames do not nest",
@@ -1310,9 +1410,7 @@ mod tests {
     fn layer(id: &str, name: &str) -> Layer {
         Layer {
             id: id.into(),
-            name: name.into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of(name, Kind::Raster)
         }
     }
 
@@ -1443,6 +1541,81 @@ mod tests {
     }
 
     #[test]
+    fn a_layer_says_nothing_of_its_opacity_blend_lock_or_colour_at_their_defaults() {
+        // Every board written before these existed opens meaning what it
+        // meant: full strength, normal, open, untagged.
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": []
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let l = &doc.layers[0];
+        assert_eq!(l.opacity, 1.0);
+        assert_eq!(l.blend, BlendMode::Normal);
+        assert!(!l.locked);
+        assert_eq!(l.color, Tag::None);
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        for field in ["opacity", "blend", "locked", "color"] {
+            assert!(v["layers"][0].get(field).is_none(), "{field}: {v}");
+        }
+        let fresh = Layer::new("Layer 2");
+        assert_eq!(
+            (fresh.opacity, fresh.blend, fresh.locked, fresh.color),
+            (1.0, BlendMode::Normal, false, Tag::None)
+        );
+    }
+
+    #[test]
+    fn a_layers_opacity_blend_lock_and_colour_go_to_disk_and_come_back() {
+        let mut doc = sample_doc();
+        doc.layers[0].opacity = 0.4;
+        doc.layers[0].blend = BlendMode::ColorDodge;
+        doc.layers[0].locked = true;
+        doc.layers[0].color = Tag::Violet;
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["layers"][0]["opacity"].as_f64(), Some(0.4));
+        assert_eq!(v["layers"][0]["blend"], "colorDodge");
+        assert_eq!(v["layers"][0]["locked"], true);
+        assert_eq!(v["layers"][0]["color"], "violet");
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_layers_opacity_is_a_fraction() {
+        for bad in ["-0.1", "1.5"] {
+            let json = format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "layers": [ {{ "id": "l1", "name": "Layer 1", "opacity": {bad} }} ],
+                    "elements": []
+                }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains("opacity"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_blend_mode_or_colour_is_an_error() {
+        for (field, value) in [("blend", "burn"), ("color", "pink")] {
+            let json = format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "layers": [ {{ "id": "l1", "name": "Layer 1", "{field}": "{value}" }} ],
+                    "elements": []
+                }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains(value), "{field}: {err}");
+        }
+    }
+
+    #[test]
     fn add_layer_makes_the_kind_it_is_asked_for() {
         let mut doc = Document::new("t");
         assert_eq!(doc.add_layer(None, 0, Kind::Vector).unwrap(), 1);
@@ -1479,9 +1652,8 @@ mod tests {
         let mut doc = sample_doc();
         doc.layers.push(Layer {
             id: "L2".into(),
-            name: "Layer 2".into(),
             visible: false,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         doc.elements[1].set_layer("L2");
         let json = doc.to_json().unwrap();
@@ -2477,9 +2649,7 @@ mod tests {
         // A second frame over the same place, higher up, wins.
         doc.layers.push(Layer {
             id: "fl2".into(),
-            name: "Frame 2".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Frame 2", Kind::Frame)
         });
         doc.elements.push(Element::Frame(Frame {
             id: "fr2".into(),
