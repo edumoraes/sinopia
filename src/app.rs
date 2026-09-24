@@ -26,7 +26,7 @@ use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
-use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Stylus, Tool};
+use crate::editor::{Button, Change, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
 use crate::field::{self, Field};
 use crate::geom::Corner;
@@ -1429,6 +1429,13 @@ impl App {
         let PanelHit::Pick(id) = hit else {
             return hit;
         };
+        // A press with Ctrl or Shift is a pick, never the first half of a
+        // rename.
+        let mods = self.modifiers.state();
+        if mods.control_key() || mods.shift_key() {
+            self.last_card = None;
+            return PanelHit::Pick(id);
+        }
         let now = Instant::now();
         let again = self
             .last_card
@@ -1456,9 +1463,22 @@ impl App {
             self.renaming = Some((id, Field::name(&name)));
             return;
         }
+        // Ctrl takes one in or out, Shift the rows from the anchor.
+        let mods = self.modifiers.state();
+        let how = if mods.control_key() {
+            Pick::Toggle
+        } else if mods.shift_key() {
+            Pick::Range
+        } else {
+            Pick::Only
+        };
         let (editor, doc) = self.active();
         let change = match hit {
-            PanelHit::Pick(id) => editor.select_layer(doc, &id),
+            PanelHit::Pick(id) => {
+                let rows = doc.rows(|l| editor.is_open(l));
+                let order: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
+                editor.pick_layer(doc, &id, how, &order)
+            }
             PanelHit::Toggle(id) => editor.toggle_layer(doc, &id),
             PanelHit::Open(id) => editor.toggle_open(&id),
             PanelHit::Group => editor.add_group(doc),
@@ -2010,9 +2030,15 @@ impl App {
         }
         if let (Some(panel), Some(atlas)) = (self.panel(view), self.atlas.as_ref()) {
             let lift = self.carry.as_ref().map(Carry::lift);
+            let picked: Vec<String> = self
+                .editor()
+                .picked(self.doc())
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
             let showing = layers::Showing {
                 active: self.editor().active(self.doc()),
-                picked: &[],
+                picked: &picked,
                 lift: lift.as_ref(),
                 slides: &self.slides,
             };

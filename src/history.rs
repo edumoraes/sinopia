@@ -239,6 +239,7 @@ mod tests {
         Spot {
             selection: selection.iter().map(|s| (*s).to_owned()).collect(),
             layer: None,
+            picked: Vec::new(),
         }
     }
 

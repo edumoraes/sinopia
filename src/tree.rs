@@ -95,6 +95,11 @@ impl Document {
         self.trail(id).is_some_and(|t| t.iter().all(|l| l.visible))
     }
 
+    /// Whether `id`'s content is locked: it, or anything holding it.
+    pub fn locked(&self, id: &str) -> bool {
+        self.trail(id).is_some_and(|t| t.iter().any(|l| l.locked))
+    }
+
     /// Every layer in the order the panel lists it — top first, a
     /// holder's layers under it and one deeper — descending only into
     /// the holders `open` says are expanded.
@@ -541,6 +546,18 @@ pub(crate) mod tests {
         assert!(doc.shown("A"));
         doc.layer_mut("F").unwrap().visible = false;
         assert!(!doc.shown("E"), "hidden with its frame");
+    }
+
+    #[test]
+    fn a_layer_is_locked_by_its_own_lock_or_its_holders() {
+        let mut doc = nested();
+        assert!(!doc.locked("C"));
+        doc.layer_mut("H").unwrap().locked = true;
+        assert!(doc.locked("C"));
+        assert!(doc.locked("H"));
+        assert!(!doc.locked("B"), "a sibling of the locked group is not");
+        doc.layer_mut("F").unwrap().locked = true;
+        assert!(doc.locked("E"), "locked with its frame");
     }
 
     #[test]
