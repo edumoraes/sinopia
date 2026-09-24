@@ -41,12 +41,12 @@ implemented.
   - [x] 4f. up/down walk the wrapped lines; a press places the caret,
         a drag selects
   - [x] 4g. held keys repeat inside a field
-- [ ] 5. Skills of the selected harness
+- [x] 5. Skills of the selected harness
   - [x] 5a. where each harness keeps its skills, and how each is called
   - [x] 5b. discovery: frontmatter parsed, names checked, reads capped
   - [x] 5c. the token under the caret opens a list, filtered as typed
   - [x] 5d. arrows pick, Tab/Enter accept, Esc dismisses the list only
-  - [ ] 5e. the invocation reaches the harness as a call, verified live
+  - [x] 5e. the invocation reaches the harness as a call, verified live
 - [ ] 6. Thumbnail of what is being exported, at the dialog's foot
   - [ ] 6a. `export::fit_view`: the scope fitted into a box
   - [ ] 6b. the layout keeps the foot for it

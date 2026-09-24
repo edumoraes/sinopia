@@ -12,6 +12,8 @@ use std::process::Command;
 
 use anyhow::Context as _;
 
+use crate::skills;
+
 /// The process names this looks for. A name it does not know is not an
 /// agent, and guessing would put a text editor in the list.
 pub const KNOWN: [&str; 5] = ["claude", "codex", "opencode", "crush", "gemini"];
@@ -292,16 +294,57 @@ pub fn relative(files: &[PathBuf], cwd: &Path) -> Vec<String> {
         .collect()
 }
 
+/// What of `prompt` has to arrive typed, and what is pasted after it.
+/// Claude Code reads a skill's call only where it was typed: a paste of
+/// more than three lines is a placeholder, and a `/` that arrives inside
+/// one is text — the skill never runs. So for it the call a prompt opens
+/// with goes in as keys, with the space that ends it, and the rest as
+/// the paste it always was, which becomes the call's arguments. Every
+/// other harness reads a call inside a paste, and is pasted the whole.
+pub fn typed_call(kind: &str, prompt: &str) -> (Option<String>, String) {
+    let typed = skills::harness(kind).is_some_and(|h| h.typed);
+    if typed && let Some(rest) = prompt.strip_prefix('/') {
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let name = &rest[..end];
+        if skills::callable(name) {
+            return (
+                Some(format!("/{name} ")),
+                rest[end..].trim_start().to_owned(),
+            );
+        }
+    }
+    (None, prompt.to_owned())
+}
+
+/// How long the paste is given before the Enter that submits it. Gemini
+/// CLI takes an Enter within 40 ms of a paste for a newline in it; herdr
+/// waits this long before its own, and tmux is made to.
+const SUBMIT_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Hands `text` to a running agent. The text never becomes part of a
 /// shell command: herdr takes it as an argument and tmux takes it
 /// through a buffer on stdin, so a line holding `$(…)` or `;` has
-/// nowhere to run.
+/// nowhere to run. A skill's call that has to be typed goes in first, as
+/// literal keys — and only ever as a name [`skills::callable`] passed.
 pub fn send(agent: &Agent, text: &str) -> anyhow::Result<()> {
+    let (typed, pasted) = typed_call(&agent.kind, text);
     match &agent.reach {
         Reach::None => anyhow::bail!("nothing here knows how to reach that agent"),
         Reach::Herdr(pane) => {
+            if let Some(typed) = &typed {
+                // Raw text, never bracketed, and no Enter.
+                let out = Command::new("herdr")
+                    .args(["pane", "send-text", pane, typed])
+                    .output()
+                    .context("running herdr pane send-text")?;
+                anyhow::ensure!(
+                    out.status.success(),
+                    "herdr would not type the skill's call: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
             let out = Command::new("herdr")
-                .args(["agent", "prompt", pane, text])
+                .args(["agent", "prompt", pane, &pasted])
                 .output()
                 .context("running herdr agent prompt")?;
             anyhow::ensure!(
@@ -312,6 +355,14 @@ pub fn send(agent: &Agent, text: &str) -> anyhow::Result<()> {
             Ok(())
         }
         Reach::Tmux(pane) => {
+            if let Some(typed) = &typed {
+                let keyed = Command::new("tmux")
+                    .args(["send-keys", "-t", pane, "-l", typed])
+                    .status()
+                    .context("running tmux send-keys")?;
+                anyhow::ensure!(keyed.success(), "tmux would not type into {pane}");
+            }
+            let text = pasted.as_str();
             let buffer = "omawhite";
             // load-buffer reads the text from stdin, so it is never a
             // word on a command line.
@@ -334,6 +385,7 @@ pub fn send(agent: &Agent, text: &str) -> anyhow::Result<()> {
                 .status()
                 .context("running tmux paste-buffer")?;
             anyhow::ensure!(pasted.success(), "tmux would not paste into {pane}");
+            std::thread::sleep(SUBMIT_AFTER);
             let sent = Command::new("tmux")
                 .args(["send-keys", "-t", pane, "Enter"])
                 .status()
@@ -485,6 +537,40 @@ mod tests {
             Agent::at("codex", "/home/e/Work/board", Reach::None),
         ];
         assert_eq!(folders(&agents), ["board", "board"]);
+    }
+
+    #[test]
+    fn claude_code_gets_the_skill_it_is_called_with_typed_and_the_rest_pasted() {
+        let prompt = "/frontend-design make it calm\n\nDiagram exported from the board:\n";
+        let (typed, pasted) = typed_call("claude", prompt);
+        assert_eq!(typed.as_deref(), Some("/frontend-design "));
+        assert_eq!(pasted, "make it calm\n\nDiagram exported from the board:\n");
+        let (typed, pasted) = typed_call("claude", "/review\nthe flow");
+        assert_eq!(typed.as_deref(), Some("/review "));
+        assert_eq!(
+            pasted, "the flow",
+            "a break after the call is the space it needs"
+        );
+    }
+
+    #[test]
+    fn a_prompt_that_calls_no_skill_is_pasted_whole() {
+        for (kind, prompt) in [
+            ("claude", "draw it\n"),
+            ("claude", "/ spaced\n"),
+            ("claude", "/a;b rest\n"),
+            // These read a call inside a paste, so nothing is typed.
+            ("codex", "$review rest\n"),
+            ("opencode", "/review rest\n"),
+            ("gemini", "/review rest\n"),
+            ("pi", "/review rest\n"),
+        ] {
+            assert_eq!(
+                typed_call(kind, prompt),
+                (None, prompt.to_owned()),
+                "{kind}: {prompt:?}"
+            );
+        }
     }
 
     #[test]

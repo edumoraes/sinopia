@@ -48,6 +48,10 @@ enum Walk {
 #[derive(Debug, Clone, Copy)]
 pub struct Harness {
     pub call: Call,
+    /// The call has to arrive typed, not pasted. Claude Code collapses a
+    /// paste of more than three lines into a placeholder, and a `/` that
+    /// arrives inside one is taken as text: the skill never runs.
+    pub typed: bool,
     /// Folders under the person's home, in the order they are read.
     home: &'static [&'static str],
     /// Folders under the XDG config directory.
@@ -69,6 +73,7 @@ pub fn harness(kind: &str) -> Option<Harness> {
     let h = match kind {
         "claude" => Harness {
             call: Call::Slash,
+            typed: true,
             home: &[".claude/skills"],
             config: &[],
             system: &[],
@@ -79,6 +84,7 @@ pub fn harness(kind: &str) -> Option<Harness> {
         },
         "codex" => Harness {
             call: Call::Dollar,
+            typed: false,
             home: &[".agents/skills", ".codex/skills", ".codex/skills/.system"],
             config: &[],
             system: &["/etc/codex/skills"],
@@ -89,6 +95,7 @@ pub fn harness(kind: &str) -> Option<Harness> {
         },
         "opencode" => Harness {
             call: Call::Slash,
+            typed: false,
             home: &[
                 ".claude/skills",
                 ".agents/skills",
@@ -109,6 +116,7 @@ pub fn harness(kind: &str) -> Option<Harness> {
         },
         "crush" => Harness {
             call: Call::Words,
+            typed: false,
             home: &[".agents/skills", ".claude/skills"],
             config: &["crush/skills", "agents/skills"],
             system: &[],
@@ -124,6 +132,7 @@ pub fn harness(kind: &str) -> Option<Harness> {
         },
         "gemini" => Harness {
             call: Call::Slash,
+            typed: false,
             home: &[".gemini/skills", ".agents/skills"],
             config: &[],
             system: &[],
