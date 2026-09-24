@@ -185,8 +185,33 @@ pub enum Tag {
 }
 
 impl Tag {
+    /// The seven a layer can wear, in Photoshop's order.
+    pub const COLORS: [Tag; 7] = [
+        Tag::Red,
+        Tag::Orange,
+        Tag::Yellow,
+        Tag::Green,
+        Tag::Blue,
+        Tag::Violet,
+        Tag::Gray,
+    ];
+
     fn is_none(&self) -> bool {
         *self == Tag::None
+    }
+
+    /// What a menu calls it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Tag::None => "No Color",
+            Tag::Red => "Red",
+            Tag::Orange => "Orange",
+            Tag::Yellow => "Yellow",
+            Tag::Green => "Green",
+            Tag::Blue => "Blue",
+            Tag::Violet => "Violet",
+            Tag::Gray => "Gray",
+        }
     }
 }
 

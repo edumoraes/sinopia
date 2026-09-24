@@ -7,12 +7,13 @@
 
 use std::collections::HashMap;
 
-use crate::doc::{BlendMode, Kind};
+use crate::doc::{BlendMode, Kind, Tag};
+use crate::field::Field;
 use crate::menu::Item;
-use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix};
+use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix, parse_color};
 use crate::text::Atlas;
 use crate::theme::Theme;
-use crate::tree::{self, Place};
+use crate::tree::{self, Filter, Place};
 
 // Logical px.
 pub const WIDTH: f32 = 248.0;
@@ -25,6 +26,21 @@ pub const FOOTER: f32 = 34.0;
 /// The bar under the header: how the picked layers blend, how strong
 /// they are, and whether they are locked.
 pub const PROPS: f32 = 30.0;
+/// The filter's bar, under the header while it is open: a row for the
+/// name to look for, and one of toggles — the four kinds, then the seven
+/// colours.
+pub const FILTER: f32 = SEARCH_ROW + CHIPS_ROW;
+const SEARCH_ROW: f32 = 30.0;
+const CHIPS_ROW: f32 = 28.0;
+const FIELD_H: f32 = 24.0;
+/// A colour's toggle, its dot, and the room between the kinds and them.
+const TAG_W: f32 = 18.0;
+const TAG_DOT: f32 = 5.0;
+const TAG_GAP: f32 = 8.0;
+/// How much of a tag's colour the eye's cell takes.
+const TAG_TINT: f32 = 0.45;
+/// What an empty filter field says it is for.
+const PLACEHOLDER: &str = "Filter by name";
 /// The blend mode's button, the room the strength's number takes, and
 /// the track's thickness.
 const BLEND_W: f32 = 92.0;
@@ -141,6 +157,12 @@ pub enum PanelHit {
     Blend,
     Opacity,
     LockPicked,
+    /// The header's filter, which opens its bar or shuts it; and in the
+    /// bar, the name's field and a kind's or a colour's toggle.
+    Filter,
+    Search,
+    FilterKind(Kind),
+    FilterTag(Tag),
     /// Panel chrome between controls: swallowed, never reaches the canvas.
     Panel,
 }
@@ -186,6 +208,40 @@ pub fn blend_menu(current: BlendMode, group: bool) -> (Vec<Item>, Vec<BlendMode>
         modes.push(*mode);
     }
     (items, modes)
+}
+
+/// A tag's colour, fixed as the inks are: a tag is the document's, so it
+/// reads the same under every theme — Photoshop's seven, toned to stand
+/// out on a light panel and a dark one alike.
+pub fn tag_color(tag: Tag) -> Option<Rgba> {
+    let hex = match tag {
+        Tag::None => return None,
+        Tag::Red => "#e5534b",
+        Tag::Orange => "#e0823d",
+        Tag::Yellow => "#d4a72c",
+        Tag::Green => "#46a758",
+        Tag::Blue => "#3e8ed0",
+        Tag::Violet => "#8e6ad8",
+        Tag::Gray => "#8b949e",
+    };
+    Some(parse_color(hex))
+}
+
+/// The colours' menu, and the tag on each of its lines: no colour, then
+/// Photoshop's seven, each with its dot. `current` is checked.
+pub fn tag_menu(current: Tag) -> (Vec<Item>, Vec<Tag>) {
+    let tags: Vec<Tag> = std::iter::once(Tag::None).chain(Tag::COLORS).collect();
+    let items = tags
+        .iter()
+        .map(|t| {
+            let item = Item::new(t.name()).checked(*t == current);
+            match tag_color(*t) {
+                Some(c) => item.dot(c),
+                None => item,
+            }
+        })
+        .collect();
+    (items, tags)
 }
 
 /// Smoothstep: the lift comes on and goes off without a corner, and
@@ -314,6 +370,10 @@ pub struct Showing<'a> {
     pub blend: &'a str,
     pub opacity: f32,
     pub locked: bool,
+    /// The filter, while its bar is open, and whether its field has the
+    /// keyboard — then `app` draws the field, caret and all.
+    pub filter: Option<&'a Filter>,
+    pub searching: bool,
 }
 
 /// One row of the tree, with everything already measured.
@@ -335,6 +395,8 @@ pub struct Row {
     pub locked: bool,
     /// The lock is its own, and so its row's to open.
     pub own_lock: bool,
+    /// The colour it is tagged with, which tints its eye's cell.
+    pub tag: Tag,
     /// What the pointer hits: the whole width and the gap under the card.
     pub rect: ScreenRect,
     /// What is drawn: stepped in by its depth, less the gap that
@@ -359,6 +421,13 @@ pub struct Row {
 pub struct Panel {
     pub rect: ScreenRect,
     pub header: ScreenRect,
+    /// The header's filter button.
+    pub filter: ScreenRect,
+    /// The filter's bar, while it is open: the name's field, then the
+    /// kinds' toggles and the colours'.
+    pub search: Option<ScreenRect>,
+    pub kinds: Vec<(ScreenRect, Kind)>,
+    pub tags: Vec<(ScreenRect, Tag)>,
     /// The bar under the header, and its three: the blend mode's button,
     /// the strength's slider and number, the lock.
     pub props: ScreenRect,
@@ -391,7 +460,8 @@ impl Panel {
     /// above the band, which is as much of the tree as there is room for
     /// between the header and the footer; only the rows the band reaches
     /// are laid out, and a row it reaches part of is laid out whole and
-    /// cut by [`Panel::band`] when it is drawn.
+    /// cut by [`Panel::band`] when it is drawn. `filtering` opens the
+    /// filter's bar between the header and the properties' bar.
     pub fn layout(
         viewport: Viewport,
         scale: f64,
@@ -399,6 +469,7 @@ impl Panel {
         atlas: &Atlas,
         tree: &[tree::Row],
         scroll: f32,
+        filtering: bool,
     ) -> Panel {
         let s = scale as f32;
         let x = (viewport.w as f32 - (MARGIN + WIDTH) * s).round();
@@ -412,9 +483,22 @@ impl Panel {
             h: HEADER * s,
         };
         let side = BUTTON * s;
+        let filter = ScreenRect {
+            x: header.x + header.w - side,
+            y: header.y + (header.h - side) / 2.0,
+            w: side,
+            h: side,
+        };
+        let under = header.y + header.h;
+        let (search, kinds, tags) = if filtering {
+            Self::filter_bar(inner_x, inner_w, under, s)
+        } else {
+            (None, Vec::new(), Vec::new())
+        };
+        let bar_h = if filtering { FILTER * s } else { 0.0 };
         let props = ScreenRect {
             x: inner_x,
-            y: header.y + header.h,
+            y: under + bar_h,
             w: inner_w,
             h: PROPS * s,
         };
@@ -508,11 +592,15 @@ impl Panel {
             x,
             y,
             w: WIDTH * s,
-            h: (2.0 * PADDING + HEADER + PROPS + FOOTER) * s + band.h,
+            h: (2.0 * PADDING + HEADER + PROPS + FOOTER) * s + bar_h + band.h,
         };
         Panel {
             rect,
             header,
+            filter,
+            search,
+            kinds,
+            tags,
             props,
             blend,
             opacity,
@@ -528,6 +616,64 @@ impl Panel {
             content,
             scale: s,
         }
+    }
+
+    /// The filter's bar under `y`: the name's field across the panel, and
+    /// under it the four kinds' toggles and then the seven colours'.
+    #[allow(clippy::type_complexity)]
+    fn filter_bar(
+        x: f32,
+        w: f32,
+        y: f32,
+        s: f32,
+    ) -> (Option<ScreenRect>, Vec<(ScreenRect, Kind)>, Vec<(ScreenRect, Tag)>) {
+        let side = BUTTON * s;
+        let search = ScreenRect {
+            x,
+            y: y + (SEARCH_ROW - FIELD_H) / 2.0 * s,
+            w,
+            h: FIELD_H * s,
+        };
+        let cy = y + SEARCH_ROW * s + (CHIPS_ROW - BUTTON) / 2.0 * s;
+        let kinds: Vec<(ScreenRect, Kind)> = [Kind::Raster, Kind::Vector, Kind::Group, Kind::Frame]
+            .into_iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let r = ScreenRect {
+                    x: x + i as f32 * (side + BUTTON_GAP * s),
+                    y: cy,
+                    w: side,
+                    h: side,
+                };
+                (r, k)
+            })
+            .collect();
+        let start = kinds.last().map_or(x, |(r, _)| r.x + r.w) + TAG_GAP * s;
+        let tags = Tag::COLORS
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let r = ScreenRect {
+                    x: start + i as f32 * TAG_W * s,
+                    y: cy,
+                    w: TAG_W * s,
+                    h: side,
+                };
+                (r, t)
+            })
+            .collect();
+        (Some(search), kinds, tags)
+    }
+
+    /// Where the name's letters go in the filter's field: past the glass.
+    pub fn search_text(&self) -> Option<ScreenRect> {
+        let r = self.search?;
+        let glass = (PADDING / 2.0 + ICON_BOX) * self.scale;
+        Some(ScreenRect {
+            x: r.x + glass,
+            w: (r.w - glass).max(0.0),
+            ..r
+        })
     }
 
     /// One row, measured: the eye in its column, then the card stepped in
@@ -603,6 +749,7 @@ impl Panel {
             open: r.open,
             locked: r.locked,
             own_lock: r.layer.locked,
+            tag: r.layer.color,
             rect,
             card,
             eye,
@@ -678,9 +825,16 @@ impl Panel {
             (self.blend, PanelHit::Blend),
             (self.opacity, PanelHit::Opacity),
             (self.lock, PanelHit::LockPicked),
+            (self.filter, PanelHit::Filter),
         ];
-        if let Some((_, hit)) = buttons.iter().find(|(r, _)| r.contains(x, y)) {
-            return Some(hit.clone());
+        let bar = self
+            .search
+            .map(|r| (r, PanelHit::Search))
+            .into_iter()
+            .chain(self.kinds.iter().map(|(r, k)| (*r, PanelHit::FilterKind(*k))))
+            .chain(self.tags.iter().map(|(r, t)| (*r, PanelHit::FilterTag(*t))));
+        if let Some((_, hit)) = buttons.into_iter().chain(bar).find(|(r, _)| r.contains(x, y)) {
+            return Some(hit);
         }
         // A row reaches past the band when it is only part shown; the
         // pointer never does.
@@ -773,6 +927,7 @@ impl Panel {
         for g in atlas.layout(TITLE, self.header.x + PADDING * s, baseline) {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
         }
+        out.extend(self.filter_prims(showing, atlas, slot, theme));
         out.extend(self.bar_prims(showing, atlas, slot, theme));
         let carried = showing.lift.map(|l| l.id.as_str());
         for row in self.rows.iter().filter(|r| Some(r.id.as_str()) != carried) {
@@ -800,6 +955,70 @@ impl Panel {
             (self.remove, TRASH),
         ] {
             out.extend(icon_prims(icon, rect, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
+        }
+        out
+    }
+
+    /// The header's filter button — lit while its bar is open — and the
+    /// bar: the field, bordered as the blend button is, the glass and the
+    /// name or what the field is for; the kinds' icons and the colours'
+    /// dots, each lit while it narrows the tree.
+    fn filter_prims(&self, showing: &Showing, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
+        let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(ROW_RADIUS, s);
+        let mut out = Vec::new();
+        let lit = |r: ScreenRect| Prim::rounded(r, corner, theme.active_bg);
+        if self.search.is_some() {
+            out.push(lit(self.filter));
+        }
+        out.extend(icon_prims(FUNNEL, self.filter, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
+        let (Some(search), Some(text)) = (self.search, self.search_text()) else {
+            return out;
+        };
+        out.push(Prim::rounded(search.inset(-b), corner + b, theme.border));
+        out.push(Prim::rounded(search, corner, theme.panel));
+        let glass = ScreenRect {
+            x: search.x + PADDING / 2.0 * s,
+            y: search.y + (search.h - ICON_BOX * s) / 2.0,
+            w: ICON_BOX * s,
+            h: ICON_BOX * s,
+        };
+        out.extend(icon_prims(GLASS, glass, 24.0, ICON_BOX, ICON_STROKE, s, theme.muted));
+        let name = showing.filter.map_or("", |f| f.name.as_str());
+        if !showing.searching {
+            if name.is_empty() {
+                let baseline = atlas.baseline_in(text);
+                for g in atlas.layout(PLACEHOLDER, text.x + crate::field::PADDING, baseline) {
+                    out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(text));
+                }
+            } else {
+                out.extend(Field::new(name).prims(text, atlas, slot, theme, false));
+            }
+        }
+        let filter = showing.filter;
+        for (r, kind) in &self.kinds {
+            let on = filter.is_some_and(|f| f.kinds.contains(kind));
+            if on {
+                out.push(lit(*r));
+            }
+            let icon = match kind {
+                Kind::Raster => PIXELS,
+                Kind::Vector => CURVE,
+                Kind::Group => FOLDER,
+                Kind::Frame => FRAME,
+            };
+            let color = if on { theme.ink } else { theme.icon };
+            out.extend(icon_prims(icon, *r, 24.0, ICON_BOX, ICON_STROKE, s, color));
+        }
+        for (r, tag) in &self.tags {
+            if filter.is_some_and(|f| f.tags.contains(tag)) {
+                out.push(lit(*r));
+            }
+            if let Some(c) = tag_color(*tag) {
+                let (cx, cy) = r.center();
+                out.push(Prim::circle(cx, cy, TAG_DOT * s, c));
+            }
         }
         out
     }
@@ -931,6 +1150,14 @@ impl Panel {
             radius,
             if picked { theme.active_bg } else { theme.panel },
         ));
+        // A tag is read off the eye's cell, as in Photoshop.
+        if let Some(c) = tag_color(row.tag) {
+            out.push(Prim::rounded(
+                row.eye,
+                theme.corner(ROW_RADIUS, s),
+                mix(theme.panel, c, TAG_TINT),
+            ));
+        }
         // What is not on show is read as such: muted, whatever its own
         // eye says — hiding a group hides what it holds.
         let tint = |on: Rgba| if row.shown { on } else { theme.muted };
@@ -1173,6 +1400,39 @@ const CHEVRON_LEFT: &[&[(f32, f32)]] = &[&[(15.0, 6.0), (9.0, 12.0), (15.0, 18.0
 const CHEVRON_RIGHT: &[&[(f32, f32)]] = &[&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)]];
 /// An open holder's: pointing down at what it holds.
 const CHEVRON_DOWN: &[&[(f32, f32)]] = &[&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]];
+/// The filter: a funnel.
+const FUNNEL: &[&[(f32, f32)]] = &[&[
+    (4.0, 5.0),
+    (20.0, 5.0),
+    (14.0, 12.0),
+    (14.0, 19.0),
+    (10.0, 21.0),
+    (10.0, 12.0),
+    (4.0, 5.0),
+]];
+/// Looking for a name: a glass and its handle.
+const GLASS: &[&[(f32, f32)]] = &[
+    &[
+        (16.5, 10.5),
+        (16.04, 12.8),
+        (14.74, 14.74),
+        (12.8, 16.04),
+        (10.5, 16.5),
+        (8.2, 16.04),
+        (6.26, 14.74),
+        (4.96, 12.8),
+        (4.5, 10.5),
+        (4.96, 8.2),
+        (6.26, 6.26),
+        (8.2, 4.96),
+        (10.5, 4.5),
+        (12.8, 4.96),
+        (14.74, 6.26),
+        (16.04, 8.2),
+        (16.5, 10.5),
+    ],
+    &[(14.74, 14.74), (20.0, 20.0)],
+];
 const PLUS: &[&[(f32, f32)]] = &[&[(12.0, 5.0), (12.0, 19.0)], &[(5.0, 12.0), (19.0, 12.0)]];
 /// A bin: lid, handle, tapered body.
 const TRASH: &[&[(f32, f32)]] = &[
@@ -1284,8 +1544,9 @@ const FRAME: &[&[(f32, f32)]] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{Document, Layer};
+    use crate::doc::{Document, Layer, Tag};
     use crate::scene::{KIND_BOX, KIND_IMAGE, KIND_SEGMENT};
+    use crate::tree::Filter;
     use crate::tabs::Tabs;
     use crate::text::Font;
 
@@ -1308,7 +1569,7 @@ mod tests {
     /// The panel over `doc` with the holders in `open` shown open.
     fn laid(doc: &Document, open: &[&str], viewport: Viewport, scale: f64, scroll: f32) -> Panel {
         let rows = doc.rows(|id| open.contains(&id));
-        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &rows, scroll)
+        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &rows, scroll, false)
     }
 
     fn panel(viewport: Viewport, scale: f64, n: usize) -> Panel {
@@ -1871,6 +2132,8 @@ mod tests {
             blend: "Normal",
             opacity: 1.0,
             locked: false,
+            filter: None,
+            searching: false,
         }
     }
 
@@ -2004,6 +2267,8 @@ mod tests {
             blend: "Normal",
             opacity: 1.0,
             locked: false,
+            filter: None,
+            searching: false,
         };
         let prims = p.prims(&showing, &a, 7, &theme);
         for row in &p.rows {
@@ -2087,6 +2352,8 @@ mod tests {
             blend: "Normal",
             opacity: 1.0,
             locked: false,
+            filter: None,
+            searching: false,
         };
         let prims = p.prims(&show, &a, 7, &theme);
 
@@ -2409,5 +2676,150 @@ mod tests {
         let pick = PanelHit::Pick("L1".into());
         let PanelHit::Pick(id) = pick else { unreachable!() };
         assert_eq!(PanelHit::Rename(id.clone()), PanelHit::Rename("L1".into()));
+    }
+
+    /// The panel over `doc`, everything shut, with the filter's bar open.
+    fn filtered(doc: &Document, scale: f64) -> Panel {
+        let rows = doc.rows(|_| false);
+        Panel::layout(VP, scale, 34.0 * scale as f32, &atlas(), &rows, 0.0, true)
+    }
+
+    #[test]
+    fn the_filters_bar_opens_under_the_header_and_pushes_the_rest_down() {
+        let doc = flat(2);
+        let shut = laid(&doc, &[], VP, 1.0, 0.0);
+        assert!(shut.search.is_none() && shut.kinds.is_empty() && shut.tags.is_empty());
+        assert!(shut.header.contains_rect(&shut.filter));
+        let (x, y) = mid(shut.filter);
+        assert_eq!(shut.hit(x, y), Some(PanelHit::Filter));
+        for scale in [1.0, 2.0] {
+            let s = scale as f32;
+            let shut = laid(&doc, &[], VP, scale, 0.0);
+            let open = filtered(&doc, scale);
+            assert_eq!(open.header, shut.header);
+            assert_eq!(open.props.y - shut.props.y, FILTER * s);
+            assert_eq!(open.rect.h - shut.rect.h, FILTER * s);
+            let search = open.search.expect("a field to type a name into");
+            assert!(search.y >= open.header.y + open.header.h);
+            let (x, y) = mid(search);
+            assert_eq!(open.hit(x, y), Some(PanelHit::Search));
+            let kinds: Vec<Kind> = open.kinds.iter().map(|(_, k)| *k).collect();
+            assert_eq!(kinds, [Kind::Raster, Kind::Vector, Kind::Group, Kind::Frame]);
+            let tags: Vec<Tag> = open.tags.iter().map(|(_, t)| *t).collect();
+            assert_eq!(tags, Tag::COLORS);
+            let inner = open.rect.inset(PADDING * s);
+            let mut all: Vec<ScreenRect> = open
+                .kinds
+                .iter()
+                .map(|(r, _)| *r)
+                .chain(open.tags.iter().map(|(r, _)| *r))
+                .collect();
+            for r in &all {
+                assert!(inner.contains_rect(r), "{r:?} inside the panel");
+                assert!(r.y >= search.y + search.h && r.y + r.h <= open.props.y);
+            }
+            all.sort_by(|a, b| a.x.total_cmp(&b.x));
+            for w in all.windows(2) {
+                assert!(w[0].x + w[0].w <= w[1].x, "side by side");
+            }
+            for (r, k) in &open.kinds {
+                let (x, y) = mid(*r);
+                assert_eq!(open.hit(x, y), Some(PanelHit::FilterKind(*k)));
+            }
+            for (r, t) in &open.tags {
+                let (x, y) = mid(*r);
+                assert_eq!(open.hit(x, y), Some(PanelHit::FilterTag(*t)));
+            }
+        }
+    }
+
+    #[test]
+    fn the_colour_menu_offers_no_colour_and_the_seven_the_current_one_checked() {
+        let (items, tags) = tag_menu(Tag::Green);
+        assert_eq!(tags[0], Tag::None);
+        assert_eq!(&tags[1..], Tag::COLORS);
+        assert_eq!(items.len(), tags.len());
+        assert_eq!(items[0].label, "No Color");
+        assert!(items[0].dot.is_none());
+        for (item, tag) in items.iter().zip(&tags).skip(1) {
+            assert_eq!(item.label, tag.name());
+            assert_eq!(item.dot, tag_color(*tag));
+        }
+        let checked: Vec<Tag> = items
+            .iter()
+            .zip(&tags)
+            .filter(|(i, _)| i.checked)
+            .map(|(_, t)| *t)
+            .collect();
+        assert_eq!(checked, [Tag::Green]);
+    }
+
+    #[test]
+    fn a_tag_tints_the_eyes_cell() {
+        let theme = Theme::light();
+        let a = atlas();
+        let mut doc = flat(2);
+        doc.layers[1].color = Tag::Red;
+        let p = laid(&doc, &[], VP, 1.0, 0.0);
+        let prims = p.prims(&showing("L1", None), &a, 7, &theme);
+        let tint = mix(theme.panel, tag_color(Tag::Red).unwrap(), TAG_TINT);
+        let tinted: Vec<ScreenRect> = prims.iter().filter(|q| q.color == tint).map(Prim::bounds).collect();
+        assert_eq!(tinted, [row(&p, "L2").eye]);
+        assert!(tag_color(Tag::None).is_none());
+    }
+
+    #[test]
+    fn the_filters_toggles_read_on_and_its_field_says_what_it_is_for() {
+        let theme = Theme::light();
+        let a = atlas();
+        let p = filtered(&flat(2), 1.0);
+        let search = p.search.unwrap();
+        let mut f = Filter::default();
+        f.toggle_kind(Kind::Vector);
+        f.toggle_tag(Tag::Green);
+        let show = Showing {
+            filter: Some(&f),
+            ..showing("L1", None)
+        };
+        let prims = p.prims(&show, &a, 7, &theme);
+        let on: Vec<ScreenRect> = prims
+            .iter()
+            .filter(|q| q.color == theme.active_bg)
+            .map(Prim::bounds)
+            .collect();
+        let of_kind = |k: Kind| p.kinds.iter().find(|(_, x)| *x == k).unwrap().0;
+        let of_tag = |t: Tag| p.tags.iter().find(|(_, x)| *x == t).unwrap().0;
+        assert!(on.contains(&of_kind(Kind::Vector)) && on.contains(&of_tag(Tag::Green)));
+        assert!(!on.contains(&of_kind(Kind::Raster)) && !on.contains(&of_tag(Tag::Red)));
+        for (_, t) in &p.tags {
+            let c = tag_color(*t).unwrap();
+            assert!(prims.iter().any(|q| q.color == c), "every colour shows its dot");
+        }
+        // An empty field says what it is for, muted; a name is written
+        // in ink; a field with the keyboard is `app`'s to draw.
+        let glyphs = |prims: &[Prim], color: Rgba| {
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_IMAGE && q.slot == 7 && q.color == color)
+                .filter(|q| search.contains_rect(&q.bounds()))
+                .count()
+        };
+        let letters = PLACEHOLDER.chars().filter(|c| !c.is_whitespace()).count();
+        assert_eq!(glyphs(&prims, theme.muted), letters);
+        f.name = "sky".into();
+        let show = Showing {
+            filter: Some(&f),
+            ..showing("L1", None)
+        };
+        assert_eq!(glyphs(&p.prims(&show, &a, 7, &theme), theme.ink), 3);
+        let show = Showing {
+            filter: Some(&f),
+            searching: true,
+            ..showing("L1", None)
+        };
+        let prims = p.prims(&show, &a, 7, &theme);
+        assert_eq!(glyphs(&prims, theme.ink) + glyphs(&prims, theme.muted), 0);
+        let text = p.search_text().unwrap();
+        assert!(search.contains_rect(&text) && text.x > search.x, "after the glass");
     }
 }

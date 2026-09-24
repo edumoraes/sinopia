@@ -56,6 +56,13 @@ impl Item {
     pub fn ruled(self) -> Item {
         Item { rule: true, ..self }
     }
+
+    pub fn dot(self, color: Rgba) -> Item {
+        Item {
+            dot: Some(color),
+            ..self
+        }
+    }
 }
 
 /// A menu laid out.

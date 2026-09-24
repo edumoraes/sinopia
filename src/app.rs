@@ -24,7 +24,7 @@ use crate::bitmap::{self, Bitmap};
 use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
-use crate::doc::{BlendMode, Document, Element};
+use crate::doc::{BlendMode, Document, Element, Tag};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
@@ -221,6 +221,9 @@ struct App {
     /// A card being renamed: its layer's id and the name being typed.
     /// It is the window's, not a tab's — like every other panel state.
     renaming: Option<(String, Field)>,
+    /// The filter's name being typed: the field has the keyboard, and
+    /// every edit narrows the tree as it is made.
+    searching: Option<Field>,
     /// When the last press landed on a card, and on which. A second
     /// press on the same card inside [`DOUBLE_CLICK`] opens the rename.
     last_card: Option<(String, Instant)>,
@@ -405,6 +408,9 @@ enum Purpose {
         modes: Vec<BlendMode>,
         was: Vec<(String, BlendMode)>,
     },
+    /// The colour a layer is tagged with — and the picked with it, when
+    /// it is one of them — and the tag on each line.
+    Tag { id: String, tags: Vec<Tag> },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -786,7 +792,7 @@ impl App {
         let Open {
             project, editor, ..
         } = &self.open[self.active];
-        let rows = project.doc.rows(|id| editor.is_open(id));
+        let rows = editor.rows(&project.doc);
         let ids: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
         self.slides.restack(&ids, row);
         self.scrolling.tick(dt);
@@ -818,7 +824,7 @@ impl App {
         if self.focused.as_deref() == Some(active.as_str()) {
             return;
         }
-        let rows = doc.rows(|id| self.editor().is_open(id));
+        let rows = self.editor().rows(doc);
         let pos = rows.iter().position(|r| r.layer.id == active);
         let depth = rows.len();
         self.focused = Some(active);
@@ -1109,7 +1115,7 @@ impl App {
 
     /// Whether a field has the keyboard.
     fn typing(&self) -> bool {
-        self.sending.is_some() || self.renaming.is_some()
+        self.sending.is_some() || self.renaming.is_some() || self.searching.is_some()
     }
 
     /// The field the keyboard is writing into, if one is: the export
@@ -1118,7 +1124,17 @@ impl App {
         if let Some(sending) = self.sending.as_mut() {
             return Some(&mut sending.line);
         }
-        self.renaming.as_mut().map(|(_, field)| field)
+        if let Some((_, field)) = self.renaming.as_mut() {
+            return Some(field);
+        }
+        self.searching.as_mut()
+    }
+
+    /// The filter narrows the tree by what its field now says.
+    fn sync_search(&mut self) {
+        if let Some(name) = self.searching.as_ref().map(|f| f.value().to_owned()) {
+            self.active().0.filter_mut().name = name;
+        }
     }
 
     /// `Ctrl+C`, `Ctrl+X` or `Ctrl+V` with a field in hand: what is
@@ -1153,6 +1169,7 @@ impl App {
             if let Some(sending) = self.sending.as_mut() {
                 sending.settle(true);
             }
+            self.sync_search();
             self.follow_caret();
         }
         self.redraw();
@@ -1177,6 +1194,7 @@ impl App {
             if let Some(sending) = self.sending.as_mut() {
                 sending.settle(true);
             }
+            self.sync_search();
             self.follow_caret();
             self.redraw();
         }
@@ -1278,7 +1296,8 @@ impl App {
         }
         let atlas = self.atlas.as_ref()?;
         let top = self.strip_top(view);
-        let rows = self.doc().rows(|id| self.editor().is_open(id));
+        let editor = self.editor();
+        let rows = editor.rows(self.doc());
         Some(Panel::layout(
             view.viewport,
             self.chrome(view),
@@ -1286,6 +1305,7 @@ impl App {
             atlas,
             &rows,
             self.scroll + self.scrolling.offset(),
+            editor.filtering().is_some(),
         ))
     }
 
@@ -1483,6 +1503,33 @@ impl App {
         self.redraw();
     }
 
+    /// Opens the colours' menu beside `at` for layer `id`.
+    fn open_tag_menu(&mut self, id: String, at: ScreenRect) {
+        let current = self.doc().layer(&id).map_or(Tag::None, |l| l.color);
+        let (items, tags) = layers::tag_menu(current);
+        self.menu = Some(Opened {
+            purpose: Purpose::Tag { id, tags },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
+    /// The filter's field takes the keyboard, its caret at `x`.
+    fn search_at(&mut self, panel: &Panel, x: f64) {
+        let (Some(atlas), Some(text)) = (self.atlas.as_ref(), panel.search_text()) else {
+            return;
+        };
+        let name = self.editor().filtering().map_or(String::new(), |f| f.name.clone());
+        let mut field = Field::name(&name);
+        let lines = field.wrap(atlas, f32::INFINITY);
+        let at = field.index_at(atlas, &lines, 0, x as f32 - text.x - field::PADDING);
+        field.go(at, false);
+        self.searching = Some(field);
+    }
+
     /// The menu standing over the window, laid out.
     fn menu_laid(&self, view: &View) -> Option<menu::Menu> {
         let opened = self.menu.as_ref()?;
@@ -1515,13 +1562,16 @@ impl App {
             return;
         }
         opened.hover = hover;
-        let Purpose::Blend { modes, was } = &opened.purpose;
-        let tried = hover.and_then(|i| modes.get(i).copied());
-        let was = was.clone();
-        let (editor, doc) = self.active();
-        restore_blends(doc, &was);
-        if let Some(mode) = tried {
-            let _ = editor.set_blend(doc, mode);
+        // Only a blend mode is tried on the board: a tag is read in the
+        // panel, and the line lit under the pointer already says it.
+        if let Purpose::Blend { modes, was } = &opened.purpose {
+            let tried = hover.and_then(|i| modes.get(i).copied());
+            let was = was.clone();
+            let (editor, doc) = self.active();
+            restore_blends(doc, &was);
+            if let Some(mode) = tried {
+                let _ = editor.set_blend(doc, mode);
+            }
         }
         self.redraw();
     }
@@ -1530,12 +1580,19 @@ impl App {
     /// one step; none put back leaves the board as the menu found it.
     fn close_menu(&mut self, take: Option<usize>) {
         let Some(opened) = self.menu.take() else { return };
-        let Purpose::Blend { modes, was } = opened.purpose;
         let (editor, doc) = self.active();
-        restore_blends(doc, &was);
-        let change = match take.and_then(|i| modes.get(i).copied()) {
-            Some(mode) => editor.set_blend(doc, mode),
-            None => Change::None,
+        let change = match opened.purpose {
+            Purpose::Blend { modes, was } => {
+                restore_blends(doc, &was);
+                match take.and_then(|i| modes.get(i).copied()) {
+                    Some(mode) => editor.set_blend(doc, mode),
+                    None => Change::None,
+                }
+            }
+            Purpose::Tag { id, tags } => match take.and_then(|i| tags.get(i).copied()) {
+                Some(tag) => editor.set_tag(doc, &id, tag),
+                None => Change::None,
+            },
         };
         self.apply(change);
         self.redraw();
@@ -1608,7 +1665,7 @@ impl App {
         let (editor, doc) = self.active();
         let change = match hit {
             PanelHit::Pick(id) => {
-                let rows = doc.rows(|l| editor.is_open(l));
+                let rows = editor.rows(doc);
                 let order: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
                 editor.pick_layer(doc, &id, how, &order)
             }
@@ -1619,9 +1676,22 @@ impl App {
             PanelHit::Add => editor.add_layer(doc),
             PanelHit::Remove => editor.remove_layers(doc),
             PanelHit::LockPicked => editor.toggle_lock(doc),
+            PanelHit::Filter => editor.toggle_filter(),
+            PanelHit::FilterKind(kind) => {
+                editor.filter_mut().toggle_kind(kind);
+                Change::Selection
+            }
+            PanelHit::FilterTag(tag) => {
+                editor.filter_mut().toggle_tag(tag);
+                Change::Selection
+            }
             // The strength is read off the pointer, which is the press's
             // own business, and the blend menu is the window's.
-            PanelHit::Opacity | PanelHit::Blend | PanelHit::Rename(_) | PanelHit::Panel => {
+            PanelHit::Opacity
+            | PanelHit::Blend
+            | PanelHit::Search
+            | PanelHit::Rename(_)
+            | PanelHit::Panel => {
                 Change::None
             }
         };
@@ -2194,8 +2264,13 @@ impl App {
                     .filter(|c| c.held)
                     .and_then(|c| c.aim.as_ref()),
                 slides: &self.slides,
+                filter: self.editor().filtering(),
+                searching: self.searching.is_some(),
             };
             frame.extend(panel.prims(&showing, atlas, self.atlas_slot, &self.theme));
+            if let (Some(field), Some(text)) = (&self.searching, panel.search_text()) {
+                frame.extend(field.prims(text, atlas, self.atlas_slot, &self.theme, true));
+            }
             // The name being typed is drawn over the name it replaces,
             // rounded the way the card is: the row goes on showing its
             // eye, its chevron and its glyph, so what is being renamed
@@ -2348,6 +2423,9 @@ impl App {
         if self.renaming.is_some() && button == Button::Left {
             self.commit_rename();
         }
+        if button == Button::Left {
+            self.searching = None;
+        }
         // The strip is over the handle is over the panel is over the
         // dock is over the canvas.
         if let Some(hit) = self.tabs(&view).and_then(|t| t.hit(x, y)) {
@@ -2382,6 +2460,13 @@ impl App {
                     self.open_blend_menu(panel.blend);
                     return self.update_cursor_icon();
                 }
+                // The field takes the keyboard, the caret where it was
+                // pressed.
+                if hit == PanelHit::Search {
+                    self.search_at(&panel, x);
+                    self.redraw();
+                    return self.update_cursor_icon();
+                }
                 // The strength's slider has the pointer to itself from the
                 // press to the release, wherever it wanders.
                 if hit == PanelHit::Opacity {
@@ -2408,6 +2493,12 @@ impl App {
                     });
                 }
                 self.redraw();
+            } else if button == Button::Right
+                // The eye's own menu is its colours, as in Photoshop.
+                && let PanelHit::Toggle(id) = hit
+                && let Some(row) = panel.rows.iter().find(|r| r.id == id)
+            {
+                self.open_tag_menu(id, row.eye);
             }
             return self.update_cursor_icon();
         }
@@ -2874,6 +2965,21 @@ impl App {
                         edit(field, key, self.modifiers.state());
                     }
                 }
+                self.redraw();
+            }
+            // The filter's field narrows the tree as it is typed into, and
+            // Enter or Esc gives the keyboard back with the name kept.
+            _ if self.searching.is_some() && pressed => {
+                let Some(field) = self.searching.as_mut() else {
+                    return;
+                };
+                match key {
+                    Key::Named(NamedKey::Escape | NamedKey::Enter) => self.searching = None,
+                    _ => {
+                        edit(field, key, self.modifiers.state());
+                    }
+                }
+                self.sync_search();
                 self.redraw();
             }
             Key::Named(NamedKey::Space) => self.active().0.hold_space(pressed),
@@ -3704,6 +3810,7 @@ pub fn run(
         menu: None,
         drag: None,
         renaming: None,
+        searching: None,
         last_card: None,
         sending: None,
         slides: layers::Slides::default(),

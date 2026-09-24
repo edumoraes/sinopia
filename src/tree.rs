@@ -7,7 +7,7 @@
 //! stack of the frame on it. One address for all three, so the panel,
 //! the editor and the CLI speak the same ids. Pure.
 
-use crate::doc::{BlendMode, Document, Element, Frame, Kind, Layer, new_id};
+use crate::doc::{BlendMode, Document, Element, Frame, Kind, Layer, Tag, new_id};
 
 impl Document {
     /// The layer `id`, however deep it stands, in whichever stack.
@@ -119,18 +119,53 @@ impl Document {
         for layer in layers.iter().rev() {
             let holds = matches!(layer.kind, Kind::Group | Kind::Frame);
             let row = Row {
-                layer,
-                owner: parent.map(|p| p.layer.id.as_str()),
-                depth: parent.map_or(0, |p| p.depth + 1),
-                shown: parent.is_none_or(|p| p.shown) && layer.visible,
-                locked: parent.is_some_and(|p| p.locked) || layer.locked,
                 open: holds && open(&layer.id),
+                ..Row::under(layer, parent)
             };
             out.push(row);
             if row.open {
                 self.rows_in(self.inner(layer), Some(&row), open, out);
             }
         }
+    }
+
+    /// The rows the panel shows under `filter`: every layer it matches,
+    /// and every layer holding one, so a match is never shown out of its
+    /// place. A holder opens for what matches under it and only for that:
+    /// one that matches with nothing under it that does is shown shut,
+    /// whatever `open` says. The empty filter is [`Document::rows`].
+    pub fn rows_matching(&self, open: impl Fn(&str) -> bool, filter: &Filter) -> Vec<Row<'_>> {
+        if filter.is_empty() {
+            return self.rows(open);
+        }
+        let mut out = Vec::new();
+        self.matching_in(&self.layers, None, filter, &mut out);
+        out
+    }
+
+    /// `layers`, top first, onto `out` as far as `filter` keeps them;
+    /// whether it kept any.
+    fn matching_in<'a>(
+        &'a self,
+        layers: &'a [Layer],
+        parent: Option<&Row<'a>>,
+        filter: &Filter,
+        out: &mut Vec<Row<'a>>,
+    ) -> bool {
+        let mut kept = false;
+        for layer in layers.iter().rev() {
+            let row = Row::under(layer, parent);
+            let at = out.len();
+            out.push(row);
+            if self.matching_in(self.inner(layer), Some(&row), filter, out) {
+                out[at].open = true;
+            } else if !filter.matches(layer) {
+                out.truncate(at);
+                continue;
+            }
+            kept = true;
+        }
+        kept
     }
 
     /// The stack `owner` holds — the board's root for none. Empty for a
@@ -652,6 +687,62 @@ pub struct Row<'a> {
     pub open: bool,
 }
 
+impl<'a> Row<'a> {
+    /// `layer`'s row under `parent`'s — none on the board's root — shut.
+    fn under(layer: &'a Layer, parent: Option<&Row<'a>>) -> Row<'a> {
+        Row {
+            layer,
+            owner: parent.map(|p| p.layer.id.as_str()),
+            depth: parent.map_or(0, |p| p.depth + 1),
+            shown: parent.is_none_or(|p| p.shown) && layer.visible,
+            locked: parent.is_some_and(|p| p.locked) || layer.locked,
+            open: false,
+        }
+    }
+}
+
+/// What the panel narrows the tree to: layers whose name holds `name`,
+/// whatever its case and the space round it, of one of `kinds`, wearing
+/// one of `tags`. A part left empty narrows nothing, so the empty filter
+/// is the whole tree.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Filter {
+    pub name: String,
+    pub kinds: Vec<Kind>,
+    pub tags: Vec<Tag>,
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        self.name.trim().is_empty() && self.kinds.is_empty() && self.tags.is_empty()
+    }
+
+    pub fn matches(&self, layer: &Layer) -> bool {
+        let name = self.name.trim().to_lowercase();
+        (name.is_empty() || layer.name.to_lowercase().contains(&name))
+            && (self.kinds.is_empty() || self.kinds.contains(&layer.kind))
+            && (self.tags.is_empty() || self.tags.contains(&layer.color))
+    }
+
+    pub fn toggle_kind(&mut self, kind: Kind) {
+        toggle(&mut self.kinds, kind);
+    }
+
+    pub fn toggle_tag(&mut self, tag: Tag) {
+        toggle(&mut self.tags, tag);
+    }
+}
+
+/// Takes `v` out of `list` when it is there, and puts it in when not.
+fn toggle<T: PartialEq>(list: &mut Vec<T>, v: T) {
+    match list.iter().position(|x| *x == v) {
+        Some(i) => {
+            list.remove(i);
+        }
+        None => list.push(v),
+    }
+}
+
 /// `layers` and every group's under them, given the ids `minted` says.
 fn renamed(layers: &mut [Layer], minted: &impl Fn(&str) -> Option<String>) {
     for l in layers {
@@ -1080,4 +1171,109 @@ pub(crate) mod tests {
         assert!(doc.frame_holding("F").is_none(), "a frame's own layer is the board's");
     }
 
+    fn row_ids(rows: &[Row]) -> Vec<String> {
+        rows.iter().map(|r| r.layer.id.clone()).collect()
+    }
+
+    #[test]
+    fn an_empty_filter_narrows_nothing() {
+        let doc = nested();
+        let open = |id: &str| id == "G";
+        assert_eq!(
+            row_ids(&doc.rows_matching(open, &Filter::default())),
+            row_ids(&doc.rows(open))
+        );
+        assert!(Filter::default().is_empty());
+        let spaces = Filter {
+            name: "  ".into(),
+            ..Filter::default()
+        };
+        assert!(spaces.is_empty(), "space is no name");
+    }
+
+    #[test]
+    fn a_name_matches_whatever_its_case_and_brings_its_holders_open() {
+        let doc = nested();
+        let filter = Filter {
+            name: " LAYER 3 ".into(),
+            ..Filter::default()
+        };
+        // Everything shut: the match opens the holders it needs.
+        let rows = doc.rows_matching(|_| false, &filter);
+        assert_eq!(row_ids(&rows), ["G", "H", "C"]);
+        assert!(rows[0].open && rows[1].open, "open down to the match");
+        assert_eq!(rows.iter().map(|r| r.depth).collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_holder_that_matches_alone_is_shown_shut() {
+        let doc = nested();
+        let filter = Filter {
+            name: "group 2".into(),
+            ..Filter::default()
+        };
+        // Even open, it shows nothing it holds that does not match.
+        let rows = doc.rows_matching(|_| true, &filter);
+        assert_eq!(row_ids(&rows), ["G", "H"]);
+        assert!(rows[0].open);
+        assert!(!rows[1].open, "nothing under it matches");
+    }
+
+    #[test]
+    fn kinds_narrow_and_a_frame_opens_for_what_it_holds() {
+        let doc = nested();
+        let filter = Filter {
+            kinds: vec![Kind::Group],
+            ..Filter::default()
+        };
+        let rows = doc.rows_matching(|_| false, &filter);
+        assert_eq!(row_ids(&rows), ["F", "K", "G", "H"]);
+        assert!(rows[0].open, "the frame holds a group");
+        assert!(!rows[1].open, "K holds only a layer");
+        assert!(rows[2].open, "G matches, and so does what it holds");
+        let frames = Filter {
+            kinds: vec![Kind::Frame],
+            ..Filter::default()
+        };
+        assert_eq!(row_ids(&doc.rows_matching(|_| true, &frames)), ["F"]);
+    }
+
+    #[test]
+    fn tags_kinds_and_a_name_narrow_together() {
+        let mut doc = nested();
+        doc.layer_mut("C").unwrap().color = Tag::Red;
+        doc.layer_mut("E").unwrap().color = Tag::Red;
+        doc.layer_mut("K").unwrap().color = Tag::Red;
+        let red = Filter {
+            tags: vec![Tag::Red],
+            ..Filter::default()
+        };
+        assert_eq!(
+            row_ids(&doc.rows_matching(|_| false, &red)),
+            ["F", "K", "E", "G", "H", "C"]
+        );
+        let narrow = Filter {
+            name: "2".into(),
+            kinds: vec![Kind::Raster],
+            tags: vec![Tag::Red, Tag::Blue],
+        };
+        assert_eq!(row_ids(&doc.rows_matching(|_| false, &narrow)), ["F", "K", "E"]);
+        let none = Filter {
+            name: "nothing like it".into(),
+            ..Filter::default()
+        };
+        assert!(doc.rows_matching(|_| true, &none).is_empty());
+    }
+
+    #[test]
+    fn a_filters_toggles_go_in_and_out() {
+        let mut f = Filter::default();
+        f.toggle_kind(Kind::Vector);
+        f.toggle_tag(Tag::Green);
+        assert_eq!((f.kinds.clone(), f.tags.clone()), (vec![Kind::Vector], vec![Tag::Green]));
+        assert!(!f.is_empty());
+        f.toggle_kind(Kind::Vector);
+        f.toggle_tag(Tag::Green);
+        assert!(f.is_empty());
+    }
 }

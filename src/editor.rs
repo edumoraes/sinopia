@@ -7,11 +7,11 @@
 use crate::bitmap;
 use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
-use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, new_id};
+use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, Tag, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
-use crate::tree::{Arrange, Place};
+use crate::tree::{self, Arrange, Filter, Place};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -338,6 +338,10 @@ pub struct Editor {
     /// Session state of the panel's and nothing else's: it is not where
     /// the hand stands, so a step back does not shut what was opened.
     open: Vec<String>,
+    /// The panel's filter, and whether its bar is open: shut, the tree is
+    /// shown whole and the filter waits as it was left.
+    filter: Filter,
+    filtering: bool,
 }
 
 /// What a new frame is born with until `app` says otherwise: white, the
@@ -951,6 +955,29 @@ impl Editor {
         Change::Scene
     }
 
+    /// Tags layer `id` with `tag` — and every picked layer with it, when
+    /// it is one of them, as a menu on a picked row speaks for the pick.
+    /// A lock does not keep a tag off: it is about the layer, and not
+    /// about what the layer holds.
+    pub fn set_tag(&mut self, doc: &mut Document, id: &str, tag: Tag) -> Change {
+        let picked = self.picked_ids(doc);
+        let ids = if picked.iter().any(|p| p == id) {
+            picked
+        } else {
+            vec![id.to_owned()]
+        };
+        let mut changed = false;
+        for id in ids {
+            if let Some(l) = doc.layer_mut(&id)
+                && l.color != tag
+            {
+                l.color = tag;
+                changed = true;
+            }
+        }
+        if changed { Change::Scene } else { Change::None }
+    }
+
     /// Gives layer `id` the name it was typed. A name that is nothing but
     /// space is not a name, and the layer keeps the one it had — a card
     /// with no word on it can be neither read nor exported under.
@@ -1050,6 +1077,30 @@ impl Editor {
             self.reveal(doc, id);
         }
         Change::Scene
+    }
+
+    /// The rows the panel shows: the tree as far as it is open, narrowed
+    /// by the filter while its bar is.
+    pub fn rows<'a>(&self, doc: &'a Document) -> Vec<tree::Row<'a>> {
+        match self.filtering() {
+            Some(filter) => doc.rows_matching(|id| self.is_open(id), filter),
+            None => doc.rows(|id| self.is_open(id)),
+        }
+    }
+
+    /// The filter in force: the bar's, while it is open.
+    pub fn filtering(&self) -> Option<&Filter> {
+        self.filtering.then_some(&self.filter)
+    }
+
+    pub fn filter_mut(&mut self) -> &mut Filter {
+        &mut self.filter
+    }
+
+    /// Opens the filter's bar, or shuts it.
+    pub fn toggle_filter(&mut self) -> Change {
+        self.filtering = !self.filtering;
+        Change::Selection
     }
 
     /// Whether the panel shows `holder`'s layers under its row.
@@ -4533,6 +4584,44 @@ mod tests {
         let _ = e.set_blend(&mut doc, BlendMode::Multiply);
         assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen, "a lock keeps how it draws");
         assert_eq!(e.set_blend(&mut doc, BlendMode::Multiply), Change::None, "already so");
+    }
+
+    #[test]
+    fn a_tag_goes_on_the_row_and_on_every_picked_layer_with_it() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        doc.layer_mut("B").unwrap().locked = true;
+        assert_eq!(e.set_tag(&mut doc, "A", Tag::Red), Change::Scene);
+        assert_eq!(doc.layer("A").unwrap().color, Tag::Red);
+        assert_eq!(doc.layer("B").unwrap().color, Tag::Red, "a lock does not keep a tag off");
+        // A row that is not picked is tagged alone.
+        assert_eq!(e.set_tag(&mut doc, "C", Tag::Blue), Change::Scene);
+        assert_eq!(doc.layer("C").unwrap().color, Tag::Blue);
+        assert_eq!(doc.layer("A").unwrap().color, Tag::Red);
+        assert_eq!(e.set_tag(&mut doc, "C", Tag::Blue), Change::None, "already so");
+        assert_eq!(e.set_tag(&mut doc, "nope", Tag::Blue), Change::None);
+    }
+
+    #[test]
+    fn the_filter_narrows_the_rows_while_its_bar_is_open() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let ids = |e: &Editor| -> Vec<String> {
+            e.rows(&doc).iter().map(|r| r.layer.id.clone()).collect()
+        };
+        let whole = ids(&e);
+        assert!(e.filtering().is_none());
+        e.filter_mut().name = "Layer 3".into();
+        assert_eq!(ids(&e), whole, "the bar is shut");
+        assert_eq!(e.toggle_filter(), Change::Selection);
+        assert!(e.filtering().is_some());
+        assert_eq!(ids(&e), ["G", "H", "C"]);
+        let _ = e.toggle_filter();
+        assert_eq!(ids(&e), whole);
+        let _ = e.toggle_filter();
+        assert_eq!(ids(&e), ["G", "H", "C"], "the filter waited as it was left");
     }
 
     /// A board of one group holding one raster layer: `G[R]`.
