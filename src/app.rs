@@ -267,13 +267,8 @@ struct Sending {
     scope: export::Scope,
     agents: Vec<agents::Agent>,
     target: usize,
-    /// The folder, when the scope has no name of its own.
-    folder: Option<Field>,
+    /// The instruction, the dialog's one field.
     line: Field,
-    /// Which field the keyboard is writing into. The line, until a press
-    /// says otherwise — the folder's prefill is usually right and the
-    /// line never is.
-    focus: send::Hit,
     /// How far down its lines the instruction is scrolled, in physical
     /// px: past twenty lines the box keeps its height and moves them.
     scroll: f32,
@@ -296,22 +291,10 @@ struct Sending {
 }
 
 impl Sending {
-    /// The field the keyboard is writing into.
-    fn writing(&mut self) -> &mut Field {
-        match (self.focus, self.folder.as_mut()) {
-            (send::Hit::Folder, Some(folder)) => folder,
-            _ => &mut self.line,
-        }
-    }
-
     /// The call being typed in the instruction and the skills answering
-    /// it, best first — when the box has the keyboard, the target's
-    /// harness takes skills, any answer, and `Esc` has not put this
-    /// call's menu away.
+    /// it, best first — when the target's harness takes skills, anything
+    /// answers, and `Esc` has not put this call's menu away.
     fn menu(&self) -> Option<(skills::Token, Vec<usize>, skills::Call)> {
-        if self.focus != send::Hit::Line {
-            return None;
-        }
         let call = skills::harness(&self.agents.get(self.target)?.kind)?.call;
         let token = skills::token(self.line.value(), self.line.caret(), call)?;
         if self.dismissed == Some(token.start) {
@@ -1045,7 +1028,6 @@ impl App {
         let lines = sending.line.wrap(atlas, width);
         let spec = send::Spec {
             rows: sending.agents.len(),
-            folder: sending.folder.is_some(),
             lines: lines.len(),
             line_h: atlas.line_height(),
             picture: sending.shape,
@@ -1064,12 +1046,10 @@ impl App {
         let Some(sending) = self.sending.as_mut() else {
             return;
         };
-        if sending.focus == send::Hit::Line {
-            let k = sending.line.caret_line(&lines);
-            let shown = panel.shown as f32 * panel.line_h;
-            sending.scroll = field::follow(sending.scroll, k, panel.line_h, shown);
-        }
-        sending.scroll = sending.scroll.clamp(0.0, panel.max_scroll(lines.len()));
+        let k = sending.line.caret_line(&lines);
+        let shown = panel.shown as f32 * panel.line_h;
+        sending.scroll = field::follow(sending.scroll, k, panel.line_h, shown)
+            .clamp(0.0, panel.max_scroll(lines.len()));
     }
 
     /// Writes the call to the `at`th skill answering the call being
@@ -1100,7 +1080,7 @@ impl App {
     /// dialog's, or a layer's name being typed.
     fn field_in_hand(&mut self) -> Option<&mut Field> {
         if let Some(sending) = self.sending.as_mut() {
-            return Some(sending.writing());
+            return Some(&mut sending.line);
         }
         self.renaming.as_mut().map(|(_, field)| field)
     }
@@ -1544,24 +1524,15 @@ impl App {
             return;
         }
         let shape = export::bounds(self.doc(), &scope).map(|b| export::shape(&b) as f32);
-        // A frame brings its name; a loose selection is asked for one,
-        // counted past whatever the folder already holds.
-        let folder = match export::named(self.doc(), &scope) {
-            Some(_) => None,
-            None => {
-                let taken = taken_names(&found[0].cwd);
-                Some(Field::name(&export::free_name(&self.doc().title, &taken)))
-            }
-        };
+        // What the page is called is not asked: `send_to` names it after
+        // what owns the scope, or else after the tab.
         self.sending = Some(Sending {
             scope,
             agents: found,
             target: 0,
-            folder,
             // No longer than the send would take: a field never holds
             // what the thing it feeds would refuse.
             line: Field::lines("").limited(agents::PROMPT_MAX),
-            focus: send::Hit::Line,
             scroll: 0.0,
             selecting: false,
             skills: Vec::new(),
@@ -1595,13 +1566,11 @@ impl App {
 
     fn send_to(&mut self, agent: &agents::Agent, sending: &Sending) -> anyhow::Result<()> {
         let line = agents::sanitize(sending.line.value())?;
-        let name = export::named(self.doc(), &sending.scope)
-            .or_else(|| sending.folder.as_ref().map(|f| f.value().to_owned()))
-            .unwrap_or_default();
-        let slug = match export::slug(&name) {
-            s if s.is_empty() => anyhow::bail!("the page needs a name"),
-            s => s,
-        };
+        // Named here and not when the dialog opened: a selection across
+        // layers is counted past what this agent's folder holds, and the
+        // agent may have been changed since.
+        let taken = taken_names(&agent.cwd);
+        let slug = export::page_slug(self.doc(), &sending.scope, &self.project().label(), &taken);
         let cwd = PathBuf::from(&agent.cwd);
         let files = self.write_page(&sending.scope, &cwd, &slug)?;
         log::info!("exported {} files to {}", files.len(), agent.cwd);
@@ -1772,15 +1741,11 @@ impl App {
             .into_iter()
             .find(|c| c.id == id)
             .with_context(|| format!("no frame {id:?} on the board that is open"))?;
-        let scope = export::Scope::Frame(id.to_owned());
-        // The id where the name slugs away to nothing, which every
-        // non-Latin name does — a slug is ASCII. Two such frames would
-        // otherwise share one folder and overwrite each other's page,
-        // and an id is what is both unique and the same on every read.
-        let slug = [export::slug(&card.name), export::slug(&card.id)]
-            .into_iter()
-            .find(|s| !s.is_empty())
-            .unwrap_or_else(|| export::UNNAMED.to_owned());
+        let scope = export::Scope::Frame(card.id);
+        // Named the way `Ctrl+E` names it — its layer's name, or its id
+        // where the name slugs away to nothing, as every non-Latin name
+        // does — so a frame keeps one page whichever door it leaves by.
+        let slug = export::page_slug(self.doc(), &scope, &self.project().label(), &[]);
         self.write_page(&scope, dir, &slug)
     }
 
@@ -2119,9 +2084,7 @@ impl App {
             let look = send::Look {
                 agents: &sending.agents,
                 target: sending.target,
-                folder: sending.folder.as_ref(),
                 line: &sending.line,
-                focus: sending.focus,
                 scroll: sending.scroll,
                 menu: menu.as_ref().map(|(_, matches, call)| send::Menu {
                     skills: &sending.skills,
@@ -2201,14 +2164,12 @@ impl App {
                     // Shift, carries the selection there — and a drag
                     // from it goes on selecting.
                     (Some(send::Hit::Line), Some(s), Some(atlas)) if panel.line.contains(x, y) => {
-                        s.focus = send::Hit::Line;
                         let (k, along) = panel.boxed(&lines, s.scroll).at(x, y);
                         let to = s.line.index_at(atlas, &lines, k, along);
                         s.line.go(to, shift);
                         s.selecting = true;
                         s.settle(false);
                     }
-                    (Some(hit), Some(s), _) => s.focus = hit,
                     // A press outside a modal panel closes it.
                     (None, ..) => self.sending = None,
                     _ => {}
@@ -2571,7 +2532,6 @@ impl App {
                 let Some(sending) = self.sending.as_mut() else {
                     return;
                 };
-                let in_box = sending.focus == send::Hit::Line;
                 // While a menu of skills is up, the arrows walk it, Tab
                 // or Enter takes the pick, and Esc puts the menu away —
                 // the dialog stays. Up means on screen: a menu the wheel
@@ -2618,7 +2578,7 @@ impl App {
                     Key::Named(NamedKey::Escape) => self.sending = None,
                     // Shift+Enter breaks the line, as it does in the
                     // agent's own box; Enter alone sends.
-                    Key::Named(NamedKey::Enter) if mods.shift_key() && in_box => {
+                    Key::Named(NamedKey::Enter) if mods.shift_key() => {
                         sending.line.newline();
                         edited = true;
                     }
@@ -2640,7 +2600,7 @@ impl App {
                         | NamedKey::ArrowDown
                         | NamedKey::Home
                         | NamedKey::End),
-                    ) if in_box && !mods.control_key() => {
+                    ) if !mods.control_key() => {
                         if let (Some((_, lines)), Some(atlas)) = (&laid, self.atlas.as_ref()) {
                             let shift = mods.shift_key();
                             match named {
@@ -2652,7 +2612,7 @@ impl App {
                             edited = true;
                         }
                     }
-                    _ => edited = edit(sending.writing(), key, mods),
+                    _ => edited = edit(&mut sending.line, key, mods),
                 }
                 if let Some(sending) = self.sending.as_mut() {
                     sending.settle(edited);
@@ -2849,14 +2809,13 @@ impl App {
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
-        // Over a field of the dialog the pointer is the I-beam that says
-        // a press there puts the caret down; over the rest of it, and
-        // over the board behind it, an arrow.
+        // Over the dialog's box the pointer is the I-beam that says a
+        // press there puts the caret down; over the rest of it, and over
+        // the board behind it, an arrow.
         let over_text = match (self.cursor, self.view()) {
-            (Some((x, y)), Some(view)) => self.send_panel(&view).map(|(p, _)| {
-                let folder = p.folder.is_some_and(|f| f.contains(x, y));
-                p.line.contains(x, y) || folder
-            }),
+            (Some((x, y)), Some(view)) => {
+                self.send_panel(&view).map(|(p, _)| p.line.contains(x, y))
+            }
             _ => None,
         };
         let icon = if over_text == Some(true) {

@@ -35,6 +35,23 @@ rows that would otherwise read alike, as many directories above it as it
 takes (`agents::folders`). Two agents in the same directory are one
 place and say it alike.
 
+## A page names itself
+
+The first cut asked a loose selection for a folder name, in a second
+field prefilled with the board's title — `untitled` on every board no
+one had saved under a name — and it read as a field nobody asked for.
+The dialog now asks for nothing but the instruction. `export::owner`
+says what owns a scope: a frame's layer, as before, and — a layer being
+the object it holds — the one layer everything a selection names stands
+on, which is how "export a layer" reads. An owned page is named after
+its owner, and sending it again updates it, as a frame's always did; a
+name that slugs away to nothing, as every non-Latin one does, falls
+back on the owner's id. A selection across layers has no owner and
+takes the tab's name with a counter past the folder's pages, so it
+never writes over one it did not make. The name is decided when the
+page is sent, against the folder of the agent it goes to, and
+`agent read` names a frame through the same function.
+
 ## Copy and paste
 
 The field gains a selection (an anchor; the caret is the other end):

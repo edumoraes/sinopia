@@ -1,8 +1,9 @@
-//! The export dialog: the agents that are running, the folder the page
-//! lands in when the scope has no name of its own, and the instruction
-//! that goes with it — a box that grows a line at a time and scrolls past
-//! [`MAX_LINES`]. Its shape is `dock`'s — layout, hit, prims — and it
-//! holds no state: `app` owns the fields and lends them for a frame.
+//! The export dialog: the agents that are running, the instruction that
+//! goes with the page — a box that grows a line at a time and scrolls
+//! past [`MAX_LINES`] — and a picture of what leaves. What the page is
+//! called is not asked: `export::page_slug` names it. Its shape is
+//! `dock`'s — layout, hit, prims — and it holds no state: `app` owns the
+//! field and lends it for a frame.
 
 use crate::agents::Agent;
 use crate::export;
@@ -17,7 +18,6 @@ use crate::theme::Theme;
 const WIDTH: f32 = 640.0;
 const PADDING: f32 = 12.0;
 const ROW_H: f32 = 34.0;
-const FIELD_H: f32 = 28.0;
 const GAP: f32 = 6.0;
 const RADIUS: f32 = 12.0;
 const ROW_RADIUS: f32 = 7.0;
@@ -94,7 +94,7 @@ fn logo_uv(i: usize) -> [f32; 4] {
 pub enum Hit {
     /// An agent's row, by its place in the list handed to `layout`.
     Target(usize),
-    Folder,
+    /// The instruction, which is all the rest of the dialog.
     Line,
 }
 
@@ -103,8 +103,6 @@ pub enum Hit {
 pub struct Spec {
     /// How many agents are running — the caller opens no dialog for none.
     pub rows: usize,
-    /// Whether the scope needs a folder named for it.
-    pub folder: bool,
     /// How many lines the instruction wraps to at [`Panel::text_width`].
     pub lines: usize,
     /// How far apart two lines stand, in px: the atlas's own.
@@ -120,11 +118,8 @@ pub struct Look<'a> {
     pub agents: &'a [Agent],
     /// Which row wears the ring.
     pub target: usize,
-    /// The folder's field, when the scope asks for one.
-    pub folder: Option<&'a Field>,
+    /// The instruction: the one field, and so the one with the caret.
     pub line: &'a Field,
-    /// Which field has the keyboard, and so the caret.
-    pub focus: Hit,
     /// How far down its lines the instruction is scrolled, in px.
     pub scroll: f32,
     /// The skills answering the call being typed, when one is.
@@ -181,8 +176,6 @@ pub struct Panel {
     pub title: ScreenRect,
     /// One per running agent, in the order they were given.
     pub rows: Vec<ScreenRect>,
-    /// Where the page lands, shown only when the scope has no name.
-    pub folder: Option<ScreenRect>,
     /// The instruction's box.
     pub line: ScreenRect,
     /// How many of the instruction's lines are in sight at once.
@@ -227,12 +220,10 @@ impl Panel {
         let w = Panel::width(viewport, s);
         let inner_w = w - PADDING * 2.0 * s;
         let inset = field::PADDING * s;
-        let fields = if spec.folder { 1.0 } else { 0.0 };
         // Everything but the lines of the instruction and the picture.
         let fixed = PADDING * 2.0 * s
             + TITLE_H * s
             + spec.rows as f32 * (ROW_H * s + GAP * s)
-            + fields * (FIELD_H * s + GAP * s)
             + inset * 2.0;
         let room = viewport.h as f32 - MARGIN * 2.0 * s - fixed;
         // The picture as tall as its shape and the dialog's width allow;
@@ -271,16 +262,6 @@ impl Panel {
                 r
             })
             .collect();
-        let folder = spec.folder.then(|| {
-            let r = ScreenRect {
-                x: inner,
-                y: pen,
-                w: inner_w,
-                h: FIELD_H * s,
-            };
-            pen += FIELD_H * s + GAP * s;
-            r
-        });
         let line = ScreenRect {
             x: inner,
             y: pen,
@@ -300,7 +281,6 @@ impl Panel {
             rect,
             title,
             rows,
-            folder,
             line,
             shown,
             line_h: spec.line_h,
@@ -418,9 +398,6 @@ impl Panel {
         if let Some(i) = self.rows.iter().position(|r| r.contains(x, y)) {
             return Some(Hit::Target(i));
         }
-        if self.folder.is_some_and(|f| f.contains(x, y)) {
-            return Some(Hit::Folder);
-        }
         // Everything else in the panel is the line: a press on the
         // panel's own ground puts the caret where it was going anyway.
         Some(Hit::Line)
@@ -523,10 +500,6 @@ impl Panel {
                 }
             }
         }
-        if let (Some(rect), Some(field)) = (self.folder, look.folder) {
-            out.push(Prim::rounded(rect, theme.corner(ROW_RADIUS, 1.0), theme.bg));
-            out.extend(field.prims(rect, atlas, slot, theme, look.focus == Hit::Folder));
-        }
         out.push(Prim::rounded(
             self.line,
             theme.corner(ROW_RADIUS, 1.0),
@@ -549,10 +522,7 @@ impl Panel {
                 out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(self.line));
             }
         }
-        out.extend(
-            look.line
-                .prims_boxed(&b, atlas, slot, theme, look.focus == Hit::Line),
-        );
+        out.extend(look.line.prims_boxed(&b, atlas, slot, theme, true));
         if let Some(thumb) = self.thumb(lines.len(), look.scroll) {
             out.push(Prim::rounded(thumb, thumb.w / 2.0, theme.muted));
         }
@@ -628,10 +598,9 @@ mod tests {
 
     const LINE_H: f32 = 19.0;
 
-    fn spec(rows: usize, folder: bool) -> Spec {
+    fn spec(rows: usize) -> Spec {
         Spec {
             rows,
-            folder,
             lines: 1,
             line_h: LINE_H,
             picture: None,
@@ -648,7 +617,7 @@ mod tests {
     fn lines(n: usize) -> Spec {
         Spec {
             lines: n,
-            ..spec(2, false)
+            ..spec(2)
         }
     }
 
@@ -685,9 +654,7 @@ mod tests {
             Look {
                 agents,
                 target: 0,
-                folder: None,
                 line: &self.line,
-                focus: Hit::Line,
                 scroll: 0.0,
                 menu: None,
                 picture: None,
@@ -697,35 +664,25 @@ mod tests {
 
     #[test]
     fn a_row_a_target_and_the_line_are_all_inside_the_panel() {
-        let p = Panel::layout(viewport(), 1.0, &spec(3, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(3));
         assert_eq!(p.rows.len(), 3);
         for r in &p.rows {
             assert!(p.rect.contains_rect(r), "a row outside the panel: {r:?}");
         }
         assert!(p.rect.contains_rect(&p.line));
-        assert!(p.folder.is_none());
-    }
-
-    #[test]
-    fn the_folder_field_appears_only_when_it_is_asked_for_and_makes_the_panel_taller() {
-        let without = Panel::layout(viewport(), 1.0, &spec(2, false));
-        let with = Panel::layout(viewport(), 1.0, &spec(2, true));
-        assert!(with.folder.is_some());
-        assert!(with.rect.h > without.rect.h);
-        assert!(with.rect.contains_rect(&with.folder.unwrap()));
     }
 
     #[test]
     fn the_dialog_is_wide_enough_for_a_logo_a_name_a_folder_and_a_status() {
-        let p = Panel::layout(Viewport { w: 1600, h: 900 }, 1.0, &spec(2, false));
+        let p = Panel::layout(Viewport { w: 1600, h: 900 }, 1.0, &spec(2));
         assert_eq!(p.rect.w, 640.0);
-        let p = Panel::layout(Viewport { w: 3200, h: 1800 }, 2.0, &spec(2, false));
+        let p = Panel::layout(Viewport { w: 3200, h: 1800 }, 2.0, &spec(2));
         assert_eq!(p.rect.w, 1280.0, "logical px, like the rest of the chrome");
     }
 
     #[test]
     fn a_narrow_window_keeps_a_margin_either_side_of_the_dialog() {
-        let p = Panel::layout(Viewport { w: 500, h: 800 }, 1.0, &spec(2, false));
+        let p = Panel::layout(Viewport { w: 500, h: 800 }, 1.0, &spec(2));
         assert!(p.rect.x >= MARGIN - 0.5, "{:?}", p.rect);
         assert!(p.rect.x + p.rect.w <= 500.0 - MARGIN + 0.5, "{:?}", p.rect);
         for r in p.rows.iter().chain([&p.line]) {
@@ -735,7 +692,7 @@ mod tests {
 
     #[test]
     fn the_panel_is_centred_in_the_window() {
-        let p = Panel::layout(viewport(), 1.0, &spec(2, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(2));
         let (cx, _) = p.rect.center();
         assert!((cx - 600.0).abs() < 1.0);
     }
@@ -905,7 +862,7 @@ mod tests {
 
     #[test]
     fn a_press_finds_the_row_it_landed_on() {
-        let p = Panel::layout(viewport(), 1.0, &spec(3, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(3));
         for (i, r) in p.rows.iter().enumerate() {
             let (x, y) = r.center();
             assert_eq!(p.hit(f64::from(x), f64::from(y)), Some(Hit::Target(i)));
@@ -913,17 +870,19 @@ mod tests {
     }
 
     #[test]
-    fn a_press_on_each_field_names_that_field() {
-        let p = Panel::layout(viewport(), 1.0, &spec(1, true));
-        let (x, y) = p.line.center();
-        assert_eq!(p.hit(f64::from(x), f64::from(y)), Some(Hit::Line));
-        let (x, y) = p.folder.unwrap().center();
-        assert_eq!(p.hit(f64::from(x), f64::from(y)), Some(Hit::Folder));
+    fn a_press_anywhere_on_the_dialog_but_a_row_is_the_instructions() {
+        // There is one field. What a page is called is not asked: it is
+        // named after the frame or the layer it holds, or else the tab.
+        let p = Panel::layout(viewport(), 1.0, &pictured(2.0));
+        for r in [p.title, p.line, p.picture.unwrap()] {
+            let (x, y) = r.center();
+            assert_eq!(p.hit(f64::from(x), f64::from(y)), Some(Hit::Line));
+        }
     }
 
     #[test]
     fn a_press_outside_the_panel_is_not_the_panels() {
-        let p = Panel::layout(viewport(), 1.0, &spec(1, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(1));
         assert_eq!(p.hit(5.0, 5.0), None);
     }
 
@@ -938,34 +897,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_field_with_the_keyboard_shows_a_caret() {
+    fn the_instruction_wears_the_one_caret() {
         let f = Fixture::new();
         let agents = [Agent::at("claude", "/w/a", Reach::None)];
-        let folder = Field::new("sketch");
-        let p = Panel::layout(viewport(), 1.0, &spec(1, true));
-        let on_line = Look {
-            folder: Some(&folder),
-            ..f.look(&agents)
-        };
-        let on_folder = Look {
-            focus: Hit::Folder,
-            ..on_line
-        };
-        let line_caret = p.prims(&on_line, &f.ink(0, None));
-        let folder_caret = p.prims(&on_folder, &f.ink(0, None));
-        assert_eq!(carets(&line_caret), 1);
-        assert_eq!(carets(&folder_caret), 1);
-        let caret_y = |prims: &[Prim]| {
-            prims
-                .iter()
-                .find(|q| q.kind == crate::scene::KIND_BOX && (q.geom[2] - 1.5).abs() < 0.01)
-                .map(|q| q.geom[1])
-                .unwrap()
-        };
-        assert!(
-            caret_y(&line_caret) > caret_y(&folder_caret),
-            "the line is below"
-        );
+        let p = Panel::layout(viewport(), 1.0, &spec(1));
+        let prims = p.prims(&f.look(&agents), &f.ink(0, None));
+        assert_eq!(carets(&prims), 1);
+        let caret = prims
+            .iter()
+            .find(|q| q.kind == crate::scene::KIND_BOX && (q.geom[2] - 1.5).abs() < 0.01)
+            .unwrap();
+        assert!(p.line.contains_rect(&caret.bounds()), "in the box");
     }
 
     #[test]
@@ -976,7 +918,7 @@ mod tests {
             status: Some("working".into()),
             ..quiet.clone()
         };
-        let p = Panel::layout(viewport(), 1.0, &spec(1, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(1));
         let without = p.prims(&f.look(&[quiet]), &f.ink(0, None));
         let with = p.prims(&f.look(&[busy]), &f.ink(0, None));
         assert!(
@@ -994,7 +936,7 @@ mod tests {
             Agent::at("claude", "/home/e/Work/board", Reach::None),
             Agent::at("opencode", "/home/e/Work/a/very/deep/project", Reach::None),
         ];
-        let p = Panel::layout(viewport(), 1.0, &spec(agents.len(), false));
+        let p = Panel::layout(viewport(), 1.0, &spec(agents.len()));
         let folders = crate::agents::folders(&agents);
         for ((a, folder), row) in agents.iter().zip(&folders).zip(&p.rows) {
             // The mark and the name start one padding in and the status
@@ -1019,7 +961,7 @@ mod tests {
     fn a_row_says_the_agents_name_and_its_last_directory_and_not_its_path() {
         let f = Fixture::new();
         let a = Agent::at("claude", "/home/e/Work/a/very/deep/project", Reach::None);
-        let p = Panel::layout(viewport(), 1.0, &spec(1, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(1));
         let prims = p.prims(&f.look(&[a]), &f.ink(7, None));
         let inked = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
         assert_eq!(
@@ -1032,7 +974,7 @@ mod tests {
     fn a_row_wears_its_agents_mark_from_the_logo_sheet() {
         let f = Fixture::new();
         let codex = Agent::at("codex", "/w/a", Reach::None);
-        let p = Panel::layout(viewport(), 1.0, &spec(1, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(1));
         let prims = p.prims(&f.look(&[codex]), &f.ink(0, Some(9)));
         let marks: Vec<&Prim> = prims.iter().filter(|q| q.slot == 9).collect();
         assert_eq!(marks.len(), 1);
@@ -1047,7 +989,7 @@ mod tests {
     #[test]
     fn the_name_stands_in_one_place_whatever_mark_is_beside_it() {
         let f = Fixture::new();
-        let p = Panel::layout(viewport(), 1.0, &spec(1, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(1));
         let row = p.rows[0];
         let at = |kind, logos| {
             let a = [Agent::at(kind, "/w/a", Reach::None)];
@@ -1242,7 +1184,7 @@ mod tests {
     fn an_agent_nobody_drew_a_mark_for_gets_its_initial_on_a_tile() {
         let f = Fixture::new();
         let pi = Agent::at("pi", "/w/a", Reach::Herdr("p".into()));
-        let p = Panel::layout(viewport(), 1.0, &spec(1, false));
+        let p = Panel::layout(viewport(), 1.0, &spec(1));
         let prims = p.prims(&f.look(&[pi]), &f.ink(7, Some(9)));
         assert!(prims.iter().all(|q| q.slot != 9), "no cell of the sheet");
         let inked = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();

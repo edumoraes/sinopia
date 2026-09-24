@@ -41,18 +41,49 @@ pub fn bounds(doc: &Document, scope: &Scope) -> Option<Frame> {
     select::frame_of(doc, &scope.ids())
 }
 
-/// The name the scope exports under, when it has one. A frame's name is
-/// its layer's, since a frame layer and its frame are one thing. A loose
-/// selection has none and the panel asks for one.
-pub fn named(doc: &Document, scope: &Scope) -> Option<String> {
-    let Scope::Frame(id) = scope else {
-        return None;
-    };
-    let frame = doc.frame(id)?;
-    doc.layers
-        .iter()
-        .find(|l| l.id == frame.layer)
-        .map(|l| l.name.clone())
+/// What owns what the scope covers, as its name and an id to fall back
+/// on: a frame's layer, since a frame layer and its frame are one thing,
+/// with the frame's own id — and, since a layer is the object it holds,
+/// the one layer everything a selection names stands on. A selection
+/// across layers has no owner.
+pub fn owner(doc: &Document, scope: &Scope) -> Option<(String, String)> {
+    match scope {
+        Scope::Frame(id) => {
+            let frame = doc.frame(id)?;
+            let layer = doc.layers.iter().find(|l| l.id == frame.layer)?;
+            Some((layer.name.clone(), id.clone()))
+        }
+        Scope::Selection(ids) => {
+            let mut layers = ids
+                .iter()
+                .filter_map(|id| doc.elements.iter().find(|e| e.id() == id))
+                .map(Element::layer);
+            let first = layers.next()?;
+            if !layers.all(|l| l == first) {
+                return None;
+            }
+            let (frame, at) = doc.locate(first)?;
+            let layer = doc.stack(frame).get(at)?;
+            Some((layer.name.clone(), layer.id.clone()))
+        }
+    }
+}
+
+/// The folder under `docs/boards/` a scope's page is written to. An owned
+/// scope is written under its owner's name — so a frame or a layer sent
+/// again updates its own page, whichever door it left by — and under its
+/// id where the name slugs away to nothing, as every non-Latin name does.
+/// A selection across layers has no one name: it takes `fallback`'s, the
+/// tab's, with a counter past what `taken` holds, so it never writes over
+/// a page it did not make.
+pub fn page_slug(doc: &Document, scope: &Scope, fallback: &str, taken: &[String]) -> String {
+    match owner(doc, scope) {
+        Some((name, id)) => [slug(&name), slug(&id)]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or_else(|| UNNAMED.to_owned()),
+        None => free_name(fallback, taken),
+    }
 }
 
 /// One frame, as an agent is told about it: what to ask for it by, what
@@ -488,14 +519,49 @@ mod tests {
         assert!(bounds(&doc, &Scope::Selection(vec![])).is_none());
     }
 
+    fn picked(ids: &[&str]) -> Scope {
+        Scope::Selection(ids.iter().map(|id| (*id).to_owned()).collect())
+    }
+
     #[test]
-    fn a_frame_is_named_by_its_layer_and_a_selection_is_not_named() {
-        let doc = board();
-        assert_eq!(
-            named(&doc, &Scope::Frame("f1".into())).as_deref(),
-            Some("Auth Flow")
-        );
-        assert_eq!(named(&doc, &Scope::Selection(vec!["outside".into()])), None);
+    fn a_frame_and_what_stands_on_one_layer_are_owned_by_that_layer() {
+        let mut doc = board();
+        doc.layers[0].name = "Sketch".into();
+        let frame = owner(&doc, &Scope::Frame("f1".into()));
+        assert_eq!(frame, Some(("Auth Flow".into(), "f1".into())));
+        // A layer is the object it holds: what stands on one is its, the
+        // way what a frame holds is the frame's.
+        let one = owner(&doc, &picked(&["outside"]));
+        assert_eq!(one, Some(("Sketch".into(), "l0".into())));
+        // Inside a frame too, since a layer there is a layer.
+        let inner = owner(&doc, &picked(&["inside"]));
+        assert_eq!(inner, Some(("Layer 1".into(), "in".into())));
+        // And across two layers, nothing.
+        assert_eq!(owner(&doc, &picked(&["outside", "inside"])), None);
+    }
+
+    #[test]
+    fn a_page_is_named_after_its_owner_or_else_after_the_tab() {
+        let mut doc = board();
+        doc.layers[0].name = "Sketch".into();
+        let taken = vec!["sketches".to_owned(), "sketch".to_owned()];
+        let frame = Scope::Frame("f1".into());
+        assert_eq!(page_slug(&doc, &frame, "sketches", &taken), "auth-flow");
+        // An owned page is the owner's to write again, taken or not:
+        // sending the same layer twice updates its page.
+        let one = picked(&["outside"]);
+        assert_eq!(page_slug(&doc, &one, "sketches", &taken), "sketch");
+        // Nothing owns a selection across layers, so it never writes over
+        // a page it did not make.
+        let both = picked(&["outside", "inside"]);
+        assert_eq!(page_slug(&doc, &both, "sketches", &taken), "sketches-2");
+    }
+
+    #[test]
+    fn an_owner_whose_name_slugs_away_names_its_page_by_its_id() {
+        let mut doc = board();
+        doc.layers[0].name = "図".into();
+        assert_eq!(page_slug(&doc, &picked(&["outside"]), "x", &[]), "l0");
     }
 
     #[test]

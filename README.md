@@ -230,10 +230,12 @@ export to the agent and the CLI an agent asks the board through:
   same objects in the board's own schema; and `board.md`, an inventory
   under a preface saying it is a diagram and not an order — and the
   dialog shows that same picture at its foot before it goes, drawn
-  through the path `board.png` is. A frame brings the name it carries
-  on its card; a loose selection is asked for one, prefilled with a name
-  the folder does not already hold, and whatever is typed becomes
-  exactly one directory. The instruction is the person's own, typed
+  through the path `board.png` is. What the page is called is never
+  asked: a frame brings the name it carries on its card, and so does a
+  layer — whatever stands on one layer is named after it, and sending
+  it again updates its page; a selection across layers takes the tab's
+  name with a counter past what the folder already holds. A name only
+  ever becomes one directory. The instruction is the person's own, typed
   into a box that wraps, grows a line at a time to twenty and then
   scrolls — `Shift+Enter` breaks a line, Enter sends, as the title's
   far end says — and submitted into the agent's live session; never the
