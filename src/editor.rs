@@ -9,7 +9,7 @@ use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
 use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, Tag, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
-use crate::merge::Merge;
+use crate::merge::{Merge, Run};
 use crate::scene::View;
 use crate::select::{self, Handle};
 use crate::tree::{self, Arrange, Filter, Place};
@@ -1032,7 +1032,7 @@ impl Editor {
             Command::Lock => self.toggle_lock(doc),
             Command::Show => self.toggle_shown(doc),
             Command::Arrange(how) => self.arrange(doc, how),
-            Command::Merge | Command::MergeVisible | Command::Flatten => self.merge(doc, command),
+            Command::Merge | Command::MergeVisible | Command::Flatten => self.merge(doc, command, &[]),
         }
     }
 
@@ -1064,17 +1064,26 @@ impl Editor {
         }
     }
 
-    /// Carries out `command`'s merges by moving what they show onto the
-    /// layers they keep. A run that would not draw the same picture that
-    /// way refuses the whole merge, and the board stays as it was. What
-    /// is left of the pick is picked: the layer a run kept, or — once its
-    /// layer went — the top of the board.
-    fn merge(&mut self, doc: &mut Document, command: Command) -> Change {
+    /// The merges `command` asks of the board, in the order `merge` takes
+    /// the pictures of the ones that are not exact.
+    pub fn merges(&self, doc: &Document, command: Command) -> Vec<Run> {
+        self.merge_request(doc, command)
+            .map_or_else(Vec::new, |m| doc.merges(&m))
+    }
+
+    /// Carries out `command`'s merges: every run that is exact by moving
+    /// what it shows onto the layer it keeps, and every one that is not by
+    /// the picture `drawn` holds for it, at its place in [`Editor::merges`].
+    /// A run with neither refuses the whole merge, and the board stays as
+    /// it was. What is left of the pick is picked: the layer a run kept,
+    /// or — once its layer went — the top of the board.
+    pub fn merge(&mut self, doc: &mut Document, command: Command, drawn: &[Option<Image>]) -> Change {
         let Some(request) = self.merge_request(doc, command) else {
             return Change::None;
         };
         let runs = doc.merges(&request);
-        if !runs.iter().all(|r| doc.exact(r)) {
+        let pictured = |i: usize| drawn.get(i).and_then(Option::as_ref);
+        if !runs.iter().enumerate().all(|(i, r)| doc.exact(r) || pictured(i).is_some()) {
             return Change::None;
         }
         let active = self.active(doc).to_owned();
@@ -1085,8 +1094,11 @@ impl Editor {
                 .any(|m| doc.subtree(m).contains(&active))
         });
         let landed = home.map(|r| r.keep.clone());
-        for run in &runs {
-            doc.merge_structural(run);
+        for (i, run) in runs.iter().enumerate() {
+            match pictured(i).filter(|_| !doc.exact(run)) {
+                Some(picture) => doc.merge_raster(run, picture.clone()),
+                None => doc.merge_structural(run),
+            }
         }
         let discarded = request == Merge::Flatten && doc.discard_hidden();
         if runs.is_empty() && !discarded {
@@ -1100,8 +1112,14 @@ impl Editor {
     }
 
     /// Whether `command` would change anything, found out by doing it to
-    /// copies: the one answer that cannot disagree with the doing.
+    /// copies: the one answer that cannot disagree with the doing. A
+    /// merge is asked by its runs instead — one that is not exact waits
+    /// on a picture `app` can always take.
     pub fn can(&self, doc: &Document, command: Command) -> bool {
+        if matches!(command, Command::Merge | Command::MergeVisible | Command::Flatten) {
+            let hidden = command == Command::Flatten && doc.rows(|_| true).iter().any(|r| !r.layer.visible);
+            return hidden || !self.merges(doc, command).is_empty();
+        }
         let mut doc = doc.clone();
         self.clone().run(&mut doc, command) != Change::None
     }
@@ -4823,7 +4841,8 @@ mod tests {
         assert_eq!(e.merge_name(&doc), "Merge Layers");
         assert_eq!(e.run(&mut doc, Command::Merge), Change::Scene);
         assert_eq!(doc.layers.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["G", "F"]);
-        // What is not exact is not done here: it wants a picture.
+        // What is not exact wants a picture: without one nothing is done,
+        // though it can be — `app` takes the picture.
         let mut doc = crate::tree::tests::nested();
         doc.layer_mut("A").unwrap().opacity = 0.5;
         let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
@@ -4831,6 +4850,26 @@ mod tests {
         let before = doc.clone();
         assert_eq!(e.run(&mut doc, Command::Merge), Change::None);
         assert_eq!(doc, before);
+        assert!(e.can(&doc, Command::Merge));
+        let runs = e.merges(&doc, Command::Merge);
+        assert_eq!(runs.len(), 1);
+        assert!(!doc.exact(&runs[0]));
+        let picture = crate::doc::Image {
+            id: "pic".into(),
+            layer: String::new(),
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            rotation: 0.0,
+            blob: "a".repeat(64),
+        };
+        assert_eq!(e.merge(&mut doc, Command::Merge, &[Some(picture)]), Change::Scene);
+        let a = doc.layer("A").unwrap();
+        assert_eq!(a.opacity, 1.0, "the picture already is what it drew");
+        let on_a: Vec<&str> = doc.elements.iter().filter(|el| el.layer() == "A").map(|el| el.id()).collect();
+        assert_eq!(on_a, ["pic"]);
+        assert_eq!(e.active(&doc), "A");
     }
 
     #[test]

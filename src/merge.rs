@@ -4,7 +4,14 @@
 //! where it was, and a frame never does. Pure — `app` draws the merges
 //! that are not exact.
 
-use crate::doc::{BlendMode, Document, Element, Kind, Layer};
+use crate::doc::{BlendMode, Camera, Document, Element, Image, Kind, Layer};
+use crate::geom::Point;
+use crate::scene::{View, Viewport};
+use crate::select;
+
+/// Room past the ink's own frames that a merge's picture keeps, in world
+/// units: an edge's feather, and a pixel to spare.
+const RASTER_PAD: f64 = 1.0;
 
 /// A merge a board is asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,12 +162,7 @@ impl Document {
     /// one, unless the upper one erases, which would then rub out the
     /// lower one too.
     pub fn merge_structural(&mut self, run: &Run) {
-        let members: Vec<String> = run
-            .members
-            .iter()
-            .filter_map(|id| self.layer(id))
-            .flat_map(|l| self.subtree(l))
-            .collect();
+        let members = self.under(run);
         let order: Vec<usize> = self
             .painted()
             .filter(|p| members.iter().any(|m| m == p.element.layer()))
@@ -181,15 +183,68 @@ impl Document {
         }
         self.elements.retain(|el| !members.iter().any(|m| m == el.layer()));
         self.elements.extend(moved);
+        self.settle_kept(run);
+    }
+
+    /// What a run's picture is drawn from: its members as they stand —
+    /// every property they composite with — and what stands on them, and
+    /// nothing else of the board.
+    pub fn run_document(&self, run: &Run) -> Document {
+        let layers: Vec<Layer> = run
+            .members
+            .iter()
+            .filter_map(|id| self.layer(id))
+            .cloned()
+            .collect();
+        let under = self.under(run);
+        let elements = self
+            .elements
+            .iter()
+            .filter(|el| under.iter().any(|u| u == el.layer()))
+            .cloned()
+            .collect();
+        Document {
+            layers,
+            elements,
+            ..Document::new(&self.title)
+        }
+    }
+
+    /// Merges `run` into the picture taken of it: the kept layer holds
+    /// `image` and nothing else, normal and at full strength, since the
+    /// picture already is what the members drew; the other members go,
+    /// with everything they held.
+    pub fn merge_raster(&mut self, run: &Run, image: Image) {
+        let members = self.under(run);
+        self.elements.retain(|el| !members.iter().any(|m| m == el.layer()));
+        self.elements.push(Element::Image(Image {
+            layer: run.keep.clone(),
+            ..image
+        }));
+        self.settle_kept(run);
+    }
+
+    /// Every layer a run's members are, and hold.
+    fn under(&self, run: &Run) -> Vec<String> {
+        run.members
+            .iter()
+            .filter_map(|id| self.layer(id))
+            .flat_map(|l| self.subtree(l))
+            .collect()
+    }
+
+    /// The other members out of the stack, and the kept one a raster layer
+    /// under the run's name — normal and whole, since what it holds now
+    /// is what they drew — shown if any of them was.
+    fn settle_kept(&mut self, run: &Run) {
+        let shown = run.members.iter().any(|id| self.layer(id).is_some_and(|l| l.visible));
         if let Some(stack) = self.stack_mut(run.owner.as_deref()) {
             stack.retain(|l| l.id == run.keep || !run.members.contains(&l.id));
         }
-        let shown = run.members.iter().any(|id| self.layer(id).is_some_and(|l| l.visible));
         if let Some(keep) = self.layer_mut(&run.keep) {
             *keep = Layer {
                 id: keep.id.clone(),
-                name: run.name.clone(),
-                visible: shown || keep.visible,
+                visible: shown,
                 color: keep.color,
                 ..Layer::of(&run.name, Kind::Raster)
             };
@@ -228,6 +283,56 @@ fn shown_only(layers: &mut Vec<Layer>) {
     }
 }
 
+/// The world box a picture of `sub` has to cover: every element's frame —
+/// the ink's, width and all — with room for what a nib throws past it.
+pub fn raster_box(sub: &Document) -> Option<(Point, Point)> {
+    let mut span: Option<(Point, Point)> = None;
+    for el in &sub.elements {
+        let Some(frame) = select::frame(el) else { continue };
+        let thrown = match el {
+            Element::Path(p) => p.stamp.as_ref().map_or(0.0, |s| s.scatter.size),
+            Element::Paint(p) => p
+                .strokes
+                .iter()
+                .filter_map(|s| s.stamp.as_ref())
+                .map(|s| s.scatter.size)
+                .fold(0.0, f64::max),
+            _ => 0.0,
+        };
+        let pad = RASTER_PAD + thrown;
+        let (lo, hi) = frame.aabb();
+        let (lo, hi) = ([lo[0] - pad, lo[1] - pad], [hi[0] + pad, hi[1] + pad]);
+        span = Some(match span {
+            None => (lo, hi),
+            Some((l, h)) => ([l[0].min(lo[0]), l[1].min(lo[1])], [h[0].max(hi[0]), h[1].max(hi[1])]),
+        });
+    }
+    span
+}
+
+/// The camera and the size in px a picture of `lo`..`hi` is taken with:
+/// `ceiling` px to a world unit, fewer where that would pass `max_side` —
+/// the zoom gives way, never the box — and the world box its pixels cover
+/// exactly, a pixel's rounding past `hi`, which is where it is laid.
+pub fn raster_view((lo, hi): (Point, Point), ceiling: f64, max_side: u32) -> (View, u32, u32, (Point, Point)) {
+    let (world_w, world_h) = ((hi[0] - lo[0]).max(f64::MIN_POSITIVE), (hi[1] - lo[1]).max(f64::MIN_POSITIVE));
+    let most = f64::from(max_side.max(1));
+    let scale = ceiling.min(most / world_w).min(most / world_h).max(f64::MIN_POSITIVE);
+    let w = ((world_w * scale).ceil() as u32).clamp(1, max_side.max(1));
+    let h = ((world_h * scale).ceil() as u32).clamp(1, max_side.max(1));
+    let covered = [lo[0] + f64::from(w) / scale, lo[1] + f64::from(h) / scale];
+    let view = View {
+        camera: Camera {
+            x: (lo[0] + covered[0]) / 2.0,
+            y: (lo[1] + covered[1]) / 2.0,
+            zoom: scale,
+        },
+        viewport: Viewport { w, h },
+        scale: 1.0,
+    };
+    (view, w, h, (lo, covered))
+}
+
 /// A run of visible siblings as a merge: two or more, or a group alone.
 fn visible_run(owner: Option<&str>, run: &[&Layer]) -> Option<Run> {
     let top = run.last()?;
@@ -242,7 +347,7 @@ fn visible_run(owner: Option<&str>, run: &[&Layer]) -> Option<Run> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{BlendMode, Document, Element, Kind};
+    use crate::doc::{BlendMode, Document, Element, Image, Kind};
 
     /// A board of `layers` (JSON, bottom to top) and a rect on each layer
     /// named in `on`, its id the layer's lowercased.
@@ -478,5 +583,77 @@ mod tests {
         assert_eq!(stack(&doc, None), ["C", "F", "K"]);
         assert!(doc.elements.iter().all(|e| e.id() != "b"));
         assert!(!doc.discard_hidden(), "nothing left to discard");
+    }
+
+    const THREE: &str = r#"{ "id": "L1", "name": "Layer 1" }, { "id": "L2", "name": "Layer 2" }, { "id": "L3", "name": "Layer 3" }"#;
+
+    #[test]
+    fn a_run_is_drawn_from_its_members_as_they_stand_and_nothing_else() {
+        let mut doc = board(THREE, &["L1", "L2", "L3"]);
+        doc.layer_mut("L2").unwrap().opacity = 0.5;
+        let run = doc.merges(&Merge::Down("L2".into())).remove(0);
+        assert!(!doc.exact(&run));
+        let sub = doc.run_document(&run);
+        assert_eq!(stack(&sub, None), ["L1", "L2"]);
+        assert_eq!(sub.layer("L2").unwrap().opacity, 0.5, "drawn as it composites");
+        assert_eq!(
+            sub.elements.iter().map(|e| e.id()).collect::<Vec<_>>(),
+            ["l1", "l2"]
+        );
+    }
+
+    #[test]
+    fn a_picture_covers_the_ink_and_what_a_nib_throws_past_it() {
+        let doc = board(TWO, &["L1"]);
+        assert_eq!(raster_box(&doc), Some(([-1.0, -1.0], [2.0, 2.0])));
+        let path = Document::from_json(
+            r##"{ "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                  "camera": { "x": 0, "y": 0, "zoom": 1 }, "layers": [ { "id": "L1", "name": "L1" } ],
+                  "elements": [ { "id": "p", "type": "path", "layer": "L1", "width": 10, "stroke": "#000000",
+                                  "curves": [[[0,0],[10,0],[20,0],[30,0]]],
+                                  "stamp": { "spacing": 1.2, "roundness": 1, "rotation": 0,
+                                             "scatter": { "size": 3, "rotation": 0 } } } ] }"##,
+        )
+        .unwrap();
+        assert_eq!(raster_box(&path), Some(([-9.0, -9.0], [39.0, 9.0])));
+        assert_eq!(raster_box(&Document::new("t")), None, "nothing to draw");
+    }
+
+    #[test]
+    fn a_picture_is_taken_pixel_for_pixel_over_the_box_it_lands_in() {
+        let (view, w, h, (lo, hi)) = raster_view(([0.0, 0.0], [48.0, 18.0]), 2.0, 8192);
+        assert_eq!((w, h), (96, 36));
+        assert_eq!((lo, hi), ([0.0, 0.0], [48.0, 18.0]));
+        assert_eq!(view.world_to_screen(0.0, 0.0), (0.0, 0.0));
+        assert_eq!(view.world_to_screen(48.0, 18.0), (96.0, 36.0));
+        // A box too big for the device gives up zoom, never the box.
+        let (_, w, h, (lo, hi)) = raster_view(([0.0, 0.0], [20000.0, 10.3]), 2.0, 8192);
+        assert!(w <= 8192 && h >= 1);
+        assert!(hi[0] - lo[0] >= 20000.0 && hi[1] - lo[1] >= 10.3, "all of it, and a pixel's rounding");
+    }
+
+    #[test]
+    fn a_raster_merge_leaves_the_picture_alone_on_the_kept_layer() {
+        let mut doc = board(THREE, &["L1", "L2", "L3"]);
+        doc.layer_mut("L2").unwrap().opacity = 0.5;
+        doc.layer_mut("L1").unwrap().blend = BlendMode::Screen;
+        let run = doc.merges(&Merge::Down("L2".into())).remove(0);
+        let image = Image {
+            id: "pic".into(),
+            layer: String::new(),
+            x: -1.0,
+            y: -1.0,
+            w: 3.0,
+            h: 3.0,
+            rotation: 0.0,
+            blob: "a".repeat(64),
+        };
+        doc.merge_raster(&run, image);
+        assert_eq!(stack(&doc, None), ["L1", "L3"]);
+        let l1 = doc.layer("L1").unwrap();
+        assert_eq!((l1.kind, l1.opacity, l1.blend), (Kind::Raster, 1.0, BlendMode::Normal));
+        assert_eq!(on(&doc, "L1"), ["pic"]);
+        assert_eq!(on(&doc, "L3"), ["l3"], "the rest of the board is left as it was");
+        assert!(Document::from_json(&doc.to_json().unwrap()).is_ok());
     }
 }

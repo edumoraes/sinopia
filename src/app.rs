@@ -24,10 +24,11 @@ use crate::bitmap::{self, Bitmap};
 use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
-use crate::doc::{BlendMode, Document, Element, Layer, Tag};
+use crate::doc::{BlendMode, Document, Element, Image, Layer, Tag};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Command, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
+use crate::merge;
 use crate::field::{self, Field};
 use crate::geom::Corner;
 use crate::gestures;
@@ -1221,6 +1222,58 @@ impl App {
         }
     }
 
+    /// A merge from a key or a row's menu. The runs that are not exact are
+    /// drawn first, each into a picture of its own; then the editor merges
+    /// the lot, one step. A picture that cannot be taken leaves the board
+    /// as it was.
+    fn merge_layers(&mut self, command: Command) {
+        let runs = self.editor().merges(self.doc(), command);
+        let mut drawn = Vec::with_capacity(runs.len());
+        for run in &runs {
+            if self.doc().exact(run) {
+                drawn.push(None);
+                continue;
+            }
+            match self.picture_of(run) {
+                Ok(image) => drawn.push(Some(image)),
+                Err(e) => return log::warn!("merging: {e:#}"),
+            }
+        }
+        let (editor, doc) = self.active();
+        let change = editor.merge(doc, command, &drawn);
+        self.apply(change);
+    }
+
+    /// The picture a run is merged into: what its members show, drawn onto
+    /// nothing — at the zoom the board is looked at, never less than an
+    /// export's — kept in the store as a PNG and put on the GPU as a pasted
+    /// image is, and laid over the box it was taken of.
+    fn picture_of(&mut self, run: &merge::Run) -> anyhow::Result<Image> {
+        let sub = self.doc().run_document(run);
+        let bounds = merge::raster_box(&sub).context("there is nothing there to draw")?;
+        let zoom = self.view().map_or(1.0, |v| v.px_per_world());
+        let most = self.gfx.as_ref().map_or(1, Gfx::max_dimension).min(bitmap::MAX_SIDE);
+        let (view, w, h, (lo, hi)) = merge::raster_view(bounds, zoom.max(export::EXPORT_SCALE), most);
+        let mut rgba = self.render_onto(&sub, &view, w, h, [0.0; 4])?;
+        let srgb = self.gfx.as_ref().is_some_and(Gfx::is_srgb);
+        bitmap::unpremultiply(&mut rgba, srgb);
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)?;
+        let blob = self.store.write_blob(&png)?;
+        let gfx = self.gfx.as_mut().context("there is no window to draw with")?;
+        gfx.upload_image(&blob, &Bitmap { w, h, rgba })?;
+        Ok(Image {
+            id: crate::doc::new_id(),
+            layer: String::new(),
+            x: lo[0],
+            y: lo[1],
+            w: hi[0] - lo[0],
+            h: hi[1] - lo[1],
+            rotation: 0.0,
+            blob,
+        })
+    }
+
     /// `Ctrl+C` and `Ctrl+X` on the board: the picked layers become the
     /// clip — on the system's clipboard under the board's own type, and
     /// kept here for a display with none — and with `X` they go.
@@ -1671,6 +1724,13 @@ impl App {
             match take.and_then(|i| lines.get(i)) {
                 Some(layers::RowLine::Rename) => self.panel_hit(PanelHit::Rename(id.clone())),
                 Some(layers::RowLine::Copy) => self.copy_layers(false),
+                Some(&layers::RowLine::Run(
+                    command @ (Command::Merge | Command::MergeVisible | Command::Flatten),
+                )) => {
+                    self.merge_layers(command);
+                    self.redraw();
+                    return;
+                }
                 Some(layers::RowLine::Cut) => self.copy_layers(true),
                 Some(layers::RowLine::Paste) => self.paste(),
                 _ => {}
@@ -1917,7 +1977,20 @@ impl App {
         w: u32,
         h: u32,
     ) -> anyhow::Result<Vec<u8>> {
-        let (ground, edge) = (self.theme.bg, self.theme.muted);
+        self.render_onto(sub, view, w, h, self.theme.bg)
+    }
+
+    /// What `view` shows of `sub`, drawn offscreen on `ground` — which a
+    /// merge's picture wants to be nothing at all.
+    fn render_onto(
+        &mut self,
+        sub: &Document,
+        view: &View,
+        w: u32,
+        h: u32,
+        ground: scene::Rgba,
+    ) -> anyhow::Result<Vec<u8>> {
+        let edge = self.theme.muted;
         let shapes = std::mem::take(&mut self.shapes);
         let frame = {
             let none = ImageSlots::new();
@@ -3173,6 +3246,9 @@ impl App {
         let change = match (key.as_str(), shift) {
             ("n", true) => editor.add_layer(doc),
             _ => match layer_key(&key, shift, alt) {
+                Some(command @ (Command::Merge | Command::MergeVisible | Command::Flatten)) => {
+                    return self.merge_layers(command);
+                }
                 Some(command) => editor.run(doc, command),
                 None => Change::None,
             },

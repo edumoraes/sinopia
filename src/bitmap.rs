@@ -53,6 +53,32 @@ pub fn checked_size(bytes: &[u8]) -> anyhow::Result<(u32, u32)> {
     Ok((w, h))
 }
 
+/// Takes a picture drawn premultiplied — what the renderer leaves on a
+/// transparent surface — back to the straight alpha an image file holds.
+/// `srgb` says the surface blended in linear light and stored its
+/// channels encoded, and then the division is done in linear light too.
+pub fn unpremultiply(rgba: &mut [u8], srgb: bool) {
+    use crate::scene::{linear_to_srgb, srgb_to_linear};
+    for px in rgba.as_chunks_mut::<4>().0 {
+        match px[3] {
+            0 => *px = [0; 4],
+            255 => {}
+            alpha => {
+                let a = f32::from(alpha) / 255.0;
+                for c in &mut px[..3] {
+                    let v = f32::from(*c) / 255.0;
+                    let straight = if srgb {
+                        linear_to_srgb(srgb_to_linear(v) / a)
+                    } else {
+                        v / a
+                    };
+                    *c = (straight.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+        }
+    }
+}
+
 /// A reader over `bytes` with the format taken from the content. The
 /// dimensions are left to [`decode`], which refuses an oversized image in
 /// its own words; what stays here is the allocation ceiling, the backstop
@@ -99,6 +125,23 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), format)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn a_premultiplied_picture_comes_back_straight() {
+        // Opaque, and nothing at all, are what they were.
+        let mut px = vec![200, 100, 50, 255, 9, 9, 9, 0];
+        unpremultiply(&mut px, true);
+        assert_eq!(px, [200, 100, 50, 255, 0, 0, 0, 0]);
+        // White at half strength, blended in linear light and stored in
+        // sRGB: 0.5 linear is 188.
+        let mut px = vec![188, 188, 188, 128];
+        unpremultiply(&mut px, true);
+        assert_eq!(px, [255, 255, 255, 128]);
+        // Stored as it was blended, the plain division.
+        let mut px = vec![64, 32, 0, 128];
+        unpremultiply(&mut px, false);
+        assert_eq!(px, [128, 64, 0, 128]);
     }
 
     #[test]

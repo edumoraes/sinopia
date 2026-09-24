@@ -129,7 +129,7 @@ pub fn try_parse_color(hex: &str) -> Option<Rgba> {
     Some([rgb[0], rgb[1], rgb[2], 1.0])
 }
 
-fn srgb_to_linear(c: f32) -> f32 {
+pub(crate) fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
         c / 12.92
     } else {
@@ -157,7 +157,7 @@ pub fn to_hex(c: Rgba) -> String {
     format!("#{:02x}{:02x}{:02x}", byte(c[0]), byte(c[1]), byte(c[2]))
 }
 
-fn linear_to_srgb(c: f32) -> f32 {
+pub(crate) fn linear_to_srgb(c: f32) -> f32 {
     if c <= 0.003_130_8 {
         c * 12.92
     } else {

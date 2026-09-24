@@ -974,6 +974,12 @@ impl Gfx {
         self.device.limits().max_texture_dimension_2d
     }
 
+    /// Whether the surfaces keep their channels sRGB-encoded, blending in
+    /// linear light: what a picture read back has to be undone through.
+    pub fn is_srgb(&self) -> bool {
+        self.config.format.is_srgb()
+    }
+
     /// Renders `frame` into a texture of its own and answers the pixels,
     /// tight RGBA8, `w * h * 4` bytes. The copy out is padded to wgpu's
     /// 256-byte row alignment and unpadded here, so the caller gets rows
