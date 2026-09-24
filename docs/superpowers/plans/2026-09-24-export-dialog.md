@@ -27,7 +27,7 @@ implemented.
   - [ ] 2c. logos sourced from the vendors, sheet built by a tool, embedded
   - [ ] 2d. a row draws its logo from the sheet
 - [ ] 3. Copy and paste in the input
-  - [ ] 3a. `Field` selection: anchor, extend, select all, replace
+  - [x] 3a. `Field` selection: anchor, extend, select all, replace
   - [ ] 3b. pasted text cleaned for the field it lands in
   - [ ] 3c. clipboard reads text (`Ctrl+V`), never types a `v`
   - [ ] 3d. clipboard writes text (`Ctrl+C`, `Ctrl+X`)

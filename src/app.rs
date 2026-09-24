@@ -2230,21 +2230,9 @@ impl App {
                         let n = sending.agents.len();
                         sending.target = (sending.target + 1) % n.max(1);
                     }
-                    Key::Named(NamedKey::Backspace) => sending.writing().backspace(),
-                    Key::Named(NamedKey::ArrowLeft) => sending.writing().left(),
-                    Key::Named(NamedKey::ArrowRight) => sending.writing().right(),
-                    Key::Named(NamedKey::Home) => sending.writing().home(),
-                    Key::Named(NamedKey::End) => sending.writing().end(),
-                    // A space is a named key and never a character, so
-                    // without this an instruction is one word long.
-                    Key::Named(NamedKey::Space) => sending.writing().insert(' '),
-                    Key::Character(text) => {
-                        let field = sending.writing();
-                        for c in text.chars().filter(|c| !c.is_control()) {
-                            field.insert(c);
-                        }
+                    _ => {
+                        edit(sending.writing(), key, self.modifiers.state());
                     }
-                    _ => {}
                 }
                 self.redraw();
             }
@@ -2258,18 +2246,9 @@ impl App {
                 match key {
                     Key::Named(NamedKey::Escape) => self.renaming = None,
                     Key::Named(NamedKey::Enter) => self.commit_rename(),
-                    Key::Named(NamedKey::Backspace) => field.backspace(),
-                    Key::Named(NamedKey::ArrowLeft) => field.left(),
-                    Key::Named(NamedKey::ArrowRight) => field.right(),
-                    Key::Named(NamedKey::Home) => field.home(),
-                    Key::Named(NamedKey::End) => field.end(),
-                    Key::Named(NamedKey::Space) => field.insert(' '),
-                    Key::Character(text) => {
-                        for c in text.chars().filter(|c| !c.is_control()) {
-                            field.insert(c);
-                        }
+                    _ => {
+                        edit(field, key, self.modifiers.state());
                     }
-                    _ => {}
                 }
                 self.redraw();
             }
@@ -2774,6 +2753,41 @@ const MAX_FRAGMENT_BYTES: u64 = 64 * 1024 * 1024;
 /// The fragment `add_frame` names, read and parsed. The parse is the
 /// board's own — closed schema, settled layers, blob names checked — so
 /// nothing that would not open as a board can be grafted onto one.
+/// What a key does to the field that has the keyboard, and whether it
+/// did anything. Shift carries a selection along with the caret and Ctrl
+/// walks a word at a time; a letter held with Ctrl or Super is a command
+/// and never text, so `Ctrl+A` selects everything rather than typing an
+/// `a` — and the ones this does not know type nothing at all.
+fn edit(field: &mut Field, key: &Key, mods: winit::keyboard::ModifiersState) -> bool {
+    let (shift, ctrl) = (mods.shift_key(), mods.control_key());
+    match key {
+        Key::Named(NamedKey::Backspace) => field.backspace(),
+        Key::Named(NamedKey::Delete) => field.delete(),
+        Key::Named(NamedKey::ArrowLeft) if ctrl => field.word_left(shift),
+        Key::Named(NamedKey::ArrowRight) if ctrl => field.word_right(shift),
+        Key::Named(NamedKey::ArrowLeft) => field.left(shift),
+        Key::Named(NamedKey::ArrowRight) => field.right(shift),
+        Key::Named(NamedKey::Home) => field.home(shift),
+        Key::Named(NamedKey::End) => field.end(shift),
+        // A space is a named key and never a character, so without this
+        // an instruction is one word long.
+        Key::Named(NamedKey::Space) => field.insert(' '),
+        Key::Character(text) if ctrl || mods.super_key() => {
+            if !text.eq_ignore_ascii_case("a") {
+                return false;
+            }
+            field.select_all();
+        }
+        Key::Character(text) => {
+            for c in text.chars().filter(|c| !c.is_control()) {
+                field.insert(c);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn read_fragment(path: &Path) -> anyhow::Result<Document> {
     let text = String::from_utf8(store::read_capped(path, MAX_FRAGMENT_BYTES)?)
         .with_context(|| format!("reading {path:?}"))?;
