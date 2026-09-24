@@ -480,6 +480,9 @@ pub struct Gfx {
     /// The export dialog's picture of what is leaving: a slot of its own,
     /// replaced in place each time the picture is taken again.
     picture: Option<u32>,
+    /// The layers panel's sheet of thumbnails: drawn onto on the GPU and
+    /// sampled like an image, its slot kept when it changes size.
+    thumbs: Option<Target>,
     /// The window-sized texture a group is composited in, once a frame
     /// has needed one. Rebuilt when the window changes size; like the
     /// atlas, a slot of its own and never an entry in `slots`.
@@ -730,6 +733,7 @@ impl Gfx {
             shapes: None,
             agent_logos: None,
             picture: None,
+            thumbs: None,
             atlas: None,
             scratch: None,
             sheets: Vec::new(),
@@ -972,6 +976,59 @@ impl Gfx {
     /// on an export's size.
     pub fn max_dimension(&self) -> u32 {
         self.device.limits().max_texture_dimension_2d
+    }
+
+    /// Draws `frame` onto the sheet of thumbnails, `size` px and cleared
+    /// to nothing first, and answers the slot it is sampled from. Nothing
+    /// is read back: the pictures stay where they are drawn.
+    pub fn render_thumbs(&mut self, size: (u32, u32), frame: &Frame) -> u32 {
+        let size = (size.0.max(1), size.1.max(1));
+        if self.thumbs.as_ref().is_none_or(|t| t.size != size) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("thumbs"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let group = bind_group(&self.device, &self.tex_bgl, &self.sampler, &view);
+            let slot = match self.thumbs.take() {
+                Some(old) => {
+                    self.textures[old.slot as usize] = group;
+                    old.slot
+                }
+                None => {
+                    self.textures.push(group);
+                    (self.textures.len() - 1) as u32
+                }
+            };
+            self.thumbs = Some(Target {
+                texture,
+                view,
+                size,
+                slot,
+            });
+        }
+        let t = self.thumbs.as_ref().expect("the sheet was made");
+        let (texture, view, slot) = (t.texture.clone(), t.view.clone(), t.slot);
+        let viewport = Viewport {
+            w: size.0,
+            h: size.1,
+        };
+        let encoder = self.encode(&texture, &view, viewport, [0.0; 4], frame);
+        self.queue.submit([encoder.finish()]);
+        slot
     }
 
     /// Whether the surfaces keep their channels sRGB-encoded, blending in
@@ -1423,6 +1480,14 @@ fn pipeline(
 /// The texture format that matches the surface: the pipeline writes its
 /// colors straight through, so an image has to go in the same space the
 /// surface reads out.
+/// A texture drawn onto and sampled, and the slot it is sampled from.
+struct Target {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    slot: u32,
+}
+
 fn texture_format(surface: wgpu::TextureFormat) -> wgpu::TextureFormat {
     if surface.is_srgb() {
         wgpu::TextureFormat::Rgba8UnormSrgb

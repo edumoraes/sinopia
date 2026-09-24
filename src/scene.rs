@@ -1507,6 +1507,13 @@ impl Frame {
     }
 
     /// `other` painted after everything here.
+    /// Every prim cut to `to`: nothing of the frame is drawn outside it.
+    pub fn cut(&mut self, to: ScreenRect) {
+        for p in &mut self.prims {
+            *p = p.clipped(to);
+        }
+    }
+
     pub fn append(&mut self, other: Frame) {
         let offset = self.prims.len() as u32;
         self.prims.extend(other.prims);
@@ -4574,5 +4581,29 @@ mod tests {
             Some(live),
         );
         assert_eq!(f.prims[0].clip, NO_CLIP);
+    }
+
+    #[test]
+    fn a_frame_appended_keeps_its_groups_and_sheets_on_its_own_prims() {
+        let r = |x: f32| ScreenRect { x, y: 0.0, w: 4.0, h: 4.0 };
+        let mut a = Frame::new();
+        a.group(vec![Prim::rect(r(0.0), [1.0; 4]), Prim::rect(r(8.0), [1.0; 4])], 0.5, Blend::Union, Blend::Over);
+        let mut b = Frame::new();
+        b.sheet(|f| f.group(vec![Prim::rect(r(20.0), [1.0; 4])], 0.5, Blend::Union, Blend::Over));
+        a.append(b);
+        assert_eq!(a.prims.len(), 3);
+        let spans: Vec<(u32, u32)> = a.groups.iter().map(|g| (g.start, g.end)).collect();
+        assert_eq!(spans, [(0, 2), (2, 3)]);
+        assert_eq!(a.sheets.iter().map(|s| (s.start, s.end)).collect::<Vec<_>>(), [(2, 3)]);
+        assert_eq!(a.prims[2].bounds(), r(20.0));
+    }
+
+    #[test]
+    fn a_frame_cut_to_a_box_draws_nothing_outside_it() {
+        let mut f = Frame::new();
+        f.extend([Prim::rect(ScreenRect { x: 0.0, y: 0.0, w: 50.0, h: 50.0 }, [1.0; 4])]);
+        let cell = ScreenRect { x: 10.0, y: 10.0, w: 20.0, h: 20.0 };
+        f.cut(cell);
+        assert_eq!(f.prims[0].clip, Prim::rect(cell, [1.0; 4]).clipped(cell).clip);
     }
 }

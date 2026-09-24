@@ -40,6 +40,7 @@ mod tablet;
 mod tabs;
 mod text;
 mod theme;
+mod thumbs;
 mod tree;
 
 use anyhow::Context as _;

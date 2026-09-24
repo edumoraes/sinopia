@@ -29,6 +29,7 @@ use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Command, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
 use crate::merge;
+use crate::thumbs;
 use crate::field::{self, Field};
 use crate::geom::Corner;
 use crate::gestures;
@@ -220,6 +221,10 @@ struct App {
     fading: bool,
     /// A menu standing over the window, and what it is for.
     menu: Option<Opened>,
+    /// The panel's thumbnails as last taken, and the slot they are in;
+    /// and whether what they show may have changed since.
+    thumbs: Option<(thumbs::Sheet, u32)>,
+    thumbs_stale: bool,
     /// A brush the pointer is carrying out of the library, if any. It
     /// does not outlive the release: there is nothing to settle.
     drag: Option<Dragging>,
@@ -688,6 +693,7 @@ impl App {
         } = &mut self.open[self.active];
         let Some(entry) = history.undo() else { return };
         entry.restore(&mut project.doc, editor);
+        self.thumbs_stale = true;
         self.stepped();
     }
 
@@ -703,6 +709,7 @@ impl App {
         } = &mut self.open[self.active];
         let Some(entry) = history.redo() else { return };
         entry.restore(&mut project.doc, editor);
+        self.thumbs_stale = true;
         self.stepped();
     }
 
@@ -1036,6 +1043,7 @@ impl App {
         self.shared.lock().expect("lock shared").board_id = self.doc().id.clone();
         self.retitle();
         self.load_images();
+        self.thumbs_stale = true;
         self.redraw();
         self.update_cursor_icon();
     }
@@ -2005,6 +2013,57 @@ impl App {
         gfx.render_offscreen(w, h, ground, &frame)
     }
 
+    /// Takes the panel's thumbnails again when what they show may have
+    /// changed — the board came to rest after a change, a step was taken
+    /// or undone, another tab came forward — or other rows are on show.
+    /// Only at rest: a stroke's picture is taken once it is laid, not on
+    /// every sample of it. Every raster and vector row on show is drawn
+    /// into a cell of one sheet, on a checker, in one pass.
+    fn ensure_thumbs(&mut self) {
+        if !self.settled() {
+            return;
+        }
+        let Some(view) = self.view() else { return };
+        let Some(panel) = self.panel(&view) else { return };
+        let ids: Vec<String> = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r.kind, crate::doc::Kind::Raster | crate::doc::Kind::Vector))
+            .map(|r| r.id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.thumbs = None;
+            return;
+        }
+        let s = self.chrome(&view) as f32;
+        let cell = ((layers::GLYPH_W * s).round() as u32, (layers::GLYPH_H * s).round() as u32);
+        let sheet = thumbs::Sheet::new(ids, cell);
+        if !self.thumbs_stale && self.thumbs.as_ref().is_some_and(|(had, _)| *had == sheet) {
+            return;
+        }
+        let edge = self.theme.muted;
+        let shapes = std::mem::take(&mut self.shapes);
+        let mut frame = scene::Frame::new();
+        {
+            let none = ImageSlots::new();
+            let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
+            for (i, id) in sheet.ids().iter().enumerate() {
+                frame.extend(sheet.checker(i));
+                let subject = thumbs::subject(self.doc(), id);
+                if let Some(content) = merge::raster_box(&subject) {
+                    let mut picture = scene::document_prims(&subject, &sheet.view(i, content), images, &shapes, edge, None);
+                    picture.cut(sheet.rect(i));
+                    frame.append(picture);
+                }
+            }
+        }
+        self.shapes = shapes;
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        let slot = gfx.render_thumbs(sheet.size(), &frame);
+        self.thumbs = Some((sheet, slot));
+        self.thumbs_stale = false;
+    }
+
     /// Takes the dialog's picture of what is leaving again when its place
     /// has changed size — it opened, the window was resized, the scale
     /// changed — at that size in px, so it is drawn one to one. Like the
@@ -2440,6 +2499,7 @@ impl App {
                 slides: &self.slides,
                 filter: self.editor().filtering(),
                 searching: self.searching.is_some(),
+                thumbs: self.thumbs.as_ref().map(|(sheet, slot)| (sheet, *slot)),
             };
             frame.extend(panel.prims(&showing, atlas, self.atlas_slot, &self.theme));
             if let (Some(field), Some(text)) = (&self.searching, panel.search_text()) {
@@ -2518,6 +2578,7 @@ impl App {
             Change::Scene => {
                 self.remember();
                 self.touch();
+                self.thumbs_stale = true;
                 self.redraw();
             }
             Change::Camera(camera) => {
@@ -3672,6 +3733,7 @@ impl App {
                 // lettered surface drawing nothing at all.
                 self.ensure_atlas();
                 self.ensure_picture();
+                self.ensure_thumbs();
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
@@ -4031,6 +4093,8 @@ pub fn run(
         pressed: None,
         fading: false,
         menu: None,
+        thumbs: None,
+        thumbs_stale: true,
         drag: None,
         renaming: None,
         searching: None,

@@ -14,6 +14,7 @@ use crate::menu::Item;
 use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix, parse_color};
 use crate::text::Atlas;
 use crate::theme::Theme;
+use crate::thumbs::Sheet;
 use crate::tree::{self, Filter, Place};
 
 // Logical px.
@@ -103,6 +104,11 @@ const BUTTON_GAP: f32 = 2.0;
 /// Between an icon and the label it introduces: a row's glyph and its
 /// name, the handle's chevron and the word under it.
 const LABEL_GAP: f32 = 6.0;
+/// A picture's kind rides on a badge this big at its lower right, this
+/// far out past its corner, the kind's icon this big inside it.
+const BADGE: f32 = 11.0;
+const BADGE_OUT: f32 = 2.0;
+const BADGE_ICON: f32 = 8.0;
 /// The clickable area around the eye and the chevron, past the box.
 const EYE_SLOP: f32 = 2.0;
 /// The 24-unit icon grid maps onto a box this big, centered in its button.
@@ -451,6 +457,9 @@ pub struct Showing<'a> {
     /// keyboard — then `app` draws the field, caret and all.
     pub filter: Option<&'a Filter>,
     pub searching: bool,
+    /// The sheet of pictures of what raster and vector layers hold, and
+    /// the slot it is in, while there is one.
+    pub thumbs: Option<(&'a Sheet, u32)>,
 }
 
 /// One row of the tree, with everything already measured.
@@ -1253,7 +1262,9 @@ impl Panel {
             out.extend(icon_prims(icon, chevron, 24.0, CHEVRON, ICON_STROKE, s, theme.icon));
         }
         // What the row is, read and never clicked: pixels, a curve, a
-        // folder — open when it is — or a frame.
+        // folder — open when it is — or a frame. A raster or a vector
+        // layer shows a picture of what it holds once there is one, its
+        // kind riding on a badge at the corner.
         let glyph = match (row.kind, row.open) {
             (Kind::Raster, _) => PIXELS,
             (Kind::Vector, _) => CURVE,
@@ -1261,12 +1272,35 @@ impl Panel {
             (Kind::Group, true) => FOLDER_OPEN,
             (Kind::Frame, _) => FRAME,
         };
-        let square = ScreenRect {
-            x: row.glyph.x + (row.glyph.w - row.glyph.h) / 2.0,
-            w: row.glyph.h,
-            ..row.glyph
-        };
-        out.extend(icon_prims(glyph, square, 24.0, ICON_BOX, ICON_STROKE, s, tint(theme.icon)));
+        let picture = showing
+            .thumbs
+            .filter(|_| matches!(row.kind, Kind::Raster | Kind::Vector))
+            .and_then(|(sheet, slot)| sheet.uv(&row.id).map(|uv| (uv, slot)));
+        match picture {
+            Some((uv, slot)) => {
+                let b = theme.edge(s);
+                out.push(Prim::rect(row.glyph.inset(-b), theme.border));
+                out.push(Prim::sprite(row.glyph, uv, slot));
+                let badge = ScreenRect {
+                    x: row.glyph.x + row.glyph.w + (BADGE_OUT - BADGE) * s,
+                    y: row.glyph.y + row.glyph.h + (BADGE_OUT - BADGE) * s,
+                    w: BADGE * s,
+                    h: BADGE * s,
+                };
+                let corner = theme.corner(BADGE / 3.0, s);
+                out.push(Prim::rounded(badge.inset(-b), corner + b, theme.border));
+                out.push(Prim::rounded(badge, corner, theme.panel));
+                out.extend(icon_prims(glyph, badge, 24.0, BADGE_ICON, ICON_STROKE, s, tint(theme.icon)));
+            }
+            None => {
+                let square = ScreenRect {
+                    x: row.glyph.x + (row.glyph.w - row.glyph.h) / 2.0,
+                    w: row.glyph.h,
+                    ..row.glyph
+                };
+                out.extend(icon_prims(glyph, square, 24.0, ICON_BOX, ICON_STROKE, s, tint(theme.icon)));
+            }
+        }
         // A lock of its own is the row's to open; one worn for a holder
         // is read, muted, since it is the holder's.
         if let Some(lock) = row.lock {
@@ -2211,6 +2245,7 @@ mod tests {
             locked: false,
             filter: None,
             searching: false,
+            thumbs: None,
         }
     }
 
@@ -2346,6 +2381,7 @@ mod tests {
             locked: false,
             filter: None,
             searching: false,
+            thumbs: None,
         };
         let prims = p.prims(&showing, &a, 7, &theme);
         for row in &p.rows {
@@ -2431,6 +2467,7 @@ mod tests {
             locked: false,
             filter: None,
             searching: false,
+            thumbs: None,
         };
         let prims = p.prims(&show, &a, 7, &theme);
 
@@ -2883,6 +2920,37 @@ mod tests {
         );
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"Unlock") && labels.contains(&"Show") && labels.contains(&"Merge Layers"));
+    }
+
+    #[test]
+    fn a_row_with_a_picture_shows_it_badged_with_its_kind() {
+        let theme = Theme::light();
+        let a = atlas();
+        let p = laid(&flat(2), &[], VP, 1.0, 0.0);
+        let sheet = crate::thumbs::Sheet::new(vec!["L2".into()], (32, 24));
+        let show = Showing {
+            thumbs: Some((&sheet, 9)),
+            ..showing("L1", None)
+        };
+        let prims = p.prims(&show, &a, 7, &theme);
+        let l2 = row(&p, "L2");
+        let pictures: Vec<&Prim> = prims.iter().filter(|q| q.kind == KIND_IMAGE && q.slot == 9).collect();
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(pictures[0].bounds(), l2.glyph);
+        assert_eq!(pictures[0].uv, sheet.uv("L2").unwrap());
+        // The kind rides on a badge at the picture's lower right.
+        let g = l2.glyph;
+        let corner = ScreenRect {
+            x: g.x + g.w / 2.0,
+            y: g.y + g.h / 2.0,
+            w: g.w / 2.0 + 4.0,
+            h: g.h / 2.0 + 4.0,
+        };
+        assert!(prims.iter().any(|q| q.kind == KIND_SEGMENT && corner.contains_rect(&q.bounds())));
+        // A row with no picture shows its kind's icon, as before.
+        let l1 = row(&p, "L1");
+        assert!(!prims.iter().any(|q| q.slot == 9 && l1.glyph.contains_rect(&q.bounds())));
+        assert!(prims.iter().any(|q| q.kind == KIND_SEGMENT && l1.glyph.contains_rect(&q.bounds())));
     }
 
     #[test]
