@@ -69,3 +69,10 @@ under a test of its own, and one older fault with them.
 - [x] a name holds no more than a directory name may
 - [x] the picture's ceiling is a logical density
 - [x] coming back to the window keeps the agent aimed at (older)
+
+## After a first look
+
+- [x] the picture at the foot is half the size: at most half the
+      dialog's width and 80 px tall
+- [x] no folder field for a selection that is not a frame: a page is
+      named after the layer that owns it, or else after the tab
