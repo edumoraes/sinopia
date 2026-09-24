@@ -2537,9 +2537,6 @@ impl App {
     fn key(&mut self, key: &Key, bare: &Key, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
-            // The send panel is modal: it takes the keyboard before
-            // anything else, including the rename that cannot be open
-            // under it.
             // The clipboard's keys come first for whichever field has the
             // keyboard: they are the window's to answer, not the field's.
             Key::Character(c)
@@ -2550,6 +2547,9 @@ impl App {
             {
                 self.clipboard_key(c);
             }
+            // The send panel is modal: it takes the keyboard before
+            // anything else, including the rename that cannot be open
+            // under it.
             _ if self.sending.is_some() && pressed => {
                 let mods = self.modifiers.state();
                 let laid = self.view().and_then(|view| self.send_panel(&view));
@@ -2586,22 +2586,27 @@ impl App {
                         _ => {}
                     }
                 }
-                let mut edited = true;
+                // Whether the key changed the text or moved the caret:
+                // only then is the menu's pick back at its first row. A
+                // modifier pressed on its own is neither.
+                let mut edited = false;
                 match key {
                     Key::Named(NamedKey::Escape) => self.sending = None,
                     // Shift+Enter breaks the line, as it does in the
                     // agent's own box; Enter alone sends.
                     Key::Named(NamedKey::Enter) if mods.shift_key() && in_box => {
                         sending.line.newline();
+                        edited = true;
                     }
                     Key::Named(NamedKey::Enter) => self.do_send(),
                     Key::Named(NamedKey::Tab) => {
                         // Tab walks the targets when there is more than
                         // one, since the fields are two at most and the
                         // list is the thing being chosen from.
-                        let n = sending.agents.len();
-                        sending.aim((sending.target + 1) % n.max(1));
-                        edited = false;
+                        let next = (sending.target + 1) % sending.agents.len().max(1);
+                        if next != sending.target {
+                            sending.aim(next);
+                        }
                     }
                     // In the box the arrows and Home and End walk the
                     // lines as it shows them; with Ctrl, Home and End
@@ -2620,11 +2625,10 @@ impl App {
                                 NamedKey::Home => sending.line.line_home(lines, shift),
                                 _ => sending.line.line_end(lines, shift),
                             }
+                            edited = true;
                         }
                     }
-                    _ => {
-                        edit(sending.writing(), key, mods);
-                    }
+                    _ => edited = edit(sending.writing(), key, mods),
                 }
                 if let Some(sending) = self.sending.as_mut() {
                     sending.settle(edited);
