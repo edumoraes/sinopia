@@ -107,6 +107,10 @@ enum UserEvent {
     },
     /// Clipboard text, for the field that asked for it.
     PastedText(String),
+    /// A board's layers off the clipboard, already parsed off the loop —
+    /// by the board's own parse, schema closed, since any client can put
+    /// anything under any type.
+    PastedLayers(Box<Document>),
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
 }
@@ -247,6 +251,9 @@ struct App {
     atlas: Option<Atlas>,
     atlas_slot: u32,
     clipboard: Option<Clipboard>,
+    /// The last layers copied, for a display with no clipboard to hold
+    /// them: there, `Ctrl+V` pastes this.
+    clip: Option<Document>,
     /// Where a portal dialog sends its answer. Absent before the window.
     dialog_sink: Option<dialogs::Sink>,
     pending: Option<Pending>,
@@ -1205,12 +1212,47 @@ impl App {
     /// Asks the clipboard for an image. The bytes arrive later, as
     /// [`UserEvent::Pasted`].
     fn paste(&mut self) {
-        match &self.clipboard {
-            Some(clipboard) => {
-                clipboard.paste_image();
+        match (&self.clipboard, &self.clip) {
+            (Some(clipboard), _) => {
+                clipboard.paste();
             }
-            None => log::debug!("paste: no clipboard on this display"),
+            (None, Some(clip)) => self.pasted_layers(clip.clone()),
+            (None, None) => log::debug!("paste: no clipboard on this display"),
         }
+    }
+
+    /// `Ctrl+C` and `Ctrl+X` on the board: the picked layers become the
+    /// clip — on the system's clipboard under the board's own type, and
+    /// kept here for a display with none — and with `X` they go.
+    fn copy_layers(&mut self, cut: bool) {
+        let (editor, doc) = self.active();
+        let (clip, change) = if cut {
+            editor.cut(doc)
+        } else {
+            (editor.copy(doc), Change::None)
+        };
+        let Some(clip) = clip else { return };
+        if let Some(clipboard) = &self.clipboard {
+            match clip.to_json() {
+                Ok(json) => clipboard.copy_layers(json),
+                Err(e) => log::warn!("copying layers: {e:#}"),
+            }
+        }
+        self.clip = Some(clip);
+        self.apply(change);
+    }
+
+    /// Layers came back: planted above the active layer, in place when
+    /// that is on show and in the middle of the window otherwise, and
+    /// their images put on the GPU the way a reopened board's are.
+    fn pasted_layers(&mut self, clip: Document) {
+        let Some(view) = self.view() else { return };
+        let (x0, y0) = view.screen_to_world(0.0, 0.0);
+        let (x1, y1) = view.screen_to_world(f64::from(view.viewport.w), f64::from(view.viewport.h));
+        let (editor, doc) = self.active();
+        let change = editor.paste(doc, &clip, ([x0, y0], [x1, y1]));
+        self.apply(change);
+        self.load_images();
     }
 
     /// A clipboard image came back: keep the original bytes, upload the
@@ -1524,7 +1566,11 @@ impl App {
             hidden: picked.iter().all(|l| !l.visible),
             tag: doc.layer(&id).map_or(Tag::None, |l| l.color),
         };
-        let (items, lines) = layers::row_menu(|c| editor.can(doc, c), state);
+        let paste = match &self.clipboard {
+            Some(clipboard) => clipboard.can_paste(),
+            None => self.clip.is_some(),
+        };
+        let (items, lines) = layers::row_menu(|c| editor.can(doc, c), paste, state);
         let at = ScreenRect {
             x: x as f32,
             y: y as f32,
@@ -1618,13 +1664,16 @@ impl App {
     /// one step; none put back leaves the board as the menu found it.
     fn close_menu(&mut self, take: Option<usize>) {
         let Some(opened) = self.menu.take() else { return };
-        // A name opens a field rather than changing the board.
-        if let Purpose::Row { id, lines } = &opened.purpose
-            && take.and_then(|i| lines.get(i)) == Some(&layers::RowLine::Rename)
-        {
-            self.panel_hit(PanelHit::Rename(id.clone()));
-            self.redraw();
-            return;
+        // A name opens a field, and the clipboard is the window's: none
+        // of them is the editor's to answer.
+        if let Purpose::Row { id, lines } = &opened.purpose {
+            match take.and_then(|i| lines.get(i)) {
+                Some(layers::RowLine::Rename) => self.panel_hit(PanelHit::Rename(id.clone())),
+                Some(layers::RowLine::Copy) => self.copy_layers(false),
+                Some(layers::RowLine::Cut) => self.copy_layers(true),
+                Some(layers::RowLine::Paste) => self.paste(),
+                _ => {}
+            }
         }
         let (editor, doc) = self.active();
         let change = match opened.purpose {
@@ -1642,7 +1691,7 @@ impl App {
             Purpose::Row { id, lines } => match take.and_then(|i| lines.get(i).copied()) {
                 Some(layers::RowLine::Run(command)) => editor.run(doc, command),
                 Some(layers::RowLine::Tag(tag)) => editor.set_tag(doc, &id, tag),
-                Some(layers::RowLine::Rename) | None => Change::None,
+                _ => Change::None,
             },
         };
         self.apply(change);
@@ -3071,6 +3120,8 @@ impl App {
                 let shift = self.modifiers.state().shift_key();
                 match text.to_ascii_lowercase().as_str() {
                     "v" => self.paste(),
+                    "c" if !shift => self.copy_layers(false),
+                    "x" if !shift => self.copy_layers(true),
                     "z" if shift => self.redo(),
                     "z" => self.undo(),
                     "s" if shift => self.ask_name(self.active, Then::Stay),
@@ -3342,6 +3393,18 @@ impl ApplicationHandler<UserEvent> for App {
                         let text = String::from_utf8_lossy(&p.bytes).into_owned();
                         return proxy.send_event(UserEvent::PastedText(text)).is_ok();
                     }
+                    if clipboard::is_layers(&p.mime) {
+                        let parsed = std::str::from_utf8(&p.bytes)
+                            .map_err(anyhow::Error::from)
+                            .and_then(Document::from_json);
+                        return match parsed {
+                            Ok(clip) => proxy.send_event(UserEvent::PastedLayers(Box::new(clip))).is_ok(),
+                            Err(e) => {
+                                log::warn!("pasting layers: {e:#}");
+                                true
+                            }
+                        };
+                    }
                     // Decoding a 4K screenshot is tens of milliseconds:
                     // it happens here, on the paste thread, not on the loop.
                     match bitmap::decode(&p.bytes) {
@@ -3559,6 +3622,7 @@ impl App {
             UserEvent::Pen(p) => return self.pen(p),
             UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
             UserEvent::PastedText(text) => return self.pasted_text(&text),
+            UserEvent::PastedLayers(clip) => return self.pasted_layers(*clip),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
         };
         match req {
@@ -3889,6 +3953,7 @@ pub fn run(
         atlas: None,
         atlas_slot: 0,
         clipboard: None,
+        clip: None,
         dialog_sink: None,
         pending: None,
         owed: None,
@@ -3938,7 +4003,7 @@ mod tests {
         assert_eq!(layer_key("[", false), Some(Command::Arrange(Arrange::Backward)));
         assert_eq!(layer_key("q", false), None);
         // Every key a row's menu writes beside a command is that command's.
-        let (items, lines) = layers::row_menu(|_| true, layers::RowState {
+        let (items, lines) = layers::row_menu(|_| true, true, layers::RowState {
             locked: false,
             hidden: false,
             tag: Tag::None,

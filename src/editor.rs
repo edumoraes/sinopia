@@ -971,6 +971,49 @@ impl Editor {
         Change::Scene
     }
 
+    /// The picked layers as a clip — `Ctrl+C` — or none to copy.
+    pub fn copy(&self, doc: &Document) -> Option<Document> {
+        doc.clip(&self.picked_ids(doc))
+    }
+
+    /// The picked layers as a clip, taken off the board — `Ctrl+X`.
+    pub fn cut(&mut self, doc: &mut Document) -> (Option<Document>, Change) {
+        let Some(clip) = self.copy(doc) else {
+            return (None, Change::None);
+        };
+        (Some(clip), self.remove_layers(doc))
+    }
+
+    /// Plants `clip` above the active layer and picks what it planted —
+    /// `Ctrl+V`. It lands in place when that place is in `seen`, the part
+    /// of the world on show, and in the middle of it otherwise: a paste
+    /// nobody can see did not happen, as far as the hand can tell.
+    pub fn paste(&mut self, doc: &mut Document, clip: &Document, seen: (Point, Point)) -> Change {
+        let ids: Vec<String> = clip.elements.iter().map(|el| el.id().to_owned()).collect();
+        let (lo, hi) = seen;
+        let by = match select::frame_of(clip, &ids).map(|f| f.aabb()) {
+            Some((a, b)) if b[0] < lo[0] || a[0] > hi[0] || b[1] < lo[1] || a[1] > hi[1] => {
+                Affine::translate(
+                    (lo[0] + hi[0] - a[0] - b[0]) / 2.0,
+                    (lo[1] + hi[1] - a[1] - b[1]) / 2.0,
+                )
+            }
+            _ => Affine::IDENTITY,
+        };
+        let above = self.active(doc).to_owned();
+        let planted = doc.paste(clip, &above, &by);
+        let Some(top) = planted.last().cloned() else {
+            return Change::None;
+        };
+        for id in &planted {
+            self.reveal(doc, id);
+        }
+        self.picked = planted;
+        self.layer = Some(top);
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
     /// Does `command` to the picked layers.
     pub fn run(&mut self, doc: &mut Document, command: Command) -> Change {
         match command {
@@ -4648,6 +4691,39 @@ mod tests {
         assert_eq!(e.run(&mut doc, Command::Lock), Change::Scene);
         assert!(doc.layer("C").unwrap().locked);
         assert_eq!(e.run(&mut doc, Command::Arrange(Arrange::Front)), Change::None, "alone in its stack");
+    }
+
+    #[test]
+    fn copy_cut_and_paste_carry_the_pick_and_land_where_they_are_seen() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "B", Pick::Only, &ROWS);
+        let clip = e.copy(&doc).expect("B to copy");
+        assert_eq!(clip.layers.len(), 1);
+        let (cut, change) = e.cut(&mut doc);
+        assert_eq!(change, Change::Scene);
+        assert!(doc.layer("B").is_none(), "a cut takes it away");
+        let cut = cut.expect("and keeps it");
+        // What the clip covers is on show: it lands in place.
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let seen = ([-100.0, -100.0], [100.0, 100.0]);
+        assert_eq!(e.paste(&mut doc, &cut, seen), Change::Scene);
+        let active = e.active(&doc).to_owned();
+        assert_eq!(e.picked(&doc), [active.as_str()], "what came in is picked");
+        assert_eq!(doc.layers[1].id, active, "above the active layer");
+        let rect_on = |doc: &Document, layer: &str| -> (f64, f64) {
+            match doc.elements.iter().find(|el| el.layer() == layer) {
+                Some(Element::Rect(r)) => (r.x + r.w / 2.0, r.y + r.h / 2.0),
+                other => panic!("a rect, not {other:?}"),
+            }
+        };
+        assert_eq!(rect_on(&doc, &active), (0.5, 0.5), "in place");
+        // Out of sight: into the middle of what is on show.
+        let far = ([1000.0, 1000.0], [1200.0, 1100.0]);
+        let _ = e.paste(&mut doc, &cut, far);
+        let active = e.active(&doc).to_owned();
+        assert_eq!(rect_on(&doc, &active), (1100.0, 1050.0), "centred");
+        assert_eq!(e.copy(&Document::new("t")).map(|c| c.layers.len()), Some(1), "the lone layer");
     }
 
     #[test]

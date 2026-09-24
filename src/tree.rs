@@ -8,6 +8,9 @@
 //! the editor and the CLI speak the same ids. Pure.
 
 use crate::doc::{BlendMode, Document, Element, Frame, Kind, Layer, Tag, new_id};
+use crate::geom::Affine;
+use crate::graft;
+use crate::select;
 
 impl Document {
     /// The layer `id`, however deep it stands, in whichever stack.
@@ -423,6 +426,98 @@ impl Document {
             elements.push(el);
         }
         (copy, elements)
+    }
+
+    /// The clip of `ids`: a board holding them — each one no other of
+    /// them holds — on its root in paint order, with everything under
+    /// them and every element standing on any of it. Its ids are this
+    /// board's own, and [`Document::paste`] mints them anew on the way
+    /// back in. None when there is nothing there to take.
+    pub fn clip(&self, ids: &[String]) -> Option<Document> {
+        let taken = self.movable(ids);
+        if taken.is_empty() {
+            return None;
+        }
+        let mut layers = Vec::new();
+        let mut under = Vec::new();
+        for id in &taken {
+            let layer = self.layer(id)?;
+            under.extend(self.subtree(layer));
+            layers.push(layer.clone());
+        }
+        let elements = self
+            .elements
+            .iter()
+            .filter(|el| under.iter().any(|id| id == el.layer()))
+            .cloned()
+            .collect();
+        Some(Document {
+            layers,
+            elements,
+            ..Document::new(&self.title)
+        })
+    }
+
+    /// Plants `clip` above layer `above`, every element moved by `by` and
+    /// every id minted anew, so one clip pasted twice is two things. It
+    /// lands in `above`'s stack, or the nearest one up that can take it:
+    /// a locked holder's takes nothing, and a frame goes on the board's
+    /// root or nowhere. Answers the layers planted there, bottom to top —
+    /// none, and nothing changed, when an element would land past the
+    /// numbers a board can hold.
+    pub fn paste(&mut self, clip: &Document, above: &str, by: &Affine) -> Vec<String> {
+        let pairs: Vec<(String, String)> = clip
+            .layers
+            .iter()
+            .flat_map(|l| clip.subtree(l))
+            .map(|id| (id, new_id()))
+            .collect();
+        let minted = |id: &str| pairs.iter().find(|(a, _)| a == id).map(|(_, b)| b.clone());
+        let mut elements = Vec::new();
+        for el in &clip.elements {
+            let Some(to) = minted(el.layer()) else {
+                continue;
+            };
+            let mut el = el.clone();
+            el.set_layer(&to);
+            el.set_id(&new_id());
+            if let Element::Frame(f) = &mut el {
+                renamed(&mut f.layers, &minted);
+            }
+            select::transform(&mut el, by);
+            if !graft::placed(&el) {
+                return Vec::new();
+            }
+            elements.push(el);
+        }
+        let mut layers = clip.layers.clone();
+        renamed(&mut layers, &minted);
+        let framed = layers.iter().any(|l| l.kind == Kind::Frame);
+        let (owner, index) = self.landing(above, framed);
+        let planted: Vec<String> = layers.iter().map(|l| l.id.clone()).collect();
+        let Some(stack) = self.stack_mut(owner.as_deref()) else {
+            return Vec::new();
+        };
+        let index = index.min(stack.len());
+        stack.splice(index..index, layers);
+        self.elements.extend(elements);
+        planted
+    }
+
+    /// Where a paste above `above` lands: just over it in its stack, or
+    /// over the holder of a stack that cannot take it — a locked one, or
+    /// any but the root for a clip that holds a frame.
+    fn landing(&self, above: &str, framed: bool) -> (Option<String>, usize) {
+        let mut at = above.to_owned();
+        loop {
+            let Some((owner, index)) = self.locate(&at) else {
+                return (None, self.layers.len());
+            };
+            match owner {
+                Some(o) if framed || self.fixed(Some(o)) => at = o.to_owned(),
+                _ => return (owner.map(str::to_owned), index + 1),
+            }
+        }
     }
 
     /// Moves `ids` within their own stacks, each stack on its own:
@@ -1275,5 +1370,96 @@ pub(crate) mod tests {
         f.toggle_kind(Kind::Vector);
         f.toggle_tag(Tag::Green);
         assert!(f.is_empty());
+    }
+
+    fn element_ids(doc: &Document) -> Vec<String> {
+        let mut out: Vec<String> = doc.elements.iter().map(|e| e.id().to_owned()).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_clip_holds_the_picked_layers_with_what_is_under_and_on_them() {
+        let doc = nested();
+        let clip = doc.clip(&ids(&["H", "D", "B", "C"])).expect("something to take");
+        // C goes with H, which holds it; the rest in paint order.
+        assert_eq!(stack_ids(&clip, None), ["B", "H", "D"]);
+        assert_eq!(stack_ids(&clip, Some("H")), ["C"]);
+        assert_eq!(element_ids(&clip), ["b", "c", "d"]);
+        // What leaves is a board the parse takes back.
+        let back = Document::from_json(&clip.to_json().unwrap()).expect("a clip parses");
+        assert_eq!(stack_ids(&back, None), ["B", "H", "D"]);
+        assert!(doc.clip(&ids(&["nope"])).is_none());
+    }
+
+    #[test]
+    fn a_clip_of_a_frame_carries_the_frame_and_its_stack() {
+        let doc = nested();
+        let clip = doc.clip(&ids(&["F"])).unwrap();
+        assert_eq!(stack_ids(&clip, None), ["F"]);
+        assert_eq!(stack_ids(&clip, Some("F")), ["D", "K"]);
+        assert_eq!(element_ids(&clip), ["d", "e", "fr"]);
+    }
+
+    #[test]
+    fn a_paste_mints_every_id_anew_and_lands_above() {
+        let mut doc = nested();
+        let clip = doc.clip(&ids(&["G"])).unwrap();
+        let before = doc.clone();
+        let planted = doc.paste(&clip, "A", &Affine::IDENTITY);
+        assert_eq!(planted.len(), 1);
+        let new = &planted[0];
+        assert_eq!(stack_ids(&doc, None), ["A", new.as_str(), "G", "F"]);
+        let g = doc.layer(new).unwrap();
+        assert_eq!(g.name, "Group 1", "a paste keeps the names");
+        let inner: Vec<String> = doc.subtree(g);
+        assert_eq!(inner.len(), 4);
+        assert!(inner.iter().all(|id| before.layer(id).is_none()), "every layer id is new");
+        let on: Vec<&Element> = doc.elements.iter().filter(|e| inner.iter().any(|i| i == e.layer())).collect();
+        assert_eq!(on.len(), 2, "b and c, copied");
+        assert!(on.iter().all(|e| before.elements.iter().all(|b| b.id() != e.id())));
+        // The originals are where they were, and a second paste collides
+        // with neither.
+        assert_eq!(doc.layer("G"), before.layer("G"));
+        let again = doc.paste(&clip, "A", &Affine::IDENTITY);
+        assert_ne!(again, planted);
+        assert!(Document::from_json(&doc.to_json().unwrap()).is_ok(), "the board still parses");
+    }
+
+    #[test]
+    fn a_paste_is_moved_and_refused_whole_past_the_numbers_a_board_holds() {
+        let mut doc = nested();
+        let clip = doc.clip(&ids(&["A"])).unwrap();
+        let planted = doc.paste(&clip, "A", &Affine::translate(10.0, 5.0));
+        let el = doc.elements.iter().find(|e| e.layer() == planted[0]).unwrap();
+        let Element::Rect(r) = el else { panic!("a rect") };
+        assert_eq!((r.x, r.y), (10.0, 5.0));
+        let before = doc.clone();
+        let mut far = clip.clone();
+        if let Element::Rect(r) = &mut far.elements[0] {
+            r.x = f64::MAX;
+        }
+        let mut doc = before.clone();
+        assert!(doc.paste(&far, "A", &Affine::translate(f64::MAX, 0.0)).is_empty());
+        assert_eq!(doc, before, "nothing of it lands");
+    }
+
+    #[test]
+    fn a_paste_climbs_out_of_a_stack_that_cannot_take_it() {
+        // A frame never goes into a group or a frame: it lands on the
+        // board's root, above the frame the active layer is in.
+        let mut doc = nested();
+        let frame = doc.clip(&ids(&["F"])).unwrap();
+        let planted = doc.paste(&frame, "E", &Affine::IDENTITY);
+        assert_eq!(stack_ids(&doc, None), ["A", "G", "F", planted[0].as_str()]);
+        // A locked group takes nothing in: the paste lands above it.
+        let mut doc = nested();
+        doc.layer_mut("H").unwrap().locked = true;
+        let clip = doc.clip(&ids(&["A"])).unwrap();
+        let planted = doc.paste(&clip, "C", &Affine::IDENTITY);
+        assert_eq!(stack_ids(&doc, Some("G")), ["B", "H", planted[0].as_str()]);
+        doc.layer_mut("G").unwrap().locked = true;
+        let planted = doc.paste(&clip, "C", &Affine::IDENTITY);
+        assert_eq!(stack_ids(&doc, None), ["A", "G", planted[0].as_str(), "F"]);
     }
 }

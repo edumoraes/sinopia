@@ -234,6 +234,11 @@ pub enum RowLine {
     /// Opens the row's name to be typed.
     Rename,
     Run(Command),
+    /// The clipboard's three, which are the window's: it holds the
+    /// clipboard.
+    Copy,
+    Cut,
+    Paste,
     Tag(Tag),
 }
 
@@ -247,24 +252,43 @@ pub struct RowState {
     pub tag: Tag,
 }
 
-/// A row's menu: its name, then the commands on the picked layers with
-/// the keys that do the same — each offered only where `can` says it
-/// would change something — then the colours, as in Photoshop.
-pub fn row_menu(can: impl Fn(Command) -> bool, state: RowState) -> (Vec<Item>, Vec<RowLine>) {
-    let commands = [
-        ("Duplicate", "Ctrl+J", Command::Duplicate, false),
-        ("Delete", "Del", Command::Remove, false),
-        ("Group", "Ctrl+G", Command::Group, true),
-        ("Ungroup", "Ctrl+Shift+G", Command::Ungroup, false),
-        (if state.locked { "Unlock" } else { "Lock" }, "Ctrl+/", Command::Lock, true),
-        (if state.hidden { "Show" } else { "Hide" }, "Ctrl+,", Command::Show, false),
+/// A row's menu: its name, then what can be done to the picked layers
+/// with the keys that do the same — each offered only where it would
+/// change something: a command where `can` says so, a paste where there
+/// is something to `paste` — then the colours, as in Photoshop.
+pub fn row_menu(can: impl Fn(Command) -> bool, paste: bool, state: RowState) -> (Vec<Item>, Vec<RowLine>) {
+    let lines_of = [
+        ("Duplicate", "Ctrl+J", RowLine::Run(Command::Duplicate), false),
+        ("Delete", "Del", RowLine::Run(Command::Remove), false),
+        ("Copy", "Ctrl+C", RowLine::Copy, true),
+        ("Cut", "Ctrl+X", RowLine::Cut, false),
+        ("Paste", "Ctrl+V", RowLine::Paste, false),
+        ("Group", "Ctrl+G", RowLine::Run(Command::Group), true),
+        ("Ungroup", "Ctrl+Shift+G", RowLine::Run(Command::Ungroup), false),
+        (
+            if state.locked { "Unlock" } else { "Lock" },
+            "Ctrl+/",
+            RowLine::Run(Command::Lock),
+            true,
+        ),
+        (
+            if state.hidden { "Show" } else { "Hide" },
+            "Ctrl+,",
+            RowLine::Run(Command::Show),
+            false,
+        ),
     ];
     let mut items = vec![Item::new("Rename")];
     let mut lines = vec![RowLine::Rename];
-    for (label, keys, command, rule) in commands {
-        let item = Item::new(label).hint(keys).enabled(can(command));
+    for (label, keys, line, rule) in lines_of {
+        let enabled = match line {
+            RowLine::Run(command) => can(command),
+            RowLine::Paste => paste,
+            _ => true,
+        };
+        let item = Item::new(label).hint(keys).enabled(enabled);
         items.push(if rule { item.ruled() } else { item });
-        lines.push(RowLine::Run(command));
+        lines.push(line);
     }
     let (tags, marks) = tag_menu(state.tag);
     for (i, (item, tag)) in tags.into_iter().zip(marks).enumerate() {
@@ -2808,26 +2832,32 @@ mod tests {
             hidden: false,
             tag: Tag::Red,
         };
-        let (items, lines) = row_menu(|c| c != Command::Ungroup, state);
+        let (items, lines) = row_menu(|c| c != Command::Ungroup, false, state);
         assert_eq!(items.len(), lines.len());
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
-            labels[..7],
-            ["Rename", "Duplicate", "Delete", "Group", "Ungroup", "Lock", "Hide"]
+            labels[..10],
+            ["Rename", "Duplicate", "Delete", "Copy", "Cut", "Paste", "Group", "Ungroup", "Lock", "Hide"]
         );
-        assert_eq!(&labels[7..], ["No Color", "Red", "Orange", "Yellow", "Green", "Blue", "Violet", "Gray"]);
+        assert_eq!(&labels[10..], ["No Color", "Red", "Orange", "Yellow", "Green", "Blue", "Violet", "Gray"]);
         let line = |label: &str| labels.iter().position(|l| *l == label).unwrap();
         assert_eq!(lines[line("Rename")], RowLine::Rename);
         assert_eq!(lines[line("Ungroup")], RowLine::Run(Command::Ungroup));
         assert!(!items[line("Ungroup")].enabled, "nothing there to take apart");
         assert!(items[line("Group")].enabled);
         assert_eq!(items[line("Duplicate")].hint.as_deref(), Some("Ctrl+J"));
+        assert_eq!(lines[line("Copy")], RowLine::Copy);
+        assert_eq!(lines[line("Cut")], RowLine::Cut);
+        assert_eq!(lines[line("Paste")], RowLine::Paste);
+        assert!(!items[line("Paste")].enabled, "nothing to paste");
+        assert!(items[line("Copy")].rule);
         assert_eq!(lines[line("Red")], RowLine::Tag(Tag::Red));
         assert!(items[line("Red")].checked);
         assert!(items[line("Group")].rule && items[line("Lock")].rule && items[line("No Color")].rule);
         // The toggles say what they would do.
         let (items, _) = row_menu(
             |_| true,
+            true,
             RowState {
                 locked: true,
                 hidden: true,

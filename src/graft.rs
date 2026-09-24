@@ -199,7 +199,7 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
 /// Whether every number [`select::transform`] touched is still one.
 /// Its field set is this one: what a map moves is what a map can move
 /// out of the finite range.
-fn placed(el: &Element) -> bool {
+pub(crate) fn placed(el: &Element) -> bool {
     let ok = |v: &f64| v.is_finite();
     match el {
         Element::Path(p) => p.curves.iter().flatten().flatten().all(ok) && ok(&p.rotation),
