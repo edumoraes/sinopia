@@ -7,7 +7,7 @@
 use crate::bitmap;
 use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
-use crate::doc::{Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, new_id};
+use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
@@ -828,6 +828,25 @@ impl Editor {
                 && l.opacity != opacity
             {
                 l.opacity = opacity;
+                changed = true;
+            }
+        }
+        if changed { Change::Scene } else { Change::None }
+    }
+
+    /// Gives the picked layers a blend mode — the bar's menu. Only a
+    /// group passes through, and a locked layer keeps how it draws.
+    pub fn set_blend(&mut self, doc: &mut Document, mode: BlendMode) -> Change {
+        let mut changed = false;
+        for id in self.picked_ids(doc) {
+            if doc.locked(&id) {
+                continue;
+            }
+            if let Some(l) = doc.layer_mut(&id)
+                && l.blend != mode
+                && (mode != BlendMode::PassThrough || l.kind == Kind::Group)
+            {
+                l.blend = mode;
                 changed = true;
             }
         }
@@ -4496,6 +4515,24 @@ mod tests {
         assert_eq!(doc.layer("A").unwrap().opacity, 1.0, "a strength is a fraction");
         let _ = e.set_opacity(&mut doc, f64::NAN);
         assert_eq!(doc.layer("A").unwrap().opacity, 1.0, "and a number");
+    }
+
+    #[test]
+    fn the_picked_layers_take_a_blend_mode_and_only_a_group_passes_through() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "G", Pick::Toggle, &ROWS);
+        assert_eq!(e.set_blend(&mut doc, BlendMode::Screen), Change::Scene);
+        assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen);
+        assert_eq!(doc.layer("G").unwrap().blend, BlendMode::Screen);
+        assert_eq!(e.set_blend(&mut doc, BlendMode::PassThrough), Change::Scene);
+        assert_eq!(doc.layer("G").unwrap().blend, BlendMode::PassThrough);
+        assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen, "a layer does not pass through");
+        doc.layer_mut("A").unwrap().locked = true;
+        let _ = e.set_blend(&mut doc, BlendMode::Multiply);
+        assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen, "a lock keeps how it draws");
+        assert_eq!(e.set_blend(&mut doc, BlendMode::Multiply), Change::None, "already so");
     }
 
     /// A board of one group holding one raster layer: `G[R]`.

@@ -24,6 +24,7 @@ mod grid;
 mod history;
 mod ipc;
 mod layers;
+mod menu;
 mod omarchy;
 mod palette;
 mod project;

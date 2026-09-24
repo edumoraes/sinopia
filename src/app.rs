@@ -24,7 +24,7 @@ use crate::bitmap::{self, Bitmap};
 use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
-use crate::doc::{Document, Element};
+use crate::doc::{BlendMode, Document, Element};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
@@ -38,6 +38,7 @@ use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
+use crate::menu;
 use crate::omarchy::{self, Style};
 use crate::palette::{self, Palette};
 use crate::slots::{self, Strip};
@@ -212,6 +213,8 @@ struct App {
     /// The layers bar's strength is being dragged: the pointer is its
     /// until the button comes up, and the board is not at rest.
     fading: bool,
+    /// A menu standing over the window, and what it is for.
+    menu: Option<Opened>,
     /// A brush the pointer is carrying out of the library, if any. It
     /// does not outlive the release: there is nothing to settle.
     drag: Option<Dragging>,
@@ -379,6 +382,29 @@ struct Carry {
     /// Where the card would land if let go of now: the row under the
     /// pointer says, and a place the picked layers may not go is none.
     aim: Option<Place>,
+}
+
+/// A menu standing over the window: what it is for, its lines, what it
+/// was opened beside, the line under the pointer and how far down it is
+/// scrolled.
+struct Opened {
+    purpose: Purpose,
+    items: Vec<menu::Item>,
+    at: ScreenRect,
+    hover: Option<usize>,
+    scroll: f32,
+}
+
+/// What a menu is for.
+enum Purpose {
+    /// The picked layers' blend mode: each line's mode, and what every
+    /// picked layer had when the menu opened — put back unless a line is
+    /// taken, since the lines are tried on the board as the pointer
+    /// passes over them.
+    Blend {
+        modes: Vec<BlendMode>,
+        was: Vec<(String, BlendMode)>,
+    },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -606,7 +632,10 @@ impl App {
     /// reorders the document on every pointer move while the editor sits
     /// perfectly still.
     fn settled(&self) -> bool {
-        !self.editor().busy() && !self.carry.as_ref().is_some_and(|c| c.held) && !self.fading
+        !self.editor().busy()
+            && !self.carry.as_ref().is_some_and(|c| c.held)
+            && !self.fading
+            && self.menu.is_none()
     }
 
     /// Writes down where a change left things.
@@ -1328,7 +1357,8 @@ impl App {
     /// the dock rather than the canvas.
     fn over_chrome(&self, view: &View, screen: (f64, f64)) -> bool {
         let (x, y) = screen;
-        self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
+        self.menu_laid(view).is_some_and(|m| m.contains(x, y))
+            || self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
             || self.handle(view).is_some_and(|h| h.hit(x, y))
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
             || self.props(view).and_then(|b| b.hit(x, y)).is_some()
@@ -1425,6 +1455,90 @@ impl App {
         let f = bar.fraction(field, x);
         property.set_fraction(self.brushes.brush_mut(), f);
         self.brushes_dirty = true;
+    }
+
+    /// Opens the blend modes' menu beside `at`, on the active layer's
+    /// mode, remembering what every picked layer had.
+    fn open_blend_menu(&mut self, at: ScreenRect) {
+        let doc = self.doc();
+        let editor = self.editor();
+        let (current, group) = doc
+            .layer(editor.active(doc))
+            .map_or((BlendMode::Normal, false), |l| {
+                (l.blend, l.kind == crate::doc::Kind::Group)
+            });
+        let (items, modes) = layers::blend_menu(current, group);
+        let was = editor
+            .picked(doc)
+            .into_iter()
+            .filter_map(|id| doc.layer(id).map(|l| (id.to_owned(), l.blend)))
+            .collect();
+        self.menu = Some(Opened {
+            purpose: Purpose::Blend { modes, was },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
+    /// The menu standing over the window, laid out.
+    fn menu_laid(&self, view: &View) -> Option<menu::Menu> {
+        let opened = self.menu.as_ref()?;
+        let atlas = self.atlas.as_ref()?;
+        Some(menu::Menu::layout(
+            view.viewport,
+            self.chrome(view),
+            opened.at,
+            atlas,
+            &opened.items,
+            opened.scroll,
+        ))
+    }
+
+    /// The line under `(x, y)` is tried on the board.
+    fn hover_menu_at(&mut self, x: f64, y: f64) {
+        let hover = self.view().and_then(|view| {
+            let laid = self.menu_laid(&view)?;
+            laid.hit(x, y, &self.menu.as_ref()?.items)
+        });
+        self.hover_menu(hover);
+    }
+
+    /// The line under the pointer is `hover` now: a blend mode is tried
+    /// on the picked layers as the pointer passes over it, and what they
+    /// had comes back when it leaves every line.
+    fn hover_menu(&mut self, hover: Option<usize>) {
+        let Some(opened) = self.menu.as_mut() else { return };
+        if opened.hover == hover {
+            return;
+        }
+        opened.hover = hover;
+        let Purpose::Blend { modes, was } = &opened.purpose;
+        let tried = hover.and_then(|i| modes.get(i).copied());
+        let was = was.clone();
+        let (editor, doc) = self.active();
+        restore_blends(doc, &was);
+        if let Some(mode) = tried {
+            let _ = editor.set_blend(doc, mode);
+        }
+        self.redraw();
+    }
+
+    /// Shuts the menu, taking line `take` or none. A blend mode taken is
+    /// one step; none put back leaves the board as the menu found it.
+    fn close_menu(&mut self, take: Option<usize>) {
+        let Some(opened) = self.menu.take() else { return };
+        let Purpose::Blend { modes, was } = opened.purpose;
+        let (editor, doc) = self.active();
+        restore_blends(doc, &was);
+        let change = match take.and_then(|i| modes.get(i).copied()) {
+            Some(mode) => editor.set_blend(doc, mode),
+            None => Change::None,
+        };
+        self.apply(change);
+        self.redraw();
     }
 
     /// Writes the name being typed onto its layer and shuts the field.
@@ -2103,6 +2217,12 @@ impl App {
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
             frame.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
         }
+        // A menu stands over every panel.
+        if let (Some(laid), Some(opened), Some(atlas)) =
+            (self.menu_laid(view), self.menu.as_ref(), self.atlas.as_ref())
+        {
+            frame.extend(laid.prims(&opened.items, opened.hover, atlas, self.atlas_slot, &self.theme));
+        }
         // The send panel is modal, so it is drawn last of everything —
         // over the strip the way it is pressed before it.
         if let (Some(sending), Some(atlas), Some((panel, _))) =
@@ -2206,6 +2326,22 @@ impl App {
             }
             return self.update_cursor_icon();
         }
+        // A menu stands over everything else: a line is taken, a press on
+        // it between lines is nothing, and a press anywhere else puts it
+        // away — and is not also a press on what is under it.
+        if let Some(laid) = self.menu_laid(&view) {
+            if button == Button::Left {
+                let items = self.menu.as_ref().map_or(&[][..], |m| &m.items[..]);
+                match laid.hit(x, y, items) {
+                    Some(i) => self.close_menu(Some(i)),
+                    None if laid.contains(x, y) => {}
+                    None => self.close_menu(None),
+                }
+            } else if !laid.contains(x, y) {
+                self.close_menu(None);
+            }
+            return self.update_cursor_icon();
+        }
         // A name being typed is finished by pressing somewhere else, as
         // Enter finishes it: the keyboard cannot be left held by a field
         // the pointer has walked away from.
@@ -2242,6 +2378,10 @@ impl App {
                 // is the window's. A press on a card that is already
                 // selected, soon enough after the last one, is what
                 // makes a Select a Rename.
+                if hit == PanelHit::Blend {
+                    self.open_blend_menu(panel.blend);
+                    return self.update_cursor_icon();
+                }
                 // The strength's slider has the pointer to itself from the
                 // press to the release, wherever it wanders.
                 if hit == PanelHit::Opacity {
@@ -2458,6 +2598,11 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
+        // Over a menu the line under the pointer is tried on the board.
+        if self.menu.is_some() {
+            self.hover_menu_at(x, y);
+            return self.update_cursor_icon();
+        }
         // A press on a card lifts it once it has gone far enough to be a
         // drag, and not before: a click or a double click never lifts.
         if let Some(press) = &self.pressed {
@@ -2560,6 +2705,19 @@ impl App {
                     s.scroll = next;
                     self.redraw();
                 }
+            }
+            return;
+        }
+        // A menu takes the wheel over itself, and nothing else does while
+        // it stands. The line under a pointer that did not move is another
+        // one once the lines have moved, and it is the one tried.
+        if let Some(laid) = self.menu_laid(&view) {
+            if laid.contains(cursor.0, cursor.1)
+                && let Some(opened) = self.menu.as_mut()
+            {
+                opened.scroll = (laid.scroll() - delta.1 as f32).clamp(0.0, laid.max_scroll());
+                self.hover_menu_at(cursor.0, cursor.1);
+                self.redraw();
             }
             return;
         }
@@ -2719,6 +2877,10 @@ impl App {
                 self.redraw();
             }
             Key::Named(NamedKey::Space) => self.active().0.hold_space(pressed),
+            // A menu goes away, leaving the board as it found it.
+            Key::Named(NamedKey::Escape) if pressed && self.menu.is_some() => {
+                self.close_menu(None);
+            }
             // A card in the hand is put back where it came from: Esc is
             // the drop that does not happen.
             Key::Named(NamedKey::Escape)
@@ -2901,6 +3063,7 @@ impl App {
         // press's doing, not the drag's.
         self.drag = None;
         self.fading = false;
+        self.close_menu(None);
         // A card the pointer was carrying goes back where it came from:
         // nothing moves until a drop, and losing the window is not one.
         // The card still has to settle.
@@ -3292,6 +3455,15 @@ impl App {
     }
 }
 
+/// Puts back the blend modes `was` says every layer had.
+fn restore_blends(doc: &mut Document, was: &[(String, BlendMode)]) {
+    for (id, mode) in was {
+        if let Some(l) = doc.layer_mut(id) {
+            l.blend = *mode;
+        }
+    }
+}
+
 /// A strength read off the slider, to the whole percent the bar writes it
 /// as: a board keeps `0.19`, not the float the pointer's x made of it.
 fn whole_percent(fraction: f32) -> f64 {
@@ -3522,6 +3694,7 @@ pub fn run(
         carry: None,
         pressed: None,
         fading: false,
+        menu: None,
         drag: None,
         renaming: None,
         last_card: None,

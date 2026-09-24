@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 
-use crate::doc::Kind;
+use crate::doc::{BlendMode, Kind};
+use crate::menu::Item;
 use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix};
 use crate::text::Atlas;
 use crate::theme::Theme;
@@ -156,6 +157,35 @@ pub struct Lift {
     /// The lift, 0 (sitting in its row) to 1 (fully off the panel),
     /// before easing. It runs back down to 0 when the card is let go.
     pub t: f32,
+}
+
+/// The blend modes' menu, and the mode on each of its lines: Photoshop's
+/// order and runs — darkening, lightening, contrast, inversion and the
+/// component modes, a rule before each — opening on Pass Through for a
+/// group, which is a group's alone. `current` is checked.
+pub fn blend_menu(current: BlendMode, group: bool) -> (Vec<Item>, Vec<BlendMode>) {
+    let runs = [
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Overlay,
+        BlendMode::Difference,
+        BlendMode::Hue,
+    ];
+    let mut items = Vec::new();
+    let mut modes = Vec::new();
+    let offered = BlendMode::ALL
+        .iter()
+        .filter(|m| **m != BlendMode::PassThrough);
+    let passing = group.then_some(&BlendMode::PassThrough);
+    for mode in passing.into_iter().chain(offered) {
+        let mut item = Item::new(mode.name()).checked(*mode == current);
+        if runs.contains(mode) {
+            item = item.ruled();
+        }
+        items.push(item);
+        modes.push(*mode);
+    }
+    (items, modes)
 }
 
 /// Smoothstep: the lift comes on and goes off without a corner, and
@@ -2331,6 +2361,45 @@ mod tests {
                 .collect()
         };
         assert_ne!(drawing(&at(1.0, true)), drawing(&at(1.0, false)));
+    }
+
+    #[test]
+    fn the_blend_menu_lists_photoshops_modes_in_its_runs() {
+        let (items, modes) = blend_menu(BlendMode::Multiply, false);
+        assert_eq!(items.len(), 27, "every mode but a group's own");
+        assert_eq!(modes.len(), items.len());
+        assert_eq!(modes[0], BlendMode::Normal);
+        assert!(!modes.contains(&BlendMode::PassThrough));
+        let checked: Vec<BlendMode> = modes
+            .iter()
+            .zip(&items)
+            .filter(|(_, i)| i.checked)
+            .map(|(m, _)| *m)
+            .collect();
+        assert_eq!(checked, [BlendMode::Multiply], "what is in force");
+        // A run each: darken, lighten, contrast, inversion, component.
+        let starts: Vec<BlendMode> = modes
+            .iter()
+            .zip(&items)
+            .filter(|(_, i)| i.rule)
+            .map(|(m, _)| *m)
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                BlendMode::Darken,
+                BlendMode::Lighten,
+                BlendMode::Overlay,
+                BlendMode::Difference,
+                BlendMode::Hue
+            ]
+        );
+        assert_eq!(items[3].label, "Multiply");
+        // A group's menu opens on Pass Through.
+        let (items, modes) = blend_menu(BlendMode::PassThrough, true);
+        assert_eq!(items.len(), 28);
+        assert_eq!(modes[0], BlendMode::PassThrough);
+        assert!(items[0].checked);
     }
 
     #[test]
