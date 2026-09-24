@@ -84,6 +84,16 @@ pub struct Glyph {
     pub uv: [f32; 4],
 }
 
+/// One line of text as a box of some width shows it: characters
+/// `start..end` of the string it was cut from — counted in characters,
+/// as a field's caret is. A line a newline ended does not hold the
+/// newline; the next one starts after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Line {
+    pub start: usize,
+    pub end: usize,
+}
+
 /// Every glyph of [`charset`] rasterized at one size. Rebuilt when the
 /// size changes, which happens when the window moves to a display with a
 /// different scale factor — not per frame.
@@ -158,9 +168,21 @@ impl Atlas {
         self.px
     }
 
+    /// How far apart two lines of this size stand, baseline to baseline:
+    /// the face's own ascent and descent and a quarter again, so a
+    /// descender never meets the accent of the line under it.
+    pub fn line_height(&self) -> f32 {
+        ((self.ascent - self.descent) * 1.25).ceil()
+    }
+
     /// Where the baseline goes for `s` to sit centered in `r`.
     pub fn baseline_in(&self, r: ScreenRect) -> f32 {
         (r.y + (r.h - (self.ascent - self.descent)) / 2.0 + self.ascent).round()
+    }
+
+    /// How far the pen moves past `ch`, in px.
+    pub fn advance(&self, ch: char) -> f32 {
+        self.cell(ch).advance
     }
 
     /// Advance width of `s` in px. Zero for the empty string.
@@ -214,6 +236,51 @@ impl Atlas {
         }
         kept.push('…');
         kept
+    }
+
+    /// `s` cut into the lines a box `max_w` px wide shows. A newline
+    /// always ends a line; past the width a line breaks after the last
+    /// space that fits, which is left hanging at its end, and a word
+    /// longer than the box breaks between two characters. A line holds
+    /// at least one character, whatever the width, so every string cuts
+    /// into a finite number of lines — and the empty one into one line
+    /// with nothing on it, which is where its caret stands.
+    pub fn wrap(&self, s: &str, max_w: f32) -> Vec<Line> {
+        let chars: Vec<char> = s.chars().collect();
+        let mut lines = Vec::new();
+        let (mut start, mut w, mut i) = (0, 0.0, 0);
+        // Where the line would break at a space: just after the last one.
+        let mut after_space: Option<usize> = None;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\n' {
+                lines.push(Line { start, end: i });
+                (start, w, after_space) = (i + 1, 0.0, None);
+                i += 1;
+                continue;
+            }
+            let advance = self.cell(c).advance;
+            // A space never breaks a line: it hangs past the edge, and
+            // the break comes after it.
+            if !c.is_whitespace() && w + advance > max_w && i > start {
+                let at = after_space.filter(|&b| b > start).unwrap_or(i);
+                lines.push(Line { start, end: at });
+                start = at;
+                w = chars[at..i].iter().map(|&c| self.cell(c).advance).sum();
+                after_space = None;
+                continue;
+            }
+            w += advance;
+            if c.is_whitespace() {
+                after_space = Some(i + 1);
+            }
+            i += 1;
+        }
+        lines.push(Line {
+            start,
+            end: chars.len(),
+        });
+        lines
     }
 
     /// The cell for `ch`, or the one standing in for it. Every atlas
@@ -359,6 +426,78 @@ mod tests {
         let cut = a.truncate("ação — ç", a.measure("ação") * 0.6);
         // Reaching this means every byte lands where a char starts.
         assert!(cut.ends_with('…'));
+    }
+
+    /// The text of each wrapped line.
+    fn cut(s: &str, lines: &[Line]) -> Vec<String> {
+        let chars: Vec<char> = s.chars().collect();
+        lines
+            .iter()
+            .map(|l| chars[l.start..l.end].iter().collect())
+            .collect()
+    }
+
+    #[test]
+    fn lines_a_line_height_apart_do_not_touch() {
+        for px in [11, 13, 16, 26] {
+            let a = Atlas::build(&Font::bundled(), px);
+            let below = a.layout("gjpqy", 0.0, 40.0);
+            let over = a.layout("ÉÇÁ", 0.0, 40.0 + a.line_height());
+            let bottom = below
+                .iter()
+                .map(|g| g.rect.y + g.rect.h)
+                .fold(0.0, f32::max);
+            let top = over.iter().map(|g| g.rect.y).fold(f32::MAX, f32::min);
+            assert!(bottom <= top, "{px}px: {bottom} runs into {top}");
+        }
+    }
+
+    #[test]
+    fn nothing_wraps_to_one_empty_line() {
+        assert_eq!(atlas().wrap("", 100.0), [Line { start: 0, end: 0 }]);
+    }
+
+    #[test]
+    fn a_line_that_fits_is_one_line() {
+        let a = atlas();
+        let s = "draw the flow";
+        assert_eq!(cut(s, &a.wrap(s, a.measure(s) + 1.0)), [s]);
+    }
+
+    #[test]
+    fn a_line_too_long_breaks_after_the_last_space_that_fits() {
+        let a = atlas();
+        let s = "one two three";
+        let lines = a.wrap(s, a.measure("one two th"));
+        assert_eq!(cut(s, &lines), ["one two ", "three"], "the space hangs");
+    }
+
+    #[test]
+    fn a_word_longer_than_the_line_breaks_between_characters() {
+        let a = atlas();
+        let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let width = a.measure("aaaaaaa");
+        let lines = a.wrap(s, width);
+        assert!(lines.len() > 3, "{lines:?}");
+        for text in cut(s, &lines) {
+            assert!(a.measure(&text) <= width, "{text:?} past {width}");
+        }
+        assert_eq!(cut(s, &lines).concat(), s, "nothing lost");
+    }
+
+    #[test]
+    fn a_newline_ends_its_line_and_is_on_neither() {
+        let a = atlas();
+        let s = "first\nsecond\n";
+        let lines = a.wrap(s, 1000.0);
+        assert_eq!(cut(s, &lines), ["first", "second", ""]);
+        assert_eq!(lines[1], Line { start: 6, end: 12 });
+    }
+
+    #[test]
+    fn no_width_at_all_still_puts_one_character_on_a_line() {
+        let a = atlas();
+        assert_eq!(cut("abc", &a.wrap("abc", 0.0)), ["a", "b", "c"]);
     }
 
     #[test]

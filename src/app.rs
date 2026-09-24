@@ -28,7 +28,7 @@ use crate::doc::{Document, Element};
 use crate::dock::{Dock, Hit};
 use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Stylus, Tool};
 use crate::export;
-use crate::field::Field;
+use crate::field::{self, Field};
 use crate::geom::Corner;
 use crate::gestures;
 use crate::history::History;
@@ -51,7 +51,7 @@ use crate::send;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
-use crate::text::{Atlas, Font};
+use crate::text::{self, Atlas, Font};
 use crate::theme::{INKS, Theme};
 
 /// The longest step the panel's easing takes in one frame. A window
@@ -273,6 +273,11 @@ struct Sending {
     /// says otherwise — the folder's prefill is usually right and the
     /// line never is.
     focus: send::Hit,
+    /// How far down its lines the instruction is scrolled, in physical
+    /// px: past twenty lines the box keeps its height and moves them.
+    scroll: f32,
+    /// A press in the box is being dragged, selecting as it goes.
+    selecting: bool,
 }
 
 impl Sending {
@@ -967,6 +972,47 @@ impl App {
         }
     }
 
+    /// The export dialog as it stands this frame, and the lines its
+    /// instruction wraps to: how many there are is what decides how tall
+    /// the box stands, so the two are only ever worked out together.
+    fn send_panel(&self, view: &View) -> Option<(send::Panel, Vec<text::Line>)> {
+        let (sending, atlas) = (self.sending.as_ref()?, self.atlas.as_ref()?);
+        let scale = self.chrome(view);
+        let width = send::Panel::text_width(view.viewport, scale);
+        let lines = sending.line.wrap(atlas, width);
+        let spec = send::Spec {
+            rows: sending.agents.len(),
+            folder: sending.folder.is_some(),
+            lines: lines.len(),
+            line_h: atlas.line_height(),
+        };
+        Some((send::Panel::layout(view.viewport, scale, &spec), lines))
+    }
+
+    /// Keeps the instruction's scroll inside what the text allows, and —
+    /// while the box has the keyboard — just far enough along for the
+    /// caret's line to be in sight.
+    fn follow_caret(&mut self) {
+        let Some(view) = self.view() else { return };
+        let Some((panel, lines)) = self.send_panel(&view) else {
+            return;
+        };
+        let Some(sending) = self.sending.as_mut() else {
+            return;
+        };
+        if sending.focus == send::Hit::Line {
+            let k = sending.line.caret_line(&lines);
+            let shown = panel.shown as f32 * panel.line_h;
+            sending.scroll = field::follow(sending.scroll, k, panel.line_h, shown);
+        }
+        sending.scroll = sending.scroll.clamp(0.0, panel.max_scroll(lines.len()));
+    }
+
+    /// Whether a field has the keyboard.
+    fn typing(&self) -> bool {
+        self.sending.is_some() || self.renaming.is_some()
+    }
+
     /// The field the keyboard is writing into, if one is: the export
     /// dialog's, or a layer's name being typed.
     fn field_in_hand(&mut self) -> Option<&mut Field> {
@@ -1013,6 +1059,7 @@ impl App {
     fn pasted_text(&mut self, text: &str) {
         if let Some(field) = self.field_in_hand() {
             field.paste(text);
+            self.follow_caret();
             self.redraw();
         }
     }
@@ -1410,8 +1457,10 @@ impl App {
             folder,
             // No longer than the send would take: a field never holds
             // what the thing it feeds would refuse.
-            line: Field::new("").limited(agents::PROMPT_MAX),
+            line: Field::lines("").limited(agents::PROMPT_MAX),
             focus: send::Hit::Line,
+            scroll: 0.0,
+            selecting: false,
         });
         self.redraw();
     }
@@ -1905,23 +1954,24 @@ impl App {
         }
         // The send panel is modal, so it is drawn last of everything —
         // over the strip the way it is pressed before it.
-        if let (Some(sending), Some(atlas)) = (&self.sending, self.atlas.as_ref()) {
-            let panel = send::Panel::layout(
-                view.viewport,
-                self.chrome(view),
-                sending.agents.len(),
-                sending.folder.is_some(),
-            );
-            frame.extend(panel.prims(
-                &sending.agents,
-                sending.target,
-                sending.folder.as_ref(),
-                &sending.line,
+        if let (Some(sending), Some(atlas), Some((panel, _))) =
+            (&self.sending, self.atlas.as_ref(), self.send_panel(view))
+        {
+            let look = send::Look {
+                agents: &sending.agents,
+                target: sending.target,
+                folder: sending.folder.as_ref(),
+                line: &sending.line,
+                focus: sending.focus,
+                scroll: sending.scroll,
+            };
+            let ink = send::Ink {
                 atlas,
-                self.atlas_slot,
-                self.agent_logo_slot,
-                &self.theme,
-            ));
+                slot: self.atlas_slot,
+                logos: self.agent_logo_slot,
+                theme: &self.theme,
+            };
+            frame.extend(panel.prims(&look, &ink));
         }
         frame
     }
@@ -1958,27 +2008,28 @@ impl App {
         // The send panel is modal and over everything, the strip
         // included: it is the one thing in this window that is finished
         // by leaving it.
-        if let Some(sending) = &self.sending {
-            let panel = send::Panel::layout(
-                view.viewport,
-                self.chrome(&view),
-                sending.agents.len(),
-                sending.folder.is_some(),
-            );
+        if self.sending.is_some() {
+            let Some((panel, lines)) = self.send_panel(&view) else {
+                return;
+            };
             if button == Button::Left {
-                match panel.hit(x, y) {
-                    Some(send::Hit::Target(i)) => {
-                        if let Some(s) = self.sending.as_mut() {
-                            s.target = i;
-                        }
+                let shift = self.modifiers.state().shift_key();
+                match (panel.hit(x, y), self.sending.as_mut(), self.atlas.as_ref()) {
+                    (Some(send::Hit::Target(i)), Some(s), _) => s.target = i,
+                    // A press in the box puts the caret under it — with
+                    // Shift, carries the selection there — and a drag
+                    // from it goes on selecting.
+                    (Some(send::Hit::Line), Some(s), Some(atlas)) if panel.line.contains(x, y) => {
+                        s.focus = send::Hit::Line;
+                        let (k, along) = panel.boxed(&lines, s.scroll).at(x, y);
+                        let to = s.line.index_at(atlas, &lines, k, along);
+                        s.line.go(to, shift);
+                        s.selecting = true;
                     }
-                    Some(hit) => {
-                        if let Some(s) = self.sending.as_mut() {
-                            s.focus = hit;
-                        }
-                    }
+                    (Some(hit), Some(s), _) => s.focus = hit,
                     // A press outside a modal panel closes it.
-                    None => self.sending = None,
+                    (None, ..) => self.sending = None,
+                    _ => {}
                 }
                 self.redraw();
             }
@@ -2129,6 +2180,11 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        // The box's own drag: the canvas never saw its press.
+        if let Some(s) = self.sending.as_mut().filter(|s| s.selecting) {
+            s.selecting = false;
+            return self.update_cursor_icon();
+        }
         // A brush carried out of the library is seated where it was let
         // go of, if that was a seat that can be written. Dropped
         // anywhere else it is simply the brush in the hand, which the
@@ -2178,6 +2234,22 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
+        // A press in the instruction's box is selecting for as long as
+        // it is held, wherever the pointer wanders — past the box's top
+        // or bottom edge it runs on into the lines scrolled out of sight.
+        if self.sending.as_ref().is_some_and(|s| s.selecting) {
+            if let Some(view) = self.view()
+                && let Some((panel, lines)) = self.send_panel(&view)
+                && let (Some(s), Some(atlas)) = (self.sending.as_mut(), self.atlas.as_ref())
+            {
+                let (k, along) = panel.boxed(&lines, s.scroll).at(x, y);
+                let to = s.line.index_at(atlas, &lines, k, along);
+                s.line.go(to, true);
+            }
+            self.follow_caret();
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A brush out of the library has the pointer to itself once it
         // has moved far enough to mean it, and the canvas sees nothing.
         if self.drag.is_some() {
@@ -2249,6 +2321,23 @@ impl App {
             f64::from(view.viewport.w) / 2.0,
             f64::from(view.viewport.h) / 2.0,
         ));
+        // The dialog is modal for the wheel as it is for everything else:
+        // over the instruction the wheel moves its lines, and anywhere
+        // else it moves nothing — least of all the board behind it.
+        if self.sending.is_some() {
+            if let Some((panel, lines)) = self.send_panel(&view)
+                && panel.line.contains(cursor.0, cursor.1)
+                && let Some(s) = self.sending.as_mut()
+            {
+                let most = panel.max_scroll(lines.len());
+                let next = (s.scroll - delta.1 as f32).clamp(0.0, most);
+                if next != s.scroll {
+                    s.scroll = next;
+                    self.redraw();
+                }
+            }
+            return;
+        }
         // The panel takes the wheel when the pointer is over it: the
         // wheel away from the user shows what is further up the stack.
         if self
@@ -2295,11 +2384,19 @@ impl App {
                 self.clipboard_key(c);
             }
             _ if self.sending.is_some() && pressed => {
+                let mods = self.modifiers.state();
+                let laid = self.view().and_then(|view| self.send_panel(&view));
                 let Some(sending) = self.sending.as_mut() else {
                     return;
                 };
+                let in_box = sending.focus == send::Hit::Line;
                 match key {
                     Key::Named(NamedKey::Escape) => self.sending = None,
+                    // Shift+Enter breaks the line, as it does in the
+                    // agent's own box; Enter alone sends.
+                    Key::Named(NamedKey::Enter) if mods.shift_key() && in_box => {
+                        sending.line.newline();
+                    }
                     Key::Named(NamedKey::Enter) => self.do_send(),
                     Key::Named(NamedKey::Tab) => {
                         // Tab walks the targets when there is more than
@@ -2308,10 +2405,30 @@ impl App {
                         let n = sending.agents.len();
                         sending.target = (sending.target + 1) % n.max(1);
                     }
+                    // In the box the arrows and Home and End walk the
+                    // lines as it shows them; with Ctrl, Home and End
+                    // are the whole text's, which `edit` answers.
+                    Key::Named(
+                        named @ (NamedKey::ArrowUp
+                        | NamedKey::ArrowDown
+                        | NamedKey::Home
+                        | NamedKey::End),
+                    ) if in_box && !mods.control_key() => {
+                        if let (Some((_, lines)), Some(atlas)) = (&laid, self.atlas.as_ref()) {
+                            let shift = mods.shift_key();
+                            match named {
+                                NamedKey::ArrowUp => sending.line.up(atlas, lines, shift),
+                                NamedKey::ArrowDown => sending.line.down(atlas, lines, shift),
+                                NamedKey::Home => sending.line.line_home(lines, shift),
+                                _ => sending.line.line_end(lines, shift),
+                            }
+                        }
+                    }
                     _ => {
-                        edit(sending.writing(), key, self.modifiers.state());
+                        edit(sending.writing(), key, mods);
                     }
                 }
+                self.follow_caret();
                 self.redraw();
             }
             // A field being typed into takes the keyboard whole, and so
@@ -2456,6 +2573,9 @@ impl App {
     /// Keys can't be released into a window that lost focus: drop the held
     /// overrides and whatever gesture they were driving.
     fn focus_lost(&mut self) {
+        if let Some(s) = self.sending.as_mut() {
+            s.selecting = false;
+        }
         // A brush half-carried out of the library is put down where it
         // came from: it was never seated, and the hand it is in was the
         // press's doing, not the drag's.
@@ -2500,7 +2620,20 @@ impl App {
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
-        let icon = if held || self.editor().is_panning() {
+        // Over a field of the dialog the pointer is the I-beam that says
+        // a press there puts the caret down; over the rest of it, and
+        // over the board behind it, an arrow.
+        let over_text = match (self.cursor, self.view()) {
+            (Some((x, y)), Some(view)) => self.send_panel(&view).map(|(p, _)| {
+                p.line.contains(x, y) || p.folder.is_some_and(|f| f.contains(x, y))
+            }),
+            _ => None,
+        };
+        let icon = if over_text == Some(true) {
+            CursorIcon::Text
+        } else if over_text == Some(false) {
+            CursorIcon::Default
+        } else if held || self.editor().is_panning() {
             CursorIcon::Grabbing
         } else if self.editor().is_drawing() {
             CursorIcon::Crosshair
@@ -2701,7 +2834,10 @@ impl App {
             }
             WindowEvent::MouseWheel { delta, .. } => self.scrolled(delta),
             WindowEvent::ModifiersChanged(m) => self.modifiers_changed(m),
-            WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
+            // A key held down repeats inside a field, as it does in any
+            // text box — and nowhere else, where a repeat would redo a
+            // tool change or a command every thirtieth of a second.
+            WindowEvent::KeyboardInput { event, .. } if !event.repeat || self.typing() => {
                 self.key(&event.logical_key, &event.key_without_modifiers(), event.state);
             }
             WindowEvent::RedrawRequested => {

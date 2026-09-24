@@ -31,16 +31,16 @@ implemented.
   - [x] 3b. pasted text cleaned for the field it lands in
   - [x] 3c. clipboard reads text (`Ctrl+V`), never types a `v`
   - [x] 3d. clipboard writes text (`Ctrl+C`, `Ctrl+X`)
-- [ ] 4. Multi-line input that grows, wraps at a maximum width, and
+- [x] 4. Multi-line input that grows, wraps at a maximum width, and
       scrolls past 20 lines
-  - [ ] 4a. word wrap in `text`
-  - [ ] 4b. newlines admitted by the sanitizer (still no ESC, no C0)
-  - [ ] 4c. `Shift+Enter` breaks the line, `Enter` sends
-  - [ ] 4d. the box grows a line at a time up to 20, then scrolls
-  - [ ] 4e. caret kept in sight; wheel scrolls; a thumb shows where
-  - [ ] 4f. up/down walk the wrapped lines; a press places the caret,
+  - [x] 4a. word wrap in `text`
+  - [x] 4b. newlines admitted by the sanitizer (still no ESC, no C0)
+  - [x] 4c. `Shift+Enter` breaks the line, `Enter` sends
+  - [x] 4d. the box grows a line at a time up to 20, then scrolls
+  - [x] 4e. caret kept in sight; wheel scrolls; a thumb shows where
+  - [x] 4f. up/down walk the wrapped lines; a press places the caret,
         a drag selects
-  - [ ] 4g. held keys repeat inside a field
+  - [x] 4g. held keys repeat inside a field
 - [ ] 5. Skills of the selected harness
   - [ ] 5a. where each harness keeps its skills, and how each is called
   - [ ] 5b. discovery: frontmatter parsed, names checked, reads capped

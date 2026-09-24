@@ -1,9 +1,10 @@
-//! A one-line editable value: the string, the caret, and the keys that
-//! move it. It does not know what it is naming — the panel's instruction
-//! and a layer's name are the same widget.
+//! An editable value: the string, the caret, the selection, and the keys
+//! that move them. It does not know what it is naming — the dialog's
+//! instruction and a layer's name are the same widget, one holding lines
+//! and the other a single one.
 
 use crate::scene::{Prim, ScreenRect};
-use crate::text::Atlas;
+use crate::text::{Atlas, Line};
 use crate::theme::Theme;
 
 /// The caret's width, in logical px.
@@ -45,6 +46,68 @@ fn clean(text: &str, lines: bool) -> String {
     out
 }
 
+/// Which of `lines` character `i` is on: the last one starting at or
+/// before it. Where a line wrapped without a newline, its end is the next
+/// one's start, and a caret there stands at the head of the next line —
+/// which is where the text it is in front of is.
+fn line_of(lines: &[Line], i: usize) -> usize {
+    lines.iter().rposition(|l| l.start <= i).unwrap_or(0)
+}
+
+/// The furthest a caret goes along line `k`: its end, or — where it broke
+/// without a newline, so that its end is the next line's start — the
+/// place before the space it broke at.
+fn last_index(lines: &[Line], k: usize) -> usize {
+    let line = lines[k];
+    match lines.get(k + 1) {
+        Some(next) if next.start == line.end && line.end > line.start => line.end - 1,
+        _ => line.end,
+    }
+}
+
+/// Where a box `view_h` px tall has to be scrolled to, in px, for line
+/// `k` of lines `line_h` tall to be in sight: as little as it takes, and
+/// not at all when it already is.
+pub fn follow(scroll: f32, k: usize, line_h: f32, view_h: f32) -> f32 {
+    let top = k as f32 * line_h;
+    let bottom = top + line_h;
+    if top < scroll {
+        top
+    } else if bottom > scroll + view_h {
+        bottom - view_h
+    } else {
+        scroll
+    }
+}
+
+/// Where a field that holds lines is drawn: the box, the lines the text
+/// wraps to at the box's width, how far down them it is scrolled, how
+/// tall one line stands, and how far the text is set in from the box's
+/// edge — every length in px.
+#[derive(Debug, Clone, Copy)]
+pub struct Boxed<'a> {
+    pub rect: ScreenRect,
+    pub lines: &'a [Line],
+    pub scroll: f32,
+    pub line_h: f32,
+    pub inset: f32,
+}
+
+impl Boxed<'_> {
+    /// Where line `k`'s top stands on screen.
+    fn top(&self, k: usize) -> f32 {
+        self.rect.y + self.inset + k as f32 * self.line_h - self.scroll
+    }
+
+    /// Which line a point on screen is over, and how far along it from
+    /// where the text starts. Above the box is the line scrolled out of
+    /// sight up there — which is where a drag past the top edge goes.
+    pub fn at(&self, x: f64, y: f64) -> (usize, f32) {
+        let down = (y as f32 - self.rect.y - self.inset + self.scroll) / self.line_h;
+        (down.max(0.0) as usize, x as f32 - self.rect.x - self.inset)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Field {
     value: String,
@@ -75,6 +138,15 @@ impl Field {
         }
     }
 
+    /// A field that holds lines: a newline breaks one, and a paste keeps
+    /// the breaks it came with.
+    pub fn lines(value: &str) -> Field {
+        Field {
+            lines: true,
+            ..Field::new(value)
+        }
+    }
+
     /// The same field, holding no more than `bytes`: whatever is typed or
     /// pasted past that is not taken, so a field never holds what the
     /// thing it feeds would refuse.
@@ -87,6 +159,79 @@ impl Field {
 
     pub fn value(&self) -> &str {
         &self.value
+    }
+
+    /// The caret's place, in characters.
+    #[cfg(test)]
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
+
+    /// Which of `lines` the caret is on.
+    pub fn caret_line(&self, lines: &[Line]) -> usize {
+        line_of(lines, self.caret)
+    }
+
+    /// The value cut into the lines a box `width` px wide shows.
+    pub fn wrap(&self, atlas: &Atlas, width: f32) -> Vec<Line> {
+        atlas.wrap(&self.value, width)
+    }
+
+    /// How far along `line` character `i` stands, in px.
+    fn x_at(&self, atlas: &Atlas, line: Line, i: usize) -> f32 {
+        atlas.measure(&self.value[self.byte(line.start)..self.byte(i)])
+    }
+
+    /// The place between two characters of line `k` nearest to `x` px
+    /// along it. A line past the last is the last: a press below the
+    /// text means the end of it.
+    pub fn index_at(&self, atlas: &Atlas, lines: &[Line], k: usize, x: f32) -> usize {
+        let k = k.min(lines.len().saturating_sub(1));
+        let (line, last) = (lines[k], last_index(lines, k));
+        let mut pen = 0.0;
+        let along = self.value.chars().enumerate().skip(line.start);
+        for (i, c) in along.take(last - line.start) {
+            let advance = atlas.advance(c);
+            if x < pen + advance / 2.0 {
+                return i;
+            }
+            pen += advance;
+        }
+        last
+    }
+
+    /// The line above, at the same x — or the start, from the first.
+    pub fn up(&mut self, atlas: &Atlas, lines: &[Line], extend: bool) {
+        let k = line_of(lines, self.caret);
+        if k == 0 {
+            return self.go(0, extend);
+        }
+        let x = self.x_at(atlas, lines[k], self.caret);
+        let to = self.index_at(atlas, lines, k - 1, x);
+        self.go(to, extend);
+    }
+
+    /// The line below, at the same x — or the end, from the last.
+    pub fn down(&mut self, atlas: &Atlas, lines: &[Line], extend: bool) {
+        let k = line_of(lines, self.caret);
+        if k + 1 >= lines.len() {
+            return self.go(self.len(), extend);
+        }
+        let x = self.x_at(atlas, lines[k], self.caret);
+        let to = self.index_at(atlas, lines, k + 1, x);
+        self.go(to, extend);
+    }
+
+    /// The start of the line the caret is on, as the box shows it.
+    pub fn line_home(&mut self, lines: &[Line], extend: bool) {
+        let k = line_of(lines, self.caret);
+        self.go(lines[k].start, extend);
+    }
+
+    /// The end of the line the caret is on, as the box shows it.
+    pub fn line_end(&mut self, lines: &[Line], extend: bool) {
+        let k = line_of(lines, self.caret);
+        self.go(last_index(lines, k), extend);
     }
 
     fn len(&self) -> usize {
@@ -138,7 +283,9 @@ impl Field {
     /// cut between two characters and never inside one.
     pub fn insert_str(&mut self, s: &str) {
         self.take_selection();
-        let room = self.limit.map_or(usize::MAX, |l| l.saturating_sub(self.value.len()));
+        let room = self
+            .limit
+            .map_or(usize::MAX, |l| l.saturating_sub(self.value.len()));
         let mut fits = s.len().min(room);
         while !s.is_char_boundary(fits) {
             fits -= 1;
@@ -153,6 +300,14 @@ impl Field {
     /// see [`clean`].
     pub fn paste(&mut self, text: &str) {
         self.insert_str(&clean(text, self.lines));
+    }
+
+    /// Breaks the line at the caret, in a field that holds lines; a
+    /// field of one line has nowhere to put a second.
+    pub fn newline(&mut self) {
+        if self.lines {
+            self.insert('\n');
+        }
     }
 
     pub fn backspace(&mut self) {
@@ -251,6 +406,82 @@ impl Field {
             i += 1;
         }
         self.go(i, extend);
+    }
+
+    /// The lines of a field that holds them, drawn into `b`: each one in
+    /// sight a line under the one before, whatever is selected on it
+    /// painted under its text, and the caret on its own line. Everything
+    /// is cut to the box, so a line half scrolled away is half drawn.
+    pub fn prims_boxed(
+        &self,
+        b: &Boxed,
+        atlas: &Atlas,
+        slot: u32,
+        theme: &Theme,
+        focused: bool,
+    ) -> Vec<Prim> {
+        let mut out = Vec::new();
+        let x0 = b.rect.x + b.inset;
+        // Every character's byte offset, and the end's: one walk, rather
+        // than one per line.
+        let bytes: Vec<usize> = self
+            .value
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain([self.value.len()])
+            .collect();
+        let text = |from: usize, to: usize| &self.value[bytes[from]..bytes[to]];
+        let mut caret = None;
+        for (k, line) in b.lines.iter().enumerate() {
+            let top = b.top(k);
+            if top + b.line_h < b.rect.y || top > b.rect.y + b.rect.h {
+                continue;
+            }
+            if let Some((a, z)) = self.selection()
+                && a <= line.end
+                && z >= line.start
+            {
+                let (from, to) = (a.max(line.start), z.min(line.end));
+                // A selection running on past a newline takes it along,
+                // and says so with a space's width of band.
+                let newline =
+                    z > line.end && b.lines.get(k + 1).is_some_and(|n| n.start > line.end);
+                let w =
+                    atlas.measure(text(from, to)) + if newline { atlas.advance(' ') } else { 0.0 };
+                if w > 0.0 {
+                    let band = ScreenRect {
+                        x: x0 + atlas.measure(text(line.start, from)),
+                        y: top,
+                        w,
+                        h: b.line_h,
+                    };
+                    out.push(Prim::rect(band, highlight(theme)).clipped(b.rect));
+                }
+            }
+            let row = ScreenRect {
+                x: x0,
+                y: top,
+                w: b.rect.w,
+                h: b.line_h,
+            };
+            let baseline = atlas.baseline_in(row);
+            for g in atlas.layout(text(line.start, line.end), x0, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink).clipped(b.rect));
+            }
+            if focused && k == line_of(b.lines, self.caret) {
+                caret = Some(ScreenRect {
+                    x: x0 + atlas.measure(text(line.start, self.caret)),
+                    y: top + 1.0,
+                    w: CARET_W,
+                    h: b.line_h - 2.0,
+                });
+            }
+        }
+        // Last, so nothing is drawn over it.
+        if let Some(c) = caret {
+            out.push(Prim::rect(c, theme.ink).clipped(b.rect));
+        }
+        out
     }
 
     /// The value written into `r`, with a caret after the character the
@@ -463,6 +694,24 @@ mod tests {
     }
 
     #[test]
+    fn a_paste_into_a_box_keeps_its_lines_however_they_were_spelt() {
+        let mut f = Field::lines("");
+        f.paste("one\r\ntwo\rthree\nfour");
+        assert_eq!(f.value(), "one\ntwo\nthree\nfour");
+    }
+
+    #[test]
+    fn a_box_takes_a_newline_and_a_line_does_not() {
+        let mut line = Field::new("a");
+        line.newline();
+        assert_eq!(line.value(), "a", "a name is one line");
+        let mut boxed = Field::lines("a");
+        boxed.newline();
+        boxed.insert('b');
+        assert_eq!(boxed.value(), "a\nb");
+    }
+
+    #[test]
     fn a_paste_drops_what_a_field_cannot_show() {
         // An escape pasted out of a terminal is not text anybody meant,
         // and a field holds only what it can show.
@@ -486,6 +735,193 @@ mod tests {
         f.left(true);
         f.insert('X');
         assert_eq!(f.value(), "abcdX", "the selection is spent first");
+    }
+
+    fn atlas() -> Atlas {
+        Atlas::build(&crate::text::Font::bundled(), 13)
+    }
+
+    #[test]
+    fn up_and_down_keep_the_caret_over_the_same_place_in_the_line() {
+        let a = atlas();
+        let mut f = Field::lines("abcde\nabcdefgh\nabc");
+        let lines = f.wrap(&a, 1000.0);
+        assert_eq!(f.caret(), 18);
+        f.up(&a, &lines, false);
+        assert_eq!(f.caret(), 9, "after the abc of the middle line");
+        f.up(&a, &lines, false);
+        assert_eq!(f.caret(), 3);
+        f.up(&a, &lines, false);
+        assert_eq!(f.caret(), 0, "up from the first line is its start");
+        f.down(&a, &lines, false);
+        assert_eq!(f.caret(), 6);
+        f.down(&a, &lines, true);
+        assert_eq!(f.selected(), "abcdefgh\n");
+        f.down(&a, &lines, false);
+        assert_eq!(f.caret(), 18, "down from the last line is its end");
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_ends_of_the_line_the_caret_is_on() {
+        let a = atlas();
+        let mut f = Field::lines("abcde\nabcdefgh\nabc");
+        let lines = f.wrap(&a, 1000.0);
+        f.go(9, false);
+        f.line_home(&lines, false);
+        assert_eq!(f.caret(), 6);
+        f.line_end(&lines, true);
+        assert_eq!(f.selected(), "abcdefgh");
+    }
+
+    #[test]
+    fn the_end_of_a_wrapped_line_is_before_the_space_it_broke_at() {
+        // Past it would be the next line's start, and End would take the
+        // caret down a line instead of along one.
+        let a = atlas();
+        let mut f = Field::lines("one two three");
+        let lines = f.wrap(&a, a.measure("one two th"));
+        assert_eq!(lines.len(), 2);
+        f.go(2, false);
+        f.line_end(&lines, false);
+        assert_eq!(f.caret(), 7, "after `two`");
+    }
+
+    #[test]
+    fn a_press_on_a_line_lands_between_the_two_nearest_characters() {
+        let a = atlas();
+        let f = Field::lines("abcde\nabcdefgh\nabc");
+        let lines = f.wrap(&a, 1000.0);
+        let x = a.measure("abc") + a.measure("d") * 0.3;
+        assert_eq!(f.index_at(&a, &lines, 1, x), 9);
+        let x = a.measure("abc") + a.measure("d") * 0.7;
+        assert_eq!(f.index_at(&a, &lines, 1, x), 10);
+        assert_eq!(f.index_at(&a, &lines, 1, -5.0), 6, "before it is its start");
+        assert_eq!(f.index_at(&a, &lines, 1, 999.0), 14, "past it is its end");
+        assert_eq!(
+            f.index_at(&a, &lines, 7, 0.0),
+            15,
+            "below the text is the last line"
+        );
+    }
+
+    #[test]
+    fn the_caret_is_on_the_line_the_box_shows_it_on() {
+        let a = atlas();
+        let mut f = Field::lines("one two three\nfour");
+        let lines = f.wrap(&a, a.measure("one two th"));
+        assert_eq!(f.caret_line(&lines), 2);
+        f.go(8, false);
+        assert_eq!(
+            f.caret_line(&lines),
+            1,
+            "a soft break's end is the next line's start"
+        );
+        f.go(7, false);
+        assert_eq!(f.caret_line(&lines), 0);
+    }
+
+    #[test]
+    fn the_line_the_caret_is_on_is_kept_in_sight() {
+        // Twenty-five-px lines, a box a hundred high: four lines show.
+        assert_eq!(follow(0.0, 2, 25.0, 100.0), 0.0, "already in sight");
+        assert_eq!(
+            follow(0.0, 5, 25.0, 100.0),
+            50.0,
+            "brought up to the bottom"
+        );
+        assert_eq!(
+            follow(100.0, 1, 25.0, 100.0),
+            25.0,
+            "brought down to the top"
+        );
+    }
+
+    /// A box 200 px wide at the origin, `h` tall, lines 20 px apart and
+    /// the text inset by 6.
+    fn boxed<'a>(lines: &'a [Line], h: f32, scroll: f32) -> Boxed<'a> {
+        Boxed {
+            rect: ScreenRect {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h,
+            },
+            lines,
+            scroll,
+            line_h: 20.0,
+            inset: 6.0,
+        }
+    }
+
+    fn glyphs(prims: &[Prim]) -> Vec<ScreenRect> {
+        prims
+            .iter()
+            .filter(|p| p.kind == crate::scene::KIND_IMAGE)
+            .map(Prim::bounds)
+            .collect()
+    }
+
+    #[test]
+    fn a_box_draws_its_lines_one_under_the_other() {
+        let (a, theme) = (atlas(), Theme::light());
+        let f = Field::lines("aa\naa\naa");
+        let lines = f.wrap(&a, 188.0);
+        let prims = f.prims_boxed(&boxed(&lines, 100.0, 0.0), &a, 0, &theme, false);
+        let g = glyphs(&prims);
+        assert_eq!(g.len(), 6);
+        assert!((g[2].y - g[0].y - 20.0).abs() < 0.01, "a line apart");
+        assert!((g[4].y - g[0].y - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_scrolled_box_draws_what_is_in_sight_and_cuts_the_rest() {
+        let (a, theme) = (atlas(), Theme::light());
+        let f = Field::lines(&["a"; 10].join("\n"));
+        let lines = f.wrap(&a, 188.0);
+        let b = boxed(&lines, 72.0, 100.0);
+        let prims = f.prims_boxed(&b, &a, 0, &theme, false);
+        let g = glyphs(&prims);
+        assert!(!g.is_empty() && g.len() < 10, "{} of 10", g.len());
+        let cut = [b.rect.x, b.rect.y, b.rect.w, b.rect.h];
+        assert!(prims.iter().all(|p| p.clip == cut), "all cut to the box");
+        // Scrolled 100 px: the lines wholly above the box are not drawn.
+        assert!(g.iter().all(|r| r.y > b.rect.y - 20.0), "{g:?}");
+    }
+
+    #[test]
+    fn the_caret_stands_on_its_own_line() {
+        let (a, theme) = (atlas(), Theme::light());
+        let mut f = Field::lines("aa\naa");
+        let lines = f.wrap(&a, 188.0);
+        let b = boxed(&lines, 100.0, 0.0);
+        let low = f.prims_boxed(&b, &a, 0, &theme, true).pop().unwrap();
+        f.go(1, false);
+        let high = f.prims_boxed(&b, &a, 0, &theme, true).pop().unwrap();
+        assert!((low.bounds().y - high.bounds().y - 20.0).abs() < 0.01);
+        assert!((high.bounds().x - (6.0 + a.measure("a"))).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_selection_over_three_lines_is_a_band_on_each() {
+        let (a, theme) = (atlas(), Theme::light());
+        let mut f = Field::lines("aa\naa\naa");
+        let lines = f.wrap(&a, 188.0);
+        let b = boxed(&lines, 100.0, 0.0);
+        let plain = f.prims_boxed(&b, &a, 0, &theme, false).len();
+        f.go(1, false);
+        f.go(7, true);
+        assert_eq!(f.prims_boxed(&b, &a, 0, &theme, false).len(), plain + 3);
+    }
+
+    #[test]
+    fn a_press_in_a_box_is_a_line_and_a_place_along_it() {
+        let lines = [Line { start: 0, end: 0 }; 10];
+        let b = boxed(&lines, 72.0, 100.0);
+        // 6 px of inset, then 100 px scrolled away: the first line in
+        // sight is the sixth.
+        assert_eq!(b.at(40.0, 6.0 + 1.0), (5, 34.0));
+        assert_eq!(b.at(40.0, 6.0 + 21.0), (6, 34.0));
+        assert_eq!(b.at(40.0, -30.0).0, 3, "above the box scrolls back");
     }
 
     #[test]
@@ -514,7 +950,12 @@ mod tests {
     fn a_focused_field_draws_a_caret_and_an_unfocused_one_does_not() {
         let atlas = Atlas::build(&crate::text::Font::bundled(), 13);
         let theme = Theme::light();
-        let r = ScreenRect { x: 0.0, y: 0.0, w: 200.0, h: 24.0 };
+        let r = ScreenRect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 24.0,
+        };
         let f = Field::new("hi");
         let focused = f.prims(r, &atlas, 0, &theme, true);
         let idle = f.prims(r, &atlas, 0, &theme, false);
@@ -525,7 +966,12 @@ mod tests {
     fn the_caret_sits_after_the_text_it_follows() {
         let atlas = Atlas::build(&crate::text::Font::bundled(), 13);
         let theme = Theme::light();
-        let r = ScreenRect { x: 10.0, y: 0.0, w: 200.0, h: 24.0 };
+        let r = ScreenRect {
+            x: 10.0,
+            y: 0.0,
+            w: 200.0,
+            h: 24.0,
+        };
         let mut f = Field::new("hi");
         let after = f.prims(r, &atlas, 0, &theme, true).pop().unwrap();
         f.home(false);
