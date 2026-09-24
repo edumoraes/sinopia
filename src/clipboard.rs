@@ -1,4 +1,4 @@
-//! Reading the clipboard over `wl_data_device` (ARCHITECTURE.md §7.1).
+//! The clipboard over `wl_data_device` (ARCHITECTURE.md §7.1).
 //!
 //! The same guest-client trick as `gestures`: this joins the window's
 //! Wayland connection instead of opening one of its own, so the compositor
@@ -9,10 +9,17 @@
 //! bytes are read on a short-lived thread, so a slow or dead clipboard
 //! owner cannot stall a frame.
 //!
-//! Not on Wayland, or no `wl_data_device_manager`: no paste, nothing else
-//! lost.
+//! A copy goes the other way: the board offers a `wl_data_source`, and
+//! whoever pastes it is written the text on a thread of its own. Setting
+//! the selection answers an input event by its serial, which winit keeps
+//! to itself, so the same queue holds a keyboard and a pointer of its own
+//! on the seat — only to note the last serial either one was handed.
+//!
+//! Not on Wayland, or no `wl_data_device_manager`: no paste, no copy,
+//! nothing else lost.
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
@@ -22,6 +29,9 @@ use wayland_client::protocol::{
     wl_data_device::{self, WlDataDevice},
     wl_data_device_manager::WlDataDeviceManager,
     wl_data_offer::{self, WlDataOffer},
+    wl_data_source::{self, WlDataSource},
+    wl_keyboard::{self, WlKeyboard},
+    wl_pointer::{self, WlPointer},
     wl_registry, wl_seat,
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop};
@@ -81,6 +91,14 @@ pub struct Clipboard {
     /// The offer the compositor last announced as the selection.
     selection: Arc<Mutex<Option<WlDataOffer>>>,
     sink: Sink,
+    /// What a copy is made through: a source comes from the manager and
+    /// is set as the selection on the device, and its events are
+    /// dispatched on the clipboard's own queue.
+    manager: WlDataDeviceManager,
+    device: WlDataDevice,
+    queue: QueueHandle<State>,
+    /// The last input serial the seat handed this client.
+    serial: Arc<AtomicU32>,
 }
 
 impl Clipboard {
@@ -111,15 +129,23 @@ impl Clipboard {
         // Kept alive for as long as the thread runs: dropping the device
         // ends the selection events.
         let device = manager.get_data_device(&seat, &qh, ());
+        // Heard only for their serials: a selection is set in answer to
+        // an input event, and a keyboard of our own on the seat is told
+        // of every key the window is.
+        let keyboard = seat.get_keyboard(&qh, ());
+        let pointer = seat.get_pointer(&qh, ());
 
         let selection = Arc::new(Mutex::new(None));
+        let serial = Arc::new(AtomicU32::new(0));
         let mut state = State {
             selection: selection.clone(),
+            serial: serial.clone(),
         };
+        let held = device.clone();
         std::thread::Builder::new()
             .name("clipboard".into())
             .spawn(move || {
-                let _device = device;
+                let _held = (held, keyboard, pointer);
                 loop {
                     if let Err(e) = queue.blocking_dispatch(&mut state) {
                         log::warn!("clipboard: {e:#}");
@@ -132,7 +158,28 @@ impl Clipboard {
             conn,
             selection,
             sink,
+            manager,
+            device,
+            queue: qh,
+            serial,
         })
+    }
+
+    /// Offers `text` as the selection, for any client to paste — this
+    /// window's own fields included. The text is held by the source
+    /// until another selection replaces it.
+    pub fn copy_text(&self, text: &str) {
+        let source = self
+            .manager
+            .create_data_source(&self.queue, Arc::new(text.as_bytes().to_vec()));
+        for mime in TEXT_MIMES {
+            source.offer(mime.to_owned());
+        }
+        self.device
+            .set_selection(Some(&source), self.serial.load(Ordering::Relaxed));
+        if let Err(e) = self.conn.flush() {
+            log::warn!("clipboard: {e}");
+        }
     }
 
     /// Asks for the selection as an image. Returns whether anything was
@@ -213,6 +260,77 @@ fn read_all(mut reader: std::io::PipeReader, cap: u64) -> anyhow::Result<Vec<u8>
 
 struct State {
     selection: Arc<Mutex<Option<WlDataOffer>>>,
+    serial: Arc<AtomicU32>,
+}
+
+impl Dispatch<WlDataSource, Arc<Vec<u8>>> for State {
+    fn event(
+        _: &mut State,
+        source: &WlDataSource,
+        event: wl_data_source::Event,
+        text: &Arc<Vec<u8>>,
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        match event {
+            // Someone is pasting. The write goes on a thread of its own,
+            // so a reader that never reads cannot stall the queue every
+            // other clipboard event arrives on.
+            wl_data_source::Event::Send { fd, .. } => {
+                let text = text.clone();
+                let written = std::thread::Builder::new()
+                    .name("copy".into())
+                    .spawn(move || {
+                        let mut out = std::fs::File::from(fd);
+                        if let Err(e) = out.write_all(&text) {
+                            log::warn!("clipboard: writing the copy: {e}");
+                        }
+                    });
+                if let Err(e) = written {
+                    log::warn!("clipboard: {e}");
+                }
+            }
+            // Another selection took its place: nothing will ask again.
+            wl_data_source::Event::Cancelled => source.destroy(),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut State,
+        _: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        match event {
+            wl_keyboard::Event::Enter { serial, .. } | wl_keyboard::Event::Key { serial, .. } => {
+                state.serial.store(serial, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for State {
+    fn event(
+        state: &mut State,
+        _: &WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<State>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter { serial, .. } | wl_pointer::Event::Button { serial, .. } => {
+                state.serial.store(serial, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Dispatch<WlDataDevice, ()> for State {

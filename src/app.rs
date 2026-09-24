@@ -976,6 +976,27 @@ impl App {
         self.renaming.as_mut().map(|(_, field)| field)
     }
 
+    /// `Ctrl+C`, `Ctrl+X` or `Ctrl+V` with a field in hand: what is
+    /// selected goes to the clipboard, and with `X` out of the field;
+    /// what the clipboard holds comes back into it. Nothing selected is
+    /// nothing to copy, and the clipboard keeps what it had.
+    fn clipboard_key(&mut self, c: &str) {
+        let copied = match c.to_ascii_lowercase().as_str() {
+            "v" => return self.paste_text(),
+            "c" => self.field_in_hand().map(|f| f.selected().to_owned()),
+            "x" => self.field_in_hand().and_then(Field::cut),
+            _ => None,
+        };
+        let Some(text) = copied.filter(|t| !t.is_empty()) else {
+            return;
+        };
+        match &self.clipboard {
+            Some(clipboard) => clipboard.copy_text(&text),
+            None => log::debug!("copy: no clipboard on this display"),
+        }
+        self.redraw();
+    }
+
     /// Asks the clipboard for text, for the field in hand. It arrives
     /// later, as [`UserEvent::PastedText`].
     fn paste_text(&self) {
@@ -2269,9 +2290,9 @@ impl App {
                 if pressed
                     && self.field_in_hand().is_some()
                     && self.modifiers.state().control_key()
-                    && c.eq_ignore_ascii_case("v") =>
+                    && ["c", "x", "v"].iter().any(|k| c.eq_ignore_ascii_case(k)) =>
             {
-                self.paste_text();
+                self.clipboard_key(c);
             }
             _ if self.sending.is_some() && pressed => {
                 let Some(sending) = self.sending.as_mut() else {

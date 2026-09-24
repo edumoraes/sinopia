@@ -26,11 +26,11 @@ implemented.
   - [x] 2b. rows draw name and folder (status kept at the far end)
   - [x] 2c. logos sourced from the vendors, sheet built by a tool, embedded
   - [x] 2d. a row draws its logo from the sheet
-- [ ] 3. Copy and paste in the input
+- [x] 3. Copy and paste in the input
   - [x] 3a. `Field` selection: anchor, extend, select all, replace
   - [x] 3b. pasted text cleaned for the field it lands in
   - [x] 3c. clipboard reads text (`Ctrl+V`), never types a `v`
-  - [ ] 3d. clipboard writes text (`Ctrl+C`, `Ctrl+X`)
+  - [x] 3d. clipboard writes text (`Ctrl+C`, `Ctrl+X`)
 - [ ] 4. Multi-line input that grows, wraps at a maximum width, and
       scrolls past 20 lines
   - [ ] 4a. word wrap in `text`

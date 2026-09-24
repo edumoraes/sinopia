@@ -173,6 +173,17 @@ impl Field {
         self.value.remove(at);
     }
 
+    /// The selection, handed over and taken out; `None` when nothing is
+    /// selected, so a cut of nothing leaves the clipboard alone.
+    pub fn cut(&mut self) -> Option<String> {
+        let text = self.selected().to_owned();
+        if text.is_empty() {
+            return None;
+        }
+        self.take_selection();
+        Some(text)
+    }
+
     pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.caret = self.len();
@@ -417,6 +428,17 @@ mod tests {
         assert_eq!(f.value(), "sketch the flow");
         f.insert_str("!");
         assert_eq!(f.value(), "sketch! the flow", "the caret went after it");
+    }
+
+    #[test]
+    fn cut_hands_the_selection_over_and_leaves_the_rest() {
+        let mut f = Field::new("keep cut");
+        f.left(true);
+        f.left(true);
+        f.left(true);
+        assert_eq!(f.cut().as_deref(), Some("cut"));
+        assert_eq!(f.value(), "keep ");
+        assert_eq!(f.cut(), None, "nothing selected is nothing to cut");
     }
 
     #[test]
