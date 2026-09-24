@@ -3247,6 +3247,13 @@ impl ApplicationHandler<UserEvent> for App {
     /// which is why the sleep goes back to `Wait` once it is paid.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(due) = self.owed else { return };
+        // A board in the middle of a gesture — or of a menu trying modes
+        // on it — is not what the person has. The debt waits for the rest,
+        // and the event that brings it wakes the loop anyway.
+        if !self.settled() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         if Instant::now() < due {
             event_loop.set_control_flow(ControlFlow::WaitUntil(due));
             return;
