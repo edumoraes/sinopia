@@ -52,7 +52,7 @@ use crate::skills;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
-use crate::tree::Place;
+use crate::tree::{Arrange, Place};
 use crate::text::{self, Atlas, Font};
 use crate::theme::{INKS, Theme};
 
@@ -1499,7 +1499,7 @@ impl App {
             PanelHit::Open(id) => editor.toggle_open(&id),
             PanelHit::Group => editor.add_group(doc),
             PanelHit::Add => editor.add_layer(doc),
-            PanelHit::Remove => editor.remove_layer(doc),
+            PanelHit::Remove => editor.remove_layers(doc),
             PanelHit::Rename(_) | PanelHit::Panel => Change::None,
         };
         self.apply(change);
@@ -2691,7 +2691,7 @@ impl App {
             }
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
                 let (editor, doc) = self.active();
-                let change = editor.delete_selection(doc);
+                let change = editor.delete(doc);
                 self.apply(change);
             }
             Key::Character(text) if pressed && self.modifiers.state().control_key() => {
@@ -2707,14 +2707,7 @@ impl App {
                     "o" => self.ask_open(),
                     "e" => self.ask_send(),
                     "w" => self.request_close(self.active),
-                    // Photoshop's: the active layer a step down its stack,
-                    // or a step up.
-                    "[" | "]" => {
-                        let (editor, doc) = self.active();
-                        let change = editor.move_layer(doc, text.as_str() == "]");
-                        self.apply(change);
-                    }
-                    _ => {}
+                    _ => self.layer_command(bare, shift),
                 }
             }
             Key::Character(text) if pressed => {
@@ -2730,6 +2723,29 @@ impl App {
             _ => {}
         }
         self.update_cursor_icon();
+    }
+
+    /// A layer command under `Ctrl`, Photoshop's keys: `G` groups the
+    /// picked layers and `Shift+G` ungroups, `J` duplicates, `Shift+N`
+    /// opens a new layer, and the brackets arrange — a step with `[` and
+    /// `]`, all the way with Shift. Read off the bare key, since Shift
+    /// turns a bracket into a brace on one layout and something else on
+    /// the next.
+    fn layer_command(&mut self, bare: &Key, shift: bool) {
+        let Key::Character(c) = bare else { return };
+        let (editor, doc) = self.active();
+        let change = match (c.to_ascii_lowercase().as_str(), shift) {
+            ("g", false) => editor.group_layers(doc),
+            ("g", true) => editor.ungroup(doc),
+            ("j", false) => editor.duplicate_layers(doc),
+            ("n", true) => editor.add_layer(doc),
+            ("]", false) => editor.arrange(doc, Arrange::Forward),
+            ("]", true) => editor.arrange(doc, Arrange::Front),
+            ("[", false) => editor.arrange(doc, Arrange::Backward),
+            ("[", true) => editor.arrange(doc, Arrange::Back),
+            _ => Change::None,
+        };
+        self.apply(change);
     }
 
     /// A character typed with no modifier but Shift: `Shift+L` shows or

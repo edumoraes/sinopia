@@ -7,7 +7,7 @@
 //! stack of the frame on it. One address for all three, so the panel,
 //! the editor and the CLI speak the same ids. Pure.
 
-use crate::doc::{Document, Element, Frame, Kind, Layer};
+use crate::doc::{BlendMode, Document, Element, Frame, Kind, Layer, new_id};
 
 impl Document {
     /// The layer `id`, however deep it stands, in whichever stack.
@@ -262,31 +262,178 @@ impl Document {
         true
     }
 
-    /// Swaps layer `index` with the one above it (`up`) or below, and
-    /// answers where it went. Nothing moves past the edge.
-    pub fn move_layer(&mut self, owner: Option<&str>, index: usize, up: bool) -> Option<usize> {
-        let to = if up {
-            index.checked_add(1)?
-        } else {
-            index.checked_sub(1)?
-        };
-        self.reorder_layer(owner, index, to).then_some(to)
+    /// The layers of `ids` that are on the board, each once, in paint
+    /// order — less any held by another of them, which goes where that
+    /// one goes.
+    fn movable(&self, ids: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for id in ids {
+            let held = self.ancestors(id).iter().any(|a| ids.contains(&a.id));
+            if self.layer(id).is_some() && !held && !out.contains(id) {
+                out.push(id.clone());
+            }
+        }
+        let order = self.paint_order();
+        out.sort_by_key(|m| order.iter().position(|o| o == m));
+        out
     }
 
-    /// Takes layer `from` out of the stack `owner` holds and puts it back
-    /// at `to`, shifting whatever lies between and leaving their order
-    /// alone — what a row dragged several places down does. False when
-    /// either index is past the end, or the layer is already there.
-    pub fn reorder_layer(&mut self, owner: Option<&str>, from: usize, to: usize) -> bool {
-        let Some(layers) = self.stack_mut(owner) else {
-            return false;
+    /// Every layer's id in paint order: the panel's, the other way up.
+    fn paint_order(&self) -> Vec<String> {
+        self.rows(|_| true)
+            .iter()
+            .rev()
+            .map(|r| r.layer.id.clone())
+            .collect()
+    }
+
+    /// Wraps `ids` in a new group standing where the topmost of them did,
+    /// and answers its id. They keep their order inside it. None — and
+    /// nothing changes — when there is nothing to group, or a frame among
+    /// them, which never goes in a group.
+    pub fn group_layers(&mut self, ids: &[String]) -> Option<String> {
+        let moving = self.movable(ids);
+        let frame = moving
+            .iter()
+            .any(|m| self.layer(m).is_some_and(|l| l.kind == Kind::Frame));
+        let top = moving.last().filter(|_| !frame)?.clone();
+        let (owner, index) = self.locate(&top).map(|(o, i)| (o.map(str::to_owned), i))?;
+        let name = self.next_layer_name(owner.as_deref(), Kind::Group);
+        let group = Layer {
+            blend: BlendMode::PassThrough,
+            ..Layer::of(&name, Kind::Group)
         };
-        if from >= layers.len() || to >= layers.len() || from == to {
-            return false;
+        let id = group.id.clone();
+        self.stack_mut(owner.as_deref())?.insert(index + 1, group);
+        if !self.move_layers(&moving, Some(&id), 0) {
+            let stack = self.stack_mut(owner.as_deref())?;
+            stack.retain(|l| l.id != id);
+            return None;
         }
-        let layer = layers.remove(from);
-        layers.insert(to, layer);
-        true
+        Some(id)
+    }
+
+    /// Lets group `id`'s layers out into the stack it stood in, where it
+    /// stood and in their order, and answers their ids. The group goes;
+    /// what it said of itself goes with it. None for anything but a group.
+    pub fn ungroup(&mut self, id: &str) -> Option<Vec<String>> {
+        if self.layer(id)?.kind != Kind::Group {
+            return None;
+        }
+        let (owner, index) = self.locate(id).map(|(o, i)| (o.map(str::to_owned), i))?;
+        let stack = self.stack_mut(owner.as_deref())?;
+        let group = stack.remove(index);
+        let out: Vec<String> = group.layers.iter().map(|l| l.id.clone()).collect();
+        for (k, layer) in group.layers.into_iter().enumerate() {
+            stack.insert(index + k, layer);
+        }
+        self.fill_empty_stacks();
+        Some(out)
+    }
+
+    /// A copy of every layer of `ids` — with everything under it and on
+    /// it — standing right above its original, and their ids. Every id is
+    /// minted anew; a copy is named for what it copies.
+    pub fn duplicate_layers(&mut self, ids: &[String]) -> Vec<String> {
+        let mut made = Vec::new();
+        for id in self.movable(ids) {
+            let Some(layer) = self.layer(&id).cloned() else {
+                continue;
+            };
+            let (copy, elements) = self.copied(&layer);
+            let Some((owner, index)) = self.locate(&id).map(|(o, i)| (o.map(str::to_owned), i))
+            else {
+                continue;
+            };
+            made.push(copy.id.clone());
+            if let Some(stack) = self.stack_mut(owner.as_deref()) {
+                stack.insert(index + 1, copy);
+            }
+            self.elements.extend(elements);
+        }
+        made
+    }
+
+    /// `layer`, everything under it and every element standing on any of
+    /// it — a frame's own stack included — with fresh ids throughout,
+    /// ready to stand beside the original.
+    pub(crate) fn copied(&self, layer: &Layer) -> (Layer, Vec<Element>) {
+        let pairs: Vec<(String, String)> = self
+            .subtree(layer)
+            .into_iter()
+            .map(|id| (id, new_id()))
+            .collect();
+        let minted = |id: &str| pairs.iter().find(|(a, _)| a == id).map(|(_, b)| b.clone());
+        let mut copy = layer.clone();
+        copy.name = format!("{} copy", layer.name);
+        renamed(std::slice::from_mut(&mut copy), &minted);
+        let mut elements = Vec::new();
+        for el in &self.elements {
+            let Some(to) = minted(el.layer()) else {
+                continue;
+            };
+            let mut el = el.clone();
+            el.set_layer(&to);
+            el.set_id(&new_id());
+            if let Element::Frame(f) = &mut el {
+                renamed(&mut f.layers, &minted);
+            }
+            elements.push(el);
+        }
+        (copy, elements)
+    }
+
+    /// Moves `ids` within their own stacks, each stack on its own:
+    /// Photoshop's Arrange. True when anything moved.
+    pub fn arrange(&mut self, ids: &[String], how: Arrange) -> bool {
+        let moving = self.movable(ids);
+        let mut owners: Vec<Option<String>> = Vec::new();
+        for m in &moving {
+            let owner = self.locate(m).map(|(o, _)| o.map(str::to_owned));
+            if let Some(owner) = owner
+                && !owners.contains(&owner)
+            {
+                owners.push(owner);
+            }
+        }
+        let mut changed = false;
+        for owner in owners {
+            let Some(stack) = self.stack_mut(owner.as_deref()) else {
+                continue;
+            };
+            let before: Vec<String> = stack.iter().map(|l| l.id.clone()).collect();
+            let picked = |l: &Layer| moving.contains(&l.id);
+            match how {
+                Arrange::Front | Arrange::Back => {
+                    let (mut up, mut rest): (Vec<Layer>, Vec<Layer>) =
+                        stack.drain(..).partition(|l| picked(l));
+                    if how == Arrange::Front {
+                        rest.append(&mut up);
+                        *stack = rest;
+                    } else {
+                        up.append(&mut rest);
+                        *stack = up;
+                    }
+                }
+                // Top down, so a run of picked layers climbs as one.
+                Arrange::Forward => {
+                    for i in (0..stack.len().saturating_sub(1)).rev() {
+                        if picked(&stack[i]) && !picked(&stack[i + 1]) {
+                            stack.swap(i, i + 1);
+                        }
+                    }
+                }
+                Arrange::Backward => {
+                    for i in 1..stack.len() {
+                        if picked(&stack[i]) && !picked(&stack[i - 1]) {
+                            stack.swap(i - 1, i);
+                        }
+                    }
+                }
+            }
+            changed |= stack.iter().map(|l| l.id.as_str()).ne(before.iter().map(String::as_str));
+        }
+        changed
     }
 
     /// The stack and the index a [`Place`] names, as the stacks stand:
@@ -335,24 +482,10 @@ impl Document {
     /// the move leaves empty the board or a frame gets a fresh layer in;
     /// a group may stand empty.
     pub fn move_layers(&mut self, ids: &[String], owner: Option<&str>, index: usize) -> bool {
-        let mut moving: Vec<String> = Vec::new();
-        for id in ids {
-            let held = self.ancestors(id).iter().any(|a| ids.contains(&a.id));
-            if self.layer(id).is_some() && !held && !moving.contains(id) {
-                moving.push(id.clone());
-            }
-        }
+        let moving = self.movable(ids);
         if moving.is_empty() || !self.can_move(&moving, owner) {
             return false;
         }
-        // Paint order is the panel's, the other way up.
-        let order: Vec<String> = self
-            .rows(|_| true)
-            .iter()
-            .rev()
-            .map(|r| r.layer.id.clone())
-            .collect();
-        moving.sort_by_key(|m| order.iter().position(|o| o == m));
         // What the block lands under, found before anything moves: the
         // first layer at or past `index` that is not itself moving.
         let anchor: Option<String> = self
@@ -396,7 +529,7 @@ impl Document {
 
     /// Gives the board and every frame a fresh layer where they stand
     /// empty, as the parse would: neither is ever without one.
-    fn fill_empty_stacks(&mut self) {
+    pub(crate) fn fill_empty_stacks(&mut self) {
         if self.layers.is_empty() {
             self.layers.push(Layer::new("Layer 1"));
         }
@@ -457,6 +590,16 @@ impl Document {
 
 }
 
+/// How [`Document::arrange`] moves layers within their own stacks: to
+/// the top, a step up, a step down, to the bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrange {
+    Front,
+    Forward,
+    Backward,
+    Back,
+}
+
 /// A place in the tree, told by a row: where a layer let go of over the
 /// panel lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,6 +624,16 @@ pub struct Row<'a> {
     pub shown: bool,
     pub locked: bool,
     pub open: bool,
+}
+
+/// `layers` and every group's under them, given the ids `minted` says.
+fn renamed(layers: &mut [Layer], minted: &impl Fn(&str) -> Option<String>) {
+    for l in layers {
+        if let Some(to) = minted(&l.id) {
+            l.id = to;
+        }
+        renamed(&mut l.layers, minted);
+    }
 }
 
 /// Every name in `layers` and the groups under them.
@@ -781,6 +934,95 @@ pub(crate) mod tests {
         assert!(!doc.can_move(&ids(&["F"]), Some("G")), "a frame stays on the root");
         assert!(!doc.can_move(&ids(&["A"]), Some("A")), "a layer holds none");
         assert!(doc.can_move(&ids(&["F"]), None));
+    }
+
+    #[test]
+    fn grouping_wraps_the_layers_where_the_topmost_stood() {
+        let mut doc = nested();
+        let g = doc.group_layers(&ids(&["A", "C"])).expect("a group");
+        // Where C stood, the topmost of the two: inside H.
+        assert_eq!(doc.locate(&g), Some((Some("H"), 0)));
+        let group = doc.layer(&g).unwrap();
+        assert_eq!(group.kind, Kind::Group);
+        assert_eq!(group.blend, BlendMode::PassThrough, "a new group passes through");
+        let kids: Vec<&str> = group.layers.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(kids, ["A", "C"], "in paint order");
+        assert_eq!(group.name, "Group 3");
+        Document::from_json(&doc.to_json().unwrap()).expect("still a board");
+    }
+
+    #[test]
+    fn a_frame_is_never_grouped() {
+        let mut doc = nested();
+        assert!(doc.group_layers(&ids(&["F"])).is_none());
+        assert!(doc.group_layers(&ids(&["A", "F"])).is_none(), "not even in company");
+        assert!(doc.group_layers(&ids(&["nobody"])).is_none());
+        assert_eq!(stack_ids(&doc, None), ["A", "G", "F"], "and nothing moved");
+    }
+
+    #[test]
+    fn ungrouping_lets_the_layers_out_where_the_group_stood() {
+        let mut doc = nested();
+        let out = doc.ungroup("G").expect("G is a group");
+        assert_eq!(out, ["B", "H"]);
+        assert_eq!(stack_ids(&doc, None), ["A", "B", "H", "F"]);
+        assert!(doc.layer("G").is_none());
+        assert!(doc.ungroup("A").is_none(), "a layer is no group");
+        assert!(doc.ungroup("F").is_none(), "and neither is a frame");
+    }
+
+    #[test]
+    fn a_duplicate_stands_right_above_its_original_with_ids_of_its_own() {
+        let mut doc = nested();
+        let made = doc.duplicate_layers(&ids(&["G", "A"]));
+        assert_eq!(made.len(), 2, "in paint order: A's, then G's");
+        let root = stack_ids(&doc, None);
+        assert_eq!(root.len(), 5);
+        assert_eq!(root[0], "A");
+        assert_eq!(root[1], made[0], "A's copy right above A");
+        assert_eq!(root[2], "G");
+        assert_eq!(root[3], made[1], "G's copy right above G");
+        let copy = doc.layer(&made[1]).unwrap();
+        assert_eq!(copy.name, format!("{} copy", doc.layer("G").unwrap().name));
+        // Everything under it is new, and so is what stands on it.
+        let under = doc.subtree(copy);
+        assert_eq!(under.len(), 4, "the group, B, H and C");
+        for id in &under {
+            assert!(!["G", "B", "H", "C"].contains(&id.as_str()), "{id} is minted anew");
+        }
+        let on: Vec<&Element> = doc.elements.iter().filter(|el| under.iter().any(|u| u == el.layer())).collect();
+        assert_eq!(on.len(), 2, "b and c, copied");
+        assert!(on.iter().all(|el| el.id() != "b" && el.id() != "c"));
+        Document::from_json(&doc.to_json().unwrap()).expect("still a board");
+    }
+
+    #[test]
+    fn a_duplicated_frame_carries_a_frame_and_a_stack_of_its_own() {
+        let mut doc = nested();
+        let made = doc.duplicate_layers(&ids(&["F"]));
+        let copy = doc.frame_on(&made[0]).expect("a frame on the copy");
+        assert_ne!(copy.id, "fr");
+        assert_eq!(copy.layers.len(), 2);
+        assert!(copy.layers.iter().all(|l| !["D", "K"].contains(&l.id.as_str())));
+        Document::from_json(&doc.to_json().unwrap()).expect("still a board");
+    }
+
+    #[test]
+    fn arranging_moves_the_layers_within_their_own_stacks() {
+        let mut doc = nested();
+        assert!(doc.arrange(&ids(&["A"]), Arrange::Forward));
+        assert_eq!(stack_ids(&doc, None), ["G", "A", "F"]);
+        assert!(doc.arrange(&ids(&["A"]), Arrange::Front));
+        assert_eq!(stack_ids(&doc, None), ["G", "F", "A"]);
+        assert!(!doc.arrange(&ids(&["A"]), Arrange::Forward), "already on top");
+        assert!(doc.arrange(&ids(&["A", "F"]), Arrange::Back));
+        assert_eq!(stack_ids(&doc, None), ["F", "A", "G"], "in their order");
+        // Two stacks at once: each moves in its own.
+        assert!(doc.arrange(&ids(&["B", "D"]), Arrange::Front));
+        assert_eq!(stack_ids(&doc, Some("G")), ["H", "B"]);
+        assert_eq!(stack_ids(&doc, Some("F")), ["K", "D"]);
+        assert!(doc.arrange(&ids(&["B"]), Arrange::Backward));
+        assert_eq!(stack_ids(&doc, Some("G")), ["B", "H"]);
     }
 
     #[test]

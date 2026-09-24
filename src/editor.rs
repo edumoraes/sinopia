@@ -11,7 +11,7 @@ use crate::doc::{Camera, Document, Element, Envelope, Image, Kind, Layer, Paint,
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::View;
 use crate::select::{self, Handle};
-use crate::tree::Place;
+use crate::tree::{Arrange, Place};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -331,6 +331,9 @@ pub struct Editor {
     /// picked. Empty is the active layer alone. The active layer is the
     /// anchor a range is taken from, and where ink goes.
     picked: Vec<String>,
+    /// The pick was made in the panel, not on the canvas: what `Delete`
+    /// takes is the layers, then, and not the objects.
+    in_panel: bool,
     /// The groups and frames whose rows the panel shows open, by id.
     /// Session state of the panel's and nothing else's: it is not where
     /// the hand stands, so a step back does not shut what was opened.
@@ -623,11 +626,132 @@ impl Editor {
             }
         }
         self.picked = picked;
+        self.in_panel = true;
+        self.follow_the_pick(doc);
+        Change::Selection
+    }
+
+    /// With the Select tool in hand, what the picked layers hold becomes
+    /// the selection; with any other the canvas is left alone.
+    fn follow_the_pick(&mut self, doc: &Document) {
         if self.tool == Tool::Select {
             self.drag = None;
             self.selection = self.held_by(doc, &self.picked(doc));
         }
-        Change::Selection
+    }
+
+    /// The picked layers' ids, owned: what the layer operations act on.
+    fn picked_ids(&self, doc: &Document) -> Vec<String> {
+        self.picked(doc).into_iter().map(str::to_owned).collect()
+    }
+
+    /// Wraps the picked layers in a new group standing where the topmost
+    /// of them did — `Ctrl+G` — and picks the group.
+    pub fn group_layers(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        let Some(group) = doc.group_layers(&picked) else {
+            return Change::None;
+        };
+        self.reveal(doc, &group);
+        self.layer = Some(group);
+        self.picked.clear();
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
+    /// Lets the active group's layers out where it stood — `Ctrl+Shift+G`
+    /// — and picks them.
+    pub fn ungroup(&mut self, doc: &mut Document) -> Change {
+        let group = self.active(doc).to_owned();
+        let Some(out) = doc.ungroup(&group) else {
+            return Change::None;
+        };
+        self.layer = out.last().cloned();
+        self.picked = out;
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
+    /// A copy of every picked layer right above its original — `Ctrl+J`
+    /// — and the copies picked.
+    pub fn duplicate_layers(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        let made = doc.duplicate_layers(&picked);
+        if made.is_empty() {
+            return Change::None;
+        }
+        self.layer = made.last().cloned();
+        self.picked = made;
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
+    /// Removes every picked layer, with everything under it and on it —
+    /// the bin, and `Delete` on a pick made in the panel. One alone keeps
+    /// [`Editor::remove_layer`]'s ways; several go, and the board and a
+    /// frame left empty get a fresh layer.
+    pub fn remove_layers(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        if let [one] = picked.as_slice() {
+            self.layer = Some(one.clone());
+            return self.remove_layer(doc);
+        }
+        // Where the topmost of them stood is where the hand goes back to.
+        let top = picked
+            .last()
+            .and_then(|id| doc.locate(id))
+            .map(|(o, i)| (o.map(str::to_owned), i));
+        let mut gone = false;
+        for id in picked.iter().rev() {
+            if let Some((owner, i)) = doc.locate(id).map(|(o, i)| (o.map(str::to_owned), i))
+                && let Some(layer) = doc.stack(owner.as_deref()).get(i)
+            {
+                let held = doc.subtree(layer);
+                if let Some(stack) = doc.stack_mut(owner.as_deref()) {
+                    stack.remove(i);
+                }
+                doc.elements
+                    .retain(|el| !held.iter().any(|h| h == el.layer()));
+                gone = true;
+            }
+        }
+        if !gone {
+            return Change::None;
+        }
+        doc.fill_empty_stacks();
+        self.drag = None;
+        self.selection
+            .retain(|id| doc.elements.iter().any(|el| el.id() == id));
+        self.picked.clear();
+        self.layer = top.and_then(|(owner, i)| {
+            let stack = doc.stack(owner.as_deref());
+            match stack.len() {
+                0 => owner,
+                n => Some(stack[i.min(n - 1)].id.clone()),
+            }
+        });
+        Change::Scene
+    }
+
+    /// `Delete`: the picked layers when the pick was made in the panel,
+    /// the selected objects when it was made on the canvas.
+    pub fn delete(&mut self, doc: &mut Document) -> Change {
+        if self.in_panel {
+            self.remove_layers(doc)
+        } else {
+            self.delete_selection(doc)
+        }
+    }
+
+    /// Moves the picked layers within their own stacks — to the top, a
+    /// step up, a step down, to the bottom: `Ctrl+Shift+]`, `Ctrl+]`,
+    /// `Ctrl+[`, `Ctrl+Shift+[`.
+    pub fn arrange(&mut self, doc: &mut Document, how: Arrange) -> Change {
+        let picked = self.picked_ids(doc);
+        match doc.arrange(&picked, how) {
+            true => Change::Scene,
+            false => Change::None,
+        }
     }
 
     /// What `layers` hold, in paint order: a group's are everything
@@ -661,6 +785,7 @@ impl Editor {
             }
         }
         self.picked = layers;
+        self.in_panel = false;
     }
 
     /// Adds a raster layer and makes it active: inside the active layer,
@@ -792,19 +917,6 @@ impl Editor {
             self.reveal(doc, id);
         }
         Change::Scene
-    }
-
-    /// Moves the active layer one step up or down its own stack. It keeps
-    /// its id, so it stays active.
-    pub fn move_layer(&mut self, doc: &mut Document, up: bool) -> Change {
-        let a = self.active(doc).to_owned();
-        let Some((owner, index)) = doc.locate(&a).map(|(o, i)| (o.map(str::to_owned), i)) else {
-            return Change::None;
-        };
-        match doc.move_layer(owner.as_deref(), index, up) {
-            Some(_) => Change::Scene,
-            None => Change::None,
-        }
     }
 
     /// Whether the panel shows `holder`'s layers under its row.
@@ -1572,6 +1684,7 @@ impl Editor {
         let had_selection = !self.selection.is_empty();
         self.selection.clear();
         self.picked.clear();
+        self.in_panel = false;
         had_selection
     }
 }
@@ -2204,20 +2317,6 @@ mod tests {
         let _ = toggle_at(&mut e, &mut doc, 1);
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         assert!(e.selection().is_empty());
-    }
-
-    #[test]
-    fn move_layer_swaps_and_keeps_the_active_id() {
-        let mut e = Editor::new();
-        let mut doc = layered_board();
-        let _ = select_at(&mut e, &doc, 0);
-        assert_eq!(e.move_layer(&mut doc, true), Change::Scene);
-        assert_eq!(active_at(&e, &doc), 1);
-        assert_eq!(doc.layers[1].id, "L1");
-        assert_eq!(e.move_layer(&mut doc, true), Change::None, "already on top");
-        assert_eq!(e.move_layer(&mut doc, false), Change::Scene);
-        assert_eq!(active_at(&e, &doc), 0);
-        assert_eq!(e.move_layer(&mut doc, false), Change::None);
     }
 
     /// 100×100 viewport looking at (50, 50) at zoom 1: screen px == world.
@@ -4042,6 +4141,92 @@ mod tests {
             Change::None,
             "a layer holds none"
         );
+    }
+
+    #[test]
+    fn grouping_the_picked_layers_picks_the_group() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        assert_eq!(e.group_layers(&mut doc), Change::Scene);
+        let g = e.active(&doc).to_owned();
+        assert_eq!(doc.layer(&g).unwrap().kind, Kind::Group);
+        assert_eq!(picked(&e, &doc), [g]);
+        assert!(e.is_open("G"), "where it stands can be seen");
+        // A frame is never grouped.
+        let _ = e.pick_layer(&doc, "F", Pick::Only, &ROWS);
+        assert_eq!(e.group_layers(&mut doc), Change::None);
+    }
+
+    #[test]
+    fn ungrouping_picks_what_the_group_held() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert_eq!(e.ungroup(&mut doc), Change::Scene);
+        assert_eq!(picked(&e, &doc), ["B", "H"]);
+        assert_eq!(e.active(&doc), "H");
+        assert_eq!(e.ungroup(&mut doc), Change::Scene, "H is a group too");
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.ungroup(&mut doc), Change::None, "a layer is no group");
+    }
+
+    #[test]
+    fn duplicating_picks_the_copies() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.duplicate_layers(&mut doc), Change::Scene);
+        let copy = e.active(&doc).to_owned();
+        assert_ne!(copy, "A");
+        assert_eq!(doc.locate(&copy), Some((None, 1)), "right above A");
+        assert_eq!(picked(&e, &doc), [copy]);
+        assert_eq!(e.selection().len(), 1, "and, with the Select tool, what it holds");
+    }
+
+    #[test]
+    fn removing_the_picked_layers_takes_them_all() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "H", Pick::Toggle, &ROWS);
+        assert_eq!(e.remove_layers(&mut doc), Change::Scene);
+        assert!(doc.layer("A").is_none() && doc.layer("H").is_none() && doc.layer("C").is_none());
+        assert!(!doc.elements.iter().any(|el| el.id() == "a" || el.id() == "c"));
+        assert!(e.selection().is_empty());
+        assert!(doc.layer(e.active(&doc)).is_some(), "the active layer is one that is left");
+        Document::from_json(&doc.to_json().unwrap()).expect("still a board");
+    }
+
+    #[test]
+    fn delete_takes_what_was_picked_where_it_was_picked() {
+        // Picked in the panel: the layers go, holders and all.
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert_eq!(e.delete(&mut doc), Change::Scene);
+        assert!(doc.layer("G").is_none(), "the group went, not only what it held");
+        // Picked on the canvas: the objects go, and a layer they empty.
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        assert_eq!(e.delete(&mut doc), Change::Scene);
+        assert!(doc.layer("L2").is_none());
+        assert!(doc.layer("L1").is_some(), "the layer of what was not selected stays");
+    }
+
+    #[test]
+    fn arranging_moves_the_picked_layers_in_their_stacks() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.arrange(&mut doc, Arrange::Front), Change::Scene);
+        assert_eq!(doc.locate("A"), Some((None, 2)));
+        assert_eq!(e.arrange(&mut doc, Arrange::Forward), Change::None, "already on top");
+        assert_eq!(e.arrange(&mut doc, Arrange::Backward), Change::Scene);
+        assert_eq!(doc.locate("A"), Some((None, 1)));
     }
 
     /// A board of one group holding one raster layer: `G[R]`.

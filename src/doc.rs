@@ -2345,33 +2345,6 @@ mod tests {
     }
 
     #[test]
-    fn move_layer_swaps_with_the_neighbour_and_stops_at_the_edge() {
-        let mut doc = three_layers();
-        assert_eq!(doc.move_layer(None, 0, true), Some(1));
-        assert_eq!(doc.layers[1].id, "bottom");
-        assert_eq!(doc.layers[0].id, "middle");
-        assert_eq!(doc.move_layer(None, 2, true), None, "already on top");
-        assert_eq!(doc.move_layer(None, 0, false), None, "already at the bottom");
-        assert_eq!(doc.move_layer(None, 9, true), None, "no such layer");
-        assert_eq!(doc.move_layer(None, 1, false), Some(0));
-        assert_eq!(doc.layers[0].id, "bottom");
-    }
-
-    #[test]
-    fn reorder_layer_lifts_one_out_and_drops_it_in() {
-        let mut doc = three_layers();
-        assert!(doc.reorder_layer(None, 2, 0), "the top one to the bottom");
-        let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, vec!["top", "bottom", "middle"], "the others keep their order");
-        assert!(doc.reorder_layer(None, 0, 2));
-        let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, vec!["bottom", "middle", "top"]);
-        assert!(!doc.reorder_layer(None, 1, 1), "nowhere to go");
-        assert!(!doc.reorder_layer(None, 3, 0), "no such layer");
-        assert!(!doc.reorder_layer(None, 0, 3), "no such place");
-    }
-
-    #[test]
     fn new_document_is_empty_with_ulid_and_default_camera() {
         let doc = Document::new("meu board");
         assert_eq!(doc.schema, SCHEMA_VERSION);
