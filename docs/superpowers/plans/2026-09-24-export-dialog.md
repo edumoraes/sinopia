@@ -47,10 +47,10 @@ implemented.
   - [x] 5c. the token under the caret opens a list, filtered as typed
   - [x] 5d. arrows pick, Tab/Enter accept, Esc dismisses the list only
   - [x] 5e. the invocation reaches the harness as a call, verified live
-- [ ] 6. Thumbnail of what is being exported, at the dialog's foot
-  - [ ] 6a. `export::fit_view`: the scope fitted into a box
-  - [ ] 6b. the layout keeps the foot for it
-  - [ ] 6c. rendered through the same path as `board.png`, uploaded to a
+- [x] 6. Thumbnail of what is being exported, at the dialog's foot
+  - [x] 6a. `export::fit_view`: the scope fitted into a box
+  - [x] 6b. the layout keeps the foot for it
+  - [x] 6c. rendered through the same path as `board.png`, uploaded to a
         slot of its own, redrawn when its size changes
 - [ ] 7. Docs: README, AGENTS.md, the design note
 - [ ] 8. Live check of every item in a running window; CI green

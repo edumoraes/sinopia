@@ -260,6 +260,10 @@ struct App {
     exit_error: Option<anyhow::Error>,
 }
 
+/// The most px to a world unit the dialog's picture is drawn at: a
+/// scope of two strokes is shown whole, not blown up to fill the foot.
+const PICTURE_CEILING: f64 = 4.0;
+
 /// A send being composed. It holds the agents as they were when the
 /// panel opened: a list that changed under the person mid-sentence would
 /// move the row they were about to press.
@@ -286,6 +290,13 @@ struct Sending {
     /// Where the call started whose menu `Esc` put away: it stays away
     /// for that call, and comes back for the next one.
     dismissed: Option<usize>,
+    /// The shape of what leaves, known before its picture is taken.
+    shape: Option<f32>,
+    /// The picture of it at the dialog's foot: the slot it was uploaded
+    /// to, and the size in px it was last taken at — or tried at, so a
+    /// picture that will not render is not tried again every frame.
+    picture: Option<u32>,
+    pictured: Option<(u32, u32)>,
 }
 
 impl Sending {
@@ -1041,6 +1052,7 @@ impl App {
             folder: sending.folder.is_some(),
             lines: lines.len(),
             line_h: atlas.line_height(),
+            picture: sending.shape,
         };
         Some((send::Panel::layout(view.viewport, scale, &spec), lines))
     }
@@ -1519,6 +1531,7 @@ impl App {
             log::info!("no agent is running: export to the agent needs one");
             return;
         }
+        let shape = export::bounds(self.doc(), &scope).map(|b| export::shape(&b) as f32);
         // A frame brings its name; a loose selection is asked for one,
         // counted past whatever the folder already holds.
         let folder = match export::named(self.doc(), &scope) {
@@ -1542,6 +1555,9 @@ impl App {
             skills: Vec::new(),
             pick: 0,
             dismissed: None,
+            shape,
+            picture: None,
+            pictured: None,
         });
         if let Some(sending) = self.sending.as_mut() {
             sending.aim(0);
@@ -1596,36 +1612,9 @@ impl App {
         let sub = export::sub_document(self.doc(), scope);
         let md = export::inventory(&sub, &bounds);
         let blobs = self.blobs_of(&sub);
-        let theme_bg = self.theme.bg;
-        let edge = self.theme.muted;
-        let shapes = std::mem::take(&mut self.shapes);
-        let picture = {
-            let images = self.gfx.as_ref().map(Gfx::image_slots);
-            let none = ImageSlots::new();
-            let images = images.unwrap_or(&none);
-            let (view, w, h) = match &self.gfx {
-                Some(gfx) => export::view_for(&bounds, gfx.max_dimension()),
-                None => (export::view_for(&bounds, 1).0, 1, 1),
-            };
-            // The sub-document, not the board: the json beside the
-            // picture is the scope, and the box the picture is taken
-            // through is the scope's plus `EXPORT_MARGIN` — so drawing
-            // the whole board put a neighbour's ink in the margin of a
-            // picture whose json says nothing about it. What leaves the
-            // board is one thing, said twice.
-            (
-                scene::document_prims(&sub, &view, images, &shapes, edge, None),
-                w,
-                h,
-            )
-        };
-        self.shapes = shapes;
-        let (picture, w, h) = picture;
-        let gfx = self
-            .gfx
-            .as_mut()
-            .context("there is no window to draw with")?;
-        let rgba = gfx.render_offscreen(w, h, theme_bg, &picture)?;
+        let most = self.gfx.as_ref().map_or(1, Gfx::max_dimension);
+        let (view, w, h) = export::view_for(&bounds, most);
+        let rgba = self.render_sub(&sub, &view, w, h)?;
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png).write_image(
             &rgba,
@@ -1634,6 +1623,76 @@ impl App {
             image::ExtendedColorType::Rgba8,
         )?;
         export::write(dir, slug, &png, &sub, &md, &blobs)
+    }
+
+    /// What `view` shows of `sub`, drawn offscreen on the board's own
+    /// ground: `w` by `h` px of tight RGBA8. The page and the dialog's
+    /// picture of it both come through here, so the two cannot differ.
+    ///
+    /// The sub-document, not the board: the json beside the picture is
+    /// the scope, and the box the picture is taken through is the
+    /// scope's plus `EXPORT_MARGIN` — so drawing the whole board put a
+    /// neighbour's ink in the margin of a picture whose json says nothing
+    /// about it. What leaves the board is one thing, said twice.
+    fn render_sub(
+        &mut self,
+        sub: &Document,
+        view: &View,
+        w: u32,
+        h: u32,
+    ) -> anyhow::Result<Vec<u8>> {
+        let (ground, edge) = (self.theme.bg, self.theme.muted);
+        let shapes = std::mem::take(&mut self.shapes);
+        let frame = {
+            let none = ImageSlots::new();
+            let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
+            scene::document_prims(sub, view, images, &shapes, edge, None)
+        };
+        self.shapes = shapes;
+        let gfx = self
+            .gfx
+            .as_mut()
+            .context("there is no window to draw with")?;
+        gfx.render_offscreen(w, h, ground, &frame)
+    }
+
+    /// Takes the dialog's picture of what is leaving again when its place
+    /// has changed size — it opened, the window was resized, the scale
+    /// changed — at that size in px, so it is drawn one to one. Like the
+    /// atlas, it is made here and never while a frame is being built.
+    fn ensure_picture(&mut self) {
+        let Some(view) = self.view() else { return };
+        let Some(rect) = self.send_panel(&view).and_then(|(p, _)| p.picture) else {
+            return;
+        };
+        let want = (rect.w.round() as u32, rect.h.round() as u32);
+        let Some(sending) = self.sending.as_ref() else {
+            return;
+        };
+        if sending.pictured == Some(want) {
+            return;
+        }
+        let scope = sending.scope.clone();
+        let taken = export::bounds(self.doc(), &scope)
+            .context("there is nothing there to picture")
+            .and_then(|bounds| {
+                let sub = export::sub_document(self.doc(), &scope);
+                let (view, w, h) = export::fit_view(&bounds, want.0, want.1, PICTURE_CEILING);
+                let rgba = self.render_sub(&sub, &view, w, h)?;
+                let gfx = self
+                    .gfx
+                    .as_mut()
+                    .context("there is no window to draw with")?;
+                gfx.upload_picture(&Bitmap { w, h, rgba })
+            });
+        let Some(sending) = self.sending.as_mut() else {
+            return;
+        };
+        sending.pictured = Some(want);
+        match taken {
+            Ok(slot) => sending.picture = Some(slot),
+            Err(e) => log::warn!("the dialog's picture: {e:#}"),
+        }
     }
 
     /// The bytes behind every image the sub-document names, so the json
@@ -2055,6 +2114,7 @@ impl App {
                     pick: sending.pick,
                     call: *call,
                 }),
+                picture: sending.picture,
             };
             let ink = send::Ink {
                 atlas,
@@ -2766,7 +2826,8 @@ impl App {
         // over the board behind it, an arrow.
         let over_text = match (self.cursor, self.view()) {
             (Some((x, y)), Some(view)) => self.send_panel(&view).map(|(p, _)| {
-                p.line.contains(x, y) || p.folder.is_some_and(|f| f.contains(x, y))
+                let folder = p.folder.is_some_and(|f| f.contains(x, y));
+                p.line.contains(x, y) || folder
             }),
             _ => None,
         };
@@ -2994,6 +3055,7 @@ impl App {
                 // reads: an atlas nobody put back would leave every
                 // lettered surface drawing nothing at all.
                 self.ensure_atlas();
+                self.ensure_picture();
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };

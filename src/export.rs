@@ -342,20 +342,45 @@ pub const EXPORT_SCALE: f64 = 2.0;
 /// How much room is left around the box, in world units.
 pub const EXPORT_MARGIN: f64 = 24.0;
 
+/// How much of the world a picture of `bounds` shows, margin and all.
+fn pictured(bounds: &Frame) -> (f64, f64) {
+    (
+        (bounds.half[0] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0),
+        (bounds.half[1] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0),
+    )
+}
+
+/// The shape of a picture of `bounds` — its width over its height, the
+/// margin counted — which is known before the picture is taken, and is
+/// what a place for it is laid out by.
+pub fn shape(bounds: &Frame) -> f64 {
+    let (w, h) = pictured(bounds);
+    w / h
+}
+
 /// The camera and the size a picture of `bounds` is taken with, clamped
 /// to `max_dim` — the device's largest texture. Past that the zoom gives
 /// way rather than the frame: a picture of part of a diagram is a lie,
 /// and a smaller one is only smaller.
 pub fn view_for(bounds: &Frame, max_dim: u32) -> (View, u32, u32) {
-    let world_w = (bounds.half[0] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0);
-    let world_h = (bounds.half[1] * 2.0 + EXPORT_MARGIN * 2.0).max(1.0);
-    let max = f64::from(max_dim);
-    let scale = EXPORT_SCALE
-        .min(max / world_w)
-        .min(max / world_h)
+    fit_view(bounds, max_dim, max_dim, EXPORT_SCALE)
+}
+
+/// The camera and the size a picture of `bounds` and its margin is taken
+/// with to fit `max_w` by `max_h` px: as large as fits, keeping its
+/// shape, and never more than `ceiling` px to a world unit — the page is
+/// the export scale fitted into the device, and the dialog's thumbnail
+/// is the same picture fitted into its foot, so that what the dialog
+/// shows is what will be written.
+pub fn fit_view(bounds: &Frame, max_w: u32, max_h: u32, ceiling: f64) -> (View, u32, u32) {
+    let (world_w, world_h) = pictured(bounds);
+    let (max_w, max_h) = (max_w.max(1), max_h.max(1));
+    let scale = ceiling
+        .min(f64::from(max_w) / world_w)
+        .min(f64::from(max_h) / world_h)
         .max(f64::MIN_POSITIVE);
-    let w = ((world_w * scale).ceil() as u32).clamp(1, max_dim);
-    let h = ((world_h * scale).ceil() as u32).clamp(1, max_dim);
+    let w = ((world_w * scale).ceil() as u32).clamp(1, max_w);
+    let h = ((world_h * scale).ceil() as u32).clamp(1, max_h);
     let view = View {
         camera: crate::doc::Camera {
             x: bounds.center[0],
@@ -750,6 +775,44 @@ mod tests {
             view.px_per_world() < EXPORT_SCALE,
             "the zoom gives way, not the frame"
         );
+    }
+
+    #[test]
+    fn a_picture_fitted_into_a_box_keeps_its_shape_and_stays_inside() {
+        // 148 x 98 world units with the margin: wider than tall.
+        let b = Frame::spanning([0.0, 0.0], [100.0, 50.0]);
+        let (view, w, h) = fit_view(&b, 600, 160, 100.0);
+        assert!(w <= 600 && h <= 160, "{w}x{h}");
+        assert_eq!(h, 160, "the height is what binds");
+        let (world_w, world_h) = (100.0 + 2.0 * EXPORT_MARGIN, 50.0 + 2.0 * EXPORT_MARGIN);
+        let k = view.px_per_world();
+        assert!((f64::from(w) - world_w * k).abs() <= 1.0);
+        assert!((f64::from(h) - world_h * k).abs() <= 1.0);
+        assert_eq!(view.camera.x, 50.0, "centred on it");
+        assert_eq!(view.camera.y, 25.0);
+    }
+
+    #[test]
+    fn the_shape_of_a_picture_is_its_box_and_margin_width_over_height() {
+        let b = Frame::spanning([0.0, 0.0], [100.0, 50.0]);
+        let expect = (100.0 + 2.0 * EXPORT_MARGIN) / (50.0 + 2.0 * EXPORT_MARGIN);
+        assert!((shape(&b) - expect).abs() < 1e-9);
+        let (_, w, h) = fit_view(&b, 4000, 4000, 1000.0);
+        assert!((f64::from(w) / f64::from(h) - shape(&b)).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_small_scope_is_not_blown_up_past_the_ceiling() {
+        let b = Frame::spanning([0.0, 0.0], [4.0, 4.0]);
+        let (view, w, h) = fit_view(&b, 600, 160, 3.0);
+        assert_eq!(view.px_per_world(), 3.0);
+        assert!(w < 600 && h < 160);
+    }
+
+    #[test]
+    fn the_page_is_a_fit_into_the_device_at_the_export_scale() {
+        let b = Frame::spanning([0.0, 0.0], [300.0, 70.0]);
+        assert_eq!(view_for(&b, 4096), fit_view(&b, 4096, 4096, EXPORT_SCALE));
     }
 
     #[test]

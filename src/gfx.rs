@@ -249,6 +249,9 @@ pub struct Gfx {
     shapes: Option<u32>,
     /// The agents' makers' marks, one cell each, for the export dialog.
     agent_logos: Option<u32>,
+    /// The export dialog's picture of what is leaving: a slot of its own,
+    /// replaced in place each time the picture is taken again.
+    picture: Option<u32>,
     /// The window-sized texture a group is composited in, once a frame
     /// has needed one. Rebuilt when the window changes size; like the
     /// atlas, a slot of its own and never an entry in `slots`.
@@ -451,6 +454,7 @@ impl Gfx {
             dock_icons: None,
             shapes: None,
             agent_logos: None,
+            picture: None,
             atlas: None,
             scratch: None,
             sheet: None,
@@ -591,6 +595,32 @@ impl Gfx {
         }
         let slot = self.upload_sheet(bmp)?;
         self.dock_icons = Some(slot);
+        Ok(slot)
+    }
+
+    /// Uploads the export dialog's picture and answers its slot. A new
+    /// picture replaces the last in place, as a rebuilt atlas does, so
+    /// opening the dialog over and over does not leak a texture a time.
+    pub fn upload_picture(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        let group = upload(
+            &self.device,
+            &self.queue,
+            &self.tex_bgl,
+            &self.sampler,
+            texture_format(self.config.format),
+            bmp,
+        )?;
+        let slot = match self.picture {
+            Some(slot) => {
+                self.textures[slot as usize] = group;
+                slot
+            }
+            None => {
+                self.textures.push(group);
+                (self.textures.len() - 1) as u32
+            }
+        };
+        self.picture = Some(slot);
         Ok(slot)
     }
 

@@ -42,6 +42,14 @@ const BAR_MIN: f32 = 16.0;
 /// its height and scrolls.
 pub const MAX_LINES: usize = 20;
 
+/// The picture of what leaves, at the dialog's foot: no taller than
+/// this, never shorter than the least of it worth showing, and set off
+/// from the box above it.
+const THUMB_H: f32 = 160.0;
+const THUMB_MIN: f32 = 48.0;
+const THUMB_GAP: f32 = 10.0;
+const THUMB_RADIUS: f32 = 6.0;
+
 /// The most skills the menu shows at once; the pick scrolls the rest in.
 pub const MENU_ROWS: usize = 6;
 const MENU_ROW_H: f32 = 28.0;
@@ -88,6 +96,9 @@ pub struct Spec {
     pub lines: usize,
     /// How far apart two lines stand, in px: the atlas's own.
     pub line_h: f32,
+    /// The shape of what leaves — its width over its height, margin and
+    /// all — when there is a picture of it to show.
+    pub picture: Option<f32>,
 }
 
 /// What the dialog draws: the state `app` keeps, lent for one frame.
@@ -105,6 +116,8 @@ pub struct Look<'a> {
     pub scroll: f32,
     /// The skills answering the call being typed, when one is.
     pub menu: Option<Menu<'a>>,
+    /// The texture slot the picture of what leaves was uploaded to.
+    pub picture: Option<u32>,
 }
 
 /// The skills under the caret: the target's skills, which of them answer
@@ -163,6 +176,8 @@ pub struct Panel {
     pub shown: usize,
     /// How far apart they stand, in px.
     pub line_h: f32,
+    /// Where the picture of what leaves stands, at the foot.
+    pub picture: Option<ScreenRect>,
     /// The width the instruction wraps at, in px.
     pub text_w: f32,
     /// What the logical px above were laid out at, so what is drawn
@@ -197,23 +212,32 @@ impl Panel {
     pub fn layout(viewport: Viewport, scale: f64, spec: &Spec) -> Panel {
         let s = scale as f32;
         let w = Panel::width(viewport, s);
+        let inner_w = w - PADDING * 2.0 * s;
         let inset = field::PADDING * s;
         let fields = if spec.folder { 1.0 } else { 0.0 };
-        // Everything but the lines of the instruction.
+        // Everything but the lines of the instruction and the picture.
         let fixed = PADDING * 2.0 * s
             + TITLE_H * s
             + spec.rows as f32 * (ROW_H * s + GAP * s)
             + fields * (FIELD_H * s + GAP * s)
             + inset * 2.0;
         let room = viewport.h as f32 - MARGIN * 2.0 * s - fixed;
-        let fit = (room / spec.line_h).floor().max(1.0) as usize;
+        // The picture as tall as its shape and the dialog's width allow;
+        // in a window too short for it and one line to type in, it gives
+        // up height first — and goes, once too small to read.
+        let picture_h = spec.picture.and_then(|aspect| {
+            let tall = (THUMB_H * s).min(inner_w / aspect.max(f32::MIN_POSITIVE));
+            let tall = tall.min(room - THUMB_GAP * s - spec.line_h);
+            (tall >= THUMB_MIN * s).then_some(tall)
+        });
+        let foot = picture_h.map_or(0.0, |h| THUMB_GAP * s + h);
+        let fit = ((room - foot) / spec.line_h).floor().max(1.0) as usize;
         let shown = spec.lines.clamp(1, MAX_LINES).min(fit);
-        let h = fixed + shown as f32 * spec.line_h;
+        let h = fixed + shown as f32 * spec.line_h + foot;
         let x = (viewport.w as f32 - w) / 2.0;
         let y = ((viewport.h as f32 - h) / 2.0).max(MARGIN * s);
         let rect = ScreenRect { x, y, w, h };
         let inner = x + PADDING * s;
-        let inner_w = w - PADDING * 2.0 * s;
         let title = ScreenRect {
             x: inner,
             y: y + PADDING * s,
@@ -249,6 +273,15 @@ impl Panel {
             w: inner_w,
             h: shown as f32 * spec.line_h + inset * 2.0,
         };
+        let picture = spec.picture.zip(picture_h).map(|(aspect, ph)| {
+            let pw = (ph * aspect).min(inner_w);
+            ScreenRect {
+                x: inner + (inner_w - pw) / 2.0,
+                y: line.y + line.h + THUMB_GAP * s,
+                w: pw,
+                h: ph,
+            }
+        });
         Panel {
             rect,
             title,
@@ -257,6 +290,7 @@ impl Panel {
             line,
             shown,
             line_h: spec.line_h,
+            picture,
             text_w: Panel::text_width(viewport, scale),
             scale: s,
             window: ScreenRect {
@@ -482,6 +516,18 @@ impl Panel {
         if let Some(thumb) = self.thumb(lines.len(), look.scroll) {
             out.push(Prim::rounded(thumb, thumb.w / 2.0, theme.muted));
         }
+        // What leaves, at the foot: the page's own picture, fitted. Its
+        // ground is laid first, so the place is kept while it renders.
+        if let Some(rect) = self.picture {
+            let corner = theme.corner(THUMB_RADIUS, s);
+            out.push(Prim::rounded(rect, corner, theme.bg));
+            if let Some(slot) = look.picture {
+                out.push(Prim {
+                    radius: corner,
+                    ..Prim::image(rect, rect.center(), 0.0, slot)
+                });
+            }
+        }
         // The menu last, over everything it may stand on.
         if let Some(menu) = look.menu {
             out.extend(self.menu_prims(&menu, &b, look.line.caret_line(&lines), ink));
@@ -546,6 +592,14 @@ mod tests {
             folder,
             lines: 1,
             line_h: LINE_H,
+            picture: None,
+        }
+    }
+
+    fn pictured(aspect: f32) -> Spec {
+        Spec {
+            picture: Some(aspect),
+            ..lines(2)
         }
     }
 
@@ -594,6 +648,7 @@ mod tests {
                 focus: Hit::Line,
                 scroll: 0.0,
                 menu: None,
+                picture: None,
             }
         }
     }
@@ -700,6 +755,83 @@ mod tests {
         let end = p.thumb(40, p.max_scroll(40)).unwrap();
         assert!((end.y + end.h - (track.y + track.h)).abs() < 0.01);
         assert!(p.line.contains_rect(&end));
+    }
+
+    #[test]
+    fn the_picture_stands_at_the_foot_of_the_dialog() {
+        let p = Panel::layout(viewport(), 1.0, &pictured(2.0));
+        let t = p.picture.unwrap();
+        assert!(p.rect.contains_rect(&t), "{t:?} in {:?}", p.rect);
+        assert!(t.y > p.line.y + p.line.h, "under the box");
+        let below = p.rect.y + p.rect.h - (t.y + t.h);
+        assert!(
+            (below - PADDING).abs() < 0.5,
+            "the last thing in it: {below}"
+        );
+    }
+
+    #[test]
+    fn the_picture_keeps_the_shape_of_what_leaves() {
+        for aspect in [0.5, 1.0, 3.0, 8.0] {
+            let t = Panel::layout(viewport(), 1.0, &pictured(aspect))
+                .picture
+                .unwrap();
+            assert!((t.w / t.h - aspect).abs() < 0.01, "{aspect}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn a_wide_picture_spans_the_dialog_and_a_tall_one_stops_at_its_height() {
+        let p = Panel::layout(viewport(), 1.0, &pictured(8.0));
+        let inner = p.rect.w - 2.0 * PADDING;
+        assert!((p.picture.unwrap().w - inner).abs() < 0.5);
+        let tall = Panel::layout(viewport(), 1.0, &pictured(0.5))
+            .picture
+            .unwrap();
+        assert!((tall.h - THUMB_H).abs() < 0.5);
+        let (cx, _) = p.rect.center();
+        assert!((tall.x + tall.w / 2.0 - cx).abs() < 0.5, "centred");
+    }
+
+    #[test]
+    fn without_a_picture_there_is_no_foot() {
+        let with = Panel::layout(viewport(), 1.0, &pictured(2.0));
+        let without = Panel::layout(viewport(), 1.0, &lines(2));
+        assert!(without.picture.is_none());
+        assert!(with.rect.h > without.rect.h);
+    }
+
+    #[test]
+    fn a_short_window_keeps_a_line_to_type_in_and_shrinks_the_picture() {
+        let short = Viewport { w: 1200, h: 360 };
+        let p = Panel::layout(short, 1.0, &pictured(1.0));
+        assert!(p.shown >= 1);
+        assert!(p.rect.y + p.rect.h <= 360.0 - MARGIN + 0.5, "{:?}", p.rect);
+        let t = p.picture.unwrap();
+        assert!(t.h < THUMB_H && t.h >= THUMB_MIN, "{t:?}");
+        let tiny = Viewport { w: 1200, h: 250 };
+        assert!(
+            Panel::layout(tiny, 1.0, &pictured(1.0)).picture.is_none(),
+            "a picture too small to read is no picture"
+        );
+    }
+
+    #[test]
+    fn the_picture_is_drawn_from_its_own_slot_in_its_place() {
+        let f = Fixture::new();
+        let agents = [Agent::at("claude", "/w/a", Reach::None)];
+        let p = Panel::layout(viewport(), 1.0, &pictured(2.0));
+        let prims = p.prims(
+            &Look {
+                picture: Some(11),
+                ..f.look(&agents)
+            },
+            &f.ink(0, None),
+        );
+        let drawn: Vec<&Prim> = prims.iter().filter(|q| q.slot == 11).collect();
+        assert_eq!(drawn.len(), 1);
+        assert_eq!(drawn[0].kind, crate::scene::KIND_IMAGE);
+        assert_eq!(drawn[0].bounds(), p.picture.unwrap());
     }
 
     #[test]
