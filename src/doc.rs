@@ -1188,6 +1188,9 @@ pub struct Painted<'a> {
     /// The frame whose boundary cuts it, when it is inside one. A frame
     /// is never inside itself.
     pub within: Option<&'a Frame>,
+    /// Its layer is locked, or something holding it is: it is painted,
+    /// and the pointer passes through it.
+    pub locked: bool,
 }
 
 impl Document {
@@ -1225,7 +1228,7 @@ impl Document {
     /// from the top.
     pub fn painted(&self) -> impl DoubleEndedIterator<Item = Painted<'_>> {
         let mut out: Vec<Painted<'_>> = Vec::new();
-        self.paint_stack(&self.layers, None, &mut out);
+        self.paint_stack(&self.layers, None, false, &mut out);
         out.into_iter()
     }
 
@@ -1236,9 +1239,11 @@ impl Document {
         &'a self,
         layers: &'a [Layer],
         within: Option<&'a Frame>,
+        locked: bool,
         out: &mut Vec<Painted<'a>>,
     ) {
         for layer in layers.iter().filter(|l| l.visible) {
+            let locked = locked || layer.locked;
             match layer.kind {
                 Kind::Frame => {
                     let Some((index, element)) = self
@@ -1256,11 +1261,14 @@ impl Document {
                         index,
                         element,
                         within: None,
+                        locked,
                     });
-                    self.paint_stack(&frame.layers, Some(frame), out);
+                    self.paint_stack(&frame.layers, Some(frame), locked, out);
                 }
-                Kind::Group => self.paint_stack(&layer.layers, within, out),
-                Kind::Raster | Kind::Vector => out.extend(self.on_layer(&layer.id, within)),
+                Kind::Group => self.paint_stack(&layer.layers, within, locked, out),
+                Kind::Raster | Kind::Vector => {
+                    out.extend(self.on_layer(&layer.id, within, locked));
+                }
             }
         }
     }
@@ -1271,6 +1279,7 @@ impl Document {
         &'a self,
         layer: &'a str,
         within: Option<&'a Frame>,
+        locked: bool,
     ) -> impl Iterator<Item = Painted<'a>> {
         self.elements
             .iter()
@@ -1280,6 +1289,7 @@ impl Document {
                     index,
                     element,
                     within,
+                    locked,
                 })
             })
     }

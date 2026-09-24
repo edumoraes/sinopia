@@ -1497,6 +1497,7 @@ impl App {
             }
             PanelHit::Toggle(id) => editor.toggle_layer(doc, &id),
             PanelHit::Open(id) => editor.toggle_open(&id),
+            PanelHit::Lock(id) => editor.toggle_lock_of(doc, &id),
             PanelHit::Group => editor.add_group(doc),
             PanelHit::Add => editor.add_layer(doc),
             PanelHit::Remove => editor.remove_layers(doc),
@@ -2727,8 +2728,8 @@ impl App {
 
     /// A layer command under `Ctrl`, Photoshop's keys: `G` groups the
     /// picked layers and `Shift+G` ungroups, `J` duplicates, `Shift+N`
-    /// opens a new layer, and the brackets arrange — a step with `[` and
-    /// `]`, all the way with Shift. Read off the bare key, since Shift
+    /// opens a new layer, the brackets arrange — a step with `[` and `]`,
+    /// all the way with Shift — `/` locks and `,` hides. Read off the bare key, since Shift
     /// turns a bracket into a brace on one layout and something else on
     /// the next.
     fn layer_command(&mut self, bare: &Key, shift: bool) {
@@ -2743,6 +2744,8 @@ impl App {
             ("]", true) => editor.arrange(doc, Arrange::Front),
             ("[", false) => editor.arrange(doc, Arrange::Backward),
             ("[", true) => editor.arrange(doc, Arrange::Back),
+            ("/", false) => editor.toggle_lock(doc),
+            (",", false) => editor.toggle_shown(doc),
             _ => Change::None,
         };
         self.apply(change);
@@ -2870,13 +2873,14 @@ impl App {
     /// over the chrome; resize and rotate cursors over the selection
     /// handles.
     fn update_cursor_icon(&mut self) {
-        let (over_chrome, handle, tool) = match (self.view(), self.cursor) {
+        let (over_chrome, handle, tool, refused) = match (self.view(), self.cursor) {
             (Some(view), Some((x, y))) => (
                 self.over_chrome(&view, (x, y)),
                 self.editor().hover(self.doc(), &view, (x, y)),
                 self.editor().pointer_tool(self.doc(), &view, (x, y)),
+                self.editor().refuses_ink(self.doc(), &view, (x, y)),
             ),
-            _ => (false, None, self.editor().active_tool()),
+            _ => (false, None, self.editor().active_tool(), false),
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
@@ -2901,6 +2905,10 @@ impl App {
             CursorIcon::Move
         } else if over_chrome {
             CursorIcon::Default
+        } else if refused {
+            // The layer the brush would paint on is locked: say so before
+            // the press, which would be refused.
+            CursorIcon::NotAllowed
         } else {
             match (tool, handle) {
                 (Tool::Select, Some(Handle::Resize(Corner::TopLeft | Corner::BottomRight))) => {

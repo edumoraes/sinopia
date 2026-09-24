@@ -511,14 +511,28 @@ impl Editor {
     /// top, when that is a group; right above it otherwise.
     fn opening(&self, doc: &Document, born: Option<&str>) -> (Option<String>, usize) {
         let top = |owner: Option<&str>| doc.stack(owner).len().saturating_sub(1);
-        match self.aim(doc, born) {
+        let (owner, above) = match self.aim(doc, born) {
             Some(g) if g.kind == Kind::Group => (Some(g.id.clone()), top(Some(&g.id))),
             Some(l) => match doc.locate(&l.id) {
                 Some((owner, i)) => (owner.map(str::to_owned), i),
                 None => (born.map(str::to_owned), top(born)),
             },
             None => (born.map(str::to_owned), top(born)),
+        };
+        clear_of_locks(doc, owner, above)
+    }
+
+    /// Whether a press at `screen` would lay ink that has nowhere to go:
+    /// a brush aimed at a raster layer that is locked, or held by a locked
+    /// one. The press is refused, and the cursor says so before it.
+    pub fn refuses_ink(&self, doc: &Document, view: &View, screen: (f64, f64)) -> bool {
+        if self.pointer_tool(doc, view, screen) != Tool::Brush {
+            return false;
         }
+        let (x, y) = view.screen_to_world(screen.0, screen.1);
+        let born = doc.stack_at([x, y]);
+        self.aim(doc, born)
+            .is_some_and(|l| l.kind == Kind::Raster && doc.locked(&l.id))
     }
 
     /// The raster layer ink pressed into `born` joins, when there is one
@@ -704,6 +718,7 @@ impl Editor {
         let mut gone = false;
         for id in picked.iter().rev() {
             if let Some((owner, i)) = doc.locate(id).map(|(o, i)| (o.map(str::to_owned), i))
+                && !doc.fixed(owner.as_deref())
                 && let Some(layer) = doc.stack(owner.as_deref()).get(i)
             {
                 let held = doc.subtree(layer);
@@ -754,6 +769,79 @@ impl Editor {
         }
     }
 
+    /// Locks the picked layers — all of them while any is open, and opens
+    /// them all once every one is locked: `Ctrl+/`. What a lock takes is
+    /// no longer held.
+    pub fn toggle_lock(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        let lock = picked
+            .iter()
+            .any(|id| doc.layer(id).is_some_and(|l| !l.locked));
+        self.set_locked(doc, &picked, lock)
+    }
+
+    /// Opens a lock, or closes it, on `id` alone: the lock on its row.
+    pub fn toggle_lock_of(&mut self, doc: &mut Document, id: &str) -> Change {
+        let Some(locked) = doc.layer(id).map(|l| l.locked) else {
+            return Change::None;
+        };
+        self.set_locked(doc, &[id.to_owned()], !locked)
+    }
+
+    fn set_locked(&mut self, doc: &mut Document, ids: &[String], lock: bool) -> Change {
+        let mut changed = false;
+        for id in ids {
+            if let Some(l) = doc.layer_mut(id)
+                && l.locked != lock
+            {
+                l.locked = lock;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Change::None;
+        }
+        if lock {
+            self.drag = None;
+            self.selection.retain(|sel| {
+                doc.painted()
+                    .any(|p| p.element.id() == sel && !p.locked)
+            });
+        }
+        Change::Scene
+    }
+
+    /// Hides the picked layers — all of them while any shows, and shows
+    /// them all once every one is hidden: `Ctrl+,`. What is hidden is no
+    /// longer held.
+    pub fn toggle_shown(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        let hide = picked
+            .iter()
+            .any(|id| doc.layer(id).is_some_and(|l| l.visible));
+        let mut changed = false;
+        for id in &picked {
+            if let Some(l) = doc.layer_mut(id)
+                && l.visible == hide
+            {
+                l.visible = !hide;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Change::None;
+        }
+        if hide {
+            self.drag = None;
+            self.selection.retain(|sel| {
+                doc.elements
+                    .iter()
+                    .any(|el| el.id() == sel && doc.shown(el.layer()))
+            });
+        }
+        Change::Scene
+    }
+
     /// What `layers` hold, in paint order: a group's are everything
     /// under it, a frame's is the frame — which carries what it holds.
     /// What is hidden or locked is left out: it cannot be seen, or it
@@ -767,9 +855,8 @@ impl Editor {
             }
         }
         doc.painted()
-            .map(|p| p.element)
-            .filter(|el| wanted.iter().any(|w| w == el.layer()) && !doc.locked(el.layer()))
-            .map(|el| el.id().to_owned())
+            .filter(|p| !p.locked && wanted.iter().any(|w| w == p.element.layer()))
+            .map(|p| p.element.id().to_owned())
             .collect()
     }
 
@@ -811,6 +898,7 @@ impl Editor {
                 None => return Change::None,
             },
         };
+        let (owner, above) = clear_of_locks(doc, owner, above);
         let Some(at) = doc.add_layer(owner.as_deref(), above, kind) else {
             return Change::None;
         };
@@ -847,6 +935,9 @@ impl Editor {
             return Change::None;
         };
         let owner = owner.as_deref();
+        if doc.fixed(owner) {
+            return Change::None;
+        }
         if !doc.remove_layer(owner, index) {
             match doc.stack(owner).get(index).map(|l| l.kind) {
                 // A layer that holds objects stays, emptied.
@@ -1024,6 +1115,7 @@ impl Editor {
                 let born = doc.stack_at([world.0, world.1]).map(str::to_owned);
                 self.start_stroke(world, Tip::PENCIL, born)
             }
+            (Button::Left, Tool::Brush) if self.refuses_ink(doc, view, screen) => Change::None,
             (Button::Left, Tool::Brush) => {
                 let born = doc.stack_at([world.0, world.1]).map(str::to_owned);
                 self.start_stroke(world, brush.clone(), born)
@@ -1687,6 +1779,25 @@ impl Editor {
         self.in_panel = false;
         had_selection
     }
+}
+
+/// Where a new layer goes once it is kept out of every locked holder:
+/// right above the outermost one it would have gone into. A locked group
+/// or frame is a stack nothing new goes into.
+fn clear_of_locks(doc: &Document, mut owner: Option<String>, mut above: usize) -> (Option<String>, usize) {
+    while let Some(o) = owner.clone() {
+        if !doc.locked(&o) {
+            break;
+        }
+        match doc.locate(&o) {
+            Some((up, i)) => {
+                owner = up.map(str::to_owned);
+                above = i;
+            }
+            None => break,
+        }
+    }
+    (owner, above)
 }
 
 fn point((x, y): (f64, f64)) -> Point {
@@ -4227,6 +4338,95 @@ mod tests {
         assert_eq!(e.arrange(&mut doc, Arrange::Forward), Change::None, "already on top");
         assert_eq!(e.arrange(&mut doc, Arrange::Backward), Change::Scene);
         assert_eq!(doc.locate("A"), Some((None, 1)));
+    }
+
+    #[test]
+    fn a_brush_stroke_on_a_locked_layer_is_refused_before_it_starts() {
+        let mut doc = grouped_board();
+        doc.layer_mut("R").unwrap().locked = true;
+        let mut e = tool(Tool::Brush);
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        let v = view();
+        assert!(e.refuses_ink(&doc, &v, (5.0, 5.0)), "the cursor can say so first");
+        let tip = brush().tip(Face::Round);
+        assert_eq!(e.press(Button::Left, &v, (5.0, 5.0), &mut doc, &tip), Change::None);
+        assert!(e.stroke().is_none());
+        // A locked group locks the layer it holds all the same.
+        doc.layer_mut("R").unwrap().locked = false;
+        doc.layer_mut("G").unwrap().locked = true;
+        assert!(e.refuses_ink(&doc, &v, (5.0, 5.0)));
+    }
+
+    #[test]
+    fn new_ink_never_opens_a_layer_inside_a_locked_group() {
+        let mut doc = grouped_board();
+        doc.layer_mut("G").unwrap().locked = true;
+        let mut e = pencil();
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        let v = view();
+        assert!(!e.refuses_ink(&doc, &v, (5.0, 5.0)), "a pencil opens a layer of its own");
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        assert_eq!(doc.layer("G").unwrap().layers.len(), 1, "nothing went into the locked group");
+        assert_eq!(doc.locate(e.active(&doc)), Some((None, 1)), "it opened right above it");
+    }
+
+    #[test]
+    fn a_layer_added_with_a_locked_group_active_opens_above_it() {
+        let mut doc = grouped_board();
+        doc.layer_mut("G").unwrap().locked = true;
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &[]);
+        assert_eq!(e.add_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.locate(e.active(&doc)), Some((None, 1)));
+    }
+
+    #[test]
+    fn locking_the_picked_layers_lets_go_of_what_they_hold() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.selection(), ["a"]);
+        assert_eq!(e.toggle_lock(&mut doc), Change::Scene);
+        assert!(doc.layer("A").unwrap().locked);
+        assert!(e.selection().is_empty(), "a locked object is not held");
+        let _ = e.toggle_lock(&mut doc);
+        assert!(!doc.layer("A").unwrap().locked);
+        // Several at once: all locked while any is open, all opened once
+        // every one is locked.
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        doc.layer_mut("B").unwrap().locked = true;
+        let _ = e.toggle_lock(&mut doc);
+        assert!(doc.layer("A").unwrap().locked && doc.layer("B").unwrap().locked);
+        let _ = e.toggle_lock(&mut doc);
+        assert!(!doc.layer("A").unwrap().locked && !doc.layer("B").unwrap().locked);
+    }
+
+    #[test]
+    fn hiding_the_picked_layers_hides_them_all_or_shows_them_all() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        doc.layer_mut("B").unwrap().visible = false;
+        assert_eq!(e.toggle_shown(&mut doc), Change::Scene);
+        assert!(!doc.layer("A").unwrap().visible && !doc.layer("B").unwrap().visible);
+        assert!(e.selection().is_empty(), "what is hidden is not held");
+        let _ = e.toggle_shown(&mut doc);
+        assert!(doc.layer("A").unwrap().visible && doc.layer("B").unwrap().visible);
+    }
+
+    #[test]
+    fn a_layer_in_a_locked_group_is_not_removed() {
+        let mut doc = grouped_board();
+        doc.layer_mut("G").unwrap().locked = true;
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        assert_eq!(e.remove_layers(&mut doc), Change::None);
+        assert!(doc.layer("R").is_some());
+        // The locked group itself goes, from a stack that is free.
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &[]);
+        assert_eq!(e.remove_layers(&mut doc), Change::Scene);
+        assert!(doc.layer("G").is_none());
     }
 
     /// A board of one group holding one raster layer: `G[R]`.

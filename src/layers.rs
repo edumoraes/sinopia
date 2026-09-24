@@ -116,6 +116,9 @@ pub enum PanelHit {
     Toggle(String),
     /// Open this group or frame in place, or shut it: its chevron.
     Open(String),
+    /// Open the lock on this layer: the lock its row wears, when the lock
+    /// is its own.
+    Lock(String),
     /// A card asked to be renamed. `Panel::hit` never answers it: `app`
     /// turns a second press on a picked card into it.
     Rename(String),
@@ -279,6 +282,10 @@ pub struct Row {
     pub shown: bool,
     /// A group or a frame shown open, its layers under it.
     pub open: bool,
+    /// Its content cannot change: its own lock, or a holder's.
+    pub locked: bool,
+    /// The lock is its own, and so its row's to open.
+    pub own_lock: bool,
     /// What the pointer hits: the whole width and the gap under the card.
     pub rect: ScreenRect,
     /// What is drawn: stepped in by its depth, less the gap that
@@ -291,6 +298,8 @@ pub struct Row {
     pub chevron: Option<ScreenRect>,
     /// What the row is: the kind's own icon, where a thumbnail can go.
     pub glyph: ScreenRect,
+    /// The lock it wears at the card's far end, while it is locked.
+    pub lock: Option<ScreenRect>,
     /// The name, cut down to what fits.
     pub label: String,
     /// Where the label's pen starts.
@@ -487,7 +496,14 @@ impl Panel {
             h: GLYPH_H * s,
         };
         let label_x = (glyph.x + glyph.w + LABEL_GAP * s).round();
-        let room = card.x + card.w - PADDING * s - label_x;
+        let lock = r.locked.then(|| ScreenRect {
+            x: card.x + card.w - PADDING * s - ICON_BOX * s,
+            y: cy - ICON_BOX / 2.0 * s,
+            w: ICON_BOX * s,
+            h: ICON_BOX * s,
+        });
+        let end = lock.map_or(card.x + card.w - PADDING * s, |l| l.x - LABEL_GAP * s);
+        let room = end - label_x;
         let label = if room > 0.0 {
             atlas.truncate(&r.layer.name, room)
         } else {
@@ -501,11 +517,14 @@ impl Panel {
             visible: r.layer.visible,
             shown: r.shown,
             open: r.open,
+            locked: r.locked,
+            own_lock: r.layer.locked,
             rect,
             card,
             eye,
             chevron,
             glyph,
+            lock,
             label,
             label_x,
         }
@@ -569,6 +588,11 @@ impl Panel {
                     && chevron.inset(slop).contains(x, y)
                 {
                     return Some(PanelHit::Open(row.id.clone()));
+                }
+                if let Some(lock) = row.lock.filter(|_| row.own_lock)
+                    && lock.inset(slop).contains(x, y)
+                {
+                    return Some(PanelHit::Lock(row.id.clone()));
                 }
                 return Some(PanelHit::Pick(row.id.clone()));
             }
@@ -784,6 +808,12 @@ impl Panel {
             ..row.glyph
         };
         out.extend(icon_prims(glyph, square, 24.0, ICON_BOX, ICON_STROKE, s, tint(theme.icon)));
+        // A lock of its own is the row's to open; one worn for a holder
+        // is read, muted, since it is the holder's.
+        if let Some(lock) = row.lock {
+            let color = if row.own_lock { theme.icon } else { theme.muted };
+            out.extend(icon_prims(LOCK, lock, 24.0, ICON_BOX, ICON_STROKE, s, color));
+        }
         if !row.label.is_empty() {
             let ink = tint(if picked { theme.ink } else { theme.icon });
             let baseline = atlas.baseline_in(row.rect);
@@ -1066,6 +1096,20 @@ const FOLDER_PLUS: &[&[(f32, f32)]] = &[
     ],
     &[(12.0, 11.0), (12.0, 17.0)],
     &[(9.0, 14.0), (15.0, 14.0)],
+];
+
+/// A padlock, shut: what a locked row wears.
+const LOCK: &[&[(f32, f32)]] = &[
+    &[(6.0, 11.0), (18.0, 11.0), (18.0, 20.0), (6.0, 20.0), (6.0, 11.0)],
+    &[
+        (8.0, 11.0),
+        (8.0, 8.0),
+        (9.0, 6.0),
+        (12.0, 5.0),
+        (15.0, 6.0),
+        (16.0, 8.0),
+        (16.0, 11.0),
+    ],
 ];
 
 /// A frame: the crop marks of an area, as design tools draw one.
@@ -2046,6 +2090,34 @@ mod tests {
         let around = ring.iter().fold(ring[0], |acc, r| acc.union(r));
         assert!(around.contains_rect(&h.card));
         assert!(h.card.inset(-4.0).contains_rect(&around), "and hugging it");
+    }
+
+    #[test]
+    fn a_locked_row_wears_a_lock_and_its_own_lock_opens_it() {
+        let theme = Theme::light();
+        let a = atlas();
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("G").unwrap().locked = true;
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let (g, b) = (row(&p, "G"), row(&p, "B"));
+        let (g_lock, b_lock) = (g.lock.expect("G is locked"), b.lock.expect("and so is B"));
+        assert!(row(&p, "A").lock.is_none(), "A is not");
+        assert!(g.card.contains_rect(&g_lock));
+        assert!(g.label_x + a.measure(&g.label) <= g_lock.x, "the name stops short of it");
+        let (x, y) = mid(g_lock);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Lock("G".into())));
+        let (x, y) = mid(b_lock);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Pick("B".into())), "B's lock is G's to open");
+        // Its own lock in ink; one worn for a holder, muted.
+        let prims = p.prims(&showing("A", None), &a, 7, &theme);
+        let segs = |r: ScreenRect| -> Vec<&Prim> {
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_SEGMENT && r.contains_rect(&q.bounds()))
+                .collect()
+        };
+        assert!(!segs(g_lock).is_empty() && segs(g_lock).iter().all(|q| q.color == theme.icon));
+        assert!(!segs(b_lock).is_empty() && segs(b_lock).iter().all(|q| q.color == theme.muted));
     }
 
     #[test]

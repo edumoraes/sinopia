@@ -298,6 +298,9 @@ impl Document {
             .any(|m| self.layer(m).is_some_and(|l| l.kind == Kind::Frame));
         let top = moving.last().filter(|_| !frame)?.clone();
         let (owner, index) = self.locate(&top).map(|(o, i)| (o.map(str::to_owned), i))?;
+        if !self.can_move(&moving, owner.as_deref()) {
+            return None;
+        }
         let name = self.next_layer_name(owner.as_deref(), Kind::Group);
         let group = Layer {
             blend: BlendMode::PassThrough,
@@ -317,7 +320,7 @@ impl Document {
     /// stood and in their order, and answers their ids. The group goes;
     /// what it said of itself goes with it. None for anything but a group.
     pub fn ungroup(&mut self, id: &str) -> Option<Vec<String>> {
-        if self.layer(id)?.kind != Kind::Group {
+        if self.layer(id)?.kind != Kind::Group || self.locked(id) || self.fixed_around(id) {
             return None;
         }
         let (owner, index) = self.locate(id).map(|(o, i)| (o.map(str::to_owned), i))?;
@@ -333,10 +336,14 @@ impl Document {
 
     /// A copy of every layer of `ids` — with everything under it and on
     /// it — standing right above its original, and their ids. Every id is
-    /// minted anew; a copy is named for what it copies.
+    /// minted anew; a copy is named for what it copies. None goes into a
+    /// stack that is fixed.
     pub fn duplicate_layers(&mut self, ids: &[String]) -> Vec<String> {
         let mut made = Vec::new();
         for id in self.movable(ids) {
+            if self.fixed_around(&id) {
+                continue;
+            }
             let Some(layer) = self.layer(&id).cloned() else {
                 continue;
             };
@@ -398,6 +405,9 @@ impl Document {
         }
         let mut changed = false;
         for owner in owners {
+            if self.fixed(owner.as_deref()) {
+                continue;
+            }
             let Some(stack) = self.stack_mut(owner.as_deref()) else {
                 continue;
             };
@@ -451,10 +461,26 @@ impl Document {
         }
     }
 
+    /// Whether the stack `owner` holds may not change: a locked group's or
+    /// frame's — or one held by a locked one. Nothing goes into it, comes
+    /// out of it or is reordered in it. The board's root is never fixed.
+    pub fn fixed(&self, owner: Option<&str>) -> bool {
+        owner.is_some_and(|o| self.locked(o))
+    }
+
+    /// The stack `id` stands in may not change.
+    fn fixed_around(&self, id: &str) -> bool {
+        self.locate(id).is_some_and(|(owner, _)| self.fixed(owner))
+    }
+
     /// Whether `ids` may go into the stack `owner` holds: it is a stack,
-    /// none of them would go inside itself, and a frame would not leave
-    /// the board's root.
+    /// neither it nor any stack they would leave is fixed, none of them
+    /// would go inside itself, and a frame would not leave the board's
+    /// root.
     pub fn can_move(&self, ids: &[String], owner: Option<&str>) -> bool {
+        if self.fixed(owner) || ids.iter().any(|m| self.fixed_around(m)) {
+            return false;
+        }
         let Some(o) = owner else {
             return true;
         };
@@ -1023,6 +1049,26 @@ pub(crate) mod tests {
         assert_eq!(stack_ids(&doc, Some("F")), ["K", "D"]);
         assert!(doc.arrange(&ids(&["B"]), Arrange::Backward));
         assert_eq!(stack_ids(&doc, Some("G")), ["B", "H"]);
+    }
+
+    #[test]
+    fn a_locked_holders_stack_does_not_change() {
+        let mut doc = nested();
+        doc.layer_mut("G").unwrap().locked = true;
+        let before = doc.clone();
+        // Nothing in, nothing out, nothing reordered, however deep.
+        assert!(!doc.can_move(&ids(&["A"]), Some("G")), "nothing goes in");
+        assert!(!doc.can_move(&ids(&["A"]), Some("H")), "nor into what it holds");
+        assert!(!doc.can_move(&ids(&["B"]), None), "nothing comes out");
+        assert!(!doc.move_layers(&ids(&["B"]), None, 0));
+        assert!(doc.group_layers(&ids(&["B", "H"])).is_none());
+        assert!(doc.ungroup("H").is_none());
+        assert!(doc.duplicate_layers(&ids(&["C"])).is_empty());
+        assert!(!doc.arrange(&ids(&["B"]), Arrange::Front));
+        assert_eq!(doc, before, "and nothing changed");
+        // The locked group itself still moves in a stack that is free.
+        assert!(doc.arrange(&ids(&["G"]), Arrange::Front));
+        assert!(doc.ungroup("G").is_none(), "but it does not come apart");
     }
 
     #[test]
