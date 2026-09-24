@@ -1114,8 +1114,17 @@ impl App {
     /// what the clipboard holds comes back into it. Nothing selected is
     /// nothing to copy, and the clipboard keeps what it had.
     fn clipboard_key(&mut self, c: &str) {
-        let copied = match c.to_ascii_lowercase().as_str() {
-            "v" => return self.paste_text(),
+        let key = c.to_ascii_lowercase();
+        if key == "v" {
+            return self.paste_text();
+        }
+        // With no clipboard a copy has nowhere to go, and a cut would
+        // only be a delete that looked like something else.
+        if self.clipboard.is_none() {
+            return log::debug!("copy: no clipboard on this display");
+        }
+        let cut = key == "x";
+        let copied = match key.as_str() {
             "c" => self.field_in_hand().map(|f| f.selected().to_owned()),
             "x" => self.field_in_hand().and_then(Field::cut),
             _ => None,
@@ -1123,9 +1132,16 @@ impl App {
         let Some(text) = copied.filter(|t| !t.is_empty()) else {
             return;
         };
-        match &self.clipboard {
-            Some(clipboard) => clipboard.copy_text(&text),
-            None => log::debug!("copy: no clipboard on this display"),
+        if let Some(clipboard) = &self.clipboard {
+            clipboard.copy_text(&text);
+        }
+        // A cut is an edit like any other: the box may now be shorter
+        // than it was scrolled, and the call the menu was for may be gone.
+        if cut {
+            if let Some(sending) = self.sending.as_mut() {
+                sending.settle(true);
+            }
+            self.follow_caret();
         }
         self.redraw();
     }
