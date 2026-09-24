@@ -1565,6 +1565,7 @@ impl App {
             locked: picked.iter().all(|l| l.locked),
             hidden: picked.iter().all(|l| !l.visible),
             tag: doc.layer(&id).map_or(Tag::None, |l| l.color),
+            merge: editor.merge_name(doc),
         };
         let paste = match &self.clipboard {
             Some(clipboard) => clipboard.can_paste(),
@@ -3129,6 +3130,7 @@ impl App {
                 // Shift turns the character upper case, so the letter is
                 // read case-insensitively and the modifier separately.
                 let shift = self.modifiers.state().shift_key();
+                let alt = self.modifiers.state().alt_key();
                 match text.to_ascii_lowercase().as_str() {
                     "v" => self.paste(),
                     "c" if !shift => self.copy_layers(false),
@@ -3138,9 +3140,9 @@ impl App {
                     "s" if shift => self.ask_name(self.active, Then::Stay),
                     "s" => self.save_active(),
                     "o" => self.ask_open(),
-                    "e" => self.ask_send(),
+                    "e" if !shift && !alt => self.ask_send(),
                     "w" => self.request_close(self.active),
-                    _ => self.layer_command(bare, shift),
+                    _ => self.layer_command(bare, shift, alt),
                 }
             }
             Key::Character(text) if pressed => {
@@ -3164,13 +3166,13 @@ impl App {
     /// all the way with Shift — `/` locks and `,` hides. Read off the bare key, since Shift
     /// turns a bracket into a brace on one layout and something else on
     /// the next.
-    fn layer_command(&mut self, bare: &Key, shift: bool) {
+    fn layer_command(&mut self, bare: &Key, shift: bool, alt: bool) {
         let Key::Character(c) = bare else { return };
         let (editor, doc) = self.active();
         let key = c.to_ascii_lowercase();
         let change = match (key.as_str(), shift) {
             ("n", true) => editor.add_layer(doc),
-            _ => match layer_key(&key, shift) {
+            _ => match layer_key(&key, shift, alt) {
                 Some(command) => editor.run(doc, command),
                 None => Change::None,
             },
@@ -3695,18 +3697,20 @@ impl App {
 }
 
 /// The command a layer shortcut asks for: `Ctrl` with `key`, and `Shift`
-/// when `shift`.
-fn layer_key(key: &str, shift: bool) -> Option<Command> {
-    Some(match (key, shift) {
-        ("g", false) => Command::Group,
-        ("g", true) => Command::Ungroup,
-        ("j", false) => Command::Duplicate,
-        ("]", false) => Command::Arrange(Arrange::Forward),
-        ("]", true) => Command::Arrange(Arrange::Front),
-        ("[", false) => Command::Arrange(Arrange::Backward),
-        ("[", true) => Command::Arrange(Arrange::Back),
-        ("/", false) => Command::Lock,
-        (",", false) => Command::Show,
+/// and `Alt` when they are held. `Ctrl+E` alone is the export's.
+fn layer_key(key: &str, shift: bool, alt: bool) -> Option<Command> {
+    Some(match (key, shift, alt) {
+        ("g", false, false) => Command::Group,
+        ("g", true, false) => Command::Ungroup,
+        ("j", false, false) => Command::Duplicate,
+        ("]", false, false) => Command::Arrange(Arrange::Forward),
+        ("]", true, false) => Command::Arrange(Arrange::Front),
+        ("[", false, false) => Command::Arrange(Arrange::Backward),
+        ("[", true, false) => Command::Arrange(Arrange::Back),
+        ("/", false, false) => Command::Lock,
+        (",", false, false) => Command::Show,
+        ("e", false, true) => Command::Merge,
+        ("e", true, false) => Command::MergeVisible,
         _ => return None,
     })
 }
@@ -4005,19 +4009,23 @@ mod tests {
 
     #[test]
     fn the_layer_shortcuts_ask_for_the_commands_the_menu_teaches() {
-        assert_eq!(layer_key("g", false), Some(Command::Group));
-        assert_eq!(layer_key("g", true), Some(Command::Ungroup));
-        assert_eq!(layer_key("j", false), Some(Command::Duplicate));
-        assert_eq!(layer_key("/", false), Some(Command::Lock));
-        assert_eq!(layer_key(",", false), Some(Command::Show));
-        assert_eq!(layer_key("]", true), Some(Command::Arrange(Arrange::Front)));
-        assert_eq!(layer_key("[", false), Some(Command::Arrange(Arrange::Backward)));
-        assert_eq!(layer_key("q", false), None);
+        assert_eq!(layer_key("g", false, false), Some(Command::Group));
+        assert_eq!(layer_key("g", true, false), Some(Command::Ungroup));
+        assert_eq!(layer_key("j", false, false), Some(Command::Duplicate));
+        assert_eq!(layer_key("/", false, false), Some(Command::Lock));
+        assert_eq!(layer_key(",", false, false), Some(Command::Show));
+        assert_eq!(layer_key("]", true, false), Some(Command::Arrange(Arrange::Front)));
+        assert_eq!(layer_key("[", false, false), Some(Command::Arrange(Arrange::Backward)));
+        assert_eq!(layer_key("e", false, true), Some(Command::Merge));
+        assert_eq!(layer_key("e", true, false), Some(Command::MergeVisible));
+        assert_eq!(layer_key("e", false, false), None, "Ctrl+E is the export's");
+        assert_eq!(layer_key("q", false, false), None);
         // Every key a row's menu writes beside a command is that command's.
         let (items, lines) = layers::row_menu(|_| true, true, layers::RowState {
             locked: false,
             hidden: false,
             tag: Tag::None,
+            merge: "Merge Down",
         });
         for (item, line) in items.iter().zip(&lines) {
             let (Some(hint), layers::RowLine::Run(command)) = (&item.hint, line) else {
@@ -4027,11 +4035,15 @@ mod tests {
                 assert_eq!(hint, "Del", "the one key without Ctrl");
                 continue;
             };
+            let (alt, keys) = match keys.strip_prefix("Alt+") {
+                Some(k) => (true, k),
+                None => (false, keys),
+            };
             let (shift, key) = match keys.strip_prefix("Shift+") {
                 Some(k) => (true, k),
                 None => (false, keys),
             };
-            assert_eq!(layer_key(&key.to_lowercase(), shift), Some(*command), "{hint}");
+            assert_eq!(layer_key(&key.to_lowercase(), shift, alt), Some(*command), "{hint}");
         }
     }
 

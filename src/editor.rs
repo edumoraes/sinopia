@@ -9,6 +9,7 @@ use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
 use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, Tag, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
+use crate::merge::Merge;
 use crate::scene::View;
 use crate::select::{self, Handle};
 use crate::tree::{self, Arrange, Filter, Place};
@@ -358,6 +359,13 @@ pub enum Command {
     Lock,
     Show,
     Arrange(Arrange),
+    /// The picked siblings into one, a group alone into a layer, or one
+    /// layer down into the one under it: `Ctrl+Alt+E`.
+    Merge,
+    /// Every visible sibling of every stack into one: `Ctrl+Shift+E`.
+    MergeVisible,
+    /// Merge visible, and what is hidden goes.
+    Flatten,
 }
 
 /// What a new frame is born with until `app` says otherwise: white, the
@@ -1024,7 +1032,71 @@ impl Editor {
             Command::Lock => self.toggle_lock(doc),
             Command::Show => self.toggle_shown(doc),
             Command::Arrange(how) => self.arrange(doc, how),
+            Command::Merge | Command::MergeVisible | Command::Flatten => self.merge(doc, command),
         }
+    }
+
+    /// What [`Command::Merge`] does to the pick, as a menu names it.
+    pub fn merge_name(&self, doc: &Document) -> &'static str {
+        match self.merge_request(doc, Command::Merge) {
+            Some(Merge::Layers(ids)) if ids.len() > 1 => "Merge Layers",
+            Some(Merge::Layers(_)) => "Merge Group",
+            _ => "Merge Down",
+        }
+    }
+
+    fn merge_request(&self, doc: &Document, command: Command) -> Option<Merge> {
+        match command {
+            Command::Merge => {
+                let picked = self.picked_ids(doc);
+                let active = self.active(doc).to_owned();
+                Some(if picked.len() > 1 {
+                    Merge::Layers(picked)
+                } else if doc.layer(&active).is_some_and(|l| l.kind == Kind::Group) {
+                    Merge::Layers(vec![active])
+                } else {
+                    Merge::Down(active)
+                })
+            }
+            Command::MergeVisible => Some(Merge::Visible),
+            Command::Flatten => Some(Merge::Flatten),
+            _ => None,
+        }
+    }
+
+    /// Carries out `command`'s merges by moving what they show onto the
+    /// layers they keep. A run that would not draw the same picture that
+    /// way refuses the whole merge, and the board stays as it was. What
+    /// is left of the pick is picked: the layer a run kept, or — once its
+    /// layer went — the top of the board.
+    fn merge(&mut self, doc: &mut Document, command: Command) -> Change {
+        let Some(request) = self.merge_request(doc, command) else {
+            return Change::None;
+        };
+        let runs = doc.merges(&request);
+        if !runs.iter().all(|r| doc.exact(r)) {
+            return Change::None;
+        }
+        let active = self.active(doc).to_owned();
+        let home = runs.iter().find(|r| {
+            r.members
+                .iter()
+                .filter_map(|m| doc.layer(m))
+                .any(|m| doc.subtree(m).contains(&active))
+        });
+        let landed = home.map(|r| r.keep.clone());
+        for run in &runs {
+            doc.merge_structural(run);
+        }
+        let discarded = request == Merge::Flatten && doc.discard_hidden();
+        if runs.is_empty() && !discarded {
+            return Change::None;
+        }
+        self.layer = landed.or_else(|| doc.layer(&active).map(|l| l.id.clone()));
+        self.picked.clear();
+        self.selection.retain(|id| doc.elements.iter().any(|el| el.id() == id));
+        self.follow_the_pick(doc);
+        Change::Scene
     }
 
     /// Whether `command` would change anything, found out by doing it to
@@ -4724,6 +4796,56 @@ mod tests {
         let active = e.active(&doc).to_owned();
         assert_eq!(rect_on(&doc, &active), (1100.0, 1050.0), "centred");
         assert_eq!(e.copy(&Document::new("t")).map(|c| c.layers.len()), Some(1), "the lone layer");
+    }
+
+    #[test]
+    fn merging_goes_down_or_takes_the_picked_or_a_group_and_picks_what_is_left() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert_eq!(e.merge_name(&doc), "Merge Group");
+        assert!(e.can(&doc, Command::Merge));
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::Scene);
+        let g = doc.layer("G").unwrap();
+        assert_eq!((g.kind, g.layers.len()), (Kind::Raster, 0));
+        assert_eq!(e.active(&doc), "G");
+        // A layer alone goes down into the one under it.
+        assert_eq!(e.merge_name(&doc), "Merge Down");
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::Scene);
+        assert!(doc.layer("G").is_none());
+        assert_eq!(e.active(&doc), "A", "what is left is picked");
+        let on_a: Vec<&str> = doc.elements.iter().filter(|el| el.layer() == "A").map(|el| el.id()).collect();
+        assert_eq!(on_a, ["a", "b", "c"]);
+        // Several picked: they merge into the topmost.
+        let mut doc = crate::tree::tests::nested();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "G", Pick::Toggle, &ROWS);
+        assert_eq!(e.merge_name(&doc), "Merge Layers");
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::Scene);
+        assert_eq!(doc.layers.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["G", "F"]);
+        // What is not exact is not done here: it wants a picture.
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("A").unwrap().opacity = 0.5;
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        let _ = e.run(&mut doc, Command::Merge);
+        let before = doc.clone();
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::None);
+        assert_eq!(doc, before);
+    }
+
+    #[test]
+    fn flatten_merges_what_shows_and_drops_what_is_hidden() {
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("B").unwrap().visible = false;
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "B", Pick::Only, &ROWS);
+        assert!(e.can(&doc, Command::MergeVisible));
+        assert_eq!(e.run(&mut doc, Command::Flatten), Change::Scene);
+        assert_eq!(doc.layers.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["G", "F"]);
+        assert_eq!(doc.stack(Some("F")).iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["K"]);
+        assert!(doc.elements.iter().all(|el| el.id() != "b"), "hidden, and gone");
+        assert_eq!(e.active(&doc), "G", "its layer went with the group it stood in, which is left");
+        assert!(!e.can(&doc, Command::Flatten), "flat already");
     }
 
     #[test]

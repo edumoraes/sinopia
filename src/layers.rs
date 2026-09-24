@@ -250,6 +250,8 @@ pub struct RowState {
     pub locked: bool,
     pub hidden: bool,
     pub tag: Tag,
+    /// What merging the pick is called: down, the layers, or a group.
+    pub merge: &'static str,
 }
 
 /// A row's menu: its name, then what can be done to the picked layers
@@ -265,6 +267,9 @@ pub fn row_menu(can: impl Fn(Command) -> bool, paste: bool, state: RowState) -> 
         ("Paste", "Ctrl+V", RowLine::Paste, false),
         ("Group", "Ctrl+G", RowLine::Run(Command::Group), true),
         ("Ungroup", "Ctrl+Shift+G", RowLine::Run(Command::Ungroup), false),
+        (state.merge, "Ctrl+Alt+E", RowLine::Run(Command::Merge), true),
+        ("Merge Visible", "Ctrl+Shift+E", RowLine::Run(Command::MergeVisible), false),
+        ("Flatten", "", RowLine::Run(Command::Flatten), false),
         (
             if state.locked { "Unlock" } else { "Lock" },
             "Ctrl+/",
@@ -286,7 +291,8 @@ pub fn row_menu(can: impl Fn(Command) -> bool, paste: bool, state: RowState) -> 
             RowLine::Paste => paste,
             _ => true,
         };
-        let item = Item::new(label).hint(keys).enabled(enabled);
+        let item = Item::new(label).enabled(enabled);
+        let item = if keys.is_empty() { item } else { item.hint(keys) };
         items.push(if rule { item.ruled() } else { item });
         lines.push(line);
     }
@@ -2831,16 +2837,25 @@ mod tests {
             locked: false,
             hidden: false,
             tag: Tag::Red,
+            merge: "Merge Down",
         };
         let (items, lines) = row_menu(|c| c != Command::Ungroup, false, state);
         assert_eq!(items.len(), lines.len());
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
-            labels[..10],
-            ["Rename", "Duplicate", "Delete", "Copy", "Cut", "Paste", "Group", "Ungroup", "Lock", "Hide"]
+            labels[..13],
+            [
+                "Rename", "Duplicate", "Delete", "Copy", "Cut", "Paste", "Group", "Ungroup", "Merge Down",
+                "Merge Visible", "Flatten", "Lock", "Hide"
+            ]
         );
-        assert_eq!(&labels[10..], ["No Color", "Red", "Orange", "Yellow", "Green", "Blue", "Violet", "Gray"]);
+        assert_eq!(&labels[13..], ["No Color", "Red", "Orange", "Yellow", "Green", "Blue", "Violet", "Gray"]);
         let line = |label: &str| labels.iter().position(|l| *l == label).unwrap();
+        assert_eq!(lines[line("Merge Down")], RowLine::Run(Command::Merge));
+        assert_eq!(items[line("Merge Down")].hint.as_deref(), Some("Ctrl+Alt+E"));
+        assert_eq!(lines[line("Merge Visible")], RowLine::Run(Command::MergeVisible));
+        assert_eq!(lines[line("Flatten")], RowLine::Run(Command::Flatten));
+        assert!(items[line("Merge Down")].rule);
         assert_eq!(lines[line("Rename")], RowLine::Rename);
         assert_eq!(lines[line("Ungroup")], RowLine::Run(Command::Ungroup));
         assert!(!items[line("Ungroup")].enabled, "nothing there to take apart");
@@ -2863,10 +2878,11 @@ mod tests {
                 locked: true,
                 hidden: true,
                 tag: Tag::None,
+                merge: "Merge Layers",
             },
         );
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"Unlock") && labels.contains(&"Show"));
+        assert!(labels.contains(&"Unlock") && labels.contains(&"Show") && labels.contains(&"Merge Layers"));
     }
 
     #[test]

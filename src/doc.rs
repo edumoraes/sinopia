@@ -968,6 +968,13 @@ pub struct Stroke {
     pub pen: Envelope,
 }
 
+impl Stroke {
+    /// Whether it takes ink away rather than laying it.
+    pub fn erases(&self) -> bool {
+        self.stamp.as_ref().is_some_and(|s| s.mark.erases())
+    }
+}
+
 /// What a stroke may look like on disk. Checked on the way in, like a
 /// path's: a fraction is a fraction.
 #[derive(Deserialize)]
