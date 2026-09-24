@@ -676,6 +676,7 @@ impl Panel {
             Kind::Raster => (PIXELS, theme.muted),
             Kind::Vector => (CURVE, theme.muted),
             Kind::Frame => (CHEVRON_RIGHT, theme.icon),
+            Kind::Group => (FOLDER, theme.muted),
         };
         out.extend(icon_prims(
             holds,
@@ -922,6 +923,18 @@ const PIXELS: &[&[(f32, f32)]] = &[
     &[(12.0, 5.0), (12.0, 19.0)],
     &[(5.0, 12.0), (19.0, 12.0)],
 ];
+
+/// What a group holds: other layers, in a folder.
+const FOLDER: &[&[(f32, f32)]] = &[&[
+    (3.0, 7.0),
+    (3.0, 19.0),
+    (21.0, 19.0),
+    (21.0, 9.0),
+    (11.0, 9.0),
+    (9.0, 6.0),
+    (3.0, 6.0),
+    (3.0, 7.0),
+]];
 
 /// What a vector layer holds: one curve, flattened the way the renderer
 /// flattens the real ones.

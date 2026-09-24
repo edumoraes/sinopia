@@ -1244,9 +1244,9 @@ impl Editor {
         match kind {
             Kind::Vector => curve::fit(&hand, tolerance),
             // A stroke is a pencil's or a brush's. A frame layer holds
-            // an area and never asks for curves, so it can only mean
-            // the brush's answer here.
-            Kind::Raster | Kind::Frame => curve::polyline(&hand),
+            // an area and a group holds layers; neither asks for curves,
+            // so either can only mean the brush's answer here.
+            Kind::Raster | Kind::Frame | Kind::Group => curve::polyline(&hand),
         }
     }
 
