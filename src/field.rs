@@ -12,6 +12,11 @@ const CARET_W: f32 = 1.5;
 /// How far the text sits in from the field's own edge, in logical px.
 pub const PADDING: f32 = 6.0;
 
+/// The most a name holds, in bytes: what a directory's name may be, since
+/// a folder's name becomes one — and a layer's, shown on a card, is no
+/// more a paragraph than a folder's is.
+pub const NAME_MAX: usize = 255;
+
 /// What is selected is painted in the selection's own blue, thinned so
 /// the ink over it still reads — the same blue that frames a selected
 /// object on the canvas, since both say "this is what you picked".
@@ -125,6 +130,11 @@ impl Field {
             lines: false,
             limit: None,
         }
+    }
+
+    /// A field for a name: one line of no more than [`NAME_MAX`] bytes.
+    pub fn name(value: &str) -> Field {
+        Field::new(value).limited(NAME_MAX)
     }
 
     /// A field that holds lines: a newline breaks one, and a paste keeps
@@ -731,6 +741,16 @@ mod tests {
         let mut f = Field::new("ab").limited(5);
         f.paste("çççç");
         assert_eq!(f.value(), "abç", "another ç would make six bytes");
+    }
+
+    #[test]
+    fn a_name_holds_no_more_than_a_directory_name_may() {
+        // A folder's name becomes one, and a layer's is shown on a card:
+        // neither is a paragraph, and a paste can now bring one in.
+        let mut f = Field::name("frame");
+        f.paste(&"x".repeat(1000));
+        assert_eq!(f.value().len(), NAME_MAX);
+        assert!(f.value().starts_with("frame"));
     }
 
     #[test]

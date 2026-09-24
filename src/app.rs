@@ -1485,7 +1485,7 @@ impl App {
                 .get(i)
                 .map(|l| l.name.clone())
                 .unwrap_or_default();
-            self.renaming = Some((i, Field::new(&name)));
+            self.renaming = Some((i, Field::name(&name)));
             return;
         }
         let (editor, doc) = self.active();
@@ -1538,7 +1538,7 @@ impl App {
             Some(_) => None,
             None => {
                 let taken = taken_names(&found[0].cwd);
-                Some(Field::new(&export::free_name(&self.doc().title, &taken)))
+                Some(Field::name(&export::free_name(&self.doc().title, &taken)))
             }
         };
         self.sending = Some(Sending {
