@@ -52,5 +52,5 @@ implemented.
   - [x] 6b. the layout keeps the foot for it
   - [x] 6c. rendered through the same path as `board.png`, uploaded to a
         slot of its own, redrawn when its size changes
-- [ ] 7. Docs: README, AGENTS.md, the design note
+- [x] 7. Docs: README, AGENTS.md, the design note
 - [ ] 8. Live check of every item in a running window; CI green

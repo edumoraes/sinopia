@@ -10,7 +10,7 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames,
 export to the agent and the CLI an agent asks the board through:
 
-- `cargo build` clean, `cargo test` with 789 tests.
+- `cargo build` clean, `cargo test` with 888 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -217,23 +217,39 @@ export to the agent and the CLI an agent asks the board through:
   own, capped by a depth and by a memory budget, so a heavy board gets
   fewer steps rather than a quarter of a gigabyte of them.
 - Export to the agent: `Ctrl+E` sends what is selected to an AI agent
-  running on this machine. A panel lists the agents found — herdr says
-  where each one is working, which is focused and what it is doing;
-  tmux says the pane and its path; a `/proc` walk finds the ones under
-  neither and, having no way to talk to them, writes them muted. The
-  page lands in that agent's own working directory as three files under
+  running on this machine. A dialog lists the agents found, a row each:
+  the agent's own mark, its name as its makers write it — Claude Code,
+  Codex, OpenCode, Crush, Gemini CLI — and the last directory of where
+  it works (one more above it only where two projects share a name),
+  with what herdr says it is doing at the far end. herdr says where
+  each one is working, which is focused and what it is doing; tmux says
+  the pane and its path; a `/proc` walk finds the ones under neither
+  and, having no way to talk to them, writes them muted. The page lands
+  in that agent's own working directory as three files under
   `docs/boards/<name>/` — `board.png`, the picture; `board.json`, the
   same objects in the board's own schema; and `board.md`, an inventory
-  under a preface saying it is a diagram and not an order. A frame
-  brings the name it carries on its card; a loose selection is asked
-  for one, prefilled with a name the folder does not already hold, and
-  whatever is typed becomes exactly one directory. The instruction is
-  the person's own line, typed into the panel and submitted into the
-  agent's live session — never the board's text, which is inventory.
-  With nothing selected, or no agent running, the key opens nothing and
-  says which half is missing. A layer's name is now the person's to
-  give: a second press on a card opens it for editing, and a frame is
-  born `Frame 1` rather than `Layer 3`.
+  under a preface saying it is a diagram and not an order — and the
+  dialog shows that same picture at its foot before it goes, drawn
+  through the path `board.png` is. A frame brings the name it carries
+  on its card; a loose selection is asked for one, prefilled with a name
+  the folder does not already hold, and whatever is typed becomes
+  exactly one directory. The instruction is the person's own, typed
+  into a box that wraps, grows a line at a time to twenty and then
+  scrolls — `Shift+Enter` breaks a line, Enter sends, as the title's
+  far end says — and submitted into the agent's live session; never the
+  board's text, which is inventory. Every field takes the keys a text
+  box does: Shift, Ctrl and the pointer select, `Ctrl+A` takes all,
+  `Ctrl+C`, `Ctrl+X` and `Ctrl+V` go through the system clipboard, and
+  held keys repeat. Typing the target's mark — `/` for Claude Code,
+  OpenCode, Gemini CLI and Crush, `$` for Codex — opens a menu of that
+  harness's skills, read from where that harness reads them, plugins
+  included for Claude Code; the arrows pick one and Tab or Enter writes
+  its call. A call reaches Claude Code typed and the rest pasted, since
+  a slash inside a paste is text there. With nothing selected, or no
+  agent running, the key opens nothing and says which half is missing.
+  A layer's name is now the person's to give: a second press on a card
+  opens it for editing, and a frame is born `Frame 1` rather than
+  `Layer 3`.
 - The CLI an agent asks the board through: `Ctrl+E` pushes a page at an
   agent; this is the way back, and a **frame** is the whole of what
   travels either way. `omawhite agent frames` lists what the open board
@@ -569,6 +585,8 @@ src/brush.rs     the brush library: sets, presets, a brush's body, its propertie
 tools/import-skbrushes.py  Sketchbook `.skbrushes` -> assets/brushes/ (parameters + icon sheet)
 assets/brushes/  library.json (17 sets, 211 brushes) and icons.png (211 cells), built into the binary
 assets/dock/     six RGBA tool illustrations and their 6 x 1 icon sheet, built into the binary
+assets/agents/   the five agents' own marks and the sheet of them, built into the binary
+tools/agent-logos.sh  the marks -> assets/agents/logos.png
 src/scene.rs     View (camera + viewport + scale), document → SDF prims, frames, groups and passes (pure, tested)
 src/geom.rs      affine maps, corners and oriented frames (pure, tested)
 src/select.rs    selection: element frames, hit-testing, handles, transforms, overlay prims (pure, tested)
@@ -583,18 +601,19 @@ src/slots.rs     brush strip on the left: the brush in the hand, the two buttons
 src/palette.rs   brush library beside it: the shelves, the grid of icons, the scroll (pure, tested)
 src/props.rs     brush properties bar under the strip: the basic pair, and the Advanced layout it drops (pure, tested)
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
-src/text.rs      glyph atlas, measure, layout, ellipsis truncation (pure, tested)
+src/text.rs      glyph atlas, measure, layout, word wrap, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
-src/field.rs     a one-line editable value: the string, the caret, the keys that move it (pure, tested)
+src/field.rs     an editable value, one line or several: the caret, the selection, the lines a box shows (pure, tested)
 src/export.rs    what leaves the board: the scope, its box, its sub-document, the slug, the inventory, the write (pure, tested)
 src/graft.rs     what comes back: the fragment, the ids minted anew, the free spot, the graft (pure, tested)
 src/agents.rs    the agents running here: herdr, tmux and /proc parsed into one list, and reaching one (pure, tested)
-src/send.rs      the export panel: the targets, the folder, the instruction (pure, tested)
+src/skills.rs    each harness's skills: where they live, which may be called, how a call is written (pure, tested)
+src/send.rs      the export dialog: the rows, the folder, the instruction box, the skills menu, the picture (pure, tested)
 src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch a group is composited in
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
 src/tablet.rs    the tablet's pen (zwp_tablet_v2) → event loop bridge; its frame is tested
-src/clipboard.rs selection reads (wl_data_device) → event loop bridge
+src/clipboard.rs selection reads and writes (wl_data_device) → event loop bridge
 src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
 assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
 plugin/          the Omarchy bar widget (QML): manifest, BarWidget, install notes
