@@ -24,6 +24,8 @@ mod grid;
 mod history;
 mod ipc;
 mod layers;
+mod menu;
+mod merge;
 mod omarchy;
 mod palette;
 mod project;
@@ -38,6 +40,8 @@ mod tablet;
 mod tabs;
 mod text;
 mod theme;
+mod thumbs;
+mod tree;
 
 use anyhow::Context as _;
 
@@ -79,6 +83,21 @@ fn main() -> anyhow::Result<()> {
             path: std::fs::canonicalize(file)
                 .with_context(|| format!("reading the fragment {file:?}"))?,
         },
+        Action::Layer(verb) => {
+            // One listing, fetched the first time a name needs it and
+            // read for every name after that.
+            let listing = std::cell::OnceCell::new();
+            cli::layer_request(verb, |asked| {
+                let listing = match listing.get() {
+                    Some(l) => l,
+                    None => {
+                        let fetched = layer_listing(&socket_path)?;
+                        listing.get_or_init(|| fetched)
+                    }
+                };
+                cli::resolve_layer(listing, asked)
+            })?
+        }
     };
 
     // §5: a second omawhite becomes a command on the socket, not a second window.
@@ -104,7 +123,7 @@ fn main() -> anyhow::Result<()> {
         // with the work nobody has saved yet inside it. There is nothing
         // to answer without one, and opening a window to answer would
         // answer about a different board.
-        Action::Frames | Action::Read { .. } | Action::Add(_) => {
+        Action::Frames | Action::Read { .. } | Action::Add(_) | Action::Layer(_) => {
             anyhow::bail!("no omawhite instance running; open the board first")
         }
         Action::Shutdown => {
@@ -191,6 +210,19 @@ fn frame_id(socket: &std::path::Path, asked: &str) -> anyhow::Result<String> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+    }
+}
+
+/// The open board's layers, for turning the names a person typed into
+/// the ids the protocol speaks: one round trip, outside the schema, like
+/// a frame's name.
+fn layer_listing(socket: &std::path::Path) -> anyhow::Result<Vec<editor::Listed>> {
+    let reply = try_forward(socket, &Request::Layers)?
+        .context("no omawhite instance running; open the board first")?;
+    match parse_event(&reply)? {
+        Event::Layers { layers } => Ok(layers),
+        Event::Denied { reason, .. } => anyhow::bail!("the board refused the listing: {reason}"),
+        other => anyhow::bail!("the board answered {other:?} to a listing"),
     }
 }
 

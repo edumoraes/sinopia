@@ -4,13 +4,17 @@
 //! Pure — `app` feeds it pointer events in screen px together with the
 //! current [`View`] and the document, and stores whatever comes back.
 
+use serde::{Deserialize, Serialize};
+
 use crate::bitmap;
 use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
-use crate::doc::{Camera, Document, Element, Envelope, Image, Kind, Paint, Path, new_id};
+use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, Tag, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
+use crate::merge::{Merge, Run};
 use crate::scene::View;
 use crate::select::{self, Handle};
+use crate::tree::{self, Arrange, Filter, Place};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
@@ -235,8 +239,8 @@ pub struct Stroke {
     /// One reading per point, in step with it.
     pub stylus: Vec<Stylus>,
     pub tip: Tip,
-    /// The frame the press was in, if any. Read once, at the press, and
-    /// never again: the stroke is painted from its first sample, so if
+    /// The frame the press was in, if any, by its layer — the stack the
+    /// ink lands in. Read once, at the press, and never again: the stroke is painted from its first sample, so if
     /// the release read the geometry a second time the ink could be cut
     /// by one boundary while it was drawn and land under another. The
     /// tip is taken at the press for the same reason.
@@ -278,7 +282,7 @@ impl Stroke {
 }
 
 /// Where the hand is standing: what is selected, the layer new ink
-/// lands on, and the frame being worked in. Session state (§6.2) — it
+/// lands on, and the layers picked in the panel. Session state (§6.2) — it
 /// never enters the document — and exactly the part of it that belongs
 /// beside a board rather than to the window.
 ///
@@ -289,10 +293,20 @@ pub struct Spot {
     /// Ids of the selected elements, in selection order.
     pub selection: Vec<String>,
     pub layer: Option<String>,
-    pub inside: Option<String>,
+    pub picked: Vec<String>,
 }
 
-#[derive(Debug, Default)]
+/// How a press on a row picks its layer: alone, in or out of what is
+/// already picked (`Ctrl`), or every row between the anchor and it
+/// (`Shift`) — Photoshop's three, and every file manager's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    Only,
+    Toggle,
+    Range,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct Editor {
     tool: Tool,
     space: bool,
@@ -316,12 +330,105 @@ pub struct Editor {
     /// What a new frame's background is set to — the theme's surface,
     /// handed over by `app` so the editor never sees a `Theme`.
     surface: String,
-    /// The frame whose stack is being worked in, by id; `None` is the
-    /// board's own. Session state like the active layer and the
-    /// selection: it belongs to a tab, and every use of it goes
-    /// through [`Editor::inside_in`], so a frame that has been deleted
-    /// cannot leave the editor pointing into it.
-    inside: Option<String>,
+    /// The layers picked in the panel, by id, in the order they were
+    /// picked. Empty is the active layer alone. The active layer is the
+    /// anchor a range is taken from, and where ink goes.
+    picked: Vec<String>,
+    /// The pick was made in the panel, not on the canvas: what `Delete`
+    /// takes is the layers, then, and not the objects.
+    in_panel: bool,
+    /// The groups and frames whose rows the panel shows open, by id.
+    /// Session state of the panel's and nothing else's: it is not where
+    /// the hand stands, so a step back does not shut what was opened.
+    open: Vec<String>,
+    /// The panel's filter, and whether its bar is open: shut, the tree is
+    /// shown whole and the filter waits as it was left.
+    filter: Filter,
+    filtering: bool,
+}
+
+/// One layer as the command line lists it: where it stands in the tree,
+/// what it is and how it draws, and whether it is the active layer or
+/// among the picked. `visible` is its own eye; `shown` is whether it is
+/// on show at all, which every layer holding it has a say in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Listed {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    /// The layer holding its stack; none on the board's root.
+    pub owner: Option<String>,
+    pub depth: usize,
+    pub visible: bool,
+    pub shown: bool,
+    pub locked: bool,
+    pub opacity: f64,
+    pub blend: BlendMode,
+    pub color: Tag,
+    pub active: bool,
+    pub picked: bool,
+    /// How many objects stand on it.
+    pub elements: usize,
+}
+
+/// What a lock keeps a layer from being asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keeps {
+    /// How it draws — its strength and its mode — which its own lock and
+    /// every holder's keep.
+    Look,
+    /// Where it stands in its stack, which only a locked holder keeps: a
+    /// layer's own lock is about what it holds, not about its place.
+    Place,
+}
+
+/// The first of `ids` a lock keeps from what `keeps` names, if any: what
+/// the command line refuses rather than answering done while nothing
+/// changed.
+pub fn locked_among(doc: &Document, ids: &[String], keeps: Keeps) -> Option<String> {
+    ids.iter()
+        .find(|id| match keeps {
+            Keeps::Look => doc.locked(id),
+            Keeps::Place => doc.locate(id).is_some_and(|(owner, _)| doc.fixed(owner)),
+        })
+        .cloned()
+}
+
+/// A command on the picked layers: what a shortcut, a row's menu and
+/// the command line all ask for, so the three cannot come to disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Group,
+    Ungroup,
+    Duplicate,
+    /// Takes the picked layers away, with everything on them.
+    Remove,
+    /// Locks them all while any is open, and opens them all once every
+    /// one is locked; `Show` does the same with what shows.
+    Lock,
+    Show,
+    Arrange(Arrange),
+    /// The picked siblings into one, a group alone into a layer, or one
+    /// layer down into the one under it: `Ctrl+Alt+E`.
+    Merge,
+    /// The active layer — a group too — into the one under it, as the
+    /// command line asks by name.
+    MergeDown,
+    /// Every visible sibling of every stack into one: `Ctrl+Shift+E`.
+    MergeVisible,
+    /// Merge visible, and what is hidden goes.
+    Flatten,
+}
+
+impl Command {
+    /// Whether it merges: those wait on pictures `app` takes of what is
+    /// not exact, and go through [`Editor::merge`].
+    pub fn merges(self) -> bool {
+        matches!(
+            self,
+            Command::Merge | Command::MergeDown | Command::MergeVisible | Command::Flatten
+        )
+    }
 }
 
 /// What a new frame is born with until `app` says otherwise: white, the
@@ -468,85 +575,92 @@ impl Editor {
         self.stroke.as_ref()
     }
 
-    /// The frame being worked in, as last recorded. `app` reads this to
-    /// notice a change between frames; everything with a document in
-    /// hand asks [`Editor::inside_in`] instead.
-    pub fn inside(&self) -> Option<&str> {
-        self.inside.as_deref()
-    }
-
-    /// The frame being worked in, checked against `doc`: none once that
-    /// frame is gone, which is what makes the field self-clearing.
-    fn inside_in(&self, doc: &Document) -> Option<&str> {
-        self.inside.as_deref().filter(|id| doc.frame(id).is_some())
-    }
-
-    /// The stack new ink goes to: the frame the stroke in progress was
-    /// born in, or the one being worked in when no stroke is in flight.
-    /// The panel and the ink can disagree — pressing inside a frame
-    /// while the panel stands on the board paints in the frame — and
-    /// this is where they are told apart.
-    fn ink_stack(&self, doc: &Document) -> Option<&str> {
-        match &self.stroke {
-            Some(s) => s.born.as_deref().filter(|id| doc.frame(id).is_some()),
-            None => self.inside_in(doc),
-        }
-    }
-
-    /// The active layer's index in `stack`, which is not always the one
-    /// the panel is showing: a press inside a frame paints there while
-    /// the panel stands on the board.
-    fn index_in(&self, doc: &Document, stack: Option<&str>) -> usize {
+    /// The layer new ink is aimed at, by id: the one chosen while it is
+    /// still on the board, or the top of the board's root otherwise.
+    pub fn active<'a>(&self, doc: &'a Document) -> &'a str {
         self.layer
             .as_deref()
-            .and_then(|id| doc.layer_index(stack, id))
-            .unwrap_or(doc.stack(stack).len().saturating_sub(1))
+            .and_then(|id| doc.layer(id))
+            .or_else(|| doc.layers.last())
+            .map_or("", |l| l.id.as_str())
     }
 
-    /// Works inside `frame` from now on: the panel shows its stack and
-    /// new ink lands there. The top of that stack becomes active.
-    pub fn enter_frame(&mut self, doc: &Document, frame: &str) -> Change {
-        if doc.frame(frame).is_none() {
-            return Change::None;
+    /// The layer ink pressed into `born` — a frame, by its layer, or the
+    /// board — is aimed at: the active layer when it stands where the
+    /// press landed, and the top of that stack when it does not. Pressing
+    /// inside a frame while another layer is active paints in the frame.
+    fn aim<'a>(&self, doc: &'a Document, born: Option<&str>) -> Option<&'a Layer> {
+        let a = self.active(doc);
+        if doc.context(a) == born {
+            return doc.layer(a);
         }
-        self.inside = Some(frame.to_owned());
-        self.layer = doc.stack(Some(frame)).last().map(|l| l.id.clone());
-        Change::Selection
+        doc.stack(born).last()
     }
 
-    /// Back out to the board, with the frame's own layer active — the
-    /// card the pointer came from.
-    pub fn leave_frame(&mut self, doc: &Document) -> Change {
-        let Some(frame) = self.inside.take() else {
-            return Change::None;
+    /// Where a layer opened for ink pressed into `born` goes: the stack,
+    /// and the index it is laid above — inside the layer aimed at, on
+    /// top, when that is a group; right above it otherwise.
+    fn opening(&self, doc: &Document, born: Option<&str>) -> (Option<String>, usize) {
+        let top = |owner: Option<&str>| doc.stack(owner).len().saturating_sub(1);
+        let (owner, above) = match self.aim(doc, born) {
+            Some(g) if g.kind == Kind::Group => (Some(g.id.clone()), top(Some(&g.id))),
+            Some(l) => match doc.locate(&l.id) {
+                Some((owner, i)) => (owner.map(str::to_owned), i),
+                None => (born.map(str::to_owned), top(born)),
+            },
+            None => (born.map(str::to_owned), top(born)),
         };
-        self.layer = doc.frame(&frame).map(|f| f.layer.clone());
-        Change::Selection
+        clear_of_locks(doc, owner, above)
     }
 
-    /// Index of the layer new ink lands on, in the stack being worked
-    /// in: the one chosen, or the top one when none was, when the chosen
-    /// one is gone, or when it is on another stack.
-    pub fn active_layer(&self, doc: &Document) -> usize {
-        let stack = self.inside_in(doc);
-        self.layer
-            .as_deref()
-            .and_then(|id| doc.layer_index(stack, id))
-            .unwrap_or(doc.stack(stack).len().saturating_sub(1))
+    /// Whether a press at `screen` would lay ink that has nowhere to go:
+    /// a brush aimed at a raster layer that is locked, or held by a locked
+    /// one. The press is refused, and the cursor says so before it.
+    pub fn refuses_ink(&self, doc: &Document, view: &View, screen: (f64, f64)) -> bool {
+        if self.pointer_tool(doc, view, screen) != Tool::Brush {
+            return false;
+        }
+        let (x, y) = view.screen_to_world(screen.0, screen.1);
+        let born = doc.stack_at([x, y]);
+        self.aim(doc, born)
+            .is_some_and(|l| l.kind == Kind::Raster && doc.locked(&l.id))
     }
 
-    /// Opens a layer of `kind` above the active one, makes it active and
-    /// answers its id — what an element that comes with its own layer is
-    /// stamped with.
-    fn fresh_layer(&mut self, doc: &mut Document, kind: Kind, stack: Option<&str>) -> String {
-        let stack = stack.filter(|id| doc.frame(id).is_some()).map(str::to_owned);
-        let above = self.index_in(doc, stack.as_deref());
+    /// The raster layer ink pressed into `born` joins, when there is one
+    /// to join: the layer aimed at, when it takes pixels.
+    fn joins<'a>(&self, doc: &'a Document, born: Option<&str>) -> Option<&'a str> {
+        self.aim(doc, born)
+            .filter(|l| l.kind == Kind::Raster)
+            .map(|l| l.id.as_str())
+    }
+
+    /// Opens a layer of `kind` for ink pressed into `born`, where
+    /// [`Editor::opening`] says, makes it active and answers its id —
+    /// what an element that comes with its own layer is stamped with.
+    fn fresh_layer(&mut self, doc: &mut Document, kind: Kind, born: Option<&str>) -> String {
+        let (owner, above) = self.opening(doc, born);
         let at = doc
-            .add_layer(stack.as_deref(), above, kind)
+            .add_layer(owner.as_deref(), above, kind)
             .unwrap_or_default();
-        let id = doc.stack(stack.as_deref())[at].id.clone();
+        let id = doc.stack(owner.as_deref())[at].id.clone();
+        self.reveal(doc, &id);
         self.layer = Some(id.clone());
+        self.picked.clear();
         id
+    }
+
+    /// The layer the stroke in progress would join, if there is one to
+    /// join: the active layer when it takes pixels, stands where the press
+    /// landed, and the stroke is a brush's. A pencil opens a layer of its
+    /// own and a brush over a vector layer opens one above it, so neither
+    /// has anywhere to be painted yet — they are drawn over everything
+    /// until they land.
+    pub fn live_layer<'a>(&self, doc: &'a Document) -> Option<&'a str> {
+        if self.tool == Tool::Pencil {
+            return None;
+        }
+        let born = self.stroke.as_ref().and_then(|s| s.born.as_deref());
+        self.joins(doc, born.filter(|id| doc.frame_on(id).is_some()))
     }
 
     /// The layer a new element of `kind` lands on. Raster accumulates —
@@ -554,72 +668,643 @@ impl Editor {
     /// one above it when it does not, as Photoshop does when you paint on
     /// a shape. Vector does not accumulate: every object gets a layer of
     /// its own.
-    /// The layer the stroke in progress would join, if there is one to
-    /// join: the active layer when it takes pixels and the stroke is a
-    /// brush's. A pencil opens a layer of its own and a brush over a
-    /// vector layer opens one above it, so neither has anywhere to be
-    /// painted yet — they are drawn over everything until they land.
-    pub fn live_layer<'a>(&self, doc: &'a Document) -> Option<&'a str> {
-        if self.tool == Tool::Pencil {
-            return None;
-        }
-        let stack = self.ink_stack(doc);
-        doc.stack(stack)
-            .get(self.index_in(doc, stack))
-            .filter(|l| l.kind == Kind::Raster)
-            .map(|l| l.id.as_str())
-    }
-
-    fn ink_layer(&mut self, doc: &mut Document, kind: Kind, stack: Option<&str>) -> String {
-        let stack = stack.filter(|id| doc.frame(id).is_some());
+    fn ink_layer(&mut self, doc: &mut Document, kind: Kind, born: Option<&str>) -> String {
+        let born = born.filter(|id| doc.frame_on(id).is_some()).map(str::to_owned);
         if kind == Kind::Raster
-            && let Some(layer) = doc.stack(stack).get(self.index_in(doc, stack))
-            && layer.kind == Kind::Raster
+            && let Some(id) = self.joins(doc, born.as_deref())
         {
-            return layer.id.clone();
+            return id.to_owned();
         }
-        let stack = stack.map(str::to_owned);
-        self.fresh_layer(doc, kind, stack.as_deref())
+        self.fresh_layer(doc, kind, born.as_deref())
     }
 
-    /// Makes layer `index` the one new ink lands on.
-    pub fn select_layer(&mut self, doc: &Document, index: usize) -> Change {
-        match doc.stack(self.inside_in(doc)).get(index) {
-            Some(layer) => {
-                self.layer = Some(layer.id.clone());
-                Change::Selection
+    /// The layers picked in the panel, in the order they were picked —
+    /// or the active layer alone, when none are. One gone from the board
+    /// is left out.
+    pub fn picked<'a>(&self, doc: &'a Document) -> Vec<&'a str> {
+        let mut out: Vec<&str> = self
+            .picked
+            .iter()
+            .filter_map(|id| doc.layer(id))
+            .map(|l| l.id.as_str())
+            .collect();
+        if out.is_empty() {
+            out.push(self.active(doc));
+        }
+        out
+    }
+
+    /// A press on `id`'s row, picking it as `how` says. `rows` is the
+    /// order the panel lists its rows in, top first — what a range is
+    /// taken across. With the Select tool in hand the canvas follows:
+    /// what the picked layers hold becomes the selection.
+    pub fn pick_layer(&mut self, doc: &Document, id: &str, how: Pick, rows: &[&str]) -> Change {
+        if doc.layer(id).is_none() {
+            return Change::None;
+        }
+        let anchor = self.active(doc).to_owned();
+        let mut picked: Vec<String> = self.picked(doc).into_iter().map(str::to_owned).collect();
+        let range = || {
+            let a = rows.iter().position(|r| *r == anchor)?;
+            let b = rows.iter().position(|r| *r == id)?;
+            Some(rows[a.min(b)..=a.max(b)].iter().map(|r| (*r).to_owned()).collect())
+        };
+        match how {
+            Pick::Toggle => match picked.iter().position(|p| p == id) {
+                // The last one stays: there is always a layer to paint on.
+                Some(_) if picked.len() == 1 => return Change::None,
+                Some(i) => {
+                    picked.remove(i);
+                    if anchor == id {
+                        self.layer = picked.last().cloned();
+                    }
+                }
+                None => {
+                    picked.push(id.to_owned());
+                    self.layer = Some(id.to_owned());
+                }
+            },
+            Pick::Range if let Some(between) = range() => picked = between,
+            Pick::Only | Pick::Range => {
+                picked = vec![id.to_owned()];
+                self.layer = Some(id.to_owned());
             }
-            None => Change::None,
+        }
+        self.picked = picked;
+        self.in_panel = true;
+        self.follow_the_pick(doc);
+        Change::Selection
+    }
+
+    /// With the Select tool in hand, what the picked layers hold becomes
+    /// the selection; with any other the canvas is left alone.
+    fn follow_the_pick(&mut self, doc: &Document) {
+        if self.tool == Tool::Select {
+            self.drag = None;
+            self.selection = self.held_by(doc, &self.picked(doc));
         }
     }
 
-    /// Adds a layer above the active one and makes it active.
-    pub fn add_layer(&mut self, doc: &mut Document) -> Change {
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let above = self.active_layer(doc);
-        let at = doc
-            .add_layer(stack.as_deref(), above, Kind::Raster)
-            .unwrap_or_default();
-        self.layer = Some(doc.stack(stack.as_deref())[at].id.clone());
+    /// The picked layers' ids, owned: what the layer operations act on.
+    fn picked_ids(&self, doc: &Document) -> Vec<String> {
+        self.picked(doc).into_iter().map(str::to_owned).collect()
+    }
+
+    /// Wraps the picked layers in a new group standing where the topmost
+    /// of them did — `Ctrl+G` — and picks the group.
+    pub fn group_layers(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        let Some(group) = doc.group_layers(&picked) else {
+            return Change::None;
+        };
+        self.reveal(doc, &group);
+        self.layer = Some(group);
+        self.picked.clear();
+        self.follow_the_pick(doc);
         Change::Scene
     }
 
-    /// Removes the active layer with everything on it — out of the
-    /// selection too — and activates the layer that was above it, or
-    /// the one below when it was on top. The last layer stays, but what
-    /// it holds does not: a layer is its object, so the trash takes the
-    /// object either way.
-    /// Gives layer `index` of the stack being worked in the name it was
-    /// typed. A name that is nothing but space is not a name, and the
-    /// layer keeps the one it had — a card with no word on it can be
-    /// neither read nor exported under.
-    pub fn rename_layer(&mut self, doc: &mut Document, index: usize, name: &str) -> Change {
-        let name = name.trim();
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let Some(layers) = doc.stack_mut(stack.as_deref()) else {
+    /// Lets the active group's layers out where it stood — `Ctrl+Shift+G`
+    /// — and picks them.
+    pub fn ungroup(&mut self, doc: &mut Document) -> Change {
+        let group = self.active(doc).to_owned();
+        let Some(out) = doc.ungroup(&group) else {
             return Change::None;
         };
-        let Some(layer) = layers.get_mut(index) else {
+        self.layer = out.last().cloned();
+        self.picked = out;
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
+    /// A copy of every picked layer right above its original — `Ctrl+J`
+    /// — and the copies picked.
+    pub fn duplicate_layers(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        let made = doc.duplicate_layers(&picked);
+        if made.is_empty() {
+            return Change::None;
+        }
+        self.layer = made.last().cloned();
+        self.picked = made;
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
+    /// Removes every picked layer, with everything under it and on it —
+    /// the bin, and `Delete` on a pick made in the panel. One alone keeps
+    /// [`Editor::remove_layer`]'s ways; several go, and the board and a
+    /// frame left empty get a fresh layer.
+    pub fn remove_layers(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        if let [one] = picked.as_slice() {
+            self.layer = Some(one.clone());
+            return self.remove_layer(doc);
+        }
+        // Where the topmost of them stood is where the hand goes back to.
+        let top = picked
+            .last()
+            .and_then(|id| doc.locate(id))
+            .map(|(o, i)| (o.map(str::to_owned), i));
+        let mut gone = false;
+        for id in picked.iter().rev() {
+            if let Some((owner, i)) = doc.locate(id).map(|(o, i)| (o.map(str::to_owned), i))
+                && !doc.fixed(owner.as_deref())
+                && let Some(layer) = doc.stack(owner.as_deref()).get(i)
+            {
+                let held = doc.subtree(layer);
+                if let Some(stack) = doc.stack_mut(owner.as_deref()) {
+                    stack.remove(i);
+                }
+                doc.elements
+                    .retain(|el| !held.iter().any(|h| h == el.layer()));
+                gone = true;
+            }
+        }
+        if !gone {
+            return Change::None;
+        }
+        doc.fill_empty_stacks();
+        self.drag = None;
+        self.selection
+            .retain(|id| doc.elements.iter().any(|el| el.id() == id));
+        self.picked.clear();
+        self.layer = top.and_then(|(owner, i)| {
+            let stack = doc.stack(owner.as_deref());
+            match stack.len() {
+                0 => owner,
+                n => Some(stack[i.min(n - 1)].id.clone()),
+            }
+        });
+        Change::Scene
+    }
+
+    /// `Delete`: the picked layers when the pick was made in the panel,
+    /// the selected objects when it was made on the canvas.
+    pub fn delete(&mut self, doc: &mut Document) -> Change {
+        if self.in_panel {
+            self.remove_layers(doc)
+        } else {
+            self.delete_selection(doc)
+        }
+    }
+
+    /// Moves the picked layers within their own stacks — to the top, a
+    /// step up, a step down, to the bottom: `Ctrl+Shift+]`, `Ctrl+]`,
+    /// `Ctrl+[`, `Ctrl+Shift+[`.
+    pub fn arrange(&mut self, doc: &mut Document, how: Arrange) -> Change {
+        let picked = self.picked_ids(doc);
+        match doc.arrange(&picked, how) {
+            true => Change::Scene,
+            false => Change::None,
+        }
+    }
+
+    /// Locks the picked layers — all of them while any is open, and opens
+    /// them all once every one is locked: `Ctrl+/`. What a lock takes is
+    /// no longer held.
+    pub fn toggle_lock(&mut self, doc: &mut Document) -> Change {
+        let picked = self.picked_ids(doc);
+        let lock = picked
+            .iter()
+            .any(|id| doc.layer(id).is_some_and(|l| !l.locked));
+        self.set_locked(doc, &picked, lock)
+    }
+
+    /// Locks the picked layers, or opens them — as asked, not toggled.
+    pub fn lock_layers(&mut self, doc: &mut Document, locked: bool) -> Change {
+        let picked = self.picked_ids(doc);
+        self.set_locked(doc, &picked, locked)
+    }
+
+    /// Opens a lock, or closes it, on `id` alone: the lock on its row.
+    pub fn toggle_lock_of(&mut self, doc: &mut Document, id: &str) -> Change {
+        let Some(locked) = doc.layer(id).map(|l| l.locked) else {
+            return Change::None;
+        };
+        self.set_locked(doc, &[id.to_owned()], !locked)
+    }
+
+    fn set_locked(&mut self, doc: &mut Document, ids: &[String], lock: bool) -> Change {
+        let mut changed = false;
+        for id in ids {
+            if let Some(l) = doc.layer_mut(id)
+                && l.locked != lock
+            {
+                l.locked = lock;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Change::None;
+        }
+        if lock {
+            self.drag = None;
+            self.selection.retain(|sel| {
+                doc.painted()
+                    .any(|p| p.element.id() == sel && !p.locked)
+            });
+        }
+        Change::Scene
+    }
+
+    /// Gives the picked layers a strength, 0 to 1 — the bar's slider and,
+    /// with a tool that does not paint, the digits. A locked layer keeps
+    /// how it draws; what is not a number changes nothing.
+    pub fn set_opacity(&mut self, doc: &mut Document, opacity: f64) -> Change {
+        if opacity.is_nan() {
+            return Change::None;
+        }
+        let opacity = opacity.clamp(0.0, 1.0);
+        let mut changed = false;
+        for id in self.picked_ids(doc) {
+            if doc.locked(&id) {
+                continue;
+            }
+            if let Some(l) = doc.layer_mut(&id)
+                && l.opacity != opacity
+            {
+                l.opacity = opacity;
+                changed = true;
+            }
+        }
+        if changed { Change::Scene } else { Change::None }
+    }
+
+    /// Gives the picked layers a blend mode — the bar's menu. Only a
+    /// group passes through, and a locked layer keeps how it draws.
+    pub fn set_blend(&mut self, doc: &mut Document, mode: BlendMode) -> Change {
+        let mut changed = false;
+        for id in self.picked_ids(doc) {
+            if doc.locked(&id) {
+                continue;
+            }
+            if let Some(l) = doc.layer_mut(&id)
+                && l.blend != mode
+                && (mode != BlendMode::PassThrough || l.kind == Kind::Group)
+            {
+                l.blend = mode;
+                changed = true;
+            }
+        }
+        if changed { Change::Scene } else { Change::None }
+    }
+
+    /// Hides the picked layers — all of them while any shows, and shows
+    /// them all once every one is hidden: `Ctrl+,`. What is hidden is no
+    /// longer held.
+    pub fn toggle_shown(&mut self, doc: &mut Document) -> Change {
+        let hide = self
+            .picked_ids(doc)
+            .iter()
+            .any(|id| doc.layer(id).is_some_and(|l| l.visible));
+        self.show_layers(doc, !hide)
+    }
+
+    /// Shows the picked layers, or hides them — as asked, not toggled.
+    /// What is hidden is no longer held.
+    pub fn show_layers(&mut self, doc: &mut Document, visible: bool) -> Change {
+        let mut changed = false;
+        for id in self.picked_ids(doc) {
+            if let Some(l) = doc.layer_mut(&id)
+                && l.visible != visible
+            {
+                l.visible = visible;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Change::None;
+        }
+        if !visible {
+            self.drag = None;
+            self.selection.retain(|sel| {
+                doc.elements
+                    .iter()
+                    .any(|el| el.id() == sel && doc.shown(el.layer()))
+            });
+        }
+        Change::Scene
+    }
+
+    /// What `layers` hold, in paint order: a group's are everything
+    /// under it, a frame's is the frame — which carries what it holds.
+    /// What is hidden or locked is left out: it cannot be seen, or it
+    /// cannot be moved.
+    fn held_by(&self, doc: &Document, layers: &[&str]) -> Vec<String> {
+        let mut wanted: Vec<String> = Vec::new();
+        for l in layers.iter().filter_map(|id| doc.layer(id)) {
+            match l.kind {
+                Kind::Group => wanted.extend(doc.subtree(l)),
+                _ => wanted.push(l.id.clone()),
+            }
+        }
+        doc.painted()
+            .filter(|p| !p.locked && wanted.iter().any(|w| w == p.element.layer()))
+            .map(|p| p.element.id().to_owned())
+            .collect()
+    }
+
+    /// The canvas said what is selected: the panel picks the layers it
+    /// stands on, in the order it was picked.
+    fn pick_what_is_selected(&mut self, doc: &Document) {
+        let mut layers: Vec<String> = Vec::new();
+        for id in &self.selection {
+            if let Some(el) = doc.elements.iter().find(|el| el.id() == id)
+                && !layers.iter().any(|l| l == el.layer())
+            {
+                layers.push(el.layer().to_owned());
+            }
+        }
+        self.picked = layers;
+        self.in_panel = false;
+    }
+
+    /// Adds a raster layer and makes it active: inside the active layer,
+    /// on top, when that is a group or a frame; above it in its own
+    /// stack otherwise.
+    pub fn add_layer(&mut self, doc: &mut Document) -> Change {
+        self.add(doc, Kind::Raster)
+    }
+
+    /// Adds an empty group where [`Editor::add_layer`] would add a layer.
+    pub fn add_group(&mut self, doc: &mut Document) -> Change {
+        self.add(doc, Kind::Group)
+    }
+
+    fn add(&mut self, doc: &mut Document, kind: Kind) -> Change {
+        let a = self.active(doc).to_owned();
+        let (owner, above) = match doc.layer(&a) {
+            Some(l) if matches!(l.kind, Kind::Group | Kind::Frame) => {
+                (Some(a.clone()), doc.stack(Some(&a)).len().saturating_sub(1))
+            }
+            _ => match doc.locate(&a) {
+                Some((owner, i)) => (owner.map(str::to_owned), i),
+                None => return Change::None,
+            },
+        };
+        let (owner, above) = clear_of_locks(doc, owner, above);
+        let Some(at) = doc.add_layer(owner.as_deref(), above, kind) else {
+            return Change::None;
+        };
+        let id = doc.stack(owner.as_deref())[at].id.clone();
+        self.reveal(doc, &id);
+        self.layer = Some(id);
+        self.picked.clear();
+        Change::Scene
+    }
+
+    /// The picked layers as a clip — `Ctrl+C` — or none to copy.
+    pub fn copy(&self, doc: &Document) -> Option<Document> {
+        doc.clip(&self.picked_ids(doc))
+    }
+
+    /// The picked layers as a clip, taken off the board — `Ctrl+X`.
+    pub fn cut(&mut self, doc: &mut Document) -> (Option<Document>, Change) {
+        let Some(clip) = self.copy(doc) else {
+            return (None, Change::None);
+        };
+        (Some(clip), self.remove_layers(doc))
+    }
+
+    /// Plants `clip` above the active layer and picks what it planted —
+    /// `Ctrl+V`. It lands in place when that place is in `seen`, the part
+    /// of the world on show, and in the middle of it otherwise: a paste
+    /// nobody can see did not happen, as far as the hand can tell.
+    pub fn paste(&mut self, doc: &mut Document, clip: &Document, seen: (Point, Point)) -> Change {
+        let ids: Vec<String> = clip.elements.iter().map(|el| el.id().to_owned()).collect();
+        let (lo, hi) = seen;
+        let by = match select::frame_of(clip, &ids).map(|f| f.aabb()) {
+            Some((a, b)) if b[0] < lo[0] || a[0] > hi[0] || b[1] < lo[1] || a[1] > hi[1] => {
+                Affine::translate(
+                    (lo[0] + hi[0] - a[0] - b[0]) / 2.0,
+                    (lo[1] + hi[1] - a[1] - b[1]) / 2.0,
+                )
+            }
+            _ => Affine::IDENTITY,
+        };
+        let above = self.active(doc).to_owned();
+        let planted = doc.paste(clip, &above, &by);
+        let Some(top) = planted.last().cloned() else {
+            return Change::None;
+        };
+        for id in &planted {
+            self.reveal(doc, id);
+        }
+        self.picked = planted;
+        self.layer = Some(top);
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
+    /// Picks exactly `ids`, the last of them active, as the panel picks —
+    /// what a command from the command line acts on — and opens the rows
+    /// holding them. Every id has to be a layer of the board: a name that
+    /// is not picks nothing at all.
+    pub fn pick_ids(&mut self, doc: &Document, ids: &[String]) -> Result<(), String> {
+        let Some(last) = ids.last() else {
+            return Err("no layer named".into());
+        };
+        if let Some(missing) = ids.iter().find(|id| doc.layer(id).is_none()) {
+            return Err(format!("no layer {missing:?} on the board"));
+        }
+        self.picked = ids.to_vec();
+        self.layer = Some(last.clone());
+        self.in_panel = true;
+        for id in ids {
+            self.reveal(doc, id);
+        }
+        self.follow_the_pick(doc);
+        Ok(())
+    }
+
+    /// A new raster layer — or group — above `above`, or above the
+    /// active layer when none is named, called `name` when there is one.
+    pub fn add_layer_as(
+        &mut self,
+        doc: &mut Document,
+        group: bool,
+        name: Option<&str>,
+        above: Option<&str>,
+    ) -> Result<Change, String> {
+        if let Some(above) = above {
+            self.pick_ids(doc, &[above.to_owned()])?;
+        }
+        let change = if group {
+            self.add_group(doc)
+        } else {
+            self.add_layer(doc)
+        };
+        if change == Change::None {
+            return Err("nothing can be added there: a locked group takes nothing in".into());
+        }
+        if let Some(name) = name {
+            let id = self.active(doc).to_owned();
+            let _ = self.rename_layer(doc, &id, name);
+        }
+        Ok(change)
+    }
+
+    /// Every layer of the board, the whole tree top first whatever the
+    /// panel has open, with where it stands and what it is.
+    pub fn listing(&self, doc: &Document) -> Vec<Listed> {
+        let active = self.active(doc);
+        let picked = self.picked(doc);
+        doc.rows(|_| true)
+            .iter()
+            .map(|r| Listed {
+                id: r.layer.id.clone(),
+                name: r.layer.name.clone(),
+                kind: r.layer.kind,
+                owner: r.owner.map(str::to_owned),
+                depth: r.depth,
+                visible: r.layer.visible,
+                shown: r.shown,
+                locked: r.layer.locked,
+                opacity: r.layer.opacity,
+                blend: r.layer.blend,
+                color: r.layer.color,
+                active: r.layer.id == active,
+                picked: picked.contains(&r.layer.id.as_str()),
+                elements: doc.elements.iter().filter(|el| el.layer() == r.layer.id).count(),
+            })
+            .collect()
+    }
+
+    /// Does `command` to the picked layers.
+    pub fn run(&mut self, doc: &mut Document, command: Command) -> Change {
+        match command {
+            Command::Group => self.group_layers(doc),
+            Command::Ungroup => self.ungroup(doc),
+            Command::Duplicate => self.duplicate_layers(doc),
+            Command::Remove => self.remove_layers(doc),
+            Command::Lock => self.toggle_lock(doc),
+            Command::Show => self.toggle_shown(doc),
+            Command::Arrange(how) => self.arrange(doc, how),
+            Command::Merge | Command::MergeDown | Command::MergeVisible | Command::Flatten => {
+                self.merge(doc, command, &[])
+            }
+        }
+    }
+
+    /// What [`Command::Merge`] does to the pick, as a menu names it.
+    pub fn merge_name(&self, doc: &Document) -> &'static str {
+        match self.merge_request(doc, Command::Merge) {
+            Some(Merge::Layers(ids)) if ids.len() > 1 => "Merge Layers",
+            Some(Merge::Layers(_)) => "Merge Group",
+            _ => "Merge Down",
+        }
+    }
+
+    fn merge_request(&self, doc: &Document, command: Command) -> Option<Merge> {
+        match command {
+            Command::Merge => {
+                let picked = self.picked_ids(doc);
+                let active = self.active(doc).to_owned();
+                Some(if picked.len() > 1 {
+                    Merge::Layers(picked)
+                } else if doc.layer(&active).is_some_and(|l| l.kind == Kind::Group) {
+                    Merge::Layers(vec![active])
+                } else {
+                    Merge::Down(active)
+                })
+            }
+            Command::MergeDown => Some(Merge::Down(self.active(doc).to_owned())),
+            Command::MergeVisible => Some(Merge::Visible),
+            Command::Flatten => Some(Merge::Flatten),
+            _ => None,
+        }
+    }
+
+    /// The merges `command` asks of the board, in the order `merge` takes
+    /// the pictures of the ones that are not exact.
+    pub fn merges(&self, doc: &Document, command: Command) -> Vec<Run> {
+        self.merge_request(doc, command)
+            .map_or_else(Vec::new, |m| doc.merges(&m))
+    }
+
+    /// Carries out `command`'s merges: every run that is exact by moving
+    /// what it shows onto the layer it keeps, and every one that is not by
+    /// the picture `drawn` holds for it, at its place in [`Editor::merges`].
+    /// A run with neither refuses the whole merge, and the board stays as
+    /// it was. What is left of the pick is picked: the layer a run kept,
+    /// or — once its layer went — the top of the board.
+    pub fn merge(&mut self, doc: &mut Document, command: Command, drawn: &[Option<Image>]) -> Change {
+        let Some(request) = self.merge_request(doc, command) else {
+            return Change::None;
+        };
+        let runs = doc.merges(&request);
+        let pictured = |i: usize| drawn.get(i).and_then(Option::as_ref);
+        if !runs.iter().enumerate().all(|(i, r)| doc.exact(r) || pictured(i).is_some()) {
+            return Change::None;
+        }
+        let active = self.active(doc).to_owned();
+        let home = runs.iter().find(|r| {
+            r.members
+                .iter()
+                .filter_map(|m| doc.layer(m))
+                .any(|m| doc.subtree(m).contains(&active))
+        });
+        let landed = home.map(|r| r.keep.clone());
+        for (i, run) in runs.iter().enumerate() {
+            match pictured(i).filter(|_| !doc.exact(run)) {
+                Some(picture) => doc.merge_raster(run, picture.clone()),
+                None => doc.merge_structural(run),
+            }
+        }
+        let discarded = request == Merge::Flatten && doc.discard_hidden();
+        if runs.is_empty() && !discarded {
+            return Change::None;
+        }
+        self.layer = landed.or_else(|| doc.layer(&active).map(|l| l.id.clone()));
+        self.picked.clear();
+        self.selection.retain(|id| doc.elements.iter().any(|el| el.id() == id));
+        self.follow_the_pick(doc);
+        Change::Scene
+    }
+
+    /// Whether `command` would change anything, found out by doing it to
+    /// copies: the one answer that cannot disagree with the doing. A
+    /// merge is asked by its runs instead — one that is not exact waits
+    /// on a picture `app` can always take.
+    pub fn can(&self, doc: &Document, command: Command) -> bool {
+        if command.merges() {
+            let hidden = command == Command::Flatten && doc.rows(|_| true).iter().any(|r| !r.layer.visible);
+            return hidden || !self.merges(doc, command).is_empty();
+        }
+        let mut doc = doc.clone();
+        self.clone().run(&mut doc, command) != Change::None
+    }
+
+    /// Tags layer `id` with `tag` — and every picked layer with it, when
+    /// it is one of them, as a menu on a picked row speaks for the pick.
+    /// A lock does not keep a tag off: it is about the layer, and not
+    /// about what the layer holds.
+    pub fn set_tag(&mut self, doc: &mut Document, id: &str, tag: Tag) -> Change {
+        let picked = self.picked_ids(doc);
+        let ids = if picked.iter().any(|p| p == id) {
+            picked
+        } else {
+            vec![id.to_owned()]
+        };
+        let mut changed = false;
+        for id in ids {
+            if let Some(l) = doc.layer_mut(&id)
+                && l.color != tag
+            {
+                l.color = tag;
+                changed = true;
+            }
+        }
+        if changed { Change::Scene } else { Change::None }
+    }
+
+    /// Gives layer `id` the name it was typed. A name that is nothing but
+    /// space is not a name, and the layer keeps the one it had — a card
+    /// with no word on it can be neither read nor exported under.
+    pub fn rename_layer(&mut self, doc: &mut Document, id: &str, name: &str) -> Change {
+        let name = name.trim();
+        let Some(layer) = doc.layer_mut(id) else {
             return Change::None;
         };
         if name.is_empty() || layer.name == name {
@@ -629,85 +1314,146 @@ impl Editor {
         Change::Scene
     }
 
+    /// Removes the active layer with everything on it and under it — out
+    /// of the selection too — and activates the layer that was above it,
+    /// or the one below when it was on top, or the group it leaves empty.
+    /// The board and a frame keep their last layer, but not what it holds:
+    /// a layer is its object, so the trash takes the object either way.
     pub fn remove_layer(&mut self, doc: &mut Document) -> Change {
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let index = self.active_layer(doc);
-        // A frame layer takes its frame with it, and the panel cannot go
-        // on standing in a stack that is gone.
-        let leaving = doc
-            .stack(stack.as_deref())
-            .get(index)
-            .and_then(|l| doc.frame_on(&l.id))
-            .map(|f| f.id.clone());
-        if !doc.remove_layer(stack.as_deref(), index) {
-            let Some(layer) = doc.stack(stack.as_deref()).get(index) else {
-                return Change::None;
-            };
-            let last = layer.id.clone();
-            if !doc.elements.iter().any(|el| el.layer() == last) {
-                return Change::None;
-            }
-            doc.elements.retain(|el| el.layer() != last);
-            self.drag = None;
-            self.selection
-                .retain(|id| doc.elements.iter().any(|el| el.id() == id));
-            return Change::Scene;
+        let a = self.active(doc).to_owned();
+        let Some((owner, index)) = doc.locate(&a).map(|(o, i)| (o.map(str::to_owned), i)) else {
+            return Change::None;
+        };
+        let owner = owner.as_deref();
+        if doc.fixed(owner) {
+            return Change::None;
         }
-        if self.inside.as_deref() == leaving.as_deref() {
-            self.inside = None;
+        if !doc.remove_layer(owner, index) {
+            match doc.stack(owner).get(index).map(|l| l.kind) {
+                // A layer that holds objects stays, emptied.
+                Some(Kind::Raster | Kind::Vector) => {
+                    if !doc.elements.iter().any(|el| el.layer() == a) {
+                        return Change::None;
+                    }
+                    doc.elements.retain(|el| el.layer() != a);
+                    self.drag = None;
+                    self.selection
+                        .retain(|id| doc.elements.iter().any(|el| el.id() == id));
+                    return Change::Scene;
+                }
+                // One that holds layers goes, and a fresh one keeps the
+                // stack from standing empty — as the parse would.
+                Some(Kind::Group | Kind::Frame) => {
+                    let name = doc.next_layer_name(owner, Kind::Raster);
+                    if let Some(layers) = doc.stack_mut(owner) {
+                        layers.insert(index + 1, crate::doc::Layer::new(&name));
+                    }
+                    doc.remove_layer(owner, index);
+                }
+                None => return Change::None,
+            }
         }
         self.drag = None;
         self.selection
             .retain(|id| doc.elements.iter().any(|el| el.id() == id));
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let next = index.min(doc.stack(stack.as_deref()).len() - 1);
-        self.layer = Some(doc.stack(stack.as_deref())[next].id.clone());
+        let stack = doc.stack(owner);
+        self.picked.clear();
+        self.layer = match stack.len() {
+            0 => owner.map(str::to_owned),
+            n => Some(stack[index.min(n - 1)].id.clone()),
+        };
         Change::Scene
     }
 
-    /// Shows or hides layer `index`. What is hidden cannot be seen, so
-    /// it cannot stay selected either.
-    pub fn toggle_layer(&mut self, doc: &mut Document, index: usize) -> Change {
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let Some(layer) = doc
-            .stack_mut(stack.as_deref())
-            .and_then(|layers| layers.get_mut(index))
-        else {
+    /// Shows or hides layer `id`. What is hidden cannot be seen, so it
+    /// cannot stay selected either — hiding a group hides what it holds.
+    pub fn toggle_layer(&mut self, doc: &mut Document, id: &str) -> Change {
+        let Some(layer) = doc.layer_mut(id) else {
             return Change::None;
         };
         layer.visible = !layer.visible;
         if !layer.visible {
-            let hidden = layer.id.clone();
             self.drag = None;
-            self.selection.retain(|id| {
+            self.selection.retain(|sel| {
                 doc.elements
                     .iter()
-                    .any(|el| el.id() == id && el.layer() != hidden)
+                    .any(|el| el.id() == sel && doc.shown(el.layer()))
             });
         }
         Change::Scene
     }
 
-    /// Moves the active layer one step up or down. It keeps its id, so
-    /// it stays active.
-    pub fn move_layer(&mut self, doc: &mut Document, up: bool) -> Change {
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let index = self.active_layer(doc);
-        match doc.move_layer(stack.as_deref(), index, up) {
-            Some(_) => Change::Scene,
-            None => Change::None,
+    /// Drops the picked layers at `place` — what a card let go of over
+    /// the panel does — keeping their order. They stay picked, and what
+    /// holds them now is shown open.
+    pub fn drop_layers(&mut self, doc: &mut Document, place: &Place) -> Change {
+        let picked: Vec<String> = self.picked(doc).into_iter().map(str::to_owned).collect();
+        let Some((owner, index)) = doc.place(place).map(|(o, i)| (o.map(str::to_owned), i)) else {
+            return Change::None;
+        };
+        if !doc.move_layers(&picked, owner.as_deref(), index) {
+            return Change::None;
+        }
+        for id in &picked {
+            self.reveal(doc, id);
+        }
+        Change::Scene
+    }
+
+    /// The rows the panel shows: the tree as far as it is open, narrowed
+    /// by the filter while its bar is.
+    pub fn rows<'a>(&self, doc: &'a Document) -> Vec<tree::Row<'a>> {
+        match self.filtering() {
+            Some(filter) => doc.rows_matching(|id| self.is_open(id), filter),
+            None => doc.rows(|id| self.is_open(id)),
         }
     }
 
-    /// Drops the active layer at `index`, however far that is — what a
-    /// row dragged in the panel does. It keeps its id, so it stays
-    /// active wherever it lands.
-    pub fn move_layer_to(&mut self, doc: &mut Document, index: usize) -> Change {
-        let stack = self.inside_in(doc).map(str::to_owned);
-        let from = self.active_layer(doc);
-        match doc.reorder_layer(stack.as_deref(), from, index) {
-            true => Change::Scene,
-            false => Change::None,
+    /// The filter in force: the bar's, while it is open.
+    pub fn filtering(&self) -> Option<&Filter> {
+        self.filtering.then_some(&self.filter)
+    }
+
+    pub fn filter_mut(&mut self) -> &mut Filter {
+        &mut self.filter
+    }
+
+    /// Opens the filter's bar, or shuts it.
+    pub fn toggle_filter(&mut self) -> Change {
+        self.filtering = !self.filtering;
+        Change::Selection
+    }
+
+    /// Whether the panel shows `holder`'s layers under its row.
+    pub fn is_open(&self, holder: &str) -> bool {
+        self.open.iter().any(|id| id == holder)
+    }
+
+    /// Opens `holder`'s row, or shuts it, as asked.
+    pub fn set_open(&mut self, holder: &str, open: bool) -> Change {
+        if self.is_open(holder) != open {
+            return self.toggle_open(holder);
+        }
+        Change::None
+    }
+
+    /// Opens `holder`'s row, or shuts it.
+    pub fn toggle_open(&mut self, holder: &str) -> Change {
+        match self.open.iter().position(|id| id == holder) {
+            Some(i) => {
+                self.open.remove(i);
+            }
+            None => self.open.push(holder.to_owned()),
+        }
+        Change::Selection
+    }
+
+    /// Opens every row holding `layer`, so its own can be seen.
+    pub fn reveal(&mut self, doc: &Document, layer: &str) {
+        for holder in doc.ancestors(layer) {
+            if !self.is_open(&holder.id) {
+                self.open.push(holder.id.clone());
+            }
         }
     }
 
@@ -720,7 +1466,7 @@ impl Editor {
         Spot {
             selection: self.selection.clone(),
             layer: self.layer.clone(),
-            inside: self.inside.clone(),
+            picked: self.picked.clone(),
         }
     }
 
@@ -730,11 +1476,11 @@ impl Editor {
         let Spot {
             selection,
             layer,
-            inside,
+            picked,
         } = spot;
         self.selection = selection;
         self.layer = layer;
-        self.inside = inside;
+        self.picked = picked;
     }
 
     /// Something is in the middle of happening: a stroke, an area being
@@ -788,11 +1534,12 @@ impl Editor {
                 Change::None
             }
             (Button::Left, Tool::Pencil) => {
-                let born = doc.frame_at([world.0, world.1]).map(str::to_owned);
+                let born = doc.stack_at([world.0, world.1]).map(str::to_owned);
                 self.start_stroke(world, Tip::PENCIL, born)
             }
+            (Button::Left, Tool::Brush) if self.refuses_ink(doc, view, screen) => Change::None,
             (Button::Left, Tool::Brush) => {
-                let born = doc.frame_at([world.0, world.1]).map(str::to_owned);
+                let born = doc.stack_at([world.0, world.1]).map(str::to_owned);
                 self.start_stroke(world, brush.clone(), born)
             }
             (Button::Left, Tool::Frame) => {
@@ -876,24 +1623,23 @@ impl Editor {
         };
         if let Some(el) = doc.elements.iter().find(|el| el.id() == id) {
             let layer = el.layer().to_owned();
-            // A layer belongs to a stack, so going to it means going to
-            // that stack: picking something inside a frame goes in with
-            // it, and picking something on the board comes back out.
-            self.inside = doc
-                .locate(&layer)
-                .and_then(|(frame, _)| frame)
-                .map(str::to_owned);
+            // A layer belongs to a stack, and its row may be inside a
+            // group or a frame that is shut: picking the object opens
+            // them, so the panel can show where it is.
+            self.reveal(doc, &layer);
             self.layer = Some(layer);
         }
         if self.shift {
             if let Some(i) = self.selection.iter().position(|s| *s == id) {
                 self.selection.remove(i);
+                self.pick_what_is_selected(doc);
                 return Change::Selection;
             }
             self.selection.push(id);
         } else if !self.selection.contains(&id) {
             self.selection = vec![id];
         }
+        self.pick_what_is_selected(doc);
         let Some(frame) = select::frame_of(doc, &self.selection) else {
             return Change::Selection;
         };
@@ -920,9 +1666,17 @@ impl Editor {
         if (hi[0] - lo[0]) * px < MIN_FRAME_PX || (hi[1] - lo[1]) * px < MIN_FRAME_PX {
             return Change::Selection;
         }
-        // A frame is always the board's: it does not nest.
+        // A frame is always the board's: it does not nest. It goes in
+        // above whatever holds the active layer on the board's root.
+        let active = self.active(doc).to_owned();
+        let root = doc
+            .ancestors(&active)
+            .last()
+            .map_or(active.clone(), |l| l.id.clone());
         let above = doc
-            .layer_index(None, self.layer.as_deref().unwrap_or_default())
+            .layers
+            .iter()
+            .position(|l| l.id == root)
             .unwrap_or(doc.layers.len().saturating_sub(1));
         let Some(at) = doc.add_layer(None, above, Kind::Frame) else {
             return Change::None;
@@ -949,11 +1703,11 @@ impl Editor {
             })
             .collect();
         for l in claimed {
-            doc.rehome_layer(&l, Some(&id));
+            doc.rehome_layer(&l, Some(&layer));
         }
         self.selection = vec![id];
-        self.inside = None;
         self.layer = Some(layer);
+        self.picked.clear();
         Change::Scene
     }
 
@@ -972,9 +1726,9 @@ impl Editor {
                 continue;
             }
             let Some(f) = select::frame(el) else { continue };
-            let home = doc.frame_at(f.center).map(str::to_owned);
+            let home = doc.stack_at(f.center).map(str::to_owned);
             let layer = el.layer().to_owned();
-            let was = doc.locate(&layer).and_then(|(f, _)| f).map(str::to_owned);
+            let was = doc.context(&layer).map(str::to_owned);
             if was != home {
                 moves.push((layer, home));
             }
@@ -1142,6 +1896,7 @@ impl Editor {
                     }
                 }
                 self.selection = selection;
+                self.pick_what_is_selected(doc);
                 Change::Selection
             }
             None => Change::None,
@@ -1179,7 +1934,7 @@ impl Editor {
         // layer, so a stroke after it paints over the image, not beside it.
         // The pointer names the stack, as a press does: an image pasted
         // over a frame's area lands in it.
-        let born = doc.frame_at([cx, cy]).map(str::to_owned);
+        let born = doc.stack_at([cx, cy]).map(str::to_owned);
         let layer = self.fresh_layer(doc, Kind::Raster, born.as_deref());
         doc.elements.push(Element::Image(Image {
             id: id.clone(),
@@ -1219,6 +1974,7 @@ impl Editor {
             }
         }
         self.selection.clear();
+        self.picked.clear();
         Change::Scene
     }
 
@@ -1244,9 +2000,9 @@ impl Editor {
         match kind {
             Kind::Vector => curve::fit(&hand, tolerance),
             // A stroke is a pencil's or a brush's. A frame layer holds
-            // an area and never asks for curves, so it can only mean
-            // the brush's answer here.
-            Kind::Raster | Kind::Frame => curve::polyline(&hand),
+            // an area and a group holds layers; neither asks for curves,
+            // so either can only mean the brush's answer here.
+            Kind::Raster | Kind::Frame | Kind::Group => curve::polyline(&hand),
         }
     }
 
@@ -1312,13 +2068,11 @@ impl Editor {
                 }));
                 return Change::Scene;
             }
-            // A raster layer holds one painting: the stroke joins the
-            // paint already on it, and opens one only when there is none.
-            let onto = doc
-                .elements
-                .iter()
-                .position(|el| matches!(el, Element::Paint(p) if p.layer == layer));
-            if let Some(i) = onto
+            // A raster layer accumulates: the stroke joins the paint on
+            // top of it — where it was painted while it was drawn — and
+            // opens one on top when the top of the layer is not a paint.
+            let top = doc.elements.iter().rposition(|el| el.layer() == layer);
+            if let Some(i) = top
                 && let Element::Paint(p) = &mut doc.elements[i]
             {
                 p.strokes.push(laid);
@@ -1425,6 +2179,7 @@ impl Editor {
             }
             Some(Drag::Marquee { base, .. }) => {
                 self.selection = base;
+                self.pick_what_is_selected(doc);
                 true
             }
             None => false,
@@ -1440,8 +2195,29 @@ impl Editor {
         }
         let had_selection = !self.selection.is_empty();
         self.selection.clear();
+        self.picked.clear();
+        self.in_panel = false;
         had_selection
     }
+}
+
+/// Where a new layer goes once it is kept out of every locked holder:
+/// right above the outermost one it would have gone into. A locked group
+/// or frame is a stack nothing new goes into.
+fn clear_of_locks(doc: &Document, mut owner: Option<String>, mut above: usize) -> (Option<String>, usize) {
+    while let Some(o) = owner.clone() {
+        if !doc.locked(&o) {
+            break;
+        }
+        match doc.locate(&o) {
+            Some((up, i)) => {
+                owner = up.map(str::to_owned);
+                above = i;
+            }
+            None => break,
+        }
+    }
+    (owner, above)
 }
 
 fn point((x, y): (f64, f64)) -> Point {
@@ -1472,6 +2248,24 @@ mod tests {
         Brush::default()
     }
 
+    /// Where the active layer stands in its own stack — on a board of one
+    /// stack, its index in the board's.
+    fn active_at(e: &Editor, doc: &Document) -> usize {
+        doc.locate(e.active(doc)).expect("the active layer is on the board").1
+    }
+
+    /// Picks the board's layer `i`, by its id.
+    fn select_at(e: &mut Editor, doc: &Document, i: usize) -> Change {
+        let id = doc.layers.get(i).map_or(String::new(), |l| l.id.clone());
+        e.pick_layer(doc, &id, Pick::Only, &[])
+    }
+
+    /// Shows or hides the board's layer `i`, by its id.
+    fn toggle_at(e: &mut Editor, doc: &mut Document, i: usize) -> Change {
+        let id = doc.layers.get(i).map_or(String::new(), |l| l.id.clone());
+        e.toggle_layer(doc, &id)
+    }
+
     fn points(e: &Editor) -> Option<&[[f64; 2]]> {
         e.stroke().map(|s| s.points.as_slice())
     }
@@ -1495,9 +2289,7 @@ mod tests {
         let mut doc = board();
         doc.layers.push(Layer {
             id: "L2".into(),
-            name: "Layer 2".into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         doc.elements[1].set_layer("L2");
         doc
@@ -1679,14 +2471,14 @@ mod tests {
         let mut doc = Document::new("t");
         doc.add_layer(None, 0, Kind::Raster);
         doc.add_layer(None, 1, Kind::Raster);
-        assert_eq!(e.active_layer(&doc), 2);
-        assert_eq!(e.select_layer(&doc, 0), Change::Selection);
-        assert_eq!(e.active_layer(&doc), 0);
-        assert_eq!(e.select_layer(&doc, 9), Change::None);
-        assert_eq!(e.active_layer(&doc), 0);
+        assert_eq!(active_at(&e, &doc), 2);
+        assert_eq!(select_at(&mut e, &doc, 0), Change::Selection);
+        assert_eq!(active_at(&e, &doc), 0);
+        assert_eq!(e.pick_layer(&doc, "nobody", Pick::Only, &[]), Change::None);
+        assert_eq!(active_at(&e, &doc), 0);
         // The layer goes away under the editor: back to the top.
         assert!(doc.remove_layer(None, 0));
-        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(active_at(&e, &doc), 1);
     }
 
     /// The samples a fast brush stroke leaves: nine of them over ~450
@@ -1799,10 +2591,10 @@ mod tests {
         let v = view();
         assert_eq!(e.add_layer(&mut doc), Change::Scene);
         assert_eq!(doc.layers.len(), 2);
-        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(active_at(&e, &doc), 1);
         let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
         assert_eq!(paint_of(&doc, 0).layer, doc.layers[1].id);
-        let _ = e.select_layer(&doc, 0);
+        let _ = select_at(&mut e, &doc, 0);
         let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
         assert_eq!(paint_of(&doc, 1).layer, doc.layers[0].id, "another layer, another paint");
     }
@@ -1864,7 +2656,7 @@ mod tests {
         assert_eq!(doc.layers[0].id, first, "which went in above the active one");
         assert_eq!(doc.layers[1].kind, Kind::Vector);
         assert_eq!(path_of(&doc, 0).layer, doc.layers[1].id);
-        assert_eq!(e.active_layer(&doc), 1, "and is now the active one");
+        assert_eq!(active_at(&e, &doc), 1, "and is now the active one");
         // The next object gets one of its own too.
         let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
         assert_eq!(doc.layers.len(), 3);
@@ -1883,7 +2675,7 @@ mod tests {
         assert_eq!(doc.layers.len(), 3, "pixels cannot go on a vector layer");
         assert_eq!(doc.layers[2].kind, Kind::Raster);
         assert_eq!(paint_of(&doc, 1).layer, doc.layers[2].id);
-        assert_eq!(e.active_layer(&doc), 2);
+        assert_eq!(active_at(&e, &doc), 2);
         // The one after it finds that paint and joins it.
         let _ = drag(&mut e, &v, &mut doc, (1.0, 8.0), (9.0, 8.0));
         assert_eq!(doc.layers.len(), 3);
@@ -1938,7 +2730,7 @@ mod tests {
         assert_eq!(doc.layers.len(), 2);
         assert_eq!(doc.layers[1].kind, Kind::Raster);
         assert_eq!(doc.elements[0].layer(), doc.layers[1].id);
-        assert_eq!(e.active_layer(&doc), 1, "so a brush stroke lands over it");
+        assert_eq!(active_at(&e, &doc), 1, "so a brush stroke lands over it");
         // A second one does not join the first.
         let _ = e.paste_image(&mut doc, &v, None, BLOB.into(), (10, 10));
         assert_eq!(doc.layers.len(), 3);
@@ -1958,28 +2750,28 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = layered_board();
         let v = view();
-        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(active_at(&e, &doc), 1);
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
-        assert_eq!(e.active_layer(&doc), 0, "a is on L1");
+        assert_eq!(active_at(&e, &doc), 0, "a is on L1");
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
-        assert_eq!(e.active_layer(&doc), 1, "b is on L2");
+        assert_eq!(active_at(&e, &doc), 1, "b is on L2");
         e.hold_shift(true);
         let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
-        assert_eq!(e.active_layer(&doc), 0, "adding to the selection too");
+        assert_eq!(active_at(&e, &doc), 0, "adding to the selection too");
         e.hold_shift(false);
         // Empty canvas changes nothing.
         let _ = click(&mut e, &v, &mut doc, (50.0, 5.0));
-        assert_eq!(e.active_layer(&doc), 0);
+        assert_eq!(active_at(&e, &doc), 0);
     }
 
     #[test]
     fn add_layer_goes_in_above_the_active_one() {
         let mut e = Editor::new();
         let mut doc = layered_board();
-        let _ = e.select_layer(&doc, 0);
+        let _ = select_at(&mut e, &doc, 0);
         assert_eq!(e.add_layer(&mut doc), Change::Scene);
         assert_eq!(doc.layers.len(), 3);
-        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(active_at(&e, &doc), 1);
         assert_eq!(doc.layers[1].name, "Layer 3");
         assert_eq!(doc.layers[2].id, "L2");
     }
@@ -1991,12 +2783,12 @@ mod tests {
         let v = view();
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         assert_eq!(e.selection(), ids(&["b"]));
-        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(active_at(&e, &doc), 1);
         assert_eq!(e.remove_layer(&mut doc), Change::Scene);
         assert_eq!(doc.layers.len(), 1);
         assert_eq!(doc.elements.len(), 1, "b went with L2");
         assert!(e.selection().is_empty());
-        assert_eq!(e.active_layer(&doc), 0);
+        assert_eq!(active_at(&e, &doc), 0);
         assert_eq!(e.remove_layer(&mut doc), Change::Scene, "a takes its turn");
         assert_eq!(doc.layers.len(), 1, "the last layer stays");
         assert!(doc.elements.is_empty(), "though what it held does not");
@@ -2023,9 +2815,9 @@ mod tests {
         let _ = e.add_layer(&mut doc);
         let _ = e.add_layer(&mut doc);
         let top = doc.layers[2].id.clone();
-        let _ = e.select_layer(&doc, 1);
+        let _ = select_at(&mut e, &doc, 1);
         let _ = e.remove_layer(&mut doc);
-        assert_eq!(e.active_layer(&doc), 1);
+        assert_eq!(active_at(&e, &doc), 1);
         assert_eq!(doc.layers[1].id, top);
     }
 
@@ -2039,13 +2831,13 @@ mod tests {
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         e.hold_shift(false);
         assert_eq!(e.selection(), ids(&["a", "b"]));
-        assert_eq!(e.toggle_layer(&mut doc, 1), Change::Scene);
+        assert_eq!(toggle_at(&mut e, &mut doc, 1), Change::Scene);
         assert!(!doc.layers[1].visible);
         assert_eq!(e.selection(), ids(&["a"]), "b is hidden with its layer");
-        assert_eq!(e.toggle_layer(&mut doc, 1), Change::Scene);
+        assert_eq!(toggle_at(&mut e, &mut doc, 1), Change::Scene);
         assert!(doc.layers[1].visible);
         assert_eq!(e.selection(), ids(&["a"]));
-        assert_eq!(e.toggle_layer(&mut doc, 7), Change::None);
+        assert_eq!(toggle_at(&mut e, &mut doc, 7), Change::None);
     }
 
     #[test]
@@ -2053,39 +2845,9 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = layered_board();
         let v = view();
-        let _ = e.toggle_layer(&mut doc, 1);
+        let _ = toggle_at(&mut e, &mut doc, 1);
         let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
         assert!(e.selection().is_empty());
-    }
-
-    #[test]
-    fn move_layer_swaps_and_keeps_the_active_id() {
-        let mut e = Editor::new();
-        let mut doc = layered_board();
-        let _ = e.select_layer(&doc, 0);
-        assert_eq!(e.move_layer(&mut doc, true), Change::Scene);
-        assert_eq!(e.active_layer(&doc), 1);
-        assert_eq!(doc.layers[1].id, "L1");
-        assert_eq!(e.move_layer(&mut doc, true), Change::None, "already on top");
-        assert_eq!(e.move_layer(&mut doc, false), Change::Scene);
-        assert_eq!(e.active_layer(&doc), 0);
-        assert_eq!(e.move_layer(&mut doc, false), Change::None);
-    }
-
-    #[test]
-    fn move_layer_to_drops_the_active_layer_at_an_index() {
-        let mut e = Editor::new();
-        let mut doc = layered_board();
-        doc.add_layer(None, 1, Kind::Raster);
-        let top = doc.layers[2].id.clone();
-        let _ = e.select_layer(&doc, 2);
-        assert_eq!(e.move_layer_to(&mut doc, 0), Change::Scene);
-        assert_eq!(e.active_layer(&doc), 0, "it stays active where it landed");
-        assert_eq!(doc.layers[0].id, top);
-        assert_eq!(doc.layers[1].id, "L1", "the others keep their order");
-        assert_eq!(doc.layers[2].id, "L2");
-        assert_eq!(e.move_layer_to(&mut doc, 0), Change::None, "already there");
-        assert_eq!(e.move_layer_to(&mut doc, 9), Change::None, "no such place");
     }
 
     /// 100×100 viewport looking at (50, 50) at zoom 1: screen px == world.
@@ -2117,7 +2879,8 @@ mod tests {
     fn renaming_a_layer_writes_the_name_and_asks_for_a_save() {
         let mut doc = Document::new("t");
         let mut ed = Editor::default();
-        assert_eq!(ed.rename_layer(&mut doc, 0, "  auth flow  "), Change::Scene);
+        let id = doc.layers[0].id.clone();
+        assert_eq!(ed.rename_layer(&mut doc, &id, "  auth flow  "), Change::Scene);
         assert_eq!(doc.layers[0].name, "auth flow");
     }
 
@@ -2125,14 +2888,15 @@ mod tests {
     fn a_name_of_nothing_but_space_leaves_the_layer_as_it_was() {
         let mut doc = Document::new("t");
         let was = doc.layers[0].name.clone();
-        assert_eq!(ed_default().rename_layer(&mut doc, 0, "   "), Change::None);
+        let id = doc.layers[0].id.clone();
+        assert_eq!(ed_default().rename_layer(&mut doc, &id, "   "), Change::None);
         assert_eq!(doc.layers[0].name, was);
     }
 
     #[test]
-    fn renaming_past_the_end_of_the_stack_changes_nothing() {
+    fn renaming_a_layer_that_is_not_there_changes_nothing() {
         let mut doc = Document::new("t");
-        assert_eq!(ed_default().rename_layer(&mut doc, 9, "x"), Change::None);
+        assert_eq!(ed_default().rename_layer(&mut doc, "nobody", "x"), Change::None);
     }
 
     fn tool(t: Tool) -> Editor {
@@ -3147,106 +3911,123 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_starts_on_the_board_and_can_enter_a_frame() {
+    fn a_layer_inside_a_frame_is_picked_by_its_id_like_any_other() {
         let doc = framed_editor_doc();
         let mut e = Editor::new();
-        assert_eq!(e.inside(), None);
-        let _ = e.enter_frame(&doc, "fr");
-        assert_eq!(e.inside(), Some("fr"));
-        assert_eq!(e.active_layer(&doc), 0, "the top of the frame's stack");
-        assert_eq!(doc.stack(e.inside())[e.active_layer(&doc)].id, "in");
-        let _ = e.leave_frame(&doc);
-        assert_eq!(e.inside(), None);
+        assert_eq!(e.active(&doc), "fl", "the top of the board's root");
+        assert_eq!(e.pick_layer(&doc, "in", Pick::Only, &[]), Change::Selection);
+        assert_eq!(e.active(&doc), "in");
+        assert_eq!(e.pick_layer(&doc, "nobody", Pick::Only, &[]), Change::None);
+        assert_eq!(e.active(&doc), "in");
     }
 
     #[test]
-    fn entering_a_frame_that_is_not_there_does_nothing() {
-        let doc = framed_editor_doc();
-        let mut e = Editor::new();
-        let _ = e.enter_frame(&doc, "nobody");
-        assert_eq!(e.inside(), None);
-    }
-
-    #[test]
-    fn a_layer_added_while_inside_a_frame_lands_in_the_frames_stack() {
+    fn a_layer_added_with_a_frame_active_goes_into_its_stack_on_top() {
         let mut doc = framed_editor_doc();
         let mut e = Editor::new();
-        let _ = e.enter_frame(&doc, "fr");
+        let _ = e.pick_layer(&doc, "fl", Pick::Only, &[]);
+        assert_eq!(e.add_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.stack(Some("fl")).len(), 2);
+        assert_eq!(doc.layers.len(), 1, "the board's root did not grow");
+        assert_eq!(doc.stack(Some("fl"))[1].id, e.active(&doc), "on top, and active");
+        assert!(e.is_open("fl"), "and its row can be seen");
+    }
+
+    #[test]
+    fn a_layer_added_with_a_layer_in_a_frame_active_goes_right_above_it() {
+        let mut doc = framed_editor_doc();
+        doc.add_layer(Some("fl"), 0, Kind::Raster).unwrap();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "in", Pick::Only, &[]);
         let _ = e.add_layer(&mut doc);
-        assert_eq!(doc.stack(Some("fr")).len(), 2);
-        assert_eq!(doc.layers.len(), 1, "the board's stack did not grow");
+        let stack = doc.stack(Some("fl"));
+        assert_eq!(stack.len(), 3);
+        assert_eq!(stack[0].id, "in");
+        assert_eq!(stack[1].id, e.active(&doc));
     }
 
     #[test]
-    fn leaving_a_frame_makes_its_own_layer_active() {
-        let doc = framed_editor_doc();
+    fn a_group_added_with_a_group_active_goes_inside_it() {
+        let mut doc = crate::tree::tests::nested();
         let mut e = Editor::new();
-        let _ = e.enter_frame(&doc, "fr");
-        let _ = e.leave_frame(&doc);
-        assert_eq!(
-            doc.stack(None)[e.active_layer(&doc)].id,
-            "fl",
-            "the card the pointer came from"
-        );
+        let _ = e.pick_layer(&doc, "H", Pick::Only, &[]);
+        assert_eq!(e.add_group(&mut doc), Change::Scene);
+        let new = e.active(&doc).to_owned();
+        assert_eq!(doc.locate(&new), Some((Some("H"), 1)), "on top of H's own");
+        let group = doc.layer(&new).unwrap();
+        assert_eq!(group.kind, Kind::Group);
+        assert_eq!(group.name, "Group 3", "numbered across the board's tree");
     }
 
     #[test]
-    fn inside_lets_go_when_its_frame_is_gone() {
+    fn the_active_layer_falls_back_to_the_top_when_its_layer_is_gone() {
         let mut doc = framed_editor_doc();
         let mut e = Editor::new();
-        let _ = e.enter_frame(&doc, "fr");
+        let _ = e.pick_layer(&doc, "in", Pick::Only, &[]);
         doc.elements.retain(|el| el.id() != "fr");
         doc.layers.clear();
         doc.layers.push(crate::doc::Layer::new("Layer 1"));
-        assert_eq!(
-            e.active_layer(&doc),
-            0,
-            "it falls back to the board's top layer"
-        );
+        assert_eq!(e.active(&doc), doc.layers[0].id);
     }
 
-    /// A layer picked inside a frame is read against that frame's stack,
-    /// not the board's.
+    /// The frame's own layer takes the frame, its stack and everything on
+    /// it.
     #[test]
-    fn select_layer_reads_the_stack_being_worked_in() {
-        let mut doc = framed_editor_doc();
-        let mut e = Editor::new();
-        let _ = e.enter_frame(&doc, "fr");
-        doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
-        let _ = e.select_layer(&doc, 0);
-        assert_eq!(doc.stack(Some("fr"))[e.active_layer(&doc)].id, "in");
-        let _ = e.select_layer(&doc, 1);
-        assert_eq!(e.active_layer(&doc), 1);
-    }
-
-    /// Deleting the frame's own layer from the board takes the frame,
-    /// its stack and everything on it — and the panel stops standing in
-    /// a stack that is gone.
-    #[test]
-    fn removing_a_frame_layer_lets_go_of_the_frame() {
+    fn removing_a_frame_layer_takes_the_frame_and_what_it_holds() {
         let mut doc = framed_editor_doc();
         doc.layers.insert(0, crate::doc::Layer::new("Layer 1"));
         let mut e = Editor::new();
-        let _ = e.enter_frame(&doc, "fr");
-        let _ = e.leave_frame(&doc);
-        let _ = e.enter_frame(&doc, "fr");
-        // Stand on the board, on the frame's own card, and take it out.
-        e.inside = None;
-        e.layer = Some("fl".into());
-        let _ = e.remove_layer(&mut doc);
-        assert!(!doc.elements.iter().any(|el| el.id() == "fr"));
-        assert_eq!(e.inside(), None, "and the panel came back out");
+        let _ = e.pick_layer(&doc, "fl", Pick::Only, &[]);
+        assert_eq!(e.remove_layer(&mut doc), Change::Scene);
+        assert!(doc.frame("fr").is_none());
+        assert!(doc.layer("in").is_none());
+        assert_eq!(e.active(&doc), doc.layers[0].id, "the one left below");
     }
 
-    /// A layer hidden inside a frame is the frame's, not the board's.
+    /// A board keeps a layer: the only one it has going, when that one
+    /// holds layers, leaves a fresh one behind rather than a frame layer
+    /// with no frame on it.
+    #[test]
+    fn removing_the_boards_only_frame_leaves_a_fresh_layer() {
+        let mut doc = framed_editor_doc();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "fl", Pick::Only, &[]);
+        assert_eq!(e.remove_layer(&mut doc), Change::Scene);
+        assert!(doc.frame("fr").is_none());
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.layers[0].kind, Kind::Raster);
+        Document::from_json(&doc.to_json().unwrap()).expect("and it is still a board");
+    }
+
+    #[test]
+    fn removing_a_groups_last_layer_leaves_the_group_empty_and_active() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "C", Pick::Only, &[]);
+        assert_eq!(e.remove_layer(&mut doc), Change::Scene);
+        assert!(doc.layer("H").unwrap().layers.is_empty(), "a group may stand empty");
+        assert_eq!(e.active(&doc), "H");
+    }
+
     #[test]
     fn toggling_a_layer_inside_a_frame_hides_that_one() {
         let mut doc = framed_editor_doc();
         let mut e = Editor::new();
-        let _ = e.enter_frame(&doc, "fr");
-        let _ = e.toggle_layer(&mut doc, 0);
-        assert!(!doc.stack(Some("fr"))[0].visible);
+        assert_eq!(e.toggle_layer(&mut doc, "in"), Change::Scene);
+        assert!(!doc.layer("in").unwrap().visible);
         assert!(doc.layers[0].visible, "the frame's own card is untouched");
+    }
+
+    #[test]
+    fn hiding_a_group_lets_go_of_what_it_holds() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        e.go(Spot {
+            selection: vec!["c".into(), "a".into()],
+            ..Spot::default()
+        });
+        let _ = e.toggle_layer(&mut doc, "G");
+        assert_eq!(e.selection(), ["a"], "c is in G's group H");
     }
 
     /// A press at a world point, through the view the test is using.
@@ -3261,9 +4042,7 @@ mod tests {
             .iter()
             .find(|el| matches!(el, Element::Paint(_)))
             .expect("a paint landed");
-        doc.locate(paint.layer())
-            .and_then(|(f, _)| f)
-            .map(str::to_owned)
+        doc.context(paint.layer()).map(str::to_owned)
     }
 
     #[test]
@@ -3275,7 +4054,7 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 20.0, 20.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.moved(&v, at(&v, 40.0, 40.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 40.0, 40.0), &mut doc, "#111");
-        assert_eq!(paint_stack(&doc).as_deref(), Some("fr"));
+        assert_eq!(paint_stack(&doc).as_deref(), Some("fl"));
     }
 
     /// The press decides, not the release: a stroke that wanders out of
@@ -3289,7 +4068,7 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 20.0, 20.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.moved(&v, at(&v, 500.0, 500.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 500.0, 500.0), &mut doc, "#111");
-        assert_eq!(paint_stack(&doc).as_deref(), Some("fr"));
+        assert_eq!(paint_stack(&doc).as_deref(), Some("fl"));
     }
 
     #[test]
@@ -3319,13 +4098,13 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 20.0, 20.0), &mut doc, &brush().tip(Face::Round));
         let live = e.live_layer(&doc).map(str::to_owned);
         assert_eq!(
-            live.as_deref().and_then(|l| doc.locate(l)).and_then(|(f, _)| f),
-            Some("fr"),
+            live.as_deref().and_then(|l| doc.context(l)),
+            Some("fl"),
             "the live stroke is painted in the frame the press was in"
         );
         let _ = e.moved(&v, at(&v, 40.0, 40.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 40.0, 40.0), &mut doc, "#111");
-        assert_eq!(paint_stack(&doc).as_deref(), Some("fr"));
+        assert_eq!(paint_stack(&doc).as_deref(), Some("fl"));
     }
 
     /// A pencil opens a layer of its own, and it opens it in the frame
@@ -3345,8 +4124,8 @@ mod tests {
             .iter()
             .find(|el| matches!(el, Element::Path(_)))
             .expect("a path landed");
-        assert_eq!(doc.locate(path.layer()).and_then(|(f, _)| f), Some("fr"));
-        assert_eq!(doc.stack(Some("fr")).len(), 2, "its own layer, in the frame");
+        assert_eq!(doc.context(path.layer()), Some("fl"));
+        assert_eq!(doc.stack(Some("fl")).len(), 2, "its own layer, in the frame");
     }
 
     /// A loose rect on a board layer of its own, well away from the
@@ -3380,8 +4159,8 @@ mod tests {
         let _ = e.moved(&v, at(&v, 55.0, 55.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 55.0, 55.0), &mut doc, "#111");
         assert_eq!(
-            doc.locate(&layer).and_then(|(f, _)| f),
-            Some("fr"),
+            doc.context(&layer),
+            Some("fl"),
             "the layer moved into the frame"
         );
         let el = doc.elements.iter().find(|el| el.id() == "loose").unwrap();
@@ -3409,7 +4188,7 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.moved(&v, at(&v, 600.0, 600.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 600.0, 600.0), &mut doc, "#111");
-        assert_eq!(doc.locate("in").and_then(|(f, _)| f), None, "the layer came out");
+        assert_eq!(doc.context("in"), None, "the layer came out");
     }
 
     #[test]
@@ -3418,9 +4197,7 @@ mod tests {
         doc.layers.insert(0, Layer::new("Layer 1"));
         doc.layers.push(Layer {
             id: "fl2".into(),
-            name: "Frame 2".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Frame 2", Kind::Frame)
         });
         doc.elements.push(Element::Frame(crate::doc::Frame {
             id: "fr2".into(),
@@ -3438,7 +4215,7 @@ mod tests {
         let _ = e.moved(&v, at(&v, 460.0, 460.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 460.0, 460.0), &mut doc, "#111");
         assert_eq!(
-            doc.locate("fl").and_then(|(f, _)| f),
+            doc.context("fl"),
             None,
             "a frame does not nest, however far it is dragged"
         );
@@ -3453,7 +4230,7 @@ mod tests {
         let v = view();
         let _ = e.press(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.release(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, "#111");
-        assert_eq!(doc.locate(&layer).and_then(|(f, _)| f), None);
+        assert_eq!(doc.context(&layer), None);
     }
 
     /// The frame of `framed_editor_doc`, with a rect inside it and a
@@ -3561,8 +4338,8 @@ mod tests {
         let v = view();
         let _ = e.press(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, &brush().tip(Face::Round));
         assert_eq!(e.selection(), ["held"]);
-        assert_eq!(e.inside(), Some("fr"));
-        assert_eq!(doc.stack(e.inside())[e.active_layer(&doc)].id, "in");
+        assert_eq!(e.active(&doc), "in", "its layer, in the frame");
+        assert!(e.is_open("fl"), "and the frame's row is open to show it");
     }
 
     /// And picking something on the board comes back out.
@@ -3575,8 +4352,7 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.release(Button::Left, &v, at(&v, 45.0, 45.0), &mut doc, "#111");
         let _ = e.press(Button::Left, &v, at(&v, 505.0, 505.0), &mut doc, &brush().tip(Face::Round));
-        assert_eq!(e.inside(), None);
-        assert_eq!(doc.stack(None)[e.active_layer(&doc)].id, layer);
+        assert_eq!(e.active(&doc), layer);
     }
 
     #[test]
@@ -3667,10 +4443,10 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.moved(&v, at(&v, 200.0, 150.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 200.0, 150.0), &mut doc, "#111");
-        let id = the_frame(&doc).id.clone();
+        let layer = the_frame(&doc).layer.clone();
         assert_eq!(
-            doc.locate(&board).and_then(|(f, _)| f),
-            Some(id.as_str()),
+            doc.context(&board),
+            Some(layer.as_str()),
             "an object visibly inside the area is in it"
         );
     }
@@ -3697,7 +4473,7 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 0.0, 0.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.moved(&v, at(&v, 200.0, 150.0), &mut doc);
         let _ = e.release(Button::Left, &v, at(&v, 200.0, 150.0), &mut doc, "#111");
-        assert_eq!(doc.locate(&board).and_then(|(f, _)| f), None);
+        assert_eq!(doc.context(&board), None);
     }
 
     #[test]
@@ -3728,23 +4504,20 @@ mod tests {
     }
 
     #[test]
-    fn a_spot_is_what_is_selected_the_ink_layer_and_the_frame_worked_in() {
+    fn a_spot_is_what_is_selected_and_the_ink_layer() {
         let mut e = Editor::new();
         e.selection = vec!["a".into()];
         e.layer = Some("L1".into());
-        e.inside = Some("F1".into());
         let spot = e.at();
         assert_eq!(spot.selection, ["a"]);
         assert_eq!(spot.layer.as_deref(), Some("L1"));
-        assert_eq!(spot.inside.as_deref(), Some("F1"));
     }
 
     #[test]
-    fn going_to_a_spot_puts_all_three_back() {
+    fn going_to_a_spot_puts_it_all_back() {
         let mut e = Editor::new();
         e.selection = vec!["a".into()];
         e.layer = Some("L1".into());
-        e.inside = Some("F1".into());
         let there = e.at();
 
         let mut other = Editor::new();
@@ -3764,6 +4537,732 @@ mod tests {
         e.go(Spot::default());
         assert_eq!(e.tool(), Tool::Brush);
         assert!(e.shift);
+    }
+
+    /// The rows of [`crate::tree::tests::nested`] with `G` open, top
+    /// first: what `Shift` ranges over.
+    const ROWS: [&str; 5] = ["F", "G", "H", "B", "A"];
+
+    fn picked(e: &Editor, doc: &Document) -> Vec<String> {
+        e.picked(doc).into_iter().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_plain_pick_takes_one_layer_and_makes_it_active() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        assert_eq!(picked(&e, &doc), ["F"], "nothing picked is the active layer alone");
+        assert_eq!(e.pick_layer(&doc, "B", Pick::Only, &ROWS), Change::Selection);
+        assert_eq!(picked(&e, &doc), ["B"]);
+        assert_eq!(e.active(&doc), "B");
+        assert_eq!(e.pick_layer(&doc, "nobody", Pick::Only, &ROWS), Change::None);
+        assert_eq!(picked(&e, &doc), ["B"]);
+    }
+
+    #[test]
+    fn ctrl_takes_a_layer_in_and_out_of_the_pick() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "C", Pick::Toggle, &ROWS);
+        assert_eq!(picked(&e, &doc), ["A", "C"]);
+        assert_eq!(e.active(&doc), "C", "the one just taken is where ink goes");
+        let _ = e.pick_layer(&doc, "A", Pick::Toggle, &ROWS);
+        assert_eq!(picked(&e, &doc), ["C"]);
+        // The last one stays: there is always a layer to paint on.
+        let _ = e.pick_layer(&doc, "C", Pick::Toggle, &ROWS);
+        assert_eq!(picked(&e, &doc), ["C"]);
+    }
+
+    #[test]
+    fn shift_takes_the_rows_between_the_anchor_and_the_press() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "B", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "F", Pick::Range, &ROWS);
+        assert_eq!(picked(&e, &doc), ["F", "G", "H", "B"], "in row order, both ends in");
+        assert_eq!(e.active(&doc), "B", "the anchor stays where it was");
+        // Again from the same anchor, the other way: the range is
+        // measured from it, not added to.
+        let _ = e.pick_layer(&doc, "A", Pick::Range, &ROWS);
+        assert_eq!(picked(&e, &doc), ["B", "A"]);
+    }
+
+    #[test]
+    fn with_the_select_tool_a_picked_layer_selects_its_objects() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        // A group's are everything under it, in paint order.
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert_eq!(e.selection(), ["b", "c"]);
+        // A frame's is the frame, which carries what it holds.
+        let _ = e.pick_layer(&doc, "F", Pick::Only, &ROWS);
+        assert_eq!(e.selection(), ["fr"]);
+        let _ = e.pick_layer(&doc, "A", Pick::Toggle, &ROWS);
+        assert_eq!(e.selection(), ["a", "fr"]);
+        // What is hidden or locked is not there to be selected.
+        doc.layer_mut("H").unwrap().visible = false;
+        doc.layer_mut("B").unwrap().locked = true;
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert!(e.selection().is_empty(), "{:?}", e.selection());
+    }
+
+    #[test]
+    fn with_a_painting_tool_a_pick_leaves_the_canvas_alone() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = tool(Tool::Brush);
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert!(e.selection().is_empty());
+        assert_eq!(e.active(&doc), "A", "the layer the next stroke joins");
+        let _ = &mut doc;
+    }
+
+    #[test]
+    fn picking_objects_on_the_canvas_picks_their_layers() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        e.hold_shift(true);
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        e.hold_shift(false);
+        assert_eq!(picked(&e, &doc), ["L1", "L2"]);
+        assert_eq!(e.active(&doc), "L2", "the last one picked");
+        // A marquee picks what it catches.
+        let _ = e.escape(&mut doc);
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 1.0), (99.0, 99.0));
+        assert_eq!(picked(&e, &doc), ["L1", "L2"]);
+    }
+
+    #[test]
+    fn letting_go_of_the_selection_keeps_the_active_layer() {
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (15.0, 15.0));
+        assert!(e.escape(&mut doc));
+        assert_eq!(picked(&e, &doc), ["L1"], "the active layer, and nothing else");
+    }
+
+    #[test]
+    fn a_spot_keeps_the_pick() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "C", Pick::Toggle, &ROWS);
+        let there = e.at();
+        let mut other = Editor::new();
+        other.go(there);
+        assert_eq!(picked(&other, &doc), ["A", "C"]);
+    }
+
+    #[test]
+    fn dropping_the_picked_layers_moves_them_all_and_opens_where_they_went() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        assert_eq!(e.drop_layers(&mut doc, &Place::Into("F".into())), Change::Scene);
+        assert_eq!(doc.context("A"), Some("F"));
+        assert_eq!(doc.context("B"), Some("F"));
+        assert_eq!(picked(&e, &doc), ["A", "B"], "still picked where they landed");
+        assert!(e.is_open("F"), "and the frame shows them");
+        assert_eq!(
+            e.drop_layers(&mut doc, &Place::Into("A".into())),
+            Change::None,
+            "a layer holds none"
+        );
+    }
+
+    #[test]
+    fn grouping_the_picked_layers_picks_the_group() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        assert_eq!(e.group_layers(&mut doc), Change::Scene);
+        let g = e.active(&doc).to_owned();
+        assert_eq!(doc.layer(&g).unwrap().kind, Kind::Group);
+        assert_eq!(picked(&e, &doc), [g]);
+        assert!(e.is_open("G"), "where it stands can be seen");
+        // A frame is never grouped.
+        let _ = e.pick_layer(&doc, "F", Pick::Only, &ROWS);
+        assert_eq!(e.group_layers(&mut doc), Change::None);
+    }
+
+    #[test]
+    fn ungrouping_picks_what_the_group_held() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert_eq!(e.ungroup(&mut doc), Change::Scene);
+        assert_eq!(picked(&e, &doc), ["B", "H"]);
+        assert_eq!(e.active(&doc), "H");
+        assert_eq!(e.ungroup(&mut doc), Change::Scene, "H is a group too");
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.ungroup(&mut doc), Change::None, "a layer is no group");
+    }
+
+    #[test]
+    fn duplicating_picks_the_copies() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.duplicate_layers(&mut doc), Change::Scene);
+        let copy = e.active(&doc).to_owned();
+        assert_ne!(copy, "A");
+        assert_eq!(doc.locate(&copy), Some((None, 1)), "right above A");
+        assert_eq!(picked(&e, &doc), [copy]);
+        assert_eq!(e.selection().len(), 1, "and, with the Select tool, what it holds");
+    }
+
+    #[test]
+    fn removing_the_picked_layers_takes_them_all() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "H", Pick::Toggle, &ROWS);
+        assert_eq!(e.remove_layers(&mut doc), Change::Scene);
+        assert!(doc.layer("A").is_none() && doc.layer("H").is_none() && doc.layer("C").is_none());
+        assert!(!doc.elements.iter().any(|el| el.id() == "a" || el.id() == "c"));
+        assert!(e.selection().is_empty());
+        assert!(doc.layer(e.active(&doc)).is_some(), "the active layer is one that is left");
+        Document::from_json(&doc.to_json().unwrap()).expect("still a board");
+    }
+
+    #[test]
+    fn delete_takes_what_was_picked_where_it_was_picked() {
+        // Picked in the panel: the layers go, holders and all.
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert_eq!(e.delete(&mut doc), Change::Scene);
+        assert!(doc.layer("G").is_none(), "the group went, not only what it held");
+        // Picked on the canvas: the objects go, and a layer they empty.
+        let mut e = Editor::new();
+        let mut doc = layered_board();
+        let v = view();
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        assert_eq!(e.delete(&mut doc), Change::Scene);
+        assert!(doc.layer("L2").is_none());
+        assert!(doc.layer("L1").is_some(), "the layer of what was not selected stays");
+    }
+
+    #[test]
+    fn arranging_moves_the_picked_layers_in_their_stacks() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.arrange(&mut doc, Arrange::Front), Change::Scene);
+        assert_eq!(doc.locate("A"), Some((None, 2)));
+        assert_eq!(e.arrange(&mut doc, Arrange::Forward), Change::None, "already on top");
+        assert_eq!(e.arrange(&mut doc, Arrange::Backward), Change::Scene);
+        assert_eq!(doc.locate("A"), Some((None, 1)));
+    }
+
+    #[test]
+    fn a_brush_stroke_on_a_locked_layer_is_refused_before_it_starts() {
+        let mut doc = grouped_board();
+        doc.layer_mut("R").unwrap().locked = true;
+        let mut e = tool(Tool::Brush);
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        let v = view();
+        assert!(e.refuses_ink(&doc, &v, (5.0, 5.0)), "the cursor can say so first");
+        let tip = brush().tip(Face::Round);
+        assert_eq!(e.press(Button::Left, &v, (5.0, 5.0), &mut doc, &tip), Change::None);
+        assert!(e.stroke().is_none());
+        // A locked group locks the layer it holds all the same.
+        doc.layer_mut("R").unwrap().locked = false;
+        doc.layer_mut("G").unwrap().locked = true;
+        assert!(e.refuses_ink(&doc, &v, (5.0, 5.0)));
+    }
+
+    #[test]
+    fn new_ink_never_opens_a_layer_inside_a_locked_group() {
+        let mut doc = grouped_board();
+        doc.layer_mut("G").unwrap().locked = true;
+        let mut e = pencil();
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        let v = view();
+        assert!(!e.refuses_ink(&doc, &v, (5.0, 5.0)), "a pencil opens a layer of its own");
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        assert_eq!(doc.layer("G").unwrap().layers.len(), 1, "nothing went into the locked group");
+        assert_eq!(doc.locate(e.active(&doc)), Some((None, 1)), "it opened right above it");
+    }
+
+    #[test]
+    fn a_layer_added_with_a_locked_group_active_opens_above_it() {
+        let mut doc = grouped_board();
+        doc.layer_mut("G").unwrap().locked = true;
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &[]);
+        assert_eq!(e.add_layer(&mut doc), Change::Scene);
+        assert_eq!(doc.locate(e.active(&doc)), Some((None, 1)));
+    }
+
+    #[test]
+    fn locking_the_picked_layers_lets_go_of_what_they_hold() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        assert_eq!(e.selection(), ["a"]);
+        assert_eq!(e.toggle_lock(&mut doc), Change::Scene);
+        assert!(doc.layer("A").unwrap().locked);
+        assert!(e.selection().is_empty(), "a locked object is not held");
+        let _ = e.toggle_lock(&mut doc);
+        assert!(!doc.layer("A").unwrap().locked);
+        // Several at once: all locked while any is open, all opened once
+        // every one is locked.
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        doc.layer_mut("B").unwrap().locked = true;
+        let _ = e.toggle_lock(&mut doc);
+        assert!(doc.layer("A").unwrap().locked && doc.layer("B").unwrap().locked);
+        let _ = e.toggle_lock(&mut doc);
+        assert!(!doc.layer("A").unwrap().locked && !doc.layer("B").unwrap().locked);
+    }
+
+    #[test]
+    fn hiding_the_picked_layers_hides_them_all_or_shows_them_all() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        doc.layer_mut("B").unwrap().visible = false;
+        assert_eq!(e.toggle_shown(&mut doc), Change::Scene);
+        assert!(!doc.layer("A").unwrap().visible && !doc.layer("B").unwrap().visible);
+        assert!(e.selection().is_empty(), "what is hidden is not held");
+        let _ = e.toggle_shown(&mut doc);
+        assert!(doc.layer("A").unwrap().visible && doc.layer("B").unwrap().visible);
+    }
+
+    #[test]
+    fn a_layer_in_a_locked_group_is_not_removed() {
+        let mut doc = grouped_board();
+        doc.layer_mut("G").unwrap().locked = true;
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        assert_eq!(e.remove_layers(&mut doc), Change::None);
+        assert!(doc.layer("R").is_some());
+        // The locked group itself goes, from a stack that is free.
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &[]);
+        assert_eq!(e.remove_layers(&mut doc), Change::Scene);
+        assert!(doc.layer("G").is_none());
+    }
+
+    #[test]
+    fn a_brush_stroke_joins_the_paint_on_top_of_its_layer_or_goes_on_top() {
+        // A layer holding a paint under an image: the stroke lands over
+        // the image, where it was painted while it was drawn — not in the
+        // paint under it.
+        let mut doc = Document::new("t");
+        let layer = doc.layers[0].id.clone();
+        let mut e = tool(Tool::Brush);
+        let v = view();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        doc.elements.push(Element::Image(Image {
+            id: "img".into(),
+            layer: layer.clone(),
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            rotation: 0.0,
+            blob: BLOB.into(),
+        }));
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 5.0), (9.0, 5.0));
+        let on: Vec<&Element> = doc.elements.iter().filter(|el| el.layer() == layer).collect();
+        assert_eq!(on.len(), 3, "a paint of its own, over the image");
+        assert!(matches!(on[2], Element::Paint(p) if p.strokes.len() == 1));
+        assert!(matches!(on[0], Element::Paint(p) if p.strokes.len() == 1));
+        // And the next stroke joins that one, the paint on top.
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 8.0), (9.0, 8.0));
+        let on: Vec<&Element> = doc.elements.iter().filter(|el| el.layer() == layer).collect();
+        assert!(matches!(on[2], Element::Paint(p) if p.strokes.len() == 2));
+    }
+
+    #[test]
+    fn the_picked_layers_take_a_strength_and_a_locked_one_keeps_its_own() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "G", Pick::Toggle, &ROWS);
+        doc.layer_mut("G").unwrap().locked = true;
+        assert_eq!(e.set_opacity(&mut doc, 0.4), Change::Scene);
+        assert_eq!(doc.layer("A").unwrap().opacity, 0.4);
+        assert_eq!(doc.layer("G").unwrap().opacity, 1.0, "a lock keeps how a layer draws");
+        assert_eq!(e.set_opacity(&mut doc, 0.4), Change::None, "already so");
+        let _ = e.set_opacity(&mut doc, 7.0);
+        assert_eq!(doc.layer("A").unwrap().opacity, 1.0, "a strength is a fraction");
+        let _ = e.set_opacity(&mut doc, f64::NAN);
+        assert_eq!(doc.layer("A").unwrap().opacity, 1.0, "and a number");
+    }
+
+    #[test]
+    fn the_picked_layers_take_a_blend_mode_and_only_a_group_passes_through() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "G", Pick::Toggle, &ROWS);
+        assert_eq!(e.set_blend(&mut doc, BlendMode::Screen), Change::Scene);
+        assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen);
+        assert_eq!(doc.layer("G").unwrap().blend, BlendMode::Screen);
+        assert_eq!(e.set_blend(&mut doc, BlendMode::PassThrough), Change::Scene);
+        assert_eq!(doc.layer("G").unwrap().blend, BlendMode::PassThrough);
+        assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen, "a layer does not pass through");
+        doc.layer_mut("A").unwrap().locked = true;
+        let _ = e.set_blend(&mut doc, BlendMode::Multiply);
+        assert_eq!(doc.layer("A").unwrap().blend, BlendMode::Screen, "a lock keeps how it draws");
+        assert_eq!(e.set_blend(&mut doc, BlendMode::Multiply), Change::None, "already so");
+    }
+
+    #[test]
+    fn a_command_runs_and_can_says_whether_it_would_change_anything() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "B", Pick::Only, &ROWS);
+        let (before, at) = (doc.clone(), e.at());
+        assert!(e.can(&doc, Command::Group));
+        assert!(e.can(&doc, Command::Duplicate));
+        assert!(!e.can(&doc, Command::Ungroup), "B is no group");
+        assert_eq!((&doc, e.at()), (&before, at), "asking changes nothing");
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert!(e.can(&doc, Command::Ungroup));
+        assert_eq!(e.run(&mut doc, Command::Ungroup), Change::Scene);
+        assert!(doc.layer("G").is_none());
+        // Inside a locked group nothing comes or goes.
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("H").unwrap().locked = true;
+        let _ = e.pick_layer(&doc, "C", Pick::Only, &ROWS);
+        assert!(!e.can(&doc, Command::Duplicate));
+        assert!(!e.can(&doc, Command::Group));
+        assert!(e.can(&doc, Command::Show), "what shows is still the layer's");
+        assert_eq!(e.run(&mut doc, Command::Show), Change::Scene);
+        assert!(!doc.layer("C").unwrap().visible);
+        assert_eq!(e.run(&mut doc, Command::Lock), Change::Scene);
+        assert!(doc.layer("C").unwrap().locked);
+        assert_eq!(e.run(&mut doc, Command::Arrange(Arrange::Front)), Change::None, "alone in its stack");
+    }
+
+    #[test]
+    fn copy_cut_and_paste_carry_the_pick_and_land_where_they_are_seen() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "B", Pick::Only, &ROWS);
+        let clip = e.copy(&doc).expect("B to copy");
+        assert_eq!(clip.layers.len(), 1);
+        let (cut, change) = e.cut(&mut doc);
+        assert_eq!(change, Change::Scene);
+        assert!(doc.layer("B").is_none(), "a cut takes it away");
+        let cut = cut.expect("and keeps it");
+        // What the clip covers is on show: it lands in place.
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let seen = ([-100.0, -100.0], [100.0, 100.0]);
+        assert_eq!(e.paste(&mut doc, &cut, seen), Change::Scene);
+        let active = e.active(&doc).to_owned();
+        assert_eq!(e.picked(&doc), [active.as_str()], "what came in is picked");
+        assert_eq!(doc.layers[1].id, active, "above the active layer");
+        let rect_on = |doc: &Document, layer: &str| -> (f64, f64) {
+            match doc.elements.iter().find(|el| el.layer() == layer) {
+                Some(Element::Rect(r)) => (r.x + r.w / 2.0, r.y + r.h / 2.0),
+                other => panic!("a rect, not {other:?}"),
+            }
+        };
+        assert_eq!(rect_on(&doc, &active), (0.5, 0.5), "in place");
+        // Out of sight: into the middle of what is on show.
+        let far = ([1000.0, 1000.0], [1200.0, 1100.0]);
+        let _ = e.paste(&mut doc, &cut, far);
+        let active = e.active(&doc).to_owned();
+        assert_eq!(rect_on(&doc, &active), (1100.0, 1050.0), "centred");
+        assert_eq!(e.copy(&Document::new("t")).map(|c| c.layers.len()), Some(1), "the lone layer");
+    }
+
+    #[test]
+    fn merging_goes_down_or_takes_the_picked_or_a_group_and_picks_what_is_left() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        assert_eq!(e.merge_name(&doc), "Merge Group");
+        assert!(e.can(&doc, Command::Merge));
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::Scene);
+        let g = doc.layer("G").unwrap();
+        assert_eq!((g.kind, g.layers.len()), (Kind::Raster, 0));
+        assert_eq!(e.active(&doc), "G");
+        // A layer alone goes down into the one under it.
+        assert_eq!(e.merge_name(&doc), "Merge Down");
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::Scene);
+        assert!(doc.layer("G").is_none());
+        assert_eq!(e.active(&doc), "A", "what is left is picked");
+        let on_a: Vec<&str> = doc.elements.iter().filter(|el| el.layer() == "A").map(|el| el.id()).collect();
+        assert_eq!(on_a, ["a", "b", "c"]);
+        // Several picked: they merge into the topmost.
+        let mut doc = crate::tree::tests::nested();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "G", Pick::Toggle, &ROWS);
+        assert_eq!(e.merge_name(&doc), "Merge Layers");
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::Scene);
+        assert_eq!(doc.layers.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["G", "F"]);
+        // What is not exact wants a picture: without one nothing is done,
+        // though it can be — `app` takes the picture.
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("A").unwrap().opacity = 0.5;
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &ROWS);
+        let _ = e.run(&mut doc, Command::Merge);
+        let before = doc.clone();
+        assert_eq!(e.run(&mut doc, Command::Merge), Change::None);
+        assert_eq!(doc, before);
+        assert!(e.can(&doc, Command::Merge));
+        let runs = e.merges(&doc, Command::Merge);
+        assert_eq!(runs.len(), 1);
+        assert!(!doc.exact(&runs[0]));
+        let picture = crate::doc::Image {
+            id: "pic".into(),
+            layer: String::new(),
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            rotation: 0.0,
+            blob: "a".repeat(64),
+        };
+        assert_eq!(e.merge(&mut doc, Command::Merge, &[Some(picture)]), Change::Scene);
+        let a = doc.layer("A").unwrap();
+        assert_eq!(a.opacity, 1.0, "the picture already is what it drew");
+        let on_a: Vec<&str> = doc.elements.iter().filter(|el| el.layer() == "A").map(|el| el.id()).collect();
+        assert_eq!(on_a, ["pic"]);
+        assert_eq!(e.active(&doc), "A");
+    }
+
+    #[test]
+    fn flatten_merges_what_shows_and_drops_what_is_hidden() {
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("B").unwrap().visible = false;
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "B", Pick::Only, &ROWS);
+        assert!(e.can(&doc, Command::MergeVisible));
+        assert_eq!(e.run(&mut doc, Command::Flatten), Change::Scene);
+        assert_eq!(doc.layers.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["G", "F"]);
+        assert_eq!(doc.stack(Some("F")).iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), ["K"]);
+        assert!(doc.elements.iter().all(|el| el.id() != "b"), "hidden, and gone");
+        assert_eq!(e.active(&doc), "G", "its layer went with the group it stood in, which is left");
+        assert!(!e.can(&doc, Command::Flatten), "flat already");
+    }
+
+    #[test]
+    fn layers_are_picked_by_id_and_every_id_has_to_be_there() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        assert_eq!(e.pick_ids(&doc, &["C".into(), "A".into()]), Ok(()));
+        assert_eq!(e.picked(&doc), ["C", "A"]);
+        assert_eq!(e.active(&doc), "A", "the last one named leads");
+        let before = e.at();
+        assert!(e.pick_ids(&doc, &["A".into(), "nope".into()]).unwrap_err().contains("nope"));
+        assert_eq!(e.at(), before, "a refusal picks nothing");
+        assert!(e.pick_ids(&doc, &[]).is_err(), "nothing named is nothing to act on");
+    }
+
+    #[test]
+    fn a_listing_is_the_whole_tree_top_first_with_the_pick() {
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("H").unwrap().visible = false;
+        doc.layer_mut("A").unwrap().opacity = 0.25;
+        let mut e = Editor::new();
+        e.pick_ids(&doc, &["B".into(), "C".into()]).unwrap();
+        let list = e.listing(&doc);
+        let ids: Vec<&str> = list.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["F", "K", "E", "D", "G", "H", "C", "B", "A"], "shut rows too");
+        let c = list.iter().find(|l| l.id == "C").unwrap();
+        assert_eq!((c.owner.as_deref(), c.depth, c.visible, c.shown), (Some("H"), 2, true, false));
+        assert!(c.active && c.picked);
+        let b = list.iter().find(|l| l.id == "B").unwrap();
+        assert!(!b.active && b.picked);
+        assert_eq!(list.iter().find(|l| l.id == "A").unwrap().opacity, 0.25);
+        assert_eq!(list.iter().find(|l| l.id == "F").unwrap().elements, 1, "its frame");
+    }
+
+    #[test]
+    fn the_picked_layers_are_shown_hidden_locked_and_opened_as_asked() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        e.pick_ids(&doc, &["A".into(), "B".into()]).unwrap();
+        assert_eq!(e.show_layers(&mut doc, false), Change::Scene);
+        assert!(!doc.layer("A").unwrap().visible && !doc.layer("B").unwrap().visible);
+        assert_eq!(e.show_layers(&mut doc, false), Change::None, "already so: not a toggle");
+        assert_eq!(e.show_layers(&mut doc, true), Change::Scene);
+        assert_eq!(e.lock_layers(&mut doc, true), Change::Scene);
+        assert!(doc.layer("A").unwrap().locked && doc.layer("B").unwrap().locked);
+        assert_eq!(e.lock_layers(&mut doc, true), Change::None);
+        assert!(e.is_open("G"), "it holds what was picked");
+        assert!(!e.is_open("H"));
+        let _ = e.set_open("H", true);
+        let _ = e.set_open("H", true);
+        assert!(e.is_open("H"), "opened, and not shut again");
+        let _ = e.set_open("H", false);
+        assert!(!e.is_open("H"));
+    }
+
+    #[test]
+    fn what_a_lock_keeps_is_named_before_anything_is_asked_of_it() {
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("H").unwrap().locked = true;
+        let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // How it draws: a lock of its own or a holder's keeps it.
+        assert_eq!(locked_among(&doc, &ids(&["A", "C"]), Keeps::Look), Some("C".into()));
+        assert_eq!(locked_among(&doc, &ids(&["A", "H"]), Keeps::Look), Some("H".into()));
+        assert_eq!(locked_among(&doc, &ids(&["A", "B"]), Keeps::Look), None);
+        // Where it stands: only a locked holder keeps that.
+        assert_eq!(locked_among(&doc, &ids(&["H"]), Keeps::Place), None, "its own lock does not");
+        assert_eq!(locked_among(&doc, &ids(&["C"]), Keeps::Place), Some("C".into()));
+    }
+
+    #[test]
+    fn a_layer_is_added_where_it_is_asked_under_the_name_it_is_given() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        assert_eq!(e.add_layer_as(&mut doc, false, Some("Sky"), Some("A")), Ok(Change::Scene));
+        let sky = e.active(&doc).to_owned();
+        assert_eq!(doc.layer(&sky).unwrap().name, "Sky");
+        assert_eq!(doc.layers[1].id, sky, "right above A");
+        assert_eq!(e.add_layer_as(&mut doc, true, None, None), Ok(Change::Scene));
+        let group = e.active(&doc).to_owned();
+        assert_eq!(doc.layer(&group).unwrap().kind, Kind::Group);
+        assert!(e.add_layer_as(&mut doc, false, None, Some("nope")).is_err());
+    }
+
+    #[test]
+    fn a_tag_goes_on_the_row_and_on_every_picked_layer_with_it() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let _ = e.pick_layer(&doc, "A", Pick::Only, &ROWS);
+        let _ = e.pick_layer(&doc, "B", Pick::Toggle, &ROWS);
+        doc.layer_mut("B").unwrap().locked = true;
+        assert_eq!(e.set_tag(&mut doc, "A", Tag::Red), Change::Scene);
+        assert_eq!(doc.layer("A").unwrap().color, Tag::Red);
+        assert_eq!(doc.layer("B").unwrap().color, Tag::Red, "a lock does not keep a tag off");
+        // A row that is not picked is tagged alone.
+        assert_eq!(e.set_tag(&mut doc, "C", Tag::Blue), Change::Scene);
+        assert_eq!(doc.layer("C").unwrap().color, Tag::Blue);
+        assert_eq!(doc.layer("A").unwrap().color, Tag::Red);
+        assert_eq!(e.set_tag(&mut doc, "C", Tag::Blue), Change::None, "already so");
+        assert_eq!(e.set_tag(&mut doc, "nope", Tag::Blue), Change::None);
+    }
+
+    #[test]
+    fn the_filter_narrows_the_rows_while_its_bar_is_open() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let ids = |e: &Editor| -> Vec<String> {
+            e.rows(&doc).iter().map(|r| r.layer.id.clone()).collect()
+        };
+        let whole = ids(&e);
+        assert!(e.filtering().is_none());
+        e.filter_mut().name = "Layer 3".into();
+        assert_eq!(ids(&e), whole, "the bar is shut");
+        assert_eq!(e.toggle_filter(), Change::Selection);
+        assert!(e.filtering().is_some());
+        assert_eq!(ids(&e), ["G", "H", "C"]);
+        let _ = e.toggle_filter();
+        assert_eq!(ids(&e), whole);
+        let _ = e.toggle_filter();
+        assert_eq!(ids(&e), ["G", "H", "C"], "the filter waited as it was left");
+    }
+
+    /// A board of one group holding one raster layer: `G[R]`.
+    fn grouped_board() -> Document {
+        let mut doc = Document::new("t");
+        doc.layers = vec![Layer {
+            id: "G".into(),
+            layers: vec![Layer {
+                id: "R".into(),
+                ..Layer::of("Layer 1", Kind::Raster)
+            }],
+            ..Layer::of("Group 1", Kind::Group)
+        }];
+        doc
+    }
+
+    #[test]
+    fn a_brush_stroke_joins_a_raster_layer_inside_a_group() {
+        let mut doc = grouped_board();
+        let mut e = tool(Tool::Brush);
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        let v = view();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        assert_eq!(paint_of(&doc, 0).layer, "R");
+        assert_eq!(doc.layer("G").unwrap().layers.len(), 1, "nothing opened");
+    }
+
+    #[test]
+    fn a_brush_stroke_with_a_group_active_opens_a_layer_inside_it_on_top() {
+        let mut doc = grouped_board();
+        let mut e = tool(Tool::Brush);
+        let _ = e.pick_layer(&doc, "G", Pick::Only, &[]);
+        let v = view();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        let group = doc.layer("G").unwrap();
+        assert_eq!(group.layers.len(), 2);
+        assert_eq!(paint_of(&doc, 0).layer, group.layers[1].id, "on top, inside");
+        assert_eq!(e.active(&doc), group.layers[1].id);
+        assert!(e.is_open("G"), "and its row can be seen");
+    }
+
+    #[test]
+    fn a_pencil_stroke_opens_its_layer_right_above_the_active_one_in_its_group() {
+        let mut doc = grouped_board();
+        doc.stack_mut(Some("G"))
+            .unwrap()
+            .push(Layer::of("Layer 2", Kind::Raster));
+        let mut e = pencil();
+        let _ = e.pick_layer(&doc, "R", Pick::Only, &[]);
+        let v = view();
+        let _ = drag(&mut e, &v, &mut doc, (1.0, 2.0), (9.0, 2.0));
+        let kids = &doc.layer("G").unwrap().layers;
+        assert_eq!(kids.len(), 3);
+        assert_eq!(kids[0].id, "R");
+        assert_eq!(kids[1].kind, Kind::Vector, "right above R, still in G");
+        assert_eq!(path_of(&doc, 0).layer, kids[1].id);
+    }
+
+    #[test]
+    fn a_holder_opens_and_shuts_and_starts_shut() {
+        let mut e = Editor::new();
+        assert!(!e.is_open("G"), "every holder starts shut");
+        assert_eq!(e.toggle_open("G"), Change::Selection);
+        assert!(e.is_open("G"));
+        let _ = e.toggle_open("G");
+        assert!(!e.is_open("G"));
+    }
+
+    #[test]
+    fn revealing_a_layer_opens_everything_holding_it_and_nothing_else() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        e.reveal(&doc, "E");
+        assert!(e.is_open("K") && e.is_open("F"));
+        assert!(!e.is_open("G") && !e.is_open("H"));
+        e.reveal(&doc, "C");
+        assert!(e.is_open("H") && e.is_open("G"));
+    }
+
+    #[test]
+    fn opening_a_holder_is_not_where_the_hand_stands() {
+        // Undo does not shut what was opened: looking inside a group is
+        // not work, as panning is not.
+        let mut e = Editor::new();
+        let before = e.at();
+        let _ = e.toggle_open("G");
+        assert_eq!(e.at(), before);
+    }
+
+    #[test]
+    fn picking_an_object_on_the_canvas_reveals_its_layer() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        let v = view();
+        // The top of the pile at the origin is the rect in the group in
+        // the frame.
+        let _ = click(&mut e, &v, &mut doc, at(&v, 0.5, 0.5));
+        assert_eq!(e.selection(), ["e"]);
+        assert!(e.is_open("K") && e.is_open("F"), "its row can be seen");
     }
 
     #[test]

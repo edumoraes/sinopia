@@ -1,24 +1,56 @@
-//! Layers panel: the dock's chrome in a column on the right, one card per
-//! layer, top layer first. Sized in logical px, positioned in physical
-//! px, floating over the canvas and swallowing whatever it catches, with
-//! a handle beside it that opens and closes it. Pure — `app` asks where a
-//! click landed and what to draw.
+//! Layers panel: the dock's chrome in a column on the right, the layer
+//! tree one card per row, top layer first. A group or a frame opens in
+//! place, its layers under it and one step in. Sized in logical px,
+//! positioned in physical px, floating over the canvas and swallowing
+//! whatever it catches, with a handle beside it that opens and closes it.
+//! Pure — `app` asks where a click landed and what to draw.
 
 use std::collections::HashMap;
 
-use crate::doc::{Kind, Layer};
-use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix};
+use crate::doc::{BlendMode, Kind, Tag};
+use crate::editor::Command;
+use crate::field::Field;
+use crate::menu::Item;
+use crate::scene::{Prim, Rgba, ScreenRect, Viewport, icon_prims, mix, parse_color};
 use crate::text::Atlas;
 use crate::theme::Theme;
+use crate::thumbs::Sheet;
+use crate::tree::{self, Filter, Place};
 
 // Logical px.
-pub const WIDTH: f32 = 200.0;
+pub const WIDTH: f32 = 248.0;
 /// From the strip above and the window's right edge.
 pub const MARGIN: f32 = 12.0;
 pub const HEADER: f32 = 34.0;
 pub const ROW: f32 = 34.0;
+/// The panel's foot, where its own buttons stand.
+pub const FOOTER: f32 = 34.0;
+/// The bar under the header: how the picked layers blend, how strong
+/// they are, and whether they are locked.
+pub const PROPS: f32 = 30.0;
+/// The filter's bar, under the header while it is open: a row for the
+/// name to look for, and one of toggles — the four kinds, then the seven
+/// colours.
+pub const FILTER: f32 = SEARCH_ROW + CHIPS_ROW;
+const SEARCH_ROW: f32 = 30.0;
+const CHIPS_ROW: f32 = 28.0;
+const FIELD_H: f32 = 24.0;
+/// A colour's toggle, its dot, and the room between the kinds and them.
+const TAG_W: f32 = 18.0;
+const TAG_DOT: f32 = 5.0;
+const TAG_GAP: f32 = 8.0;
+/// How much of a tag's colour the eye's cell takes.
+const TAG_TINT: f32 = 0.45;
+/// What an empty filter field says it is for.
+const PLACEHOLDER: &str = "Filter by name";
+/// The blend mode's button, the room the strength's number takes, and
+/// the track's thickness.
+const BLEND_W: f32 = 92.0;
+const VALUE_W: f32 = 36.0;
+const TRACK_H: f32 = 4.0;
+const KNOB: f32 = 5.0;
 pub const PADDING: f32 = 6.0;
-/// The header buttons and the eye are this square.
+/// The footer's buttons and the eye are this square.
 pub const BUTTON: f32 = 24.0;
 pub const RADIUS: f32 = 12.0;
 /// A card's corner. The rename is drawn over a card and must round
@@ -27,6 +59,22 @@ pub const ROW_RADIUS: f32 = 6.0;
 /// A row's card sits this far inside it, so the gap between two cards is
 /// twice this and a click in the gap still lands on a row.
 const CARD_INSET: f32 = 2.0;
+/// The column the eyes stand in, left of every card, so they line up
+/// however deep a row stands.
+const EYE_COL: f32 = BUTTON + PADDING;
+/// How far a card steps in for every group or frame holding it.
+pub const INDENT: f32 = 14.0;
+/// The narrowest a card is let get, however deep it stands: past that
+/// the steps stop rather than the name.
+const CARD_MIN: f32 = 120.0;
+/// A holder's chevron, and the room every card keeps for one so the
+/// glyphs line up down a level.
+const CHEVRON: f32 = 16.0;
+/// Between the card's edge and the chevron, and the chevron and the glyph.
+const CHEVRON_GAP: f32 = 4.0;
+/// The glyph: what a row is, in a box a thumbnail can later fill.
+pub const GLYPH_W: f32 = 32.0;
+pub const GLYPH_H: f32 = 24.0;
 const CARD_SHADOW_OFFSET: f32 = 1.0;
 const CARD_SHADOW_FEATHER: f32 = 4.0;
 /// A card the pointer is carrying is further off the panel: its shadow
@@ -48,13 +96,20 @@ const LIFT_REACH: f32 = LIFT_LEFT + WIDTH * LIFT_SCALE;
 const BAR_W: f32 = 4.0;
 const BAR_GAP: f32 = 3.0;
 const BAR_MIN: f32 = 24.0;
+/// The drop's line, and the outline round a holder a card would go into.
+const DROP_LINE: f32 = 2.0;
 /// How long the lift takes to come on, and to go off again.
 pub const LIFT_SECONDS: f32 = 0.14;
 const BUTTON_GAP: f32 = 2.0;
-/// Between an icon and the label it introduces: a row's eye and its name,
-/// the handle's chevron and the word under it.
+/// Between an icon and the label it introduces: a row's glyph and its
+/// name, the handle's chevron and the word under it.
 const LABEL_GAP: f32 = 6.0;
-/// The clickable area around the eye, past the box itself.
+/// A picture's kind rides on a badge this big at its lower right, this
+/// far out past its corner, the kind's icon this big inside it.
+const BADGE: f32 = 11.0;
+const BADGE_OUT: f32 = 2.0;
+const BADGE_ICON: f32 = 8.0;
+/// The clickable area around the eye and the chevron, past the box.
 const EYE_SLOP: f32 = 2.0;
 /// The 24-unit icon grid maps onto a box this big, centered in its button.
 const ICON_BOX: f32 = 16.0;
@@ -84,32 +139,46 @@ const KBD_GAP: f32 = 8.0;
 /// facing the canvas the panel comes out over.
 const QUARTER: f32 = -std::f32::consts::FRAC_PI_2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a press on the panel asks for. A row is named by its layer's id,
+/// wherever in the tree it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PanelHit {
-    /// Make this layer the active one. The index is into the document's
-    /// layers, bottom to top.
-    Select(usize),
-    /// Show or hide this layer.
-    Toggle(usize),
-    /// Work inside the frame on this layer: the panel shows its stack.
-    Enter(usize),
-    /// A card asked to be renamed: the row's index in its stack.
-    Rename(usize),
-    /// Back out to the board.
-    Leave,
+    /// Pick this layer: the card's body.
+    Pick(String),
+    /// Show or hide it: its eye.
+    Toggle(String),
+    /// Open this group or frame in place, or shut it: its chevron.
+    Open(String),
+    /// Open the lock on this layer: the lock its row wears, when the lock
+    /// is its own.
+    Lock(String),
+    /// A card asked to be renamed. `Panel::hit` never answers it: `app`
+    /// turns a second press on a picked card into it.
+    Rename(String),
+    /// The footer's three: a new group, a new layer, and the bin.
+    Group,
     Add,
     Remove,
-    Up,
-    Down,
+    /// The bar's: the blend mode's menu, the strength — read off the
+    /// pointer's x with [`Panel::opacity_at`] — and the lock.
+    Blend,
+    Opacity,
+    LockPicked,
+    /// The header's filter, which opens its bar or shuts it; and in the
+    /// bar, the name's field and a kind's or a colour's toggle.
+    Filter,
+    Search,
+    FilterKind(Kind),
+    FilterTag(Tag),
     /// Panel chrome between controls: swallowed, never reaches the canvas.
     Panel,
 }
 
 /// The card the pointer is carrying, and how far into the lift it is.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Lift {
-    /// Into the document's layers.
-    pub index: usize,
+    /// The layer it is the card of.
+    pub id: String,
     /// Where the card's top edge is asked to be, in physical px: the
     /// pointer, less the grip the card was taken by. It follows the
     /// pointer rather than the row, so the card does not jump.
@@ -117,6 +186,145 @@ pub struct Lift {
     /// The lift, 0 (sitting in its row) to 1 (fully off the panel),
     /// before easing. It runs back down to 0 when the card is let go.
     pub t: f32,
+}
+
+/// The blend modes' menu, and the mode on each of its lines: Photoshop's
+/// order and runs — darkening, lightening, contrast, inversion and the
+/// component modes, a rule before each — opening on Pass Through for a
+/// group, which is a group's alone. `current` is checked.
+pub fn blend_menu(current: BlendMode, group: bool) -> (Vec<Item>, Vec<BlendMode>) {
+    let runs = [
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Overlay,
+        BlendMode::Difference,
+        BlendMode::Hue,
+    ];
+    let mut items = Vec::new();
+    let mut modes = Vec::new();
+    let offered = BlendMode::ALL
+        .iter()
+        .filter(|m| **m != BlendMode::PassThrough);
+    let passing = group.then_some(&BlendMode::PassThrough);
+    for mode in passing.into_iter().chain(offered) {
+        let mut item = Item::new(mode.name()).checked(*mode == current);
+        if runs.contains(mode) {
+            item = item.ruled();
+        }
+        items.push(item);
+        modes.push(*mode);
+    }
+    (items, modes)
+}
+
+/// A tag's colour, fixed as the inks are: a tag is the document's, so it
+/// reads the same under every theme — Photoshop's seven, toned to stand
+/// out on a light panel and a dark one alike.
+pub fn tag_color(tag: Tag) -> Option<Rgba> {
+    let hex = match tag {
+        Tag::None => return None,
+        Tag::Red => "#e5534b",
+        Tag::Orange => "#e0823d",
+        Tag::Yellow => "#d4a72c",
+        Tag::Green => "#46a758",
+        Tag::Blue => "#3e8ed0",
+        Tag::Violet => "#8e6ad8",
+        Tag::Gray => "#8b949e",
+    };
+    Some(parse_color(hex))
+}
+
+/// What a line of a row's menu does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLine {
+    /// Opens the row's name to be typed.
+    Rename,
+    Run(Command),
+    /// The clipboard's three, which are the window's: it holds the
+    /// clipboard.
+    Copy,
+    Cut,
+    Paste,
+    Tag(Tag),
+}
+
+/// What a row's menu says of the picked layers: whether every one is
+/// locked, and hidden — the toggles say what they would do — and the
+/// row's own tag, checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowState {
+    pub locked: bool,
+    pub hidden: bool,
+    pub tag: Tag,
+    /// What merging the pick is called: down, the layers, or a group.
+    pub merge: &'static str,
+}
+
+/// A row's menu: its name, then what can be done to the picked layers
+/// with the keys that do the same — each offered only where it would
+/// change something: a command where `can` says so, a paste where there
+/// is something to `paste` — then the colours, as in Photoshop.
+pub fn row_menu(can: impl Fn(Command) -> bool, paste: bool, state: RowState) -> (Vec<Item>, Vec<RowLine>) {
+    let lines_of = [
+        ("Duplicate", "Ctrl+J", RowLine::Run(Command::Duplicate), false),
+        ("Delete", "Del", RowLine::Run(Command::Remove), false),
+        ("Copy", "Ctrl+C", RowLine::Copy, true),
+        ("Cut", "Ctrl+X", RowLine::Cut, false),
+        ("Paste", "Ctrl+V", RowLine::Paste, false),
+        ("Group", "Ctrl+G", RowLine::Run(Command::Group), true),
+        ("Ungroup", "Ctrl+Shift+G", RowLine::Run(Command::Ungroup), false),
+        (state.merge, "Ctrl+Alt+E", RowLine::Run(Command::Merge), true),
+        ("Merge Visible", "Ctrl+Shift+E", RowLine::Run(Command::MergeVisible), false),
+        ("Flatten", "", RowLine::Run(Command::Flatten), false),
+        (
+            if state.locked { "Unlock" } else { "Lock" },
+            "Ctrl+/",
+            RowLine::Run(Command::Lock),
+            true,
+        ),
+        (
+            if state.hidden { "Show" } else { "Hide" },
+            "Ctrl+,",
+            RowLine::Run(Command::Show),
+            false,
+        ),
+    ];
+    let mut items = vec![Item::new("Rename").hint("F2")];
+    let mut lines = vec![RowLine::Rename];
+    for (label, keys, line, rule) in lines_of {
+        let enabled = match line {
+            RowLine::Run(command) => can(command),
+            RowLine::Paste => paste,
+            _ => true,
+        };
+        let item = Item::new(label).enabled(enabled);
+        let item = if keys.is_empty() { item } else { item.hint(keys) };
+        items.push(if rule { item.ruled() } else { item });
+        lines.push(line);
+    }
+    let (tags, marks) = tag_menu(state.tag);
+    for (i, (item, tag)) in tags.into_iter().zip(marks).enumerate() {
+        items.push(if i == 0 { item.ruled() } else { item });
+        lines.push(RowLine::Tag(tag));
+    }
+    (items, lines)
+}
+
+/// The colours' menu, and the tag on each of its lines: no colour, then
+/// Photoshop's seven, each with its dot. `current` is checked.
+pub fn tag_menu(current: Tag) -> (Vec<Item>, Vec<Tag>) {
+    let tags: Vec<Tag> = std::iter::once(Tag::None).chain(Tag::COLORS).collect();
+    let items = tags
+        .iter()
+        .map(|t| {
+            let item = Item::new(t.name()).checked(*t == current);
+            match tag_color(*t) {
+                Some(c) => item.dot(c),
+                None => item,
+            }
+        })
+        .collect();
+    (items, tags)
 }
 
 /// Smoothstep: the lift comes on and goes off without a corner, and
@@ -163,50 +371,50 @@ impl Coming {
     }
 }
 
-/// The cards on their way between two orders of the stack. A layer that
-/// changed rows travels from where it was at the lift's pace, so the
-/// stack opens and closes around a carried card instead of jumping.
-/// Pure — `app` owns one and tells it what the stack looks like and how
-/// much time has passed.
+/// The cards on their way between two orders of the rows. A layer whose
+/// row changed travels from where it was at the lift's pace, so the list
+/// opens and closes around a carried card — or a group opening in place —
+/// instead of jumping. Pure — `app` owns one and tells it what the rows
+/// look like and how much time has passed.
 #[derive(Debug, Default, Clone)]
 pub struct Slides {
     on_the_way: HashMap<String, Coming>,
-    /// The order the stack was in when it was last looked at, bottom to
-    /// top. A stack it has never seen starts every card still, so a tab
-    /// switch does not slide a whole panel.
+    /// The rows as they were when last looked at, top first. A list it
+    /// has never seen starts every card still, so a tab switch does not
+    /// slide a whole panel.
     seen: Vec<String>,
 }
 
 impl Slides {
-    /// Takes in the stack's order; anything that changed rows starts
-    /// over from where it was. `row` is one row in physical px.
-    pub fn restack(&mut self, layers: &[Layer], row: f32) {
-        if self.seen.len() == layers.len()
-            && self.seen.iter().zip(layers).all(|(id, l)| *id == l.id)
-        {
+    /// Takes in the rows' order, top first; anything that changed rows
+    /// starts over from where it was. A row that was not on show before
+    /// arrives where it belongs. `row` is one row in physical px.
+    pub fn restack(&mut self, rows: &[&str], row: f32) {
+        if self.seen.len() == rows.len() && self.seen.iter().zip(rows).all(|(a, b)| a == b) {
             return;
         }
-        let order: Vec<String> = layers.iter().map(|l| l.id.clone()).collect();
+        let order: Vec<String> = rows.iter().map(|id| (*id).to_owned()).collect();
         let seen = std::mem::replace(&mut self.seen, order);
-        // Row positions run the other way: the top layer is row 0.
+        if seen.is_empty() {
+            return;
+        }
         let was: HashMap<&str, usize> = seen
             .iter()
             .enumerate()
-            .map(|(i, id)| (id.as_str(), seen.len() - 1 - i))
+            .map(|(i, id)| (id.as_str(), i))
             .collect();
-        for (i, layer) in layers.iter().enumerate() {
-            let Some(&then) = was.get(layer.id.as_str()) else {
+        for (now, id) in rows.iter().enumerate() {
+            let Some(&then) = was.get(id) else {
                 continue;
             };
-            let now = layers.len() - 1 - i;
             // Where it is on screen this instant, measured from the row
             // it is about to belong to: a card that moves again while
             // it is still travelling does not jump to start over.
             let step = (then as f32 - now as f32) * row;
-            let mut coming = self.on_the_way.remove(&layer.id).unwrap_or_default();
+            let mut coming = self.on_the_way.remove(*id).unwrap_or_default();
             coming.send(step);
             if coming.offset() != 0.0 {
-                self.on_the_way.insert(layer.id.clone(), coming);
+                self.on_the_way.insert((*id).to_owned(), coming);
             }
         }
     }
@@ -231,31 +439,64 @@ impl Slides {
 }
 
 /// What the panel shows beyond the layers themselves: which one is
-/// active, which is in the pointer's hand, and what is still moving.
+/// active, which are picked, which is in the pointer's hand and where it
+/// would land, and what is still moving.
 pub struct Showing<'a> {
-    pub active: usize,
-    pub lift: Option<Lift>,
+    pub active: &'a str,
+    pub picked: &'a [String],
+    pub lift: Option<&'a Lift>,
+    /// Where a carried card would land if let go of now.
+    pub drop: Option<&'a Place>,
     pub slides: &'a Slides,
+    /// What the bar says of the active layer: its blend mode's name, its
+    /// strength, whether it is locked.
+    pub blend: &'a str,
+    pub opacity: f32,
+    pub locked: bool,
+    /// The filter, while its bar is open, and whether its field has the
+    /// keyboard — then `app` draws the field, caret and all.
+    pub filter: Option<&'a Filter>,
+    pub searching: bool,
+    /// The sheet of pictures of what raster and vector layers hold, and
+    /// the slot it is in, while there is one.
+    pub thumbs: Option<(&'a Sheet, u32)>,
 }
 
-/// One layer's row, with everything already measured.
+/// One row of the tree, with everything already measured.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
-    /// Into the document's layers.
-    pub index: usize,
-    /// What the pointer hits: the card and the gap under it.
+    /// The layer it is the row of.
+    pub id: String,
+    /// The layer holding its stack, none on the board's root.
+    pub owner: Option<String>,
+    pub depth: usize,
+    pub kind: Kind,
+    /// Its own eye.
+    pub visible: bool,
+    /// It and everything holding it on show: what is not is muted.
+    pub shown: bool,
+    /// A group or a frame shown open, its layers under it.
+    pub open: bool,
+    /// Its content cannot change: its own lock, or a holder's.
+    pub locked: bool,
+    /// The lock is its own, and so its row's to open.
+    pub own_lock: bool,
+    /// The colour it is tagged with, which tints its eye's cell.
+    pub tag: Tag,
+    /// What the pointer hits: the whole width and the gap under the card.
     pub rect: ScreenRect,
-    /// What is drawn: the rect less the gap that separates two cards.
+    /// What is drawn: stepped in by its depth, less the gap that
+    /// separates two cards.
     pub card: ScreenRect,
+    /// In the column left of every card, so the eyes line up.
     pub eye: ScreenRect,
-    /// Where the mark saying what the layer holds is drawn — pixels or a
-    /// curve. It is not a control: nothing hits it.
-    pub mark: ScreenRect,
-    /// The chevron that goes into a frame, in the mark's own place. A
-    /// mark is read and this is pressed, which is why it is a rect of
-    /// its own and why it is drawn in ink rather than muted. `None` for
-    /// a layer that holds no stack.
-    pub enter: Option<ScreenRect>,
+    /// A group's or a frame's, which opens it in place. `None` for a
+    /// layer that holds none.
+    pub chevron: Option<ScreenRect>,
+    /// What the row is: the kind's own icon, where a thumbnail can go.
+    pub glyph: ScreenRect,
+    /// The lock it wears at the card's far end, while it is locked.
+    pub lock: Option<ScreenRect>,
     /// The name, cut down to what fits.
     pub label: String,
     /// Where the label's pen starts.
@@ -266,23 +507,31 @@ pub struct Row {
 pub struct Panel {
     pub rect: ScreenRect,
     pub header: ScreenRect,
-    /// Where the cards are shown and cut off: as much of the stack as
-    /// the window has room for.
+    /// The header's filter button.
+    pub filter: ScreenRect,
+    /// The filter's bar, while it is open: the name's field, then the
+    /// kinds' toggles and the colours'.
+    pub search: Option<ScreenRect>,
+    pub kinds: Vec<(ScreenRect, Kind)>,
+    pub tags: Vec<(ScreenRect, Tag)>,
+    /// The bar under the header, and its three: the blend mode's button,
+    /// the strength's slider and number, the lock.
+    pub props: ScreenRect,
+    pub blend: ScreenRect,
+    pub opacity: ScreenRect,
+    pub lock: ScreenRect,
+    /// Where the cards are shown and cut off: as much of the tree as the
+    /// window has room for.
     pub band: ScreenRect,
-    /// Top layer first, and only those the band reaches.
+    /// Top first, and only those the band reaches.
     pub rows: Vec<Row>,
-    pub up: ScreenRect,
-    pub down: ScreenRect,
+    /// The foot, and its three buttons: a new group, a new layer, the bin.
+    pub footer: ScreenRect,
+    pub group: ScreenRect,
     pub add: ScreenRect,
     pub remove: ScreenRect,
-    /// The scrollbar's thumb, when there is more stack than band.
+    /// The scrollbar's thumb, when there is more tree than band.
     pub bar: Option<ScreenRect>,
-    /// What the header writes: the panel's own word, or the name of the
-    /// frame whose stack is on show.
-    pub title: String,
-    /// The header's title as a target, while it is a way back out of a
-    /// frame. `None` on the board, where there is nowhere to go.
-    pub crumb: Option<ScreenRect>,
     /// The scroll actually used, in physical px — what was asked for,
     /// kept inside what there is to scroll.
     scroll: f32,
@@ -292,23 +541,21 @@ pub struct Panel {
 }
 
 impl Panel {
-    /// `inside` is the name of the frame whose stack is on show, or none
-    /// for the board's own — the header writes it, and inside one that
-    /// title is also the way out.
-    ///
-    /// `top` is where the strip ends, in physical px. Rows are laid out
-    /// top layer first from `scroll` px above the band, which is as much
-    /// of the stack as there is room for above the bottom margin. Only
-    /// the rows the band reaches are laid out; a row it reaches part of
-    /// is laid out whole and cut by [`Panel::band`] when it is drawn.
+    /// `top` is where the strip ends, in physical px. `tree` is every row
+    /// the tree has open, top first. Rows are laid out from `scroll` px
+    /// above the band, which is as much of the tree as there is room for
+    /// between the header and the footer; only the rows the band reaches
+    /// are laid out, and a row it reaches part of is laid out whole and
+    /// cut by [`Panel::band`] when it is drawn. `filtering` opens the
+    /// filter's bar between the header and the properties' bar.
     pub fn layout(
         viewport: Viewport,
         scale: f64,
         top: f32,
         atlas: &Atlas,
-        layers: &[Layer],
-        inside: Option<&str>,
+        tree: &[tree::Row],
         scroll: f32,
+        filtering: bool,
     ) -> Panel {
         let s = scale as f32;
         let x = (viewport.w as f32 - (MARGIN + WIDTH) * s).round();
@@ -321,11 +568,98 @@ impl Panel {
             w: inner_w,
             h: HEADER * s,
         };
-
-        // Buttons, right-aligned in the header: up, down, add, remove.
         let side = BUTTON * s;
-        let by = header.y + (header.h - side) / 2.0;
-        let mut bx = header.x + header.w - side;
+        let filter = ScreenRect {
+            x: header.x + header.w - side,
+            y: header.y + (header.h - side) / 2.0,
+            w: side,
+            h: side,
+        };
+        let under = header.y + header.h;
+        let (search, kinds, tags) = if filtering {
+            Self::filter_bar(inner_x, inner_w, under, s)
+        } else {
+            (None, Vec::new(), Vec::new())
+        };
+        let bar_h = if filtering { FILTER * s } else { 0.0 };
+        let props = ScreenRect {
+            x: inner_x,
+            y: under + bar_h,
+            w: inner_w,
+            h: PROPS * s,
+        };
+        let by = props.y + (props.h - side) / 2.0;
+        let blend = ScreenRect {
+            x: inner_x,
+            y: by,
+            w: BLEND_W * s,
+            h: side,
+        };
+        let lock = ScreenRect {
+            x: inner_x + inner_w - side,
+            y: by,
+            w: side,
+            h: side,
+        };
+        let opacity = ScreenRect {
+            x: blend.x + blend.w + LABEL_GAP * s,
+            y: by,
+            w: lock.x - LABEL_GAP * s - (blend.x + blend.w + LABEL_GAP * s),
+            h: side,
+        };
+
+        let band_y = props.y + props.h;
+        let room =
+            (viewport.h as f32 - (MARGIN + PADDING + FOOTER) * s - band_y).max(0.0);
+        let content = tree.len() as f32 * ROW * s;
+        let band = ScreenRect {
+            x: inner_x,
+            y: band_y,
+            w: inner_w,
+            h: content.min(room),
+        };
+        let scroll = scroll.clamp(0.0, (content - band.h).max(0.0));
+        let gutter = if content > band.h {
+            (BAR_W + BAR_GAP) * s
+        } else {
+            0.0
+        };
+
+        let mut rows = Vec::new();
+        for (pos, r) in tree.iter().enumerate() {
+            let ry = band.y + pos as f32 * ROW * s - scroll;
+            if ry + ROW * s <= band.y {
+                continue;
+            }
+            if ry >= band.y + band.h {
+                break;
+            }
+            rows.push(Self::row(r, inner_x, inner_w, gutter, ry, atlas, s));
+        }
+
+        // A thumb as tall a share of the band as the band is of the
+        // tree, and only when there is tree it does not reach.
+        let bar = (content > band.h).then(|| {
+            let h = (band.h * band.h / content).max(BAR_MIN * s).min(band.h);
+            let travel = (band.h - h) * scroll / (content - band.h);
+            ScreenRect {
+                x: band.x + band.w - BAR_W * s,
+                y: band.y + travel,
+                w: BAR_W * s,
+                h,
+            }
+        });
+
+        // The foot, and its buttons right-aligned in it: the bin at the
+        // end, as everywhere else.
+        let footer = ScreenRect {
+            x: inner_x,
+            y: band.y + band.h,
+            w: inner_w,
+            h: FOOTER * s,
+        };
+        let by = footer.y + (footer.h - side) / 2.0;
+        let mut bx = footer.x + footer.w - side;
         let mut button = || {
             let r = ScreenRect {
                 x: bx,
@@ -338,123 +672,178 @@ impl Panel {
         };
         let remove = button();
         let add = button();
-        let down = button();
-        let up = button();
-
-        let band_y = header.y + header.h;
-        let room = (viewport.h as f32 - (MARGIN + PADDING) * s - band_y).max(0.0);
-        let content = layers.len() as f32 * ROW * s;
-        let band = ScreenRect {
-            x: inner_x,
-            y: band_y,
-            w: inner_w,
-            h: content.min(room),
-        };
-        let scroll = scroll.clamp(0.0, (content - band.h).max(0.0));
-
-        let mut rows = Vec::new();
-        for (pos, (index, layer)) in layers.iter().enumerate().rev().enumerate() {
-            let ry = band.y + pos as f32 * ROW * s - scroll;
-            if ry + ROW * s <= band.y {
-                continue;
-            }
-            if ry >= band.y + band.h {
-                break;
-            }
-            let rect = ScreenRect {
-                x: inner_x,
-                y: ry,
-                w: inner_w,
-                h: ROW * s,
-            };
-            let eye = ScreenRect {
-                x: rect.x + PADDING * s,
-                y: rect.y + (rect.h - side) / 2.0,
-                w: side,
-                h: side,
-            };
-            let label_x = (eye.x + eye.w + LABEL_GAP * s).round();
-            let gutter = if content > band.h {
-                (BAR_W + BAR_GAP) * s
-            } else {
-                0.0
-            };
-            let mark = ScreenRect {
-                x: rect.x + rect.w - PADDING * s - gutter - side,
-                y: eye.y,
-                w: side,
-                h: side,
-            };
-            let enter = (layer.kind == Kind::Frame).then_some(mark);
-            let room = mark.x - LABEL_GAP * s - label_x;
-            let label = if room > 0.0 {
-                atlas.truncate(&layer.name, room)
-            } else {
-                String::new()
-            };
-            rows.push(Row {
-                index,
-                rect,
-                card: rect.inset(CARD_INSET * s),
-                eye,
-                mark,
-                enter,
-                label,
-                label_x,
-            });
-        }
-
-        // A thumb as tall a share of the band as the band is of the
-        // stack, and only when there is stack it does not reach.
-        let bar = (content > band.h).then(|| {
-            let h = (band.h * band.h / content).max(BAR_MIN * s).min(band.h);
-            let travel = (band.h - h) * scroll / (content - band.h);
-            ScreenRect {
-                x: band.x + band.w - BAR_W * s,
-                y: band.y + travel,
-                w: BAR_W * s,
-                h,
-            }
-        });
-
-        // The header says where the panel is standing: its own word on
-        // the board, the frame's name inside one — and inside one it is
-        // also the way out. It is cut to the room before the buttons, so
-        // a long name never runs into them.
-        let title_x = header.x + PADDING * s;
-        let room = (up.x - LABEL_GAP * s - title_x).max(0.0);
-        let title = match inside {
-            None => TITLE.to_owned(),
-            Some(name) => atlas.truncate(name, room),
-        };
-        let crumb = inside.map(|_| ScreenRect {
-            x: title_x,
-            y: header.y,
-            w: room,
-            h: header.h,
-        });
+        let group = button();
 
         let rect = ScreenRect {
             x,
             y,
             w: WIDTH * s,
-            h: (2.0 * PADDING + HEADER) * s + band.h,
+            h: (2.0 * PADDING + HEADER + PROPS + FOOTER) * s + bar_h + band.h,
         };
         Panel {
             rect,
             header,
+            filter,
+            search,
+            kinds,
+            tags,
+            props,
+            blend,
+            opacity,
+            lock,
             band,
             rows,
-            up,
-            down,
+            footer,
+            group,
             add,
             remove,
             bar,
-            title,
-            crumb,
             scroll,
             content,
             scale: s,
+        }
+    }
+
+    /// The filter's bar under `y`: the name's field across the panel, and
+    /// under it the four kinds' toggles and then the seven colours'.
+    #[allow(clippy::type_complexity)]
+    fn filter_bar(
+        x: f32,
+        w: f32,
+        y: f32,
+        s: f32,
+    ) -> (Option<ScreenRect>, Vec<(ScreenRect, Kind)>, Vec<(ScreenRect, Tag)>) {
+        let side = BUTTON * s;
+        let search = ScreenRect {
+            x,
+            y: y + (SEARCH_ROW - FIELD_H) / 2.0 * s,
+            w,
+            h: FIELD_H * s,
+        };
+        let cy = y + SEARCH_ROW * s + (CHIPS_ROW - BUTTON) / 2.0 * s;
+        let kinds: Vec<(ScreenRect, Kind)> = [Kind::Raster, Kind::Vector, Kind::Group, Kind::Frame]
+            .into_iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let r = ScreenRect {
+                    x: x + i as f32 * (side + BUTTON_GAP * s),
+                    y: cy,
+                    w: side,
+                    h: side,
+                };
+                (r, k)
+            })
+            .collect();
+        let start = kinds.last().map_or(x, |(r, _)| r.x + r.w) + TAG_GAP * s;
+        let tags = Tag::COLORS
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let r = ScreenRect {
+                    x: start + i as f32 * TAG_W * s,
+                    y: cy,
+                    w: TAG_W * s,
+                    h: side,
+                };
+                (r, t)
+            })
+            .collect();
+        (Some(search), kinds, tags)
+    }
+
+    /// Where the name's letters go in the filter's field: past the glass.
+    pub fn search_text(&self) -> Option<ScreenRect> {
+        let r = self.search?;
+        let glass = (PADDING / 2.0 + ICON_BOX) * self.scale;
+        Some(ScreenRect {
+            x: r.x + glass,
+            w: (r.w - glass).max(0.0),
+            ..r
+        })
+    }
+
+    /// One row, measured: the eye in its column, then the card stepped in
+    /// by the row's depth — never so far that it is narrower than
+    /// [`CARD_MIN`] — holding the chevron's room, the glyph and the name.
+    fn row(
+        r: &tree::Row,
+        inner_x: f32,
+        inner_w: f32,
+        gutter: f32,
+        y: f32,
+        atlas: &Atlas,
+        s: f32,
+    ) -> Row {
+        let side = BUTTON * s;
+        let rect = ScreenRect {
+            x: inner_x,
+            y,
+            w: inner_w,
+            h: ROW * s,
+        };
+        let eye = ScreenRect {
+            x: inner_x + (EYE_COL - BUTTON) / 2.0 * s,
+            y: y + (rect.h - side) / 2.0,
+            w: side,
+            h: side,
+        };
+        let right = inner_x + inner_w - gutter;
+        let deepest = (right - inner_x - (EYE_COL + CARD_MIN) * s).max(0.0);
+        let indent = (r.depth as f32 * INDENT * s).min(deepest);
+        let left = inner_x + EYE_COL * s + indent;
+        let card = ScreenRect {
+            x: left,
+            y: y + CARD_INSET * s,
+            w: right - left,
+            h: (ROW - 2.0 * CARD_INSET) * s,
+        };
+        let cy = y + rect.h / 2.0;
+        let holds = matches!(r.layer.kind, Kind::Group | Kind::Frame);
+        let chevron = holds.then(|| ScreenRect {
+            x: card.x + CHEVRON_GAP * s,
+            y: cy - CHEVRON / 2.0 * s,
+            w: CHEVRON * s,
+            h: CHEVRON * s,
+        });
+        let glyph = ScreenRect {
+            x: card.x + (2.0 * CHEVRON_GAP + CHEVRON) * s,
+            y: cy - GLYPH_H / 2.0 * s,
+            w: GLYPH_W * s,
+            h: GLYPH_H * s,
+        };
+        let label_x = (glyph.x + glyph.w + LABEL_GAP * s).round();
+        let lock = r.locked.then(|| ScreenRect {
+            x: card.x + card.w - PADDING * s - ICON_BOX * s,
+            y: cy - ICON_BOX / 2.0 * s,
+            w: ICON_BOX * s,
+            h: ICON_BOX * s,
+        });
+        let end = lock.map_or(card.x + card.w - PADDING * s, |l| l.x - LABEL_GAP * s);
+        let room = end - label_x;
+        let label = if room > 0.0 {
+            atlas.truncate(&r.layer.name, room)
+        } else {
+            String::new()
+        };
+        Row {
+            id: r.layer.id.clone(),
+            owner: r.owner.map(str::to_owned),
+            depth: r.depth,
+            kind: r.layer.kind,
+            visible: r.layer.visible,
+            shown: r.shown,
+            open: r.open,
+            locked: r.locked,
+            own_lock: r.layer.locked,
+            tag: r.layer.color,
+            rect,
+            card,
+            eye,
+            chevron,
+            glyph,
+            lock,
+            label,
+            label_x,
         }
     }
 
@@ -463,21 +852,22 @@ impl Panel {
         self.scroll
     }
 
-    /// How far the stack can be scrolled: nothing when it all fits.
+    /// How far the tree can be scrolled: nothing when it all fits.
     pub fn max_scroll(&self) -> f32 {
         (self.content - self.band.h).max(0.0)
     }
 
-    /// The scroll that brings layer `index` into the band, moving as
-    /// little as it can — what the panel does when a click on the canvas
-    /// makes a layer active that is out of sight. Where it already is,
-    /// the answer is the scroll it already has.
-    pub fn scroll_showing(&self, index: usize, layers: usize) -> f32 {
-        if index >= layers {
+    /// The scroll that brings row `pos` — its place in the tree as listed,
+    /// top first — into the band, moving as little as it can: what the
+    /// panel does when a click on the canvas makes a layer active that is
+    /// out of sight. Where it already is, the answer is the scroll it
+    /// already has.
+    pub fn scroll_showing(&self, pos: usize, rows: usize) -> f32 {
+        if pos >= rows {
             return self.scroll;
         }
         let row = ROW * self.scale;
-        let top = (layers - 1 - index) as f32 * row;
+        let top = pos as f32 * row;
         let want = if top < self.scroll {
             top
         } else if top + row > self.scroll + self.band.h {
@@ -488,54 +878,107 @@ impl Panel {
         want.clamp(0.0, self.max_scroll())
     }
 
+    /// The slider's track, left of the strength's number.
+    pub fn track(&self) -> ScreenRect {
+        let s = self.scale;
+        let o = self.opacity;
+        ScreenRect {
+            x: o.x + KNOB * s,
+            y: o.y + (o.h - TRACK_H * s) / 2.0,
+            w: (o.w - VALUE_W * s - 2.0 * KNOB * s).max(0.0),
+            h: TRACK_H * s,
+        }
+    }
+
+    /// The strength a press or a drag at `x` asks for, 0 to 1 along the
+    /// track — held past either end, that end.
+    pub fn opacity_at(&self, x: f64) -> f32 {
+        let t = self.track();
+        if t.w <= 0.0 {
+            return 1.0;
+        }
+        ((x as f32 - t.x) / t.w).clamp(0.0, 1.0)
+    }
+
     pub fn hit(&self, x: f64, y: f64) -> Option<PanelHit> {
         if !self.rect.contains(x, y) {
             return None;
         }
         let buttons = [
-            (self.up, PanelHit::Up),
-            (self.down, PanelHit::Down),
+            (self.group, PanelHit::Group),
             (self.add, PanelHit::Add),
             (self.remove, PanelHit::Remove),
+            (self.blend, PanelHit::Blend),
+            (self.opacity, PanelHit::Opacity),
+            (self.lock, PanelHit::LockPicked),
+            (self.filter, PanelHit::Filter),
         ];
-        if let Some((_, hit)) = buttons.iter().find(|(r, _)| r.contains(x, y)) {
-            return Some(*hit);
-        }
-        if let Some(crumb) = self.crumb
-            && crumb.contains(x, y)
-        {
-            return Some(PanelHit::Leave);
+        let bar = self
+            .search
+            .map(|r| (r, PanelHit::Search))
+            .into_iter()
+            .chain(self.kinds.iter().map(|(r, k)| (*r, PanelHit::FilterKind(*k))))
+            .chain(self.tags.iter().map(|(r, t)| (*r, PanelHit::FilterTag(*t))));
+        if let Some((_, hit)) = buttons.into_iter().chain(bar).find(|(r, _)| r.contains(x, y)) {
+            return Some(hit);
         }
         // A row reaches past the band when it is only part shown; the
         // pointer never does.
         if self.band.contains(x, y) {
+            let slop = -EYE_SLOP * self.scale;
             for row in &self.rows {
                 if !row.rect.contains(x, y) {
                     continue;
                 }
-                if row.eye.inset(-EYE_SLOP * self.scale).contains(x, y) {
-                    return Some(PanelHit::Toggle(row.index));
+                if row.eye.inset(slop).contains(x, y) {
+                    return Some(PanelHit::Toggle(row.id.clone()));
                 }
-                if let Some(enter) = row.enter
-                    && enter.inset(-EYE_SLOP * self.scale).contains(x, y)
+                if let Some(chevron) = row.chevron
+                    && chevron.inset(slop).contains(x, y)
                 {
-                    return Some(PanelHit::Enter(row.index));
+                    return Some(PanelHit::Open(row.id.clone()));
                 }
-                return Some(PanelHit::Select(row.index));
+                if let Some(lock) = row.lock.filter(|_| row.own_lock)
+                    && lock.inset(slop).contains(x, y)
+                {
+                    return Some(PanelHit::Lock(row.id.clone()));
+                }
+                return Some(PanelHit::Pick(row.id.clone()));
             }
         }
         Some(PanelHit::Panel)
     }
 
-    /// Where a row dragged to `y` would land: the layer whose row is
-    /// under the pointer, or the nearest one once the drag has left the
-    /// list at either end, so overshooting still drops it where it was
-    /// headed. `None` when no row is on show.
-    pub fn drop_index(&self, y: f64) -> Option<usize> {
+    /// The row a card dragged to `y` would land on: the one under the
+    /// pointer, or the nearest once the drag has left the list at either
+    /// end, so overshooting still drops it where it was headed. `None`
+    /// when no row is on show.
+    pub fn drop_row(&self, y: f64) -> Option<&Row> {
         let last = self.rows.last()?;
         let y = y as f32;
-        let row = self.rows.iter().find(|r| y < r.rect.y + r.rect.h);
-        Some(row.unwrap_or(last).index)
+        Some(self.rows.iter().find(|r| y < r.rect.y + r.rect.h).unwrap_or(last))
+    }
+
+    /// Where a card let go of at `y` lands, read off the row under the
+    /// pointer — or the nearest, once the drag has left the list: the
+    /// middle third of a group's or a frame's row is inside it; the half
+    /// of a row nearer the top is above it and the other half under it —
+    /// except under an open holder, which is the top of what it holds,
+    /// since that is the row drawn there.
+    pub fn aim(&self, y: f64) -> Option<Place> {
+        let row = self.drop_row(y)?;
+        let f = ((y as f32 - row.rect.y) / row.rect.h).clamp(0.0, 1.0);
+        let holds = row.chevron.is_some();
+        let id = row.id.clone();
+        Some(if holds && (1.0 / 3.0..2.0 / 3.0).contains(&f) {
+            Place::Into(id)
+        } else if f < 0.5 {
+            Place::Above(id)
+        } else if holds && row.open {
+            Place::Into(id)
+        } else {
+            Place::Below(id)
+        })
     }
 
     /// Where a carried card's top edge actually goes: what the pointer
@@ -549,17 +992,10 @@ impl Panel {
         y.clamp(top, bottom)
     }
 
-    /// Paint order: shadow, border, panel, the title and the buttons,
-    /// then a card per row — and last, over the cards it is passing, the
-    /// one `showing.lift` names.
-    pub fn prims(
-        &self,
-        layers: &[Layer],
-        showing: &Showing,
-        atlas: &Atlas,
-        slot: u32,
-        theme: &Theme,
-    ) -> Vec<Prim> {
+    /// Paint order: shadow, border, panel, the title, a card per row —
+    /// and, over the cards it is passing, the one `showing.lift` names —
+    /// then the thumb and the footer's buttons.
+    pub fn prims(&self, showing: &Showing, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
         let s = self.scale;
         let b = theme.edge(s);
         let corner = theme.corner(RADIUS, s);
@@ -574,52 +1010,198 @@ impl Panel {
             Prim::rounded(self.rect, corner, theme.panel),
         ];
         let baseline = atlas.baseline_in(self.header);
-        for g in atlas.layout(&self.title, self.header.x + PADDING * s, baseline) {
+        for g in atlas.layout(TITLE, self.header.x + PADDING * s, baseline) {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
         }
+        out.extend(self.filter_prims(showing, atlas, slot, theme));
+        out.extend(self.bar_prims(showing, atlas, slot, theme));
+        let carried = showing.lift.map(|l| l.id.as_str());
+        for row in self.rows.iter().filter(|r| Some(r.id.as_str()) != carried) {
+            let dy = showing.slides.offset(&row.id);
+            self.card_prims(row, showing, None, dy, atlas, slot, theme, &mut out);
+        }
+        if let Some(place) = showing.drop {
+            out.extend(self.drop_prims(place, theme));
+        }
+        // A card in the hand is where the pointer put it, not where the
+        // tree says: it takes no slide.
+        if let Some(l) = showing.lift
+            && let Some(row) = self.rows.iter().find(|r| r.id == l.id)
+        {
+            self.card_prims(row, showing, Some(l), 0.0, atlas, slot, theme, &mut out);
+        }
+        // The thumb sits over the cards, at the band's right edge: it
+        // says how much of the tree is on show and where.
+        if let Some(bar) = self.bar {
+            out.push(Prim::rounded(bar, bar.w / 2.0, theme.muted));
+        }
         for (rect, icon) in [
-            (self.up, UP),
-            (self.down, DOWN),
+            (self.group, FOLDER_PLUS),
             (self.add, PLUS),
             (self.remove, TRASH),
         ] {
             out.extend(icon_prims(icon, rect, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
         }
-        let carried = showing.lift.map(|l| l.index);
-        for row in self.rows.iter().filter(|r| Some(r.index) != carried) {
-            let dy = layers
-                .get(row.index)
-                .map_or(0.0, |l| showing.slides.offset(&l.id));
-            self.card_prims(row, layers, showing.active, None, dy, atlas, slot, theme, &mut out);
+        out
+    }
+
+    /// The header's filter button — lit while its bar is open — and the
+    /// bar: the field, bordered as the blend button is, the glass and the
+    /// name or what the field is for; the kinds' icons and the colours'
+    /// dots, each lit while it narrows the tree.
+    fn filter_prims(&self, showing: &Showing, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
+        let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(ROW_RADIUS, s);
+        let mut out = Vec::new();
+        let lit = |r: ScreenRect| Prim::rounded(r, corner, theme.active_bg);
+        if self.search.is_some() {
+            out.push(lit(self.filter));
         }
-        // A card in the hand is where the pointer put it, not where the
-        // stack says: it takes no slide.
-        if let Some(l) = showing.lift
-            && let Some(row) = self.rows.iter().find(|r| r.index == l.index)
-        {
-            let a = showing.active;
-            self.card_prims(row, layers, a, Some(l), 0.0, atlas, slot, theme, &mut out);
+        out.extend(icon_prims(FUNNEL, self.filter, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
+        let (Some(search), Some(text)) = (self.search, self.search_text()) else {
+            return out;
+        };
+        out.push(Prim::rounded(search.inset(-b), corner + b, theme.border));
+        out.push(Prim::rounded(search, corner, theme.panel));
+        let glass = ScreenRect {
+            x: search.x + PADDING / 2.0 * s,
+            y: search.y + (search.h - ICON_BOX * s) / 2.0,
+            w: ICON_BOX * s,
+            h: ICON_BOX * s,
+        };
+        out.extend(icon_prims(GLASS, glass, 24.0, ICON_BOX, ICON_STROKE, s, theme.muted));
+        let name = showing.filter.map_or("", |f| f.name.as_str());
+        if !showing.searching {
+            if name.is_empty() {
+                let baseline = atlas.baseline_in(text);
+                for g in atlas.layout(PLACEHOLDER, text.x + crate::field::PADDING, baseline) {
+                    out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(text));
+                }
+            } else {
+                out.extend(Field::new(name).prims(text, atlas, slot, theme, false));
+            }
         }
-        // The thumb sits over the cards, at the band's right edge: it
-        // says how much of the stack is on show and where.
-        if let Some(bar) = self.bar {
-            out.push(Prim::rounded(bar, bar.w / 2.0, theme.muted));
+        let filter = showing.filter;
+        for (r, kind) in &self.kinds {
+            let on = filter.is_some_and(|f| f.kinds.contains(kind));
+            if on {
+                out.push(lit(*r));
+            }
+            let icon = match kind {
+                Kind::Raster => PIXELS,
+                Kind::Vector => CURVE,
+                Kind::Group => FOLDER,
+                Kind::Frame => FRAME,
+            };
+            let color = if on { theme.ink } else { theme.icon };
+            out.extend(icon_prims(icon, *r, 24.0, ICON_BOX, ICON_STROKE, s, color));
+        }
+        for (r, tag) in &self.tags {
+            if filter.is_some_and(|f| f.tags.contains(tag)) {
+                out.push(lit(*r));
+            }
+            if let Some(c) = tag_color(*tag) {
+                let (cx, cy) = r.center();
+                out.push(Prim::circle(cx, cy, TAG_DOT * s, c));
+            }
         }
         out
     }
 
-    /// One row's card: its shadow, its outline, its body, then the eye
-    /// and the name. A card in flight is the same card, every property
-    /// carried `lift` of the way: further off the panel, bluer at the
-    /// edge, and — once it is drawn — bigger, turned and leaning at the
-    /// pointer, contents and all.
+    /// The bar: the blend mode's button — its name and a chevron — the
+    /// strength as a track filled as far as it goes with its number
+    /// beside it, and the lock, shut or open.
+    fn bar_prims(&self, showing: &Showing, atlas: &Atlas, slot: u32, theme: &Theme) -> Vec<Prim> {
+        let s = self.scale;
+        let b = theme.edge(s);
+        let corner = theme.corner(ROW_RADIUS, s);
+        let mut out = vec![
+            Prim::rounded(self.blend.inset(-b), corner + b, theme.border),
+            Prim::rounded(self.blend, corner, theme.panel),
+        ];
+        let chevron = ScreenRect {
+            x: self.blend.x + self.blend.w - (ICON_BOX + PADDING) * s,
+            y: self.blend.y + (self.blend.h - ICON_BOX * s) / 2.0,
+            w: ICON_BOX * s,
+            h: ICON_BOX * s,
+        };
+        out.extend(icon_prims(CHEVRON_DOWN, chevron, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
+        let name_x = self.blend.x + PADDING * s;
+        let name = atlas.truncate(showing.blend, (chevron.x - name_x).max(0.0));
+        let baseline = atlas.baseline_in(self.blend);
+        for g in atlas.layout(&name, name_x, baseline) {
+            out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
+        }
+        let t = self.track();
+        let v = showing.opacity.clamp(0.0, 1.0);
+        out.push(Prim::rounded(t, t.h / 2.0, theme.muted));
+        let fill = ScreenRect { w: t.w * v, ..t };
+        if fill.w > 0.0 {
+            out.push(Prim::rounded(fill, t.h / 2.0, theme.ink));
+        }
+        out.push(Prim::circle(t.x + t.w * v, t.y + t.h / 2.0, KNOB * s, theme.ink));
+        let number = format!("{}%", (v * 100.0).round() as u32);
+        // Right-aligned a little way in: a glyph's ink can reach past its
+        // advance, and the number is not to touch the lock.
+        let right = self.opacity.x + self.opacity.w - PADDING / 2.0 * s;
+        let baseline = atlas.baseline_in(self.opacity);
+        for g in atlas.layout(&number, right - atlas.measure(&number), baseline) {
+            out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
+        }
+        let lock = if showing.locked { LOCK } else { UNLOCK };
+        out.extend(icon_prims(lock, self.lock, 24.0, ICON_BOX, ICON_STROKE, s, theme.icon));
+        out
+    }
+
+    /// Where a card would land, in the lift's own blue: a line on the
+    /// boundary between two rows, as far in as the stack it lands in —
+    /// or, into a group or a frame, its card outlined all round.
+    fn drop_prims(&self, place: &Place, theme: &Theme) -> Vec<Prim> {
+        let s = self.scale;
+        let t = DROP_LINE * s;
+        let find = |id: &str| self.rows.iter().find(|r| r.id == id);
+        let line = |row: &Row, y: f32| {
+            let r = ScreenRect {
+                x: row.card.x,
+                y: y - t / 2.0,
+                w: row.card.w,
+                h: t,
+            };
+            vec![Prim::rounded(r, t / 2.0, theme.lifted).clipped(self.band.inset(-t))]
+        };
+        match place {
+            Place::Above(id) => find(id).map_or(Vec::new(), |r| line(r, r.rect.y)),
+            Place::Below(id) => find(id).map_or(Vec::new(), |r| line(r, r.rect.y + r.rect.h)),
+            Place::Into(id) => {
+                let Some(r) = find(id) else {
+                    return Vec::new();
+                };
+                let c = r.card.inset(-t / 2.0);
+                [
+                    (c.x, c.y, c.w, t),
+                    (c.x, c.y + c.h - t, c.w, t),
+                    (c.x, c.y + t, t, (c.h - 2.0 * t).max(0.0)),
+                    (c.x + c.w - t, c.y + t, t, (c.h - 2.0 * t).max(0.0)),
+                ]
+                .into_iter()
+                .map(|(x, y, w, h)| Prim::rect(ScreenRect { x, y, w, h }, theme.lifted).clipped(self.band))
+                .collect()
+            }
+        }
+    }
+
+    /// One row: its card — shadow, outline, body — then the chevron, the
+    /// glyph and the name, and the eye in its column. A card in flight is
+    /// the same row, every property carried `lift` of the way: further
+    /// off the panel, bluer at the edge, and — once it is drawn — bigger,
+    /// turned and leaning at the pointer, contents and all.
     #[allow(clippy::too_many_arguments)]
     fn card_prims(
         &self,
         row: &Row,
-        layers: &[Layer],
-        active: usize,
-        lift: Option<Lift>,
+        showing: &Showing,
+        lift: Option<&Lift>,
         dy: f32,
         atlas: &Atlas,
         slot: u32,
@@ -636,7 +1218,7 @@ impl Panel {
             at(theme.border_px, LIFT_BORDER.max(theme.border_px)),
         );
         let outline = mix(theme.border, theme.lifted, e);
-        let is_active = row.index == active;
+        let picked = showing.picked.contains(&row.id) || showing.active == row.id;
         let start = out.len();
         out.push(Prim::soft(
             row.card.offset(0.0, drop * s),
@@ -652,49 +1234,88 @@ impl Panel {
         out.push(Prim::rounded(
             row.card,
             radius,
-            if is_active { theme.active_bg } else { theme.panel },
+            if picked { theme.active_bg } else { theme.panel },
         ));
-        let Some(layer) = layers.get(row.index) else {
-            return;
-        };
-        let (eye, color) = if layer.visible {
-            (EYE, theme.icon)
+        // A tag is read off the eye's cell, as in Photoshop.
+        if let Some(c) = tag_color(row.tag) {
+            out.push(Prim::rounded(
+                row.eye,
+                theme.corner(ROW_RADIUS, s),
+                mix(theme.panel, c, TAG_TINT),
+            ));
+        }
+        // What is not on show is read as such: muted, whatever its own
+        // eye says — hiding a group hides what it holds.
+        let tint = |on: Rgba| if row.shown { on } else { theme.muted };
+        let (eye, color) = if row.visible {
+            (EYE, tint(theme.icon))
         } else {
             (EYE_HIDDEN, theme.muted)
         };
         out.extend(icon_prims(eye, row.eye, 24.0, ICON_BOX, ICON_STROKE, s, color));
-        if layer.visible {
+        if row.visible {
             let (cx, cy) = row.eye.center();
             out.push(Prim::circle(cx, cy, PUPIL / 24.0 * ICON_BOX * s, color));
         }
-        // What the layer holds, at the card's other end: it says where the
-        // next stroke goes, so it is read, never clicked.
-        // A frame's card ends in the chevron that goes into it, in the
-        // mark's own place: a mark is read and a chevron is pressed, and
-        // the panel says that difference in colour.
-        let (holds, tint) = match layer.kind {
-            Kind::Raster => (PIXELS, theme.muted),
-            Kind::Vector => (CURVE, theme.muted),
-            Kind::Frame => (CHEVRON_RIGHT, theme.icon),
+        if let Some(chevron) = row.chevron {
+            let icon = if row.open { CHEVRON_DOWN } else { CHEVRON_RIGHT };
+            out.extend(icon_prims(icon, chevron, 24.0, CHEVRON, ICON_STROKE, s, theme.icon));
+        }
+        // What the row is, read and never clicked: pixels, a curve, a
+        // folder — open when it is — or a frame. A raster or a vector
+        // layer shows a picture of what it holds once there is one, its
+        // kind riding on a badge at the corner.
+        let glyph = match (row.kind, row.open) {
+            (Kind::Raster, _) => PIXELS,
+            (Kind::Vector, _) => CURVE,
+            (Kind::Group, false) => FOLDER,
+            (Kind::Group, true) => FOLDER_OPEN,
+            (Kind::Frame, _) => FRAME,
         };
-        out.extend(icon_prims(
-            holds,
-            row.mark,
-            24.0,
-            ICON_BOX,
-            ICON_STROKE,
-            s,
-            tint,
-        ));
+        let picture = showing
+            .thumbs
+            .filter(|_| matches!(row.kind, Kind::Raster | Kind::Vector))
+            .and_then(|(sheet, slot)| sheet.uv(&row.id).map(|uv| (uv, slot)));
+        match picture {
+            Some((uv, slot)) => {
+                let b = theme.edge(s);
+                out.push(Prim::rect(row.glyph.inset(-b), theme.border));
+                out.push(Prim::sprite(row.glyph, uv, slot));
+                let badge = ScreenRect {
+                    x: row.glyph.x + row.glyph.w + (BADGE_OUT - BADGE) * s,
+                    y: row.glyph.y + row.glyph.h + (BADGE_OUT - BADGE) * s,
+                    w: BADGE * s,
+                    h: BADGE * s,
+                };
+                let corner = theme.corner(BADGE / 3.0, s);
+                out.push(Prim::rounded(badge.inset(-b), corner + b, theme.border));
+                out.push(Prim::rounded(badge, corner, theme.panel));
+                out.extend(icon_prims(glyph, badge, 24.0, BADGE_ICON, ICON_STROKE, s, tint(theme.icon)));
+            }
+            None => {
+                let square = ScreenRect {
+                    x: row.glyph.x + (row.glyph.w - row.glyph.h) / 2.0,
+                    w: row.glyph.h,
+                    ..row.glyph
+                };
+                out.extend(icon_prims(glyph, square, 24.0, ICON_BOX, ICON_STROKE, s, tint(theme.icon)));
+            }
+        }
+        // A lock of its own is the row's to open; one worn for a holder
+        // is read, muted, since it is the holder's.
+        if let Some(lock) = row.lock {
+            let color = if row.own_lock { theme.icon } else { theme.muted };
+            out.extend(icon_prims(LOCK, lock, 24.0, ICON_BOX, ICON_STROKE, s, color));
+        }
         if !row.label.is_empty() {
-            let ink = if is_active { theme.ink } else { theme.icon };
+            let ink = tint(if picked { theme.ink } else { theme.icon });
             let baseline = atlas.baseline_in(row.rect);
             for g in atlas.layout(&row.label, row.label_x, baseline) {
                 out.push(Prim::glyph(g.rect, g.uv, slot, ink));
             }
         }
-        // Out of the stack in the pointer's hand, or still on its way to
-        // the row it now belongs to. Either way the whole card moves,
+        // Out of the tree in the pointer's hand, or still on its way to
+        // the row it now belongs to. Either way the whole row moves,
         // contents and all.
         let (k, angle, by) = match lift {
             Some(l) if e > 0.0 => (
@@ -706,9 +1327,9 @@ impl Panel {
         };
         let pivot = row.card.center();
         let moved = k != 1.0 || angle != 0.0 || by.0 != 0.0 || by.1 != 0.0;
-        // The band is where the stack is shown, and the rest of a row
-        // that reaches past it is not drawn — but a card in flight is
-        // out of the stack, so the band lets go of it as it lifts.
+        // The band is where the tree is shown, and the rest of a row that
+        // reaches past it is not drawn — but a card in flight is out of
+        // the tree, so the band lets go of it as it lifts.
         let cut = self.band.inset(-LIFT_REACH * s * e);
         for prim in &mut out[start..] {
             if moved {
@@ -884,11 +1505,45 @@ fn reading_up(
 }
 
 // Icons as polylines on a 24×24 grid, like the dock's.
-const UP: &[&[(f32, f32)]] = &[&[(6.0, 15.0), (12.0, 9.0), (18.0, 15.0)]];
-/// The handle's arrow: out the way the panel comes, and back.
+/// The handle's arrow: out the way the panel comes, and back — and a shut
+/// holder's, pointing at the row it would open.
 const CHEVRON_LEFT: &[&[(f32, f32)]] = &[&[(15.0, 6.0), (9.0, 12.0), (15.0, 18.0)]];
 const CHEVRON_RIGHT: &[&[(f32, f32)]] = &[&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)]];
-const DOWN: &[&[(f32, f32)]] = &[&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]];
+/// An open holder's: pointing down at what it holds.
+const CHEVRON_DOWN: &[&[(f32, f32)]] = &[&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]];
+/// The filter: a funnel.
+const FUNNEL: &[&[(f32, f32)]] = &[&[
+    (4.0, 5.0),
+    (20.0, 5.0),
+    (14.0, 12.0),
+    (14.0, 19.0),
+    (10.0, 21.0),
+    (10.0, 12.0),
+    (4.0, 5.0),
+]];
+/// Looking for a name: a glass and its handle.
+const GLASS: &[&[(f32, f32)]] = &[
+    &[
+        (16.5, 10.5),
+        (16.04, 12.8),
+        (14.74, 14.74),
+        (12.8, 16.04),
+        (10.5, 16.5),
+        (8.2, 16.04),
+        (6.26, 14.74),
+        (4.96, 12.8),
+        (4.5, 10.5),
+        (4.96, 8.2),
+        (6.26, 6.26),
+        (8.2, 4.96),
+        (10.5, 4.5),
+        (12.8, 4.96),
+        (14.74, 6.26),
+        (16.04, 8.2),
+        (16.5, 10.5),
+    ],
+    &[(14.74, 14.74), (20.0, 20.0)],
+];
 const PLUS: &[&[(f32, f32)]] = &[&[(12.0, 5.0), (12.0, 19.0)], &[(5.0, 12.0), (19.0, 12.0)]];
 /// A bin: lid, handle, tapered body.
 const TRASH: &[&[(f32, f32)]] = &[
@@ -937,10 +1592,72 @@ const CURVE: &[&[(f32, f32)]] = &[&[
     (20.0, 8.0),
 ]];
 
+/// A group, shut: a folder.
+const FOLDER: &[&[(f32, f32)]] = &[&[
+    (3.0, 6.0),
+    (9.0, 6.0),
+    (11.0, 9.0),
+    (21.0, 9.0),
+    (21.0, 19.0),
+    (3.0, 19.0),
+    (3.0, 6.0),
+]];
+
+/// A group, open: the folder's front leaf let down.
+const FOLDER_OPEN: &[&[(f32, f32)]] = &[
+    &[(3.0, 19.0), (3.0, 6.0), (9.0, 6.0), (11.0, 9.0), (19.0, 9.0), (19.0, 11.0)],
+    &[(3.0, 19.0), (6.0, 11.0), (22.0, 11.0), (19.0, 19.0), (3.0, 19.0)],
+];
+
+/// The footer's new group: a folder with a plus on it.
+const FOLDER_PLUS: &[&[(f32, f32)]] = &[
+    &[
+        (3.0, 6.0),
+        (9.0, 6.0),
+        (11.0, 9.0),
+        (21.0, 9.0),
+        (21.0, 19.0),
+        (3.0, 19.0),
+        (3.0, 6.0),
+    ],
+    &[(12.0, 11.0), (12.0, 17.0)],
+    &[(9.0, 14.0), (15.0, 14.0)],
+];
+
+/// A padlock, shut: what a locked row wears.
+const LOCK: &[&[(f32, f32)]] = &[
+    &[(6.0, 11.0), (18.0, 11.0), (18.0, 20.0), (6.0, 20.0), (6.0, 11.0)],
+    &[
+        (8.0, 11.0),
+        (8.0, 8.0),
+        (9.0, 6.0),
+        (12.0, 5.0),
+        (15.0, 6.0),
+        (16.0, 8.0),
+        (16.0, 11.0),
+    ],
+];
+
+/// A padlock, open: the bar's lock while the active layer is not locked.
+const UNLOCK: &[&[(f32, f32)]] = &[
+    &[(6.0, 11.0), (18.0, 11.0), (18.0, 20.0), (6.0, 20.0), (6.0, 11.0)],
+    &[(8.0, 11.0), (8.0, 6.0), (9.0, 4.0), (12.0, 3.0), (15.0, 4.0), (16.0, 6.0), (16.0, 7.0)],
+];
+
+/// A frame: the crop marks of an area, as design tools draw one.
+const FRAME: &[&[(f32, f32)]] = &[
+    &[(8.0, 3.0), (8.0, 21.0)],
+    &[(16.0, 3.0), (16.0, 21.0)],
+    &[(3.0, 8.0), (21.0, 8.0)],
+    &[(3.0, 16.0), (21.0, 16.0)],
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::{Document, Layer, Tag};
     use crate::scene::{KIND_BOX, KIND_IMAGE, KIND_SEGMENT};
+    use crate::tree::Filter;
     use crate::tabs::Tabs;
     use crate::text::Font;
 
@@ -948,19 +1665,26 @@ mod tests {
         Atlas::build(&Font::bundled(), Tabs::label_px(crate::tabs::LABEL, 1.0))
     }
 
-    fn layers(n: usize) -> Vec<Layer> {
-        (1..=n)
+    /// A board of `n` raster layers on its root, `L1` at the bottom.
+    fn flat(n: usize) -> Document {
+        let mut doc = Document::new("t");
+        doc.layers = (1..=n)
             .map(|i| Layer {
                 id: format!("L{i}"),
-                name: format!("Layer {i}"),
-                visible: true,
-                kind: Kind::Raster,
+                ..Layer::of(&format!("Layer {i}"), Kind::Raster)
             })
-            .collect()
+            .collect();
+        doc
+    }
+
+    /// The panel over `doc` with the holders in `open` shown open.
+    fn laid(doc: &Document, open: &[&str], viewport: Viewport, scale: f64, scroll: f32) -> Panel {
+        let rows = doc.rows(|id| open.contains(&id));
+        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &rows, scroll, false)
     }
 
     fn panel(viewport: Viewport, scale: f64, n: usize) -> Panel {
-        Panel::layout(viewport, scale, 34.0 * scale as f32, &atlas(), &layers(n), None, 0.0)
+        laid(&flat(n), &[], viewport, scale, 0.0)
     }
 
     const VP: Viewport = Viewport { w: 1200, h: 800 };
@@ -969,18 +1693,31 @@ mod tests {
         ScreenRect { x, y, w, h }
     }
 
+    fn ids(p: &Panel) -> Vec<&str> {
+        p.rows.iter().map(|r| r.id.as_str()).collect()
+    }
+
+    fn row<'a>(p: &'a Panel, id: &str) -> &'a Row {
+        p.rows.iter().find(|r| r.id == id).expect("a row by that id")
+    }
+
+    fn mid(r: ScreenRect) -> (f64, f64) {
+        let (x, y) = r.center();
+        (f64::from(x), f64::from(y))
+    }
+
     #[test]
     fn panel_sits_below_the_strip_at_the_right_edge() {
         let p = panel(VP, 1.0, 2);
         // MARGIN from the right edge and from the strip's bottom; padding,
-        // the header, one row per layer, padding.
+        // the header, one row per layer, the footer, padding.
         assert_eq!(
             p.rect,
             sr(
                 1200.0 - MARGIN - WIDTH,
                 34.0 + MARGIN,
                 WIDTH,
-                2.0 * PADDING + HEADER + 2.0 * ROW
+                2.0 * PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER
             )
         );
     }
@@ -988,61 +1725,122 @@ mod tests {
     #[test]
     fn rows_list_the_top_layer_first() {
         let p = panel(VP, 1.0, 3);
-        let indices: Vec<usize> = p.rows.iter().map(|r| r.index).collect();
-        assert_eq!(indices, vec![2, 1, 0]);
+        assert_eq!(ids(&p), ["L3", "L2", "L1"]);
         assert_eq!(p.rows[0].label, "Layer 3");
-        assert_eq!(p.rows[0].rect.y, p.header.y + p.header.h);
+        assert_eq!(p.rows[0].rect.y, p.props.y + p.props.h, "under the bar");
         assert_eq!(p.rows[1].rect.y, p.rows[0].rect.y + ROW);
         assert_eq!(p.rows[0].rect.h, ROW);
         for r in &p.rows {
             assert!(r.rect.contains_rect(&r.eye), "the eye sits in its row");
-            assert!(r.label_x > r.eye.x + r.eye.w, "the label follows the eye");
+            assert!(r.rect.contains_rect(&r.card), "and so does the card");
+            assert!(r.card.contains_rect(&r.glyph), "which holds the glyph");
+            assert!(r.label_x > r.glyph.x + r.glyph.w, "the name follows it");
+            assert!(r.eye.x + r.eye.w <= r.card.x, "the eye is left of the card");
         }
     }
 
     #[test]
-    fn a_row_marks_what_its_layer_holds() {
-        let theme = Theme::light();
-        let a = atlas();
-        let mut ls = layers(2);
-        ls[1].kind = Kind::Vector;
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
-        for row in &p.rows {
-            assert!(row.card.contains_rect(&row.mark), "the mark sits in the card");
-            assert!(
-                row.label_x + a.measure(&row.label) <= row.mark.x,
-                "the name stops short of it"
-            );
-        }
-        let prims = p.prims(&ls, &showing(0, None), &a, 7, &theme);
-        // Where the segments fall inside the mark, not where the mark is.
-        let mark = |row: &Row| -> Vec<(f32, f32, f32, f32)> {
-            prims
-                .iter()
-                .filter(|q| q.kind == KIND_SEGMENT && row.mark.contains_rect(&q.bounds()))
-                .map(|q| {
-                    let b = q.bounds();
-                    (b.x - row.mark.x, b.y - row.mark.y, b.w, b.h)
-                })
-                .collect()
+    fn a_group_opens_in_place_its_layers_one_step_in() {
+        let doc = crate::tree::tests::nested();
+        let shut = laid(&doc, &[], VP, 1.0, 0.0);
+        assert_eq!(ids(&shut), ["F", "G", "A"]);
+        let open = laid(&doc, &["G"], VP, 1.0, 0.0);
+        assert_eq!(ids(&open), ["F", "G", "H", "B", "A"], "under its row, in place");
+        let (g, h, a) = (row(&open, "G"), row(&open, "H"), row(&open, "A"));
+        assert_eq!(h.depth, 1);
+        assert_eq!(h.card.x, g.card.x + INDENT, "one step in");
+        assert_eq!(a.card.x, g.card.x, "back out after it");
+        assert_eq!(h.card.x + h.card.w, g.card.x + g.card.w, "every card ends at the band's edge");
+        // The eyes stand in one column whatever the depth, so they line up.
+        assert!(open.rows.iter().all(|r| r.eye.x == g.eye.x));
+        assert!(g.open && !h.open);
+    }
+
+    #[test]
+    fn a_card_never_steps_in_past_its_narrowest() {
+        // A group forty deep: past a point the steps stop, not the name.
+        let mut doc = Document::new("t");
+        let mut layer = Layer {
+            id: "leaf".into(),
+            ..Layer::of("Leaf", Kind::Raster)
         };
-        // Rows list the top layer first, so row 0 holds the vector one.
-        let vector = mark(&p.rows[0]);
-        let raster = mark(&p.rows[1]);
-        assert!(!vector.is_empty(), "the vector layer is marked");
-        assert!(!raster.is_empty(), "the raster layer is marked");
-        assert_ne!(vector, raster, "and not with the same drawing");
+        let mut open = Vec::new();
+        for i in 0..40 {
+            let id = format!("g{i}");
+            layer = Layer {
+                id: id.clone(),
+                layers: vec![layer],
+                ..Layer::of("Group", Kind::Group)
+            };
+            open.push(id);
+        }
+        doc.layers = vec![layer];
+        let open: Vec<&str> = open.iter().map(String::as_str).collect();
+        let p = laid(&doc, &open, Viewport { w: 1200, h: 4000 }, 1.0, 0.0);
+        let leaf = row(&p, "leaf");
+        assert_eq!(leaf.depth, 40);
+        assert!(leaf.card.w >= CARD_MIN, "{}", leaf.card.w);
     }
 
     #[test]
-    fn the_band_is_as_much_of_the_stack_as_there_is_room_for() {
-        // Room for the header and one row above the bottom margin.
-        let h = (34.0 + MARGIN + PADDING + HEADER + ROW + PADDING + MARGIN) as u32;
+    fn only_a_group_or_a_frame_has_a_chevron_and_every_glyph_lines_up() {
+        let doc = crate::tree::tests::nested();
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        assert!(row(&p, "F").chevron.is_some() && row(&p, "G").chevron.is_some());
+        assert!(row(&p, "H").chevron.is_some());
+        assert!(row(&p, "A").chevron.is_none() && row(&p, "B").chevron.is_none());
+        // A layer keeps the chevron's room, so its glyph stands where a
+        // holder's does at the same depth.
+        assert_eq!(row(&p, "A").glyph.x, row(&p, "G").glyph.x);
+        assert_eq!(row(&p, "B").glyph.x, row(&p, "H").glyph.x);
+    }
+
+    #[test]
+    fn hit_names_the_eye_the_chevron_the_card_and_the_footer() {
+        let doc = crate::tree::tests::nested();
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let hit = |r: ScreenRect| {
+            let (x, y) = mid(r);
+            p.hit(x, y)
+        };
+        let g = row(&p, "G");
+        assert_eq!(hit(g.eye), Some(PanelHit::Toggle("G".into())));
+        assert_eq!(hit(g.chevron.unwrap()), Some(PanelHit::Open("G".into())));
+        assert_eq!(hit(g.glyph), Some(PanelHit::Pick("G".into())));
+        let b = row(&p, "B");
+        assert_eq!(p.hit(f64::from(b.label_x) + 2.0, mid(b.card).1), Some(PanelHit::Pick("B".into())));
+        assert_eq!(hit(p.group), Some(PanelHit::Group));
+        assert_eq!(hit(p.add), Some(PanelHit::Add));
+        assert_eq!(hit(p.remove), Some(PanelHit::Remove));
+        let (_, y) = mid(p.header);
+        assert_eq!(
+            p.hit(f64::from(p.header.x) + 10.0, y),
+            Some(PanelHit::Panel),
+            "the title swallows the click"
+        );
+        assert_eq!(p.hit(100.0, 100.0), None);
+    }
+
+    #[test]
+    fn the_footer_holds_group_add_and_the_bin_at_the_foot() {
+        let p = panel(VP, 1.0, 3);
+        assert_eq!(p.footer.y, p.band.y + p.band.h, "right under the rows");
+        assert_eq!(p.footer.y + p.footer.h + PADDING, p.rect.y + p.rect.h);
+        for b in [p.group, p.add, p.remove] {
+            assert!(p.footer.contains_rect(&b), "{b:?} is in the footer");
+        }
+        assert!(p.group.x < p.add.x && p.add.x < p.remove.x, "the bin at the end");
+        assert_eq!(p.remove.x + p.remove.w, p.footer.x + p.footer.w);
+    }
+
+    #[test]
+    fn the_band_is_as_much_of_the_tree_as_there_is_room_for() {
+        // Room for the header, one row and the footer above the margin.
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + ROW + FOOTER + PADDING + MARGIN) as u32;
         let p = panel(Viewport { w: 1200, h }, 1.0, 3);
         assert_eq!(p.band.h, ROW);
-        assert_eq!(p.rows.len(), 1, "{:?}", p.rows);
-        assert_eq!(p.rows[0].index, 2, "the top layer is what the band starts on");
-        assert_eq!(p.rect.h, 2.0 * PADDING + HEADER + ROW);
+        assert_eq!(ids(&p), ["L3"], "the top layer is what the band starts on");
+        assert_eq!(p.rect.h, 2.0 * PADDING + HEADER + PROPS + ROW + FOOTER);
         assert_eq!(p.max_scroll(), 2.0 * ROW, "two rows below the band");
         assert!(p.bar.is_some(), "and a thumb to say so");
 
@@ -1051,13 +1849,9 @@ mod tests {
         let p = panel(Viewport { w: 1200, h: h - 1 }, 1.0, 3);
         assert_eq!(p.band.h, ROW - 1.0);
         assert_eq!(p.rows.len(), 1);
-        assert!(
-            p.rows[0].rect.h > p.band.h,
-            "the row reaches past the band and is cut when it is drawn"
-        );
+        assert!(p.rows[0].rect.h > p.band.h);
 
-        // Everything fits: no scroll, no thumb, and the band is the
-        // stack.
+        // Everything fits: no scroll, no thumb, and the band is the tree.
         let p = panel(VP, 1.0, 3);
         assert_eq!(p.band.h, 3.0 * ROW);
         assert_eq!(p.max_scroll(), 0.0);
@@ -1065,70 +1859,59 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_slides_the_stack_under_the_band() {
-        let h = (34.0 + MARGIN + PADDING + HEADER + 2.0 * ROW + PADDING + MARGIN) as u32;
+    fn scrolling_slides_the_tree_under_the_band() {
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER + PADDING + MARGIN) as u32;
         let vp = Viewport { w: 1200, h };
-        let a = atlas();
-        let ls = layers(4);
-        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, None, scroll);
+        let doc = flat(4);
+        let at = |scroll: f32| laid(&doc, &[], vp, 1.0, scroll);
 
         let top = at(0.0);
         assert_eq!(top.scroll(), 0.0);
-        assert_eq!(indices(&top), vec![3, 2], "the top of the stack");
+        assert_eq!(ids(&top), ["L4", "L3"], "the top of the tree");
 
         // Half a row down: three rows are part shown.
         let half = at(ROW / 2.0);
-        assert_eq!(indices(&half), vec![3, 2, 1]);
+        assert_eq!(ids(&half), ["L4", "L3", "L2"]);
         assert_eq!(half.rows[0].rect.y, half.band.y - ROW / 2.0, "cut at the top");
 
         // Past the end, and it stops with the last row against the
         // band's bottom.
         let end = at(10_000.0);
-        assert_eq!(end.scroll(), 2.0 * ROW, "two rows of stack below a two-row band");
-        assert_eq!(indices(&end), vec![1, 0]);
+        assert_eq!(end.scroll(), 2.0 * ROW);
+        assert_eq!(ids(&end), ["L2", "L1"]);
         let last = end.rows.last().unwrap();
         assert_eq!(last.rect.y + last.rect.h, end.band.y + end.band.h);
 
-        // The thumb is the band's share of the stack, and travels the
+        // The thumb is the band's share of the tree, and travels the
         // whole way.
         let thumb = top.bar.unwrap();
         assert_eq!(thumb.h, top.band.h * top.band.h / (4.0 * ROW));
         assert_eq!(thumb.y, top.band.y);
-        assert_eq!(thumb.x + thumb.w, top.band.x + top.band.w);
         let thumb = end.bar.unwrap();
         assert_eq!(thumb.y + thumb.h, end.band.y + end.band.h);
     }
 
     #[test]
     fn scroll_showing_moves_as_little_as_it_can() {
-        let h = (34.0 + MARGIN + PADDING + HEADER + 2.0 * ROW + PADDING + MARGIN) as u32;
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER + PADDING + MARGIN) as u32;
         let vp = Viewport { w: 1200, h };
-        let a = atlas();
-        let ls = layers(4);
-        let at = |scroll: f32| Panel::layout(vp, 1.0, 34.0, &a, &ls, None, scroll);
+        let doc = flat(4);
+        let at = |scroll: f32| laid(&doc, &[], vp, 1.0, scroll);
 
-        // Looking at the top two rows (layers 3 and 2, top first).
+        // Looking at the top two rows.
         let p = at(0.0);
-        assert_eq!(p.scroll_showing(3, 4), 0.0, "already in the band");
-        assert_eq!(p.scroll_showing(2, 4), 0.0);
-        assert_eq!(p.scroll_showing(1, 4), ROW, "just far enough down");
-        assert_eq!(p.scroll_showing(0, 4), 2.0 * ROW);
+        assert_eq!(p.scroll_showing(0, 4), 0.0, "already in the band");
+        assert_eq!(p.scroll_showing(1, 4), 0.0);
+        assert_eq!(p.scroll_showing(2, 4), ROW, "just far enough down");
+        assert_eq!(p.scroll_showing(3, 4), 2.0 * ROW);
 
         // Looking at the bottom two: coming back up stops as soon as the
         // row is in.
         let p = at(2.0 * ROW);
-        assert_eq!(p.scroll_showing(0, 4), 2.0 * ROW);
-        assert_eq!(p.scroll_showing(2, 4), ROW);
-        assert_eq!(p.scroll_showing(3, 4), 0.0);
-        assert_eq!(p.scroll_showing(9, 4), p.scroll(), "no such layer");
-
-        // Nothing to scroll: the answer is always where it already is.
-        let p = panel(VP, 1.0, 4);
+        assert_eq!(p.scroll_showing(3, 4), 2.0 * ROW);
+        assert_eq!(p.scroll_showing(1, 4), ROW);
         assert_eq!(p.scroll_showing(0, 4), 0.0);
-    }
-
-    fn indices(p: &Panel) -> Vec<usize> {
-        p.rows.iter().map(|r| r.index).collect()
+        assert_eq!(p.scroll_showing(9, 4), p.scroll(), "no such row");
     }
 
     #[test]
@@ -1138,53 +1921,24 @@ mod tests {
         assert_eq!(p.rect.x, 1200.0 - 2.0 * (MARGIN + WIDTH));
         assert_eq!(p.rows[0].rect.h, 2.0 * ROW);
         assert_eq!(p.add.w, 2.0 * BUTTON);
+        assert_eq!(p.footer.h, 2.0 * FOOTER);
     }
 
     #[test]
-    fn hit_names_the_row_the_eye_and_the_buttons() {
-        let p = panel(VP, 1.0, 2);
-        let mid = |r: ScreenRect| {
-            let (x, y) = r.center();
-            (f64::from(x), f64::from(y))
-        };
-        let (x, y) = mid(p.up);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Up));
-        let (x, y) = mid(p.down);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Down));
-        let (x, y) = mid(p.add);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Add));
-        let (x, y) = mid(p.remove);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Remove));
-        let (x, y) = mid(p.rows[0].eye);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Toggle(1)));
-        let (x, y) = mid(p.rows[1].eye);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Toggle(0)));
-        let (x, y) = mid(p.rows[1].rect);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Select(0)));
-        let (_, y) = mid(p.header);
-        let x = f64::from(p.header.x + 10.0);
-        assert_eq!(p.hit(x, y), Some(PanelHit::Panel), "the title swallows the click");
-        assert_eq!(p.hit(f64::from(p.rect.x) + 1.0, f64::from(p.rect.y) + 1.0), Some(PanelHit::Panel));
-        assert_eq!(p.hit(100.0, 100.0), None);
-        assert_eq!(p.hit(f64::from(p.rect.x) - 1.0, f64::from(p.rect.y) + 50.0), None);
-    }
-
-    #[test]
-    fn drop_index_names_the_row_under_the_pointer() {
+    fn drop_row_names_the_row_under_the_pointer() {
         let p = panel(VP, 1.0, 3);
-        let mid = |r: ScreenRect| f64::from(r.center().1);
-        assert_eq!(p.drop_index(mid(p.rows[0].rect)), Some(2));
-        assert_eq!(p.drop_index(mid(p.rows[1].rect)), Some(1));
-        assert_eq!(p.drop_index(mid(p.rows[2].rect)), Some(0));
+        let at = |y: f64| p.drop_row(y).map(|r| r.id.as_str());
+        let y = |i: usize| mid(p.rows[i].rect).1;
+        assert_eq!(at(y(0)), Some("L3"));
+        assert_eq!(at(y(2)), Some("L1"));
         // Past either end it is the nearest row, so a drag that
         // overshoots the list still lands where it was headed.
-        assert_eq!(p.drop_index(0.0), Some(2));
-        assert_eq!(p.drop_index(10_000.0), Some(0));
-        // Nothing on show, nowhere to drop.
-        let h = (34.0 + MARGIN + PADDING + HEADER + PADDING + MARGIN) as u32;
+        assert_eq!(at(0.0), Some("L3"));
+        assert_eq!(at(10_000.0), Some("L1"));
+        let h = (34.0 + MARGIN + PADDING + HEADER + PROPS + FOOTER + PADDING + MARGIN) as u32;
         let p = panel(Viewport { w: 1200, h }, 1.0, 3);
         assert!(p.rows.is_empty());
-        assert_eq!(p.drop_index(100.0), None);
+        assert!(p.drop_row(100.0).is_none(), "nothing on show, nowhere to drop");
     }
 
     fn handle(viewport: Viewport, scale: f64, open: bool) -> Handle {
@@ -1404,35 +2158,35 @@ mod tests {
         }
     }
 
+
     #[test]
     fn every_row_is_a_card_and_the_carried_one_rises_off_the_panel() {
         let theme = Theme::light();
         let a = atlas();
-        let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
+        let p = panel(VP, 1.0, 3);
         let body = |prims: &[Prim], card: ScreenRect| {
             prims.iter().position(|q| q.bounds() == card && q.feather == 0.0)
         };
 
         // At rest: a card inside every row, on a hairline of the border
         // color, over a shadow of its own.
-        let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
+        let prims = p.prims(&showing("L2", None), &a, 7, &theme);
         for row in &p.rows {
             assert!(row.rect.contains_rect(&row.card), "the card sits in its row");
             let at = body(&prims, row.card);
-            assert!(at.is_some(), "row {} has a body", row.index);
+            assert!(at.is_some(), "row {} has a body", row.id);
             assert_eq!(
                 prims[at.unwrap()].clip,
                 [p.band.x, p.band.y, p.band.w, p.band.h],
                 "row {} is cut to the band",
-                row.index
+                row.id
             );
             assert!(
                 prims
                     .iter()
                     .any(|q| q.color == theme.border && q.bounds() == row.card.inset(-1.0)),
                 "row {} is outlined",
-                row.index
+                row.id
             );
             let shadow: Vec<&Prim> = prims
                 .iter()
@@ -1440,13 +2194,10 @@ mod tests {
                     q.color == theme.shadow && q.bounds() == row.card.offset(0.0, CARD_SHADOW_OFFSET)
                 })
                 .collect();
-            assert_eq!(shadow.len(), 1, "row {} casts one shadow", row.index);
+            assert_eq!(shadow.len(), 1, "row {} casts one shadow", row.id);
             assert_eq!(shadow[0].feather, CARD_SHADOW_FEATHER);
         }
-        assert!(
-            !prims.iter().any(|q| q.color == theme.lifted),
-            "nothing is in flight"
-        );
+        assert!(!prims.iter().any(|q| q.color == theme.lifted), "nothing is in flight");
 
         // Two cards are a gap apart, and the gap belongs to a row.
         assert_eq!(
@@ -1456,11 +2207,11 @@ mod tests {
 
         // Carried: the middle card takes the blue, a shadow with further
         // to fall, and goes last — over the cards it is passing.
-        let card = p.rows[1].card;
-        let prims = p.prims(&ls, &showing(1, Some(lift(1, card.y, 1.0))), &a, 7, &theme);
+        let card = row(&p, "L2").card;
+        let l = lift("L2", card.y, 1.0);
+        let prims = p.prims(&showing("L2", Some(&l)), &a, 7, &theme);
         let blue: Vec<&Prim> = prims.iter().filter(|q| q.color == theme.lifted).collect();
         assert_eq!(blue.len(), 1, "one card is in flight");
-        // The panel's own shadow is the first prim; the rest are cards'.
         assert!(prims[0].feather > 0.0 && prims[0].color == theme.shadow);
         let long: Vec<&Prim> = prims[1..]
             .iter()
@@ -1468,21 +2219,33 @@ mod tests {
             .collect();
         assert_eq!(long.len(), 1, "one card's shadow has further to fall");
         let carried = carried_body(&prims, &theme);
-        assert!(carried > body(&prims, p.rows[0].card).unwrap());
-        assert!(carried > body(&prims, p.rows[2].card).unwrap());
+        assert!(carried > body(&prims, row(&p, "L3").card).unwrap());
+        assert!(carried > body(&prims, row(&p, "L1").card).unwrap());
     }
 
-    fn lift(index: usize, y: f32, t: f32) -> Lift {
-        Lift { index, y, t }
+    fn lift(id: &str, y: f32, t: f32) -> Lift {
+        Lift {
+            id: id.into(),
+            y,
+            t,
+        }
     }
 
     /// Nothing on the move: what the panel shows at rest.
-    fn showing(active: usize, lift: Option<Lift>) -> Showing<'static> {
+    fn showing<'a>(active: &'a str, lift: Option<&'a Lift>) -> Showing<'a> {
         static STILL: std::sync::LazyLock<Slides> = std::sync::LazyLock::new(Slides::default);
         Showing {
             active,
+            picked: &[],
             lift,
+            drop: None,
             slides: &STILL,
+            blend: "Normal",
+            opacity: 1.0,
+            locked: false,
+            filter: None,
+            searching: false,
+            thumbs: None,
         }
     }
 
@@ -1515,14 +2278,17 @@ mod tests {
     fn a_carried_card_grows_turns_and_leans_toward_the_canvas() {
         let theme = Theme::light();
         let a = atlas();
-        let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
-        let card = p.rows[1].card;
+        let p = panel(VP, 1.0, 3);
+        let card = row(&p, "L2").card;
         let (was_x, was_y) = card.center();
-        let body_of = |prims: &[Prim]| prims[carried_body(prims, &theme)];
+        let body_at = |y: f32, t: f32| {
+            let l = lift("L2", y, t);
+            let prims = p.prims(&showing("L2", Some(&l)), &a, 7, &theme);
+            prims[carried_body(&prims, &theme)]
+        };
 
         // Fully lifted, asked to stay on its row's line.
-        let full = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y, 1.0))), &a, 7, &theme));
+        let full = body_at(card.y, 1.0);
         assert_eq!(full.geom[2], card.w * (1.0 + LIFT_SCALE), "grown");
         assert_eq!(full.geom[3], card.h * (1.0 + LIFT_SCALE));
         assert_eq!(full.angle, LIFT_TILT.to_radians(), "turned clockwise");
@@ -1534,28 +2300,27 @@ mod tests {
         assert_eq!(cy, was_y, "and nowhere in y that the pointer did not ask");
 
         // Half of it is half of everything: the transition has no step.
-        let half = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y, 0.5))), &a, 7, &theme));
+        let half = body_at(card.y, 0.5);
         assert_eq!(half.angle, LIFT_TILT.to_radians() * 0.5);
         assert_eq!(half.geom[2], card.w * (1.0 + LIFT_SCALE * 0.5));
         assert_eq!(half.geom[0] + half.geom[2] / 2.0, was_x - LIFT_LEFT * 0.5);
 
         // The card is where the pointer put it, not on any row's line.
-        let moved = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y + 11.0, 1.0))), &a, 7, &theme));
+        let moved = body_at(card.y + 11.0, 1.0);
         assert_eq!(moved.geom[1] + moved.geom[3] / 2.0, was_y + 11.0);
 
         // Nothing of the lift is drawn at rest.
-        let none = body_of(&p.prims(&ls, &showing(1, Some(lift(1, card.y + 11.0, 0.0))), &a, 7, &theme));
+        let none = body_at(card.y + 11.0, 0.0);
         assert_eq!(none.bounds(), card);
         assert_eq!(none.angle, 0.0);
     }
 
     #[test]
     fn the_cards_that_make_room_slide_from_where_they_were() {
-        let mut ls = layers(3);
         let mut s = Slides::default();
 
-        // A stack it has never seen is already where it belongs.
-        s.restack(&ls, ROW);
+        // A list it has never seen is already where it belongs.
+        s.restack(&["L3", "L2", "L1"], ROW);
         assert!(!s.moving());
         assert_eq!(s.offset("L1"), 0.0);
 
@@ -1563,9 +2328,7 @@ mod tests {
         // two it passed each drop one. Every card starts from where it
         // was, so the first frame after the move looks like the last
         // frame before it.
-        ls.swap(0, 1);
-        ls.swap(1, 2);
-        s.restack(&ls, ROW);
+        s.restack(&["L1", "L3", "L2"], ROW);
         assert!(s.moving());
         assert_eq!(s.offset("L1"), 2.0 * ROW, "down two rows from the top");
         assert_eq!(s.offset("L2"), -ROW);
@@ -1575,14 +2338,10 @@ mod tests {
         s.tick(LIFT_SECONDS / 2.0);
         assert_eq!(s.offset("L1"), 2.0 * ROW * ease(0.5));
         // A card that moves again while travelling carries what is left
-        // of the old trip into the new one, instead of jumping: L2 was
-        // 17px short of the bottom row and is now asked for the middle
-        // one, a row higher — so it starts a row below it, less what it
-        // had already come.
+        // of the old trip into the new one, instead of jumping.
         let carried = s.offset("L2");
         assert_eq!(carried, -ROW * ease(0.5));
-        ls.swap(0, 1);
-        s.restack(&ls, ROW);
+        s.restack(&["L1", "L2", "L3"], ROW);
         assert_eq!(s.offset("L2"), ROW + carried);
 
         // And they all arrive.
@@ -1592,28 +2351,45 @@ mod tests {
     }
 
     #[test]
+    fn a_group_opening_in_place_slides_what_is_under_it_down() {
+        let mut s = Slides::default();
+        s.restack(&["F", "G", "A"], ROW);
+        // G opens: its two rows arrive in place, and A makes room for
+        // them by sliding from where it was.
+        s.restack(&["F", "G", "H", "B", "A"], ROW);
+        assert_eq!(s.offset("A"), -2.0 * ROW, "it was two rows higher");
+        assert_eq!(s.offset("H"), 0.0, "a row that was not on show arrives where it belongs");
+        assert_eq!(s.offset("G"), 0.0, "and what did not move does not slide");
+    }
+
+    #[test]
     fn a_sliding_card_is_drawn_off_its_row() {
         let theme = Theme::light();
         let a = atlas();
-        let mut ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
+        let p = panel(VP, 1.0, 3);
         let mut s = Slides::default();
-        s.restack(&ls, ROW);
-        ls.swap(1, 2);
-        s.restack(&ls, ROW);
-
+        s.restack(&["L3", "L2", "L1"], ROW);
+        s.restack(&["L2", "L3", "L1"], ROW);
         let showing = Showing {
-            active: 0,
+            active: "L1",
+            picked: &[],
             lift: None,
+            drop: None,
             slides: &s,
+            blend: "Normal",
+            opacity: 1.0,
+            locked: false,
+            filter: None,
+            searching: false,
+            thumbs: None,
         };
-        let prims = p.prims(&ls, &showing, &a, 7, &theme);
+        let prims = p.prims(&showing, &a, 7, &theme);
         for row in &p.rows {
-            let card = row.card.offset(0.0, s.offset(&ls[row.index].id));
+            let card = row.card.offset(0.0, s.offset(&row.id));
             assert!(
                 prims.iter().any(|q| q.bounds() == card && q.feather == 0.0),
                 "row {} is drawn where it is coming from",
-                row.index
+                row.id
             );
         }
     }
@@ -1622,42 +2398,33 @@ mod tests {
     fn the_band_lets_go_of_a_card_in_flight() {
         let theme = Theme::light();
         let a = atlas();
-        let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
-        let card = p.rows[1].card;
+        let p = panel(VP, 1.0, 3);
+        let card = row(&p, "L2").card;
         let band = [p.band.x, p.band.y, p.band.w, p.band.h];
 
         // At rest a card is cut to the band exactly.
-        let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
+        let prims = p.prims(&showing("L2", None), &a, 7, &theme);
         let at = prims.iter().position(|q| q.bounds() == card).unwrap();
         assert_eq!(prims[at].clip, band);
 
         // In flight it leans out of the panel, so the cut goes with it:
-        // every piece of the card — its shadow, its outline, its body,
-        // its eye and its name — falls inside what it is cut to.
-        let prims = p.prims(&ls, &showing(1, Some(lift(1, card.y, 1.0))), &a, 7, &theme);
+        // every piece of the row — its shadow, its outline, its body, its
+        // eye, its glyph and its name — falls inside what it is cut to.
+        let l = lift("L2", card.y, 1.0);
+        let prims = p.prims(&showing("L2", Some(&l)), &a, 7, &theme);
         let body = prims[carried_body(&prims, &theme)];
         let [cx, cy, cw, ch] = body.clip;
         assert!(cx < p.band.x - LIFT_LEFT, "the cut clears the lean");
         assert_ne!(body.clip, band);
-        let cut = ScreenRect {
-            x: cx,
-            y: cy,
-            w: cw,
-            h: ch,
-        };
+        let cut = sr(cx, cy, cw, ch);
         let carried: Vec<&Prim> = prims.iter().filter(|q| q.clip == body.clip).collect();
-        assert!(carried.len() > 5, "a card is more than its body");
+        assert!(carried.len() > 5, "a row is more than its body");
         for q in carried {
-            assert!(
-                cut.contains_rect(&q.bounds()),
-                "{:?} is cut short by {cut:?}",
-                q.bounds()
-            );
+            assert!(cut.contains_rect(&q.bounds()), "{:?} is cut short by {cut:?}", q.bounds());
         }
 
         // And the cards it left behind are cut to the band as before.
-        let still = prims.iter().position(|q| q.bounds() == p.rows[0].card).unwrap();
+        let still = prims.iter().position(|q| q.bounds() == row(&p, "L3").card).unwrap();
         assert_eq!(prims[still].clip, band);
     }
 
@@ -1665,10 +2432,10 @@ mod tests {
     fn a_carried_card_stays_within_the_rows_on_show() {
         let theme = Theme::light();
         let a = atlas();
-        let ls = layers(3);
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
+        let p = panel(VP, 1.0, 3);
         let body_of = |y: f32| {
-            let prims = p.prims(&ls, &showing(2, Some(lift(2, y, 1.0))), &a, 7, &theme);
+            let l = lift("L3", y, 1.0);
+            let prims = p.prims(&showing("L3", Some(&l)), &a, 7, &theme);
             prims[carried_body(&prims, &theme)].bounds()
         };
         let top = p.rows[0].card;
@@ -1682,152 +2449,576 @@ mod tests {
     }
 
     #[test]
-    fn prims_highlight_the_active_row_and_dim_a_hidden_layer() {
+    fn prims_fill_the_picked_rows_and_mute_what_is_not_on_show() {
         let theme = Theme::light();
         let a = atlas();
-        let mut ls = layers(3);
-        ls[0].visible = false;
-        let p = Panel::layout(VP, 1.0, 34.0, &a, &ls, None, 0.0);
-        let prims = p.prims(&ls, &showing(1, None), &a, 7, &theme);
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("G").unwrap().visible = false;
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let picked = vec!["A".to_owned()];
+        let show = Showing {
+            active: "B",
+            picked: &picked,
+            lift: None,
+            drop: None,
+            slides: &Slides::default(),
+            blend: "Normal",
+            opacity: 1.0,
+            locked: false,
+            filter: None,
+            searching: false,
+            thumbs: None,
+        };
+        let prims = p.prims(&show, &a, 7, &theme);
 
         assert!(prims[0].feather > 0.0, "soft shadow goes first");
-        assert!(
-            prims
-                .iter()
-                .any(|q| q.color == theme.panel && q.bounds() == p.rect),
-            "panel body"
-        );
-        let highlights: Vec<ScreenRect> = prims
+        let filled: Vec<ScreenRect> = prims
             .iter()
             .filter(|q| q.kind == KIND_BOX && q.color == theme.active_bg)
             .map(|q| q.bounds())
             .collect();
-        assert_eq!(highlights.len(), 1, "one active row");
-        assert!(p.rows[1].rect.contains_rect(&highlights[0]), "on layer 1's row");
+        assert_eq!(filled.len(), 2, "the active row and the picked one");
+        assert!(filled.contains(&row(&p, "B").card) && filled.contains(&row(&p, "A").card));
 
-        // Labels are glyphs from the atlas slot; the title and every row
-        // that fits have some.
-        let glyphs = prims.iter().filter(|q| q.kind == KIND_IMAGE && q.slot == 7);
-        assert!(glyphs.count() >= 4 + 3 * 5, "'Layers' and three 'Layer N'");
-
-        // The hidden layer's eye is drawn dimmed, the others in the icon
-        // color; every eye stays inside its box.
-        for row in &p.rows {
-            let expected = if ls[row.index].visible {
-                theme.icon
-            } else {
-                theme.muted
-            };
-            let eye: Vec<&Prim> = prims
+        // Hiding a group hides what it holds: its rows are muted, though
+        // their own eyes are open.
+        let segs_in = |r: ScreenRect| -> Vec<&Prim> {
+            prims
                 .iter()
-                .filter(|q| q.kind == KIND_SEGMENT && row.eye.contains_rect(&q.bounds()))
+                .filter(|q| q.kind == KIND_SEGMENT && r.contains_rect(&q.bounds()))
+                .collect()
+        };
+        for (id, muted) in [("G", true), ("H", true), ("B", true), ("A", false), ("F", false)] {
+            let r = row(&p, id);
+            let glyph = segs_in(r.glyph);
+            assert!(!glyph.is_empty(), "{id} has a glyph");
+            let want = if muted { theme.muted } else { theme.icon };
+            assert!(glyph.iter().all(|q| q.color == want), "{id}'s glyph");
+        }
+        let eye = segs_in(row(&p, "B").eye);
+        assert!(eye.iter().all(|q| q.color == theme.muted), "B's eye is muted with it");
+
+        // The title and every row that fits are lettered.
+        let glyphs = prims.iter().filter(|q| q.kind == KIND_IMAGE && q.slot == 7);
+        assert!(glyphs.count() >= TITLE.len() + 5 * 5);
+        // The footer's three buttons draw inside their boxes.
+        for b in [p.group, p.add, p.remove] {
+            assert!(!segs_in(b).is_empty(), "{b:?} has an icon");
+        }
+    }
+
+    #[test]
+    fn every_kind_reads_apart() {
+        let theme = Theme::light();
+        let a = atlas();
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("B").unwrap().kind = Kind::Vector;
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let prims = p.prims(&showing("A", None), &a, 7, &theme);
+        // What is drawn inside a glyph box, relative to the box.
+        let drawing = |id: &str, open: bool| -> Vec<[i32; 4]> {
+            let r = row(&p, id);
+            assert_eq!(r.open, open);
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_SEGMENT && r.glyph.contains_rect(&q.bounds()))
+                .map(|q| {
+                    let b = q.bounds();
+                    [(b.x - r.glyph.x) as i32, (b.y - r.glyph.y) as i32, b.w as i32, b.h as i32]
+                })
+                .collect()
+        };
+        let kinds = [
+            drawing("A", false), // raster
+            drawing("B", false), // vector
+            drawing("H", false), // a shut group
+            drawing("G", true),  // an open one
+            drawing("F", false), // a frame
+        ];
+        for (i, one) in kinds.iter().enumerate() {
+            assert!(!one.is_empty(), "kind {i} is drawn");
+            for (j, other) in kinds.iter().enumerate().skip(i + 1) {
+                assert_ne!(one, other, "kinds {i} and {j} read alike");
+            }
+        }
+    }
+
+    /// The x both strokes of a chevron touch — its tip — and the y.
+    fn chevron_tip_in(prims: &[Prim], r: ScreenRect) -> (f32, f32) {
+        let segs: Vec<&Prim> = prims
+            .iter()
+            .filter(|q| q.kind == KIND_SEGMENT && r.contains_rect(&q.bounds()))
+            .collect();
+        assert_eq!(segs.len(), 2, "two strokes make a chevron");
+        (segs[0].geom[2], segs[0].geom[3])
+    }
+
+    #[test]
+    fn a_shut_holders_chevron_points_at_it_and_an_open_ones_points_down() {
+        let theme = Theme::light();
+        let a = atlas();
+        let doc = crate::tree::tests::nested();
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let prims = p.prims(&showing("A", None), &a, 7, &theme);
+        let shut = row(&p, "F").chevron.unwrap();
+        let (x, _) = chevron_tip_in(&prims, shut);
+        assert!(x > shut.center().0, "a shut one points right");
+        let open = row(&p, "G").chevron.unwrap();
+        let (_, y) = chevron_tip_in(&prims, open);
+        assert!(y > open.center().1, "an open one points down");
+    }
+
+    fn into(id: &str) -> Place {
+        Place::Into(id.into())
+    }
+
+    fn above(id: &str) -> Place {
+        Place::Above(id.into())
+    }
+
+    fn below(id: &str) -> Place {
+        Place::Below(id.into())
+    }
+
+    #[test]
+    fn the_middle_of_a_holders_row_drops_into_it_and_its_edges_beside_it() {
+        let doc = crate::tree::tests::nested();
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let at = |id: &str, f: f32| {
+            let r = row(&p, id);
+            p.aim(f64::from(r.rect.y + r.rect.h * f))
+        };
+        assert_eq!(at("G", 0.5), Some(into("G")));
+        assert_eq!(at("G", 0.1), Some(above("G")));
+        // G is open: just under its row is the top of what it holds.
+        assert_eq!(at("G", 0.9), Some(into("G")));
+        // F is shut: under its row is under F.
+        assert_eq!(at("F", 0.9), Some(below("F")));
+        assert_eq!(at("F", 0.5), Some(into("F")));
+        // A layer holds none: its row is cut in two.
+        assert_eq!(at("A", 0.4), Some(above("A")));
+        assert_eq!(at("A", 0.6), Some(below("A")));
+        // Past either end, the nearest edge — so an overshoot still lands
+        // where it was headed.
+        assert_eq!(p.aim(0.0), Some(above("F")));
+        assert_eq!(p.aim(10_000.0), Some(below("A")));
+    }
+
+    #[test]
+    fn a_drop_is_a_line_at_the_depth_it_lands_or_an_outline_round_its_holder() {
+        let theme = Theme::light();
+        let a = atlas();
+        let doc = crate::tree::tests::nested();
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let drawn = |place: &Place| -> Vec<ScreenRect> {
+            let show = Showing {
+                drop: Some(place),
+                ..showing("A", None)
+            };
+            p.prims(&show, &a, 7, &theme)
+                .iter()
+                .filter(|q| q.color == theme.lifted)
+                .map(Prim::bounds)
+                .collect()
+        };
+        let nothing = p.prims(&showing("A", None), &a, 7, &theme);
+        assert!(!nothing.iter().any(|q| q.color == theme.lifted));
+
+        // Above B: one line on the boundary over B's row, starting where
+        // B's card does — the depth it lands at.
+        let b = row(&p, "B");
+        let line = drawn(&above("B"));
+        assert_eq!(line.len(), 1, "{line:?}");
+        assert_eq!(line[0].x, b.card.x);
+        assert!((line[0].center().1 - b.rect.y).abs() < 1.0);
+        // Under B: on the boundary under it.
+        let line = drawn(&below("B"));
+        assert!((line[0].center().1 - (b.rect.y + b.rect.h)).abs() < 1.0);
+        // Into H: its card, outlined all round.
+        let h = row(&p, "H");
+        let ring = drawn(&into("H"));
+        assert_eq!(ring.len(), 4, "four edges");
+        let around = ring.iter().fold(ring[0], |acc, r| acc.union(r));
+        assert!(around.contains_rect(&h.card));
+        assert!(h.card.inset(-4.0).contains_rect(&around), "and hugging it");
+    }
+
+    #[test]
+    fn a_locked_row_wears_a_lock_and_its_own_lock_opens_it() {
+        let theme = Theme::light();
+        let a = atlas();
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("G").unwrap().locked = true;
+        let p = laid(&doc, &["G"], VP, 1.0, 0.0);
+        let (g, b) = (row(&p, "G"), row(&p, "B"));
+        let (g_lock, b_lock) = (g.lock.expect("G is locked"), b.lock.expect("and so is B"));
+        assert!(row(&p, "A").lock.is_none(), "A is not");
+        assert!(g.card.contains_rect(&g_lock));
+        assert!(g.label_x + a.measure(&g.label) <= g_lock.x, "the name stops short of it");
+        let (x, y) = mid(g_lock);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Lock("G".into())));
+        let (x, y) = mid(b_lock);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Pick("B".into())), "B's lock is G's to open");
+        // Its own lock in ink; one worn for a holder, muted.
+        let prims = p.prims(&showing("A", None), &a, 7, &theme);
+        let segs = |r: ScreenRect| -> Vec<&Prim> {
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_SEGMENT && r.contains_rect(&q.bounds()))
+                .collect()
+        };
+        assert!(!segs(g_lock).is_empty() && segs(g_lock).iter().all(|q| q.color == theme.icon));
+        assert!(!segs(b_lock).is_empty() && segs(b_lock).iter().all(|q| q.color == theme.muted));
+    }
+
+    #[test]
+    fn the_properties_bar_stands_between_the_header_and_the_rows() {
+        let p = panel(VP, 1.0, 2);
+        assert_eq!(p.props.y, p.header.y + p.header.h);
+        assert_eq!(p.props.h, PROPS);
+        assert_eq!(p.band.y, p.props.y + p.props.h, "the rows start under it");
+        for r in [p.blend, p.opacity, p.lock] {
+            assert!(p.props.contains_rect(&r), "{r:?} is on the bar");
+        }
+        assert!(p.blend.x + p.blend.w <= p.opacity.x && p.opacity.x + p.opacity.w <= p.lock.x);
+        assert_eq!(p.rect.h, 2.0 * PADDING + HEADER + PROPS + 2.0 * ROW + FOOTER);
+    }
+
+    #[test]
+    fn a_press_on_the_opacity_asks_for_the_strength_under_it() {
+        let p = panel(VP, 1.0, 2);
+        let (x, y) = mid(p.opacity);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Opacity));
+        let t = p.track();
+        assert_eq!(p.opacity_at(f64::from(t.x)), 0.0);
+        assert_eq!(p.opacity_at(f64::from(t.x + t.w)), 1.0);
+        assert_eq!(p.opacity_at(f64::from(t.x + t.w / 2.0)), 0.5);
+        assert_eq!(p.opacity_at(-100.0), 0.0, "held past either end, the end");
+        assert_eq!(p.opacity_at(1e6), 1.0);
+        let (x, y) = mid(p.lock);
+        assert_eq!(p.hit(x, y), Some(PanelHit::LockPicked));
+        let (x, y) = mid(p.blend);
+        assert_eq!(p.hit(x, y), Some(PanelHit::Blend));
+    }
+
+    #[test]
+    fn the_bar_shows_the_active_layers_strength_and_lock() {
+        let theme = Theme::light();
+        let a = atlas();
+        let p = panel(VP, 1.0, 2);
+        let at = |opacity: f32, locked: bool| {
+            let show = Showing {
+                opacity,
+                locked,
+                ..showing("L1", None)
+            };
+            p.prims(&show, &a, 7, &theme)
+        };
+        // The track is filled as far as the strength goes.
+        let t = p.track();
+        let fill = |prims: &[Prim]| -> f32 {
+            prims
+                .iter()
+                .filter(|q| q.color == theme.ink && q.bounds().y >= t.y - 2.0 && q.bounds().y <= t.y + t.h)
+                .map(|q| q.bounds().w)
+                .fold(0.0, f32::max)
+        };
+        let half = fill(&at(0.5, false));
+        let full = fill(&at(1.0, false));
+        assert!((half - t.w / 2.0).abs() < 1.0, "{half}");
+        assert!((full - t.w).abs() < 1.0, "{full}");
+        // And the number is written.
+        let glyphs_in = |prims: &[Prim], r: ScreenRect| {
+            prims.iter().filter(|q| q.kind == KIND_IMAGE && q.slot == 7 && r.contains_rect(&q.bounds())).count()
+        };
+        assert_eq!(glyphs_in(&at(0.5, false), p.opacity), "50%".len());
+        assert_eq!(glyphs_in(&at(1.0, false), p.opacity), "100%".len());
+        // The lock reads as shut or open.
+        let drawing = |prims: &[Prim]| -> Vec<[i32; 2]> {
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_SEGMENT && p.lock.contains_rect(&q.bounds()))
+                .map(|q| [q.bounds().x as i32, q.bounds().y as i32])
+                .collect()
+        };
+        assert_ne!(drawing(&at(1.0, true)), drawing(&at(1.0, false)));
+    }
+
+    #[test]
+    fn the_blend_menu_lists_photoshops_modes_in_its_runs() {
+        let (items, modes) = blend_menu(BlendMode::Multiply, false);
+        assert_eq!(items.len(), 27, "every mode but a group's own");
+        assert_eq!(modes.len(), items.len());
+        assert_eq!(modes[0], BlendMode::Normal);
+        assert!(!modes.contains(&BlendMode::PassThrough));
+        let checked: Vec<BlendMode> = modes
+            .iter()
+            .zip(&items)
+            .filter(|(_, i)| i.checked)
+            .map(|(m, _)| *m)
+            .collect();
+        assert_eq!(checked, [BlendMode::Multiply], "what is in force");
+        // A run each: darken, lighten, contrast, inversion, component.
+        let starts: Vec<BlendMode> = modes
+            .iter()
+            .zip(&items)
+            .filter(|(_, i)| i.rule)
+            .map(|(m, _)| *m)
+            .collect();
+        assert_eq!(
+            starts,
+            [
+                BlendMode::Darken,
+                BlendMode::Lighten,
+                BlendMode::Overlay,
+                BlendMode::Difference,
+                BlendMode::Hue
+            ]
+        );
+        assert_eq!(items[3].label, "Multiply");
+        // A group's menu opens on Pass Through.
+        let (items, modes) = blend_menu(BlendMode::PassThrough, true);
+        assert_eq!(items.len(), 28);
+        assert_eq!(modes[0], BlendMode::PassThrough);
+        assert!(items[0].checked);
+    }
+
+    #[test]
+    fn rename_names_a_row_by_its_layer_like_pick_does() {
+        // The two travel together: app turns a Pick into a Rename on the
+        // second press, so they must name a row the same way.
+        let pick = PanelHit::Pick("L1".into());
+        let PanelHit::Pick(id) = pick else { unreachable!() };
+        assert_eq!(PanelHit::Rename(id.clone()), PanelHit::Rename("L1".into()));
+    }
+
+    /// The panel over `doc`, everything shut, with the filter's bar open.
+    fn filtered(doc: &Document, scale: f64) -> Panel {
+        let rows = doc.rows(|_| false);
+        Panel::layout(VP, scale, 34.0 * scale as f32, &atlas(), &rows, 0.0, true)
+    }
+
+    #[test]
+    fn the_filters_bar_opens_under_the_header_and_pushes_the_rest_down() {
+        let doc = flat(2);
+        let shut = laid(&doc, &[], VP, 1.0, 0.0);
+        assert!(shut.search.is_none() && shut.kinds.is_empty() && shut.tags.is_empty());
+        assert!(shut.header.contains_rect(&shut.filter));
+        let (x, y) = mid(shut.filter);
+        assert_eq!(shut.hit(x, y), Some(PanelHit::Filter));
+        for scale in [1.0, 2.0] {
+            let s = scale as f32;
+            let shut = laid(&doc, &[], VP, scale, 0.0);
+            let open = filtered(&doc, scale);
+            assert_eq!(open.header, shut.header);
+            assert_eq!(open.props.y - shut.props.y, FILTER * s);
+            assert_eq!(open.rect.h - shut.rect.h, FILTER * s);
+            let search = open.search.expect("a field to type a name into");
+            assert!(search.y >= open.header.y + open.header.h);
+            let (x, y) = mid(search);
+            assert_eq!(open.hit(x, y), Some(PanelHit::Search));
+            let kinds: Vec<Kind> = open.kinds.iter().map(|(_, k)| *k).collect();
+            assert_eq!(kinds, [Kind::Raster, Kind::Vector, Kind::Group, Kind::Frame]);
+            let tags: Vec<Tag> = open.tags.iter().map(|(_, t)| *t).collect();
+            assert_eq!(tags, Tag::COLORS);
+            let inner = open.rect.inset(PADDING * s);
+            let mut all: Vec<ScreenRect> = open
+                .kinds
+                .iter()
+                .map(|(r, _)| *r)
+                .chain(open.tags.iter().map(|(r, _)| *r))
                 .collect();
-            assert!(!eye.is_empty(), "row {} has an eye", row.index);
-            assert!(
-                eye.iter().all(|q| q.color == expected),
-                "row {}'s eye color",
-                row.index
-            );
+            for r in &all {
+                assert!(inner.contains_rect(r), "{r:?} inside the panel");
+                assert!(r.y >= search.y + search.h && r.y + r.h <= open.props.y);
+            }
+            all.sort_by(|a, b| a.x.total_cmp(&b.x));
+            for w in all.windows(2) {
+                assert!(w[0].x + w[0].w <= w[1].x, "side by side");
+            }
+            for (r, k) in &open.kinds {
+                let (x, y) = mid(*r);
+                assert_eq!(open.hit(x, y), Some(PanelHit::FilterKind(*k)));
+            }
+            for (r, t) in &open.tags {
+                let (x, y) = mid(*r);
+                assert_eq!(open.hit(x, y), Some(PanelHit::FilterTag(*t)));
+            }
         }
-        // Buttons draw as strokes inside their boxes.
-        for b in [p.up, p.down, p.add, p.remove] {
-            assert!(
-                prims
-                    .iter()
-                    .any(|q| q.kind == KIND_SEGMENT && b.contains_rect(&q.bounds())),
-                "{b:?} has an icon"
-            );
+    }
+
+    #[test]
+    fn the_colour_menu_offers_no_colour_and_the_seven_the_current_one_checked() {
+        let (items, tags) = tag_menu(Tag::Green);
+        assert_eq!(tags[0], Tag::None);
+        assert_eq!(&tags[1..], Tag::COLORS);
+        assert_eq!(items.len(), tags.len());
+        assert_eq!(items[0].label, "No Color");
+        assert!(items[0].dot.is_none());
+        for (item, tag) in items.iter().zip(&tags).skip(1) {
+            assert_eq!(item.label, tag.name());
+            assert_eq!(item.dot, tag_color(*tag));
         }
-    }
-
-    /// A board stack whose top layer is a frame's.
-    fn with_a_frame() -> Vec<Layer> {
-        vec![
-            Layer::new("Layer 1"),
-            Layer::of("Frame 1", Kind::Frame),
-        ]
+        let checked: Vec<Tag> = items
+            .iter()
+            .zip(&tags)
+            .filter(|(i, _)| i.checked)
+            .map(|(_, t)| *t)
+            .collect();
+        assert_eq!(checked, [Tag::Green]);
     }
 
     #[test]
-    fn a_frame_card_carries_a_chevron_where_a_mark_would_be() {
-        let a = atlas();
-        let p = Panel::layout(VP, 1.0, 0.0, &a, &with_a_frame(), None, 0.0);
-        let frame_row = p.rows.iter().find(|r| r.index == 1).unwrap();
-        let plain_row = p.rows.iter().find(|r| r.index == 0).unwrap();
+    fn a_rows_menu_offers_what_would_change_something_and_teaches_its_keys() {
+        let state = RowState {
+            locked: false,
+            hidden: false,
+            tag: Tag::Red,
+            merge: "Merge Down",
+        };
+        let (items, lines) = row_menu(|c| c != Command::Ungroup, false, state);
+        assert_eq!(items.len(), lines.len());
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
-            frame_row.enter,
-            Some(frame_row.mark),
-            "the frame's card can be gone into, where a mark would be read"
+            labels[..13],
+            [
+                "Rename", "Duplicate", "Delete", "Copy", "Cut", "Paste", "Group", "Ungroup", "Merge Down",
+                "Merge Visible", "Flatten", "Lock", "Hide"
+            ]
         );
-        assert_eq!(plain_row.enter, None, "a raster layer's cannot");
-    }
-
-    #[test]
-    fn clicking_the_chevron_enters_and_the_rest_of_the_card_selects() {
-        let a = atlas();
-        let p = Panel::layout(VP, 1.0, 0.0, &a, &with_a_frame(), None, 0.0);
-        let row = p.rows.iter().find(|r| r.index == 1).unwrap();
-        let chevron = row.enter.unwrap();
-        let (cx, cy) = chevron.center();
-        assert_eq!(p.hit(f64::from(cx), f64::from(cy)), Some(PanelHit::Enter(1)));
-        assert_eq!(
-            p.hit(f64::from(row.label_x) + 1.0, f64::from(row.card.center().1)),
-            Some(PanelHit::Select(1))
+        assert_eq!(&labels[13..], ["No Color", "Red", "Orange", "Yellow", "Green", "Blue", "Violet", "Gray"]);
+        let line = |label: &str| labels.iter().position(|l| *l == label).unwrap();
+        assert_eq!(lines[line("Merge Down")], RowLine::Run(Command::Merge));
+        assert_eq!(items[line("Merge Down")].hint.as_deref(), Some("Ctrl+Alt+E"));
+        assert_eq!(lines[line("Merge Visible")], RowLine::Run(Command::MergeVisible));
+        assert_eq!(lines[line("Flatten")], RowLine::Run(Command::Flatten));
+        assert!(items[line("Merge Down")].rule);
+        assert_eq!(lines[line("Rename")], RowLine::Rename);
+        assert_eq!(lines[line("Ungroup")], RowLine::Run(Command::Ungroup));
+        assert!(!items[line("Ungroup")].enabled, "nothing there to take apart");
+        assert!(items[line("Group")].enabled);
+        assert_eq!(items[line("Duplicate")].hint.as_deref(), Some("Ctrl+J"));
+        assert_eq!(items[line("Rename")].hint.as_deref(), Some("F2"));
+        assert_eq!(lines[line("Copy")], RowLine::Copy);
+        assert_eq!(lines[line("Cut")], RowLine::Cut);
+        assert_eq!(lines[line("Paste")], RowLine::Paste);
+        assert!(!items[line("Paste")].enabled, "nothing to paste");
+        assert!(items[line("Copy")].rule);
+        assert_eq!(lines[line("Red")], RowLine::Tag(Tag::Red));
+        assert!(items[line("Red")].checked);
+        assert!(items[line("Group")].rule && items[line("Lock")].rule && items[line("No Color")].rule);
+        // The toggles say what they would do.
+        let (items, _) = row_menu(
+            |_| true,
+            true,
+            RowState {
+                locked: true,
+                hidden: true,
+                tag: Tag::None,
+                merge: "Merge Layers",
+            },
         );
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Unlock") && labels.contains(&"Show") && labels.contains(&"Merge Layers"));
     }
 
     #[test]
-    fn inside_a_frame_the_header_says_where_it_is_and_leads_back() {
+    fn a_row_with_a_picture_shows_it_badged_with_its_kind() {
+        let theme = Theme::light();
         let a = atlas();
-        let out = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), None, 0.0);
-        assert!(out.crumb.is_none(), "there is nowhere to go back to");
-        assert_eq!(out.title, TITLE);
-
-        let inn = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), Some("Frame 1"), 0.0);
-        let crumb = inn.crumb.expect("a way back");
-        assert_eq!(&inn.title, "Frame 1", "the header says where it is");
-        let (cx, cy) = crumb.center();
-        assert_eq!(p_hit(&inn, cx, cy), Some(PanelHit::Leave));
+        let p = laid(&flat(2), &[], VP, 1.0, 0.0);
+        let sheet = crate::thumbs::Sheet::new(vec!["L2".into()], (32, 24));
+        let show = Showing {
+            thumbs: Some((&sheet, 9)),
+            ..showing("L1", None)
+        };
+        let prims = p.prims(&show, &a, 7, &theme);
+        let l2 = row(&p, "L2");
+        let pictures: Vec<&Prim> = prims.iter().filter(|q| q.kind == KIND_IMAGE && q.slot == 9).collect();
+        assert_eq!(pictures.len(), 1);
+        assert_eq!(pictures[0].bounds(), l2.glyph);
+        assert_eq!(pictures[0].uv, sheet.uv("L2").unwrap());
+        // The kind rides on a badge at the picture's lower right.
+        let g = l2.glyph;
+        let corner = ScreenRect {
+            x: g.x + g.w / 2.0,
+            y: g.y + g.h / 2.0,
+            w: g.w / 2.0 + 4.0,
+            h: g.h / 2.0 + 4.0,
+        };
+        assert!(prims.iter().any(|q| q.kind == KIND_SEGMENT && corner.contains_rect(&q.bounds())));
+        // A row with no picture shows its kind's icon, as before.
+        let l1 = row(&p, "L1");
+        assert!(!prims.iter().any(|q| q.slot == 9 && l1.glyph.contains_rect(&q.bounds())));
+        assert!(prims.iter().any(|q| q.kind == KIND_SEGMENT && l1.glyph.contains_rect(&q.bounds())));
     }
 
-    fn p_hit(p: &Panel, x: f32, y: f32) -> Option<PanelHit> {
-        p.hit(f64::from(x), f64::from(y))
-    }
-
-    /// The panel showing a frame's stack is the same panel: the rows, the
-    /// band and the thumb do not know the difference.
     #[test]
-    fn a_panel_showing_a_frames_stack_lays_out_like_any_other() {
+    fn a_tag_tints_the_eyes_cell() {
+        let theme = Theme::light();
         let a = atlas();
-        let board = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), None, 0.0);
-        let inside = Panel::layout(VP, 1.0, 0.0, &a, &layers(2), Some("Frame 1"), 0.0);
-        assert_eq!(board.rows.len(), inside.rows.len());
-        assert_eq!(board.band, inside.band);
-        assert_eq!(board.rows[0].card, inside.rows[0].card);
+        let mut doc = flat(2);
+        doc.layers[1].color = Tag::Red;
+        let p = laid(&doc, &[], VP, 1.0, 0.0);
+        let prims = p.prims(&showing("L1", None), &a, 7, &theme);
+        let tint = mix(theme.panel, tag_color(Tag::Red).unwrap(), TAG_TINT);
+        let tinted: Vec<ScreenRect> = prims.iter().filter(|q| q.color == tint).map(Prim::bounds).collect();
+        assert_eq!(tinted, [row(&p, "L2").eye]);
+        assert!(tag_color(Tag::None).is_none());
     }
 
-    /// A frame's name too long for the header is cut, never run past the
-    /// buttons.
     #[test]
-    fn a_long_frame_name_is_cut_to_the_header() {
+    fn the_filters_toggles_read_on_and_its_field_says_what_it_is_for() {
+        let theme = Theme::light();
         let a = atlas();
-        let long = "A frame with a name nobody would ever type by hand";
-        let p = Panel::layout(VP, 1.0, 0.0, &a, &layers(1), Some(long), 0.0);
-        let width = a.measure(&p.title);
-        assert!(
-            p.crumb.unwrap().x + width <= p.up.x,
-            "the title runs into the buttons: {width}"
-        );
-    }
-
-    #[test]
-    fn rename_names_a_row_by_its_index_like_select_does() {
-        // The two travel together: app turns a Select into a Rename on
-        // the second press, so they must name a row the same way.
-        assert_eq!(
-            std::mem::discriminant(&PanelHit::Rename(3)),
-            std::mem::discriminant(&PanelHit::Rename(0))
-        );
-        assert!(matches!(PanelHit::Rename(3), PanelHit::Rename(i) if i == 3));
+        let p = filtered(&flat(2), 1.0);
+        let search = p.search.unwrap();
+        let mut f = Filter::default();
+        f.toggle_kind(Kind::Vector);
+        f.toggle_tag(Tag::Green);
+        let show = Showing {
+            filter: Some(&f),
+            ..showing("L1", None)
+        };
+        let prims = p.prims(&show, &a, 7, &theme);
+        let on: Vec<ScreenRect> = prims
+            .iter()
+            .filter(|q| q.color == theme.active_bg)
+            .map(Prim::bounds)
+            .collect();
+        let of_kind = |k: Kind| p.kinds.iter().find(|(_, x)| *x == k).unwrap().0;
+        let of_tag = |t: Tag| p.tags.iter().find(|(_, x)| *x == t).unwrap().0;
+        assert!(on.contains(&of_kind(Kind::Vector)) && on.contains(&of_tag(Tag::Green)));
+        assert!(!on.contains(&of_kind(Kind::Raster)) && !on.contains(&of_tag(Tag::Red)));
+        for (_, t) in &p.tags {
+            let c = tag_color(*t).unwrap();
+            assert!(prims.iter().any(|q| q.color == c), "every colour shows its dot");
+        }
+        // An empty field says what it is for, muted; a name is written
+        // in ink; a field with the keyboard is `app`'s to draw.
+        let glyphs = |prims: &[Prim], color: Rgba| {
+            prims
+                .iter()
+                .filter(|q| q.kind == KIND_IMAGE && q.slot == 7 && q.color == color)
+                .filter(|q| search.contains_rect(&q.bounds()))
+                .count()
+        };
+        let letters = PLACEHOLDER.chars().filter(|c| !c.is_whitespace()).count();
+        assert_eq!(glyphs(&prims, theme.muted), letters);
+        f.name = "sky".into();
+        let show = Showing {
+            filter: Some(&f),
+            ..showing("L1", None)
+        };
+        assert_eq!(glyphs(&p.prims(&show, &a, 7, &theme), theme.ink), 3);
+        let show = Showing {
+            filter: Some(&f),
+            searching: true,
+            ..showing("L1", None)
+        };
+        let prims = p.prims(&show, &a, 7, &theme);
+        assert_eq!(glyphs(&prims, theme.ink) + glyphs(&prims, theme.muted), 0);
+        let text = p.search_text().unwrap();
+        assert!(search.contains_rect(&text) && text.x > search.x, "after the glass");
     }
 }

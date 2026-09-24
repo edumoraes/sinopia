@@ -24,10 +24,14 @@ use crate::bitmap::{self, Bitmap};
 use crate::brush::{self, Library};
 use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
-use crate::doc::{Document, Element};
+use crate::doc::{BlendMode, Document, Element, Image, Layer, Tag};
 use crate::dock::{Dock, Hit};
-use crate::editor::{Button, Change, Editor, Gesture, SCROLL_LINE_PX, Stylus, Tool};
+use crate::editor::{
+    Button, Change, Command, Editor, Gesture, Keeps, Pick, SCROLL_LINE_PX, Stylus, Tool, locked_among,
+};
 use crate::export;
+use crate::merge;
+use crate::thumbs;
 use crate::field::{self, Field};
 use crate::geom::Corner;
 use crate::gestures;
@@ -38,6 +42,7 @@ use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
+use crate::menu;
 use crate::omarchy::{self, Style};
 use crate::palette::{self, Palette};
 use crate::slots::{self, Strip};
@@ -52,6 +57,7 @@ use crate::skills;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
+use crate::tree::{Arrange, Place};
 use crate::text::{self, Atlas, Font};
 use crate::theme::{INKS, Theme};
 
@@ -105,6 +111,10 @@ enum UserEvent {
     },
     /// Clipboard text, for the field that asked for it.
     PastedText(String),
+    /// A board's layers off the clipboard, already parsed off the loop —
+    /// by the board's own parse, schema closed, since any client can put
+    /// anything under any type.
+    PastedLayers(Box<Document>),
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
 }
@@ -206,15 +216,29 @@ struct App {
     /// The layer card the pointer picked up, if any. It outlives the
     /// release, easing back into the stack.
     carry: Option<Carry>,
+    /// A press on a card that has not travelled far enough to lift it.
+    pressed: Option<Press>,
+    /// The layers bar's strength is being dragged: the pointer is its
+    /// until the button comes up, and the board is not at rest.
+    fading: bool,
+    /// A menu standing over the window, and what it is for.
+    menu: Option<Opened>,
+    /// The panel's thumbnails as last taken, and the slot they are in;
+    /// and whether what they show may have changed since.
+    thumbs: Option<(thumbs::Sheet, u32)>,
+    thumbs_stale: bool,
     /// A brush the pointer is carrying out of the library, if any. It
     /// does not outlive the release: there is nothing to settle.
     drag: Option<Dragging>,
-    /// A card being renamed: the row's index and the name being typed.
+    /// A card being renamed: its layer's id and the name being typed.
     /// It is the window's, not a tab's — like every other panel state.
-    renaming: Option<(usize, Field)>,
+    renaming: Option<(String, Field)>,
+    /// The filter's name being typed: the field has the keyboard, and
+    /// every edit narrows the tree as it is made.
+    searching: Option<Field>,
     /// When the last press landed on a card, and on which. A second
     /// press on the same card inside [`DOUBLE_CLICK`] opens the rename.
-    last_card: Option<(usize, Instant)>,
+    last_card: Option<(String, Instant)>,
     /// The send in progress: what is going, where it can go, which one
     /// is picked, and the two fields. It is the window's, like the tool
     /// and the ink.
@@ -229,16 +253,15 @@ struct App {
     /// active layer glides to show it; scrolling away from it does not
     /// snap back, because it has not changed.
     focused: Option<String>,
-    /// The frame the panel was last standing in. A different stack under
-    /// it means the slides and the scroll are measured against a list
-    /// that is not there any more, so they start over.
-    standing: Option<String>,
     /// When the panel was last eased, for everything on it that moves.
     clock: Instant,
     /// Built once the scale factor is known, rebuilt when it changes.
     atlas: Option<Atlas>,
     atlas_slot: u32,
     clipboard: Option<Clipboard>,
+    /// The last layers copied, for a display with no clipboard to hold
+    /// them: there, `Ctrl+V` pastes this.
+    clip: Option<Document>,
     /// Where a portal dialog sends its answer. Absent before the window.
     dialog_sink: Option<dialogs::Sink>,
     pending: Option<Pending>,
@@ -364,8 +387,8 @@ const DRAG_SLOP: f64 = 4.0;
 /// button comes up, running the lift backwards until the card is a row
 /// again.
 struct Carry {
-    /// Into the document's layers, kept level with the active layer.
-    index: usize,
+    /// The layer it is the card of.
+    id: String,
     /// Between the press and the card's top edge: what it is held by.
     grab_dy: f32,
     /// Where the card's top edge is asked to be, in physical px.
@@ -374,12 +397,53 @@ struct Carry {
     held: bool,
     /// The lift, 0 to 1, walked toward `held` by the clock.
     t: f32,
+    /// Where the card would land if let go of now: the row under the
+    /// pointer says, and a place the picked layers may not go is none.
+    aim: Option<Place>,
+}
+
+/// A menu standing over the window: what it is for, its lines, what it
+/// was opened beside, the line under the pointer and how far down it is
+/// scrolled.
+struct Opened {
+    purpose: Purpose,
+    items: Vec<menu::Item>,
+    at: ScreenRect,
+    hover: Option<usize>,
+    scroll: f32,
+}
+
+/// What a menu is for.
+enum Purpose {
+    /// The picked layers' blend mode: each line's mode, and what every
+    /// picked layer had when the menu opened — put back unless a line is
+    /// taken, since the lines are tried on the board as the pointer
+    /// passes over them.
+    Blend {
+        modes: Vec<BlendMode>,
+        was: Vec<(String, BlendMode)>,
+    },
+    /// The colour a layer is tagged with — and the picked with it, when
+    /// it is one of them — and the tag on each line.
+    Tag { id: String, tags: Vec<Tag> },
+    /// A row's own menu: the row, and what each line does.
+    Row { id: String, lines: Vec<layers::RowLine> },
+}
+
+/// A press on a card that may yet be a drag. Nothing is lifted until the
+/// pointer has travelled past the slop: a click picks, a second click
+/// renames, and neither of them is a card leaving the tree.
+struct Press {
+    id: String,
+    from: (f64, f64),
+    /// Between the press and the card's top edge: what it is held by.
+    grab_dy: f32,
 }
 
 impl Carry {
     fn lift(&self) -> layers::Lift {
         layers::Lift {
-            index: self.index,
+            id: self.id.clone(),
             y: self.y,
             t: self.t,
         }
@@ -591,7 +655,10 @@ impl App {
     /// reorders the document on every pointer move while the editor sits
     /// perfectly still.
     fn settled(&self) -> bool {
-        !self.editor().busy() && !self.carry.as_ref().is_some_and(|c| c.held)
+        !self.editor().busy()
+            && !self.carry.as_ref().is_some_and(|c| c.held)
+            && !self.fading
+            && self.menu.is_none()
     }
 
     /// Writes down where a change left things.
@@ -628,6 +695,7 @@ impl App {
         } = &mut self.open[self.active];
         let Some(entry) = history.undo() else { return };
         entry.restore(&mut project.doc, editor);
+        self.thumbs_stale = true;
         self.stepped();
     }
 
@@ -643,6 +711,7 @@ impl App {
         } = &mut self.open[self.active];
         let Some(entry) = history.redo() else { return };
         entry.restore(&mut project.doc, editor);
+        self.thumbs_stale = true;
         self.stepped();
     }
 
@@ -742,8 +811,9 @@ impl App {
         let Open {
             project, editor, ..
         } = &self.open[self.active];
-        self.slides
-            .restack(project.doc.stack(editor.inside()), row);
+        let rows = editor.rows(&project.doc);
+        let ids: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
+        self.slides.restack(&ids, row);
         self.scrolling.tick(dt);
         // The window may have grown or shrunk under it: the panel is the
         // authority on how far the stack can be scrolled.
@@ -768,30 +838,21 @@ impl App {
     /// list stays where the wheel left it otherwise.
     fn follow_active(&mut self) {
         let Some(view) = self.view() else { return };
-        let inside = self.editor().inside();
-        let stack = self.doc().stack(inside);
-        let index = self.editor().active_layer(self.doc());
-        let id = stack.get(index).map(|l| l.id.clone());
-        let depth = stack.len();
-        if self.focused == id {
+        let doc = self.doc();
+        let active = self.editor().active(doc).to_owned();
+        if self.focused.as_deref() == Some(active.as_str()) {
             return;
         }
-        // Going into a frame or out of it puts a different stack under
-        // the panel: a slide carried across it would animate a row into a
-        // row that is not the same row, and a scroll kept would be
-        // measured against a list that is not there any more.
-        if self.standing != inside.map(str::to_owned) {
-            self.standing = inside.map(str::to_owned);
-            self.slides = layers::Slides::default();
-            self.scrolling = layers::Coming::default();
-            self.scroll = 0.0;
-        }
-        self.focused = id;
+        let rows = self.editor().rows(doc);
+        let pos = rows.iter().position(|r| r.layer.id == active);
+        let depth = rows.len();
+        self.focused = Some(active);
         // A card in the hand takes the panel where the pointer says.
         let Some(panel) = self.panel(&view).filter(|_| self.carry.is_none()) else {
             return;
         };
-        let want = panel.scroll_showing(index, depth);
+        let Some(pos) = pos else { return };
+        let want = panel.scroll_showing(pos, depth);
         if want != self.scroll {
             self.scrolling.send(self.scroll - want);
             self.scroll = want;
@@ -984,6 +1045,7 @@ impl App {
         self.shared.lock().expect("lock shared").board_id = self.doc().id.clone();
         self.retitle();
         self.load_images();
+        self.thumbs_stale = true;
         self.redraw();
         self.update_cursor_icon();
     }
@@ -1073,7 +1135,7 @@ impl App {
 
     /// Whether a field has the keyboard.
     fn typing(&self) -> bool {
-        self.sending.is_some() || self.renaming.is_some()
+        self.sending.is_some() || self.renaming.is_some() || self.searching.is_some()
     }
 
     /// The field the keyboard is writing into, if one is: the export
@@ -1082,7 +1144,17 @@ impl App {
         if let Some(sending) = self.sending.as_mut() {
             return Some(&mut sending.line);
         }
-        self.renaming.as_mut().map(|(_, field)| field)
+        if let Some((_, field)) = self.renaming.as_mut() {
+            return Some(field);
+        }
+        self.searching.as_mut()
+    }
+
+    /// The filter narrows the tree by what its field now says.
+    fn sync_search(&mut self) {
+        if let Some(name) = self.searching.as_ref().map(|f| f.value().to_owned()) {
+            self.active().0.filter_mut().name = name;
+        }
     }
 
     /// `Ctrl+C`, `Ctrl+X` or `Ctrl+V` with a field in hand: what is
@@ -1117,6 +1189,7 @@ impl App {
             if let Some(sending) = self.sending.as_mut() {
                 sending.settle(true);
             }
+            self.sync_search();
             self.follow_caret();
         }
         self.redraw();
@@ -1141,6 +1214,7 @@ impl App {
             if let Some(sending) = self.sending.as_mut() {
                 sending.settle(true);
             }
+            self.sync_search();
             self.follow_caret();
             self.redraw();
         }
@@ -1149,12 +1223,103 @@ impl App {
     /// Asks the clipboard for an image. The bytes arrive later, as
     /// [`UserEvent::Pasted`].
     fn paste(&mut self) {
-        match &self.clipboard {
-            Some(clipboard) => {
-                clipboard.paste_image();
+        match (&self.clipboard, &self.clip) {
+            (Some(clipboard), _) => {
+                clipboard.paste();
             }
-            None => log::debug!("paste: no clipboard on this display"),
+            (None, Some(clip)) => self.pasted_layers(clip.clone()),
+            (None, None) => log::debug!("paste: no clipboard on this display"),
         }
+    }
+
+    /// A merge from a key or a row's menu. The runs that are not exact are
+    /// drawn first, each into a picture of its own; then the editor merges
+    /// the lot, one step. A picture that cannot be taken leaves the board
+    /// as it was.
+    fn merge_layers(&mut self, command: Command) {
+        match self.try_merge(command) {
+            Ok(change) => self.apply(change),
+            Err(e) => log::warn!("merging: {e:#}"),
+        }
+    }
+
+    /// The merge itself, pictures and all, left for the caller to apply.
+    fn try_merge(&mut self, command: Command) -> anyhow::Result<Change> {
+        let runs = self.editor().merges(self.doc(), command);
+        let mut drawn = Vec::with_capacity(runs.len());
+        for run in &runs {
+            drawn.push(if self.doc().exact(run) {
+                None
+            } else {
+                Some(self.picture_of(run)?)
+            });
+        }
+        let (editor, doc) = self.active();
+        Ok(editor.merge(doc, command, &drawn))
+    }
+
+    /// The picture a run is merged into: what its members show, drawn onto
+    /// nothing — at the zoom the board is looked at, never less than an
+    /// export's — kept in the store as a PNG and put on the GPU as a pasted
+    /// image is, and laid over the box it was taken of.
+    fn picture_of(&mut self, run: &merge::Run) -> anyhow::Result<Image> {
+        let sub = self.doc().run_document(run);
+        let bounds = merge::raster_box(&sub).context("there is nothing there to draw")?;
+        let zoom = self.view().map_or(1.0, |v| v.px_per_world());
+        let most = self.gfx.as_ref().map_or(1, Gfx::max_dimension).min(bitmap::MAX_SIDE);
+        let (view, w, h, (lo, hi)) = merge::raster_view(bounds, zoom.max(export::EXPORT_SCALE), most);
+        let mut rgba = self.render_onto(&sub, &view, w, h, [0.0; 4])?;
+        let srgb = self.gfx.as_ref().is_some_and(Gfx::is_srgb);
+        bitmap::unpremultiply(&mut rgba, srgb);
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)?;
+        let blob = self.store.write_blob(&png)?;
+        let gfx = self.gfx.as_mut().context("there is no window to draw with")?;
+        gfx.upload_image(&blob, &Bitmap { w, h, rgba })?;
+        Ok(Image {
+            id: crate::doc::new_id(),
+            layer: String::new(),
+            x: lo[0],
+            y: lo[1],
+            w: hi[0] - lo[0],
+            h: hi[1] - lo[1],
+            rotation: 0.0,
+            blob,
+        })
+    }
+
+    /// `Ctrl+C` and `Ctrl+X` on the board: the picked layers become the
+    /// clip — on the system's clipboard under the board's own type, and
+    /// kept here for a display with none — and with `X` they go.
+    fn copy_layers(&mut self, cut: bool) {
+        let (editor, doc) = self.active();
+        let (clip, change) = if cut {
+            editor.cut(doc)
+        } else {
+            (editor.copy(doc), Change::None)
+        };
+        let Some(clip) = clip else { return };
+        if let Some(clipboard) = &self.clipboard {
+            match clip.to_json() {
+                Ok(json) => clipboard.copy_layers(json),
+                Err(e) => log::warn!("copying layers: {e:#}"),
+            }
+        }
+        self.clip = Some(clip);
+        self.apply(change);
+    }
+
+    /// Layers came back: planted above the active layer, in place when
+    /// that is on show and in the middle of the window otherwise, and
+    /// their images put on the GPU the way a reopened board's are.
+    fn pasted_layers(&mut self, clip: Document) {
+        let Some(view) = self.view() else { return };
+        let (x0, y0) = view.screen_to_world(0.0, 0.0);
+        let (x1, y1) = view.screen_to_world(f64::from(view.viewport.w), f64::from(view.viewport.h));
+        let (editor, doc) = self.active();
+        let change = editor.paste(doc, &clip, ([x0, y0], [x1, y1]));
+        self.apply(change);
+        self.load_images();
     }
 
     /// A clipboard image came back: keep the original bytes, upload the
@@ -1234,38 +1399,25 @@ impl App {
     }
 
     /// The layers panel, when it is up and there is an atlas to letter
-    /// it with.
+    /// it with. It shows the whole tree, each group and frame open or
+    /// shut as the tab's editor keeps it.
     fn panel(&self, view: &View) -> Option<Panel> {
         if !self.layers_shown {
             return None;
         }
         let atlas = self.atlas.as_ref()?;
         let top = self.strip_top(view);
-        // The panel shows one flat stack, whichever one the editor is
-        // standing in — which is what keeps its lift, its slides and its
-        // scroll from having to know that frames exist at all.
-        let inside = self.editor().inside();
-        let name = inside.and_then(|id| self.frame_name(id));
+        let editor = self.editor();
+        let rows = editor.rows(self.doc());
         Some(Panel::layout(
             view.viewport,
             self.chrome(view),
             top,
             atlas,
-            self.doc().stack(inside),
-            name,
+            &rows,
             self.scroll + self.scrolling.offset(),
+            editor.filtering().is_some(),
         ))
-    }
-
-    /// What a frame's card is called: the name of the layer it is the
-    /// object of.
-    fn frame_name(&self, id: &str) -> Option<&str> {
-        let doc = self.doc();
-        let layer = &doc.frame(id)?.layer;
-        doc.layers
-            .iter()
-            .find(|l| &l.id == layer)
-            .map(|l| l.name.as_str())
     }
 
     /// The panel's handle, once there is an atlas to letter it with. It
@@ -1336,7 +1488,8 @@ impl App {
     /// the dock rather than the canvas.
     fn over_chrome(&self, view: &View, screen: (f64, f64)) -> bool {
         let (x, y) = screen;
-        self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
+        self.menu_laid(view).is_some_and(|m| m.contains(x, y))
+            || self.tabs(view).and_then(|t| t.hit(x, y)).is_some()
             || self.handle(view).is_some_and(|h| h.hit(x, y))
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
             || self.props(view).and_then(|b| b.hit(x, y)).is_some()
@@ -1435,71 +1588,285 @@ impl App {
         self.brushes_dirty = true;
     }
 
-    /// A click on the layers panel, handed to the editor.
+    /// Opens the blend modes' menu beside `at`, on the active layer's
+    /// mode, remembering what every picked layer had.
+    fn open_blend_menu(&mut self, at: ScreenRect) {
+        let doc = self.doc();
+        let editor = self.editor();
+        let (current, group) = doc
+            .layer(editor.active(doc))
+            .map_or((BlendMode::Normal, false), |l| {
+                (l.blend, l.kind == crate::doc::Kind::Group)
+            });
+        let (items, modes) = layers::blend_menu(current, group);
+        let was = editor
+            .picked(doc)
+            .into_iter()
+            .filter_map(|id| doc.layer(id).map(|l| (id.to_owned(), l.blend)))
+            .collect();
+        self.menu = Some(Opened {
+            purpose: Purpose::Blend { modes, was },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
+    /// Opens row `id`'s menu at the pointer, on the picked layers — the
+    /// row taken into the pick first unless it is already in it, as a
+    /// right click does in Photoshop.
+    fn open_row_menu(&mut self, id: String, (x, y): (f64, f64)) {
+        let (editor, doc) = self.active();
+        if !editor.picked(doc).contains(&id.as_str()) {
+            let rows = editor.rows(doc);
+            let order: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
+            let change = editor.pick_layer(doc, &id, Pick::Only, &order);
+            self.apply(change);
+        }
+        let doc = self.doc();
+        let editor = self.editor();
+        let picked: Vec<&Layer> = editor.picked(doc).into_iter().filter_map(|p| doc.layer(p)).collect();
+        let state = layers::RowState {
+            locked: picked.iter().all(|l| l.locked),
+            hidden: picked.iter().all(|l| !l.visible),
+            tag: doc.layer(&id).map_or(Tag::None, |l| l.color),
+            merge: editor.merge_name(doc),
+        };
+        let paste = match &self.clipboard {
+            Some(clipboard) => clipboard.can_paste(),
+            None => self.clip.is_some(),
+        };
+        let (items, lines) = layers::row_menu(|c| editor.can(doc, c), paste, state);
+        let at = ScreenRect {
+            x: x as f32,
+            y: y as f32,
+            w: 0.0,
+            h: 0.0,
+        };
+        self.menu = Some(Opened {
+            purpose: Purpose::Row { id, lines },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
+    /// Opens the colours' menu beside `at` for layer `id`.
+    fn open_tag_menu(&mut self, id: String, at: ScreenRect) {
+        let current = self.doc().layer(&id).map_or(Tag::None, |l| l.color);
+        let (items, tags) = layers::tag_menu(current);
+        self.menu = Some(Opened {
+            purpose: Purpose::Tag { id, tags },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
+    /// The filter's field takes the keyboard, its caret at `x`.
+    fn search_at(&mut self, panel: &Panel, x: f64) {
+        let (Some(atlas), Some(text)) = (self.atlas.as_ref(), panel.search_text()) else {
+            return;
+        };
+        let name = self.editor().filtering().map_or(String::new(), |f| f.name.clone());
+        let mut field = Field::name(&name);
+        let lines = field.wrap(atlas, f32::INFINITY);
+        let at = field.index_at(atlas, &lines, 0, x as f32 - text.x - field::PADDING);
+        field.go(at, false);
+        self.searching = Some(field);
+    }
+
+    /// The menu standing over the window, laid out.
+    fn menu_laid(&self, view: &View) -> Option<menu::Menu> {
+        let opened = self.menu.as_ref()?;
+        let atlas = self.atlas.as_ref()?;
+        Some(menu::Menu::layout(
+            view.viewport,
+            self.chrome(view),
+            opened.at,
+            atlas,
+            &opened.items,
+            opened.scroll,
+        ))
+    }
+
+    /// The line under `(x, y)` is tried on the board.
+    fn hover_menu_at(&mut self, x: f64, y: f64) {
+        let hover = self.view().and_then(|view| {
+            let laid = self.menu_laid(&view)?;
+            laid.hit(x, y, &self.menu.as_ref()?.items)
+        });
+        self.hover_menu(hover);
+    }
+
+    /// The line under the pointer is `hover` now: a blend mode is tried
+    /// on the picked layers as the pointer passes over it, and what they
+    /// had comes back when it leaves every line.
+    fn hover_menu(&mut self, hover: Option<usize>) {
+        let Some(opened) = self.menu.as_mut() else { return };
+        if opened.hover == hover {
+            return;
+        }
+        opened.hover = hover;
+        // Only a blend mode is tried on the board: a tag is read in the
+        // panel, and the line lit under the pointer already says it.
+        if let Purpose::Blend { modes, was } = &opened.purpose {
+            let tried = hover.and_then(|i| modes.get(i).copied());
+            let was = was.clone();
+            let (editor, doc) = self.active();
+            restore_blends(doc, &was);
+            if let Some(mode) = tried {
+                let _ = editor.set_blend(doc, mode);
+            }
+        }
+        self.redraw();
+    }
+
+    /// Shuts the menu, taking line `take` or none. A blend mode taken is
+    /// one step; none put back leaves the board as the menu found it.
+    fn close_menu(&mut self, take: Option<usize>) {
+        let Some(opened) = self.menu.take() else { return };
+        // A name opens a field, and the clipboard is the window's: none
+        // of them is the editor's to answer.
+        if let Purpose::Row { id, lines } = &opened.purpose {
+            match take.and_then(|i| lines.get(i)) {
+                Some(layers::RowLine::Rename) => self.panel_hit(PanelHit::Rename(id.clone())),
+                Some(layers::RowLine::Copy) => self.copy_layers(false),
+                Some(&layers::RowLine::Run(command)) if command.merges() => {
+                    self.merge_layers(command);
+                    self.redraw();
+                    return;
+                }
+                Some(layers::RowLine::Cut) => self.copy_layers(true),
+                Some(layers::RowLine::Paste) => self.paste(),
+                _ => {}
+            }
+        }
+        let (editor, doc) = self.active();
+        let change = match opened.purpose {
+            Purpose::Blend { modes, was } => {
+                restore_blends(doc, &was);
+                match take.and_then(|i| modes.get(i).copied()) {
+                    Some(mode) => editor.set_blend(doc, mode),
+                    None => Change::None,
+                }
+            }
+            Purpose::Tag { id, tags } => match take.and_then(|i| tags.get(i).copied()) {
+                Some(tag) => editor.set_tag(doc, &id, tag),
+                None => Change::None,
+            },
+            Purpose::Row { id, lines } => match take.and_then(|i| lines.get(i).copied()) {
+                Some(layers::RowLine::Run(command)) => editor.run(doc, command),
+                Some(layers::RowLine::Tag(tag)) => editor.set_tag(doc, &id, tag),
+                _ => Change::None,
+            },
+        };
+        self.apply(change);
+        self.redraw();
+    }
+
     /// Writes the name being typed onto its layer and shuts the field.
     /// A name of nothing but space leaves the layer as it was, which is
     /// `rename_layer`'s own answer.
     fn commit_rename(&mut self) {
-        let Some((index, field)) = self.renaming.take() else {
+        let Some((id, field)) = self.renaming.take() else {
             return;
         };
         let name = field.value().to_owned();
         let (editor, doc) = self.active();
-        let change = editor.rename_layer(doc, index, &name);
+        let change = editor.rename_layer(doc, &id, &name);
         self.apply(change);
     }
 
     /// What a press on the panel means once the clock is taken into
-    /// account: a press on a card that is already selected, inside
+    /// account: a press on a card that is already picked, inside
     /// [`DOUBLE_CLICK`] of the last one on that same card, asks for the
     /// name rather than for the layer.
     fn second_press(&mut self, hit: PanelHit) -> PanelHit {
-        let PanelHit::Select(i) = hit else {
+        let PanelHit::Pick(id) = hit else {
             return hit;
         };
+        // A press with Ctrl or Shift is a pick, never the first half of a
+        // rename.
+        let mods = self.modifiers.state();
+        if mods.control_key() || mods.shift_key() {
+            self.last_card = None;
+            return PanelHit::Pick(id);
+        }
         let now = Instant::now();
         let again = self
             .last_card
-            .is_some_and(|(was, at)| was == i && now.duration_since(at) < DOUBLE_CLICK);
-        self.last_card = Some((i, now));
-        if again { PanelHit::Rename(i) } else { hit }
+            .as_ref()
+            .is_some_and(|(was, at)| *was == id && now.duration_since(*at) < DOUBLE_CLICK);
+        self.last_card = Some((id.clone(), now));
+        if again {
+            PanelHit::Rename(id)
+        } else {
+            PanelHit::Pick(id)
+        }
     }
 
+    /// A click on the layers panel, handed to the editor.
     fn panel_hit(&mut self, hit: PanelHit) {
         // A rename opens a field rather than changing the document, so
         // it is answered before the editor is borrowed. The name comes
-        // off the stack: a row's own label is cut down to what fits.
-        if let PanelHit::Rename(i) = hit {
-            let inside = self.editor().inside();
+        // off the layer: a row's own label is cut down to what fits.
+        if let PanelHit::Rename(id) = hit {
             let name = self
                 .doc()
-                .stack(inside)
-                .get(i)
+                .layer(&id)
                 .map(|l| l.name.clone())
                 .unwrap_or_default();
-            self.renaming = Some((i, Field::name(&name)));
+            self.renaming = Some((id, Field::name(&name)));
             return;
         }
+        // Ctrl takes one in or out, Shift the rows from the anchor.
+        let mods = self.modifiers.state();
+        let how = if mods.control_key() {
+            Pick::Toggle
+        } else if mods.shift_key() {
+            Pick::Range
+        } else {
+            Pick::Only
+        };
         let (editor, doc) = self.active();
         let change = match hit {
-            PanelHit::Select(i) => editor.select_layer(doc, i),
-            PanelHit::Toggle(i) => editor.toggle_layer(doc, i),
+            PanelHit::Pick(id) => {
+                let rows = editor.rows(doc);
+                let order: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
+                editor.pick_layer(doc, &id, how, &order)
+            }
+            PanelHit::Toggle(id) => editor.toggle_layer(doc, &id),
+            PanelHit::Open(id) => editor.toggle_open(&id),
+            PanelHit::Lock(id) => editor.toggle_lock_of(doc, &id),
+            PanelHit::Group => editor.add_group(doc),
             PanelHit::Add => editor.add_layer(doc),
-            PanelHit::Remove => editor.remove_layer(doc),
-            PanelHit::Up => editor.move_layer(doc, true),
-            PanelHit::Down => editor.move_layer(doc, false),
-            PanelHit::Enter(i) => match doc
-                .stack(editor.inside())
-                .get(i)
-                .and_then(|l| doc.frame_on(&l.id))
-                .map(|f| f.id.clone())
-            {
-                Some(frame) => editor.enter_frame(doc, &frame),
-                None => Change::None,
-            },
-            PanelHit::Leave => editor.leave_frame(doc),
-            PanelHit::Rename(_) => Change::None,
-            PanelHit::Panel => Change::None,
+            PanelHit::Remove => editor.remove_layers(doc),
+            PanelHit::LockPicked => editor.toggle_lock(doc),
+            PanelHit::Filter => editor.toggle_filter(),
+            PanelHit::FilterKind(kind) => {
+                editor.filter_mut().toggle_kind(kind);
+                Change::Selection
+            }
+            PanelHit::FilterTag(tag) => {
+                editor.filter_mut().toggle_tag(tag);
+                Change::Selection
+            }
+            // The strength is read off the pointer, which is the press's
+            // own business, and the blend menu is the window's.
+            PanelHit::Opacity
+            | PanelHit::Blend
+            | PanelHit::Search
+            | PanelHit::Rename(_)
+            | PanelHit::Panel => {
+                Change::None
+            }
         };
         self.apply(change);
     }
@@ -1622,7 +1989,20 @@ impl App {
         w: u32,
         h: u32,
     ) -> anyhow::Result<Vec<u8>> {
-        let (ground, edge) = (self.theme.bg, self.theme.muted);
+        self.render_onto(sub, view, w, h, self.theme.bg)
+    }
+
+    /// What `view` shows of `sub`, drawn offscreen on `ground` — which a
+    /// merge's picture wants to be nothing at all.
+    fn render_onto(
+        &mut self,
+        sub: &Document,
+        view: &View,
+        w: u32,
+        h: u32,
+        ground: scene::Rgba,
+    ) -> anyhow::Result<Vec<u8>> {
+        let edge = self.theme.muted;
         let shapes = std::mem::take(&mut self.shapes);
         let frame = {
             let none = ImageSlots::new();
@@ -1635,6 +2015,57 @@ impl App {
             .as_mut()
             .context("there is no window to draw with")?;
         gfx.render_offscreen(w, h, ground, &frame)
+    }
+
+    /// Takes the panel's thumbnails again when what they show may have
+    /// changed — the board came to rest after a change, a step was taken
+    /// or undone, another tab came forward — or other rows are on show.
+    /// Only at rest: a stroke's picture is taken once it is laid, not on
+    /// every sample of it. Every raster and vector row on show is drawn
+    /// into a cell of one sheet, on a checker, in one pass.
+    fn ensure_thumbs(&mut self) {
+        if !self.settled() {
+            return;
+        }
+        let Some(view) = self.view() else { return };
+        let Some(panel) = self.panel(&view) else { return };
+        let ids: Vec<String> = panel
+            .rows
+            .iter()
+            .filter(|r| matches!(r.kind, crate::doc::Kind::Raster | crate::doc::Kind::Vector))
+            .map(|r| r.id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.thumbs = None;
+            return;
+        }
+        let s = self.chrome(&view) as f32;
+        let cell = ((layers::GLYPH_W * s).round() as u32, (layers::GLYPH_H * s).round() as u32);
+        let sheet = thumbs::Sheet::new(ids, cell);
+        if !self.thumbs_stale && self.thumbs.as_ref().is_some_and(|(had, _)| *had == sheet) {
+            return;
+        }
+        let edge = self.theme.muted;
+        let shapes = std::mem::take(&mut self.shapes);
+        let mut frame = scene::Frame::new();
+        {
+            let none = ImageSlots::new();
+            let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
+            for (i, id) in sheet.ids().iter().enumerate() {
+                frame.extend(sheet.checker(i));
+                let subject = thumbs::subject(self.doc(), id);
+                if let Some(content) = merge::raster_box(&subject) {
+                    let mut picture = scene::document_prims(&subject, &sheet.view(i, content), images, &shapes, edge, None);
+                    picture.cut(sheet.rect(i));
+                    frame.append(picture);
+                }
+            }
+        }
+        self.shapes = shapes;
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        let slot = gfx.render_thumbs(sheet.size(), &frame);
+        self.thumbs = Some((sheet, slot));
+        self.thumbs_stale = false;
     }
 
     /// Takes the dialog's picture of what is leaving again when its place
@@ -1719,13 +2150,196 @@ impl App {
                 Ok((id, name)) => Event::Framed { id, name },
                 Err(e) => denied(&e),
             },
-            // The server only asks the three; every other op is acked
-            // and forwarded, and never arrives here.
-            other => Event::Denied {
-                op: other.op().to_owned(),
+            Request::Layers => Event::Layers {
+                layers: self.editor().listing(self.doc()),
+            },
+            // What is acked and forwarded never arrives here; every other
+            // op is one on the layers.
+            Request::Ping
+            | Request::New
+            | Request::Open { .. }
+            | Request::OpenFile { .. }
+            | Request::Raise
+            | Request::Export { .. }
+            | Request::Theme { .. }
+            | Request::Shutdown => Event::Denied {
+                op: op.to_owned(),
                 reason: "not an op the board answers".into(),
             },
+            layer => match self.layer_op(layer) {
+                Ok(ids) => Event::Done { ids },
+                Err(e) => denied(&e),
+            },
         }
+    }
+
+    /// A change to the layers asked for on the command line, made the
+    /// way the panel makes it — the layers named are picked, then acted
+    /// on — and one step of the history. Answers what it left picked. A
+    /// refusal says why and changes nothing but the pick.
+    fn layer_op(&mut self, req: Request) -> anyhow::Result<Vec<String>> {
+        let change = match req {
+            Request::AddLayer { group, name, above } => {
+                let (editor, doc) = self.active();
+                editor
+                    .add_layer_as(doc, group, name.as_deref(), above.as_deref())
+                    .map_err(anyhow::Error::msg)?
+            }
+            Request::RemoveLayers { ids } => {
+                self.pick(&ids)?;
+                self.refusing(Command::Remove, "there is nothing there to remove")?
+            }
+            Request::RenameLayer { id, name } => {
+                anyhow::ensure!(!name.trim().is_empty(), "a name has to say something");
+                self.pick(std::slice::from_ref(&id))?;
+                let (editor, doc) = self.active();
+                editor.rename_layer(doc, &id, &name)
+            }
+            Request::MoveLayers { ids, to } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                let (Place::Into(target) | Place::Above(target) | Place::Below(target)) = &to;
+                anyhow::ensure!(doc.layer(target).is_some(), "no layer {target:?} on the board");
+                let fits = doc
+                    .place(&to)
+                    .is_some_and(|(owner, _)| doc.can_move(&ids, owner));
+                anyhow::ensure!(
+                    fits,
+                    "they cannot go there: a frame stays on the board's root, nothing goes into a locked \
+                     group or into itself, and only a group or a frame takes layers in"
+                );
+                editor.drop_layers(doc, &to)
+            }
+            Request::ArrangeLayers { ids, how } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                if let Some(id) = locked_among(doc, &ids, Keeps::Place) {
+                    anyhow::bail!("{id:?} stands in a locked group, and a lock keeps its place");
+                }
+                editor.run(doc, Command::Arrange(how))
+            }
+            Request::ShowLayers { ids, visible } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                editor.show_layers(doc, visible)
+            }
+            Request::LockLayers { ids, locked } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                editor.lock_layers(doc, locked)
+            }
+            Request::SetOpacity { ids, opacity } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                if let Some(id) = locked_among(doc, &ids, Keeps::Look) {
+                    anyhow::bail!("{id:?} is locked, and a lock keeps how a layer draws");
+                }
+                editor.set_opacity(doc, opacity)
+            }
+            Request::SetBlend { ids, blend } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                if let Some(id) = locked_among(doc, &ids, Keeps::Look) {
+                    anyhow::bail!("{id:?} is locked, and a lock keeps how a layer draws");
+                }
+                if blend == BlendMode::PassThrough
+                    && let Some(id) = ids.iter().find(|id| doc.layer(id).is_some_and(|l| l.kind != crate::doc::Kind::Group))
+                {
+                    anyhow::bail!("{id:?} is no group, and only a group passes through");
+                }
+                editor.set_blend(doc, blend)
+            }
+            Request::SetColor { ids, color } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                editor.set_tag(doc, &ids[0], color)
+            }
+            Request::GroupLayers { ids } => {
+                self.pick(&ids)?;
+                self.refusing(
+                    Command::Group,
+                    "they cannot be grouped: a frame never goes into a group, and a locked group takes nothing in",
+                )?
+            }
+            Request::Ungroup { ids } => {
+                let mut left = Vec::new();
+                for id in &ids {
+                    self.pick(std::slice::from_ref(id))?;
+                    let _ = self.refusing(
+                        Command::Ungroup,
+                        &format!("{id:?} does not come apart: only a group does, and never one that is locked"),
+                    )?;
+                    left.extend(self.editor().picked(self.doc()).into_iter().map(str::to_owned));
+                }
+                let (editor, doc) = self.active();
+                editor.pick_ids(doc, &left).map_err(anyhow::Error::msg)?;
+                Change::Scene
+            }
+            Request::DuplicateLayers { ids } => {
+                self.pick(&ids)?;
+                self.refusing(Command::Duplicate, "nothing inside a locked group is duplicated where it stands")?
+            }
+            Request::MergeLayers { ids } => {
+                self.pick(&ids)?;
+                let lone = ids.len() == 1
+                    && self
+                        .doc()
+                        .layer(&ids[0])
+                        .is_some_and(|l| l.kind != crate::doc::Kind::Group);
+                anyhow::ensure!(!lone, "one layer alone merges down, or not at all: ask merge_down");
+                self.merging(Command::Merge)?
+            }
+            Request::MergeDown { id } => {
+                self.pick(std::slice::from_ref(&id))?;
+                self.merging(Command::MergeDown)?
+            }
+            Request::MergeVisible => self.merging(Command::MergeVisible)?,
+            Request::Flatten => self.merging(Command::Flatten)?,
+            Request::SelectLayers { ids } => {
+                self.pick(&ids)?;
+                Change::Selection
+            }
+            Request::OpenLayers { ids, open } => {
+                let (editor, doc) = self.active();
+                for id in &ids {
+                    let holds = doc
+                        .layer(id)
+                        .is_some_and(|l| matches!(l.kind, crate::doc::Kind::Group | crate::doc::Kind::Frame));
+                    anyhow::ensure!(holds, "{id:?} is no group or frame to open");
+                }
+                for id in &ids {
+                    let _ = editor.set_open(id, open);
+                }
+                Change::Selection
+            }
+            other => anyhow::bail!("{} is not an op on the layers", other.op()),
+        };
+        self.apply(change);
+        self.redraw();
+        Ok(self.editor().picked(self.doc()).into_iter().map(str::to_owned).collect())
+    }
+
+    /// Picks exactly `ids` on the active board, or says which is missing.
+    fn pick(&mut self, ids: &[String]) -> anyhow::Result<()> {
+        let (editor, doc) = self.active();
+        editor.pick_ids(doc, ids).map_err(anyhow::Error::msg)
+    }
+
+    /// Runs `command` on the pick, refusing with `why` what it cannot do.
+    fn refusing(&mut self, command: Command, why: &str) -> anyhow::Result<Change> {
+        let (editor, doc) = self.active();
+        anyhow::ensure!(editor.can(doc, command), "{why}");
+        Ok(editor.run(doc, command))
+    }
+
+    /// A merge, pictures and all, refused when there is nothing it merges.
+    fn merging(&mut self, command: Command) -> anyhow::Result<Change> {
+        let can = self.editor().can(self.doc(), command);
+        anyhow::ensure!(
+            can,
+            "nothing merges there: only siblings do, never a frame, nothing locked, and nothing into a group"
+        );
+        self.try_merge(command)
     }
 
     /// One frame of the open board, written under `dir` as the page §8
@@ -2044,36 +2658,66 @@ impl App {
             frame.extend(handle.prims(atlas, self.atlas_slot, &self.theme));
         }
         if let (Some(panel), Some(atlas)) = (self.panel(view), self.atlas.as_ref()) {
-            let active = self.editor().active_layer(self.doc());
+            let lift = self.carry.as_ref().map(Carry::lift);
+            let picked: Vec<String> = self
+                .editor()
+                .picked(self.doc())
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let doc = self.doc();
+            let active = self.editor().active(doc);
+            let (blend, opacity, locked) = doc.layer(active).map_or(
+                (crate::doc::BlendMode::Normal, 1.0, false),
+                |l| (l.blend, l.opacity as f32, l.locked),
+            );
             let showing = layers::Showing {
+                blend: blend.name(),
+                opacity,
+                locked,
                 active,
-                lift: self.carry.as_ref().map(Carry::lift),
+                picked: &picked,
+                lift: lift.as_ref(),
+                drop: self
+                    .carry
+                    .as_ref()
+                    .filter(|c| c.held)
+                    .and_then(|c| c.aim.as_ref()),
                 slides: &self.slides,
+                filter: self.editor().filtering(),
+                searching: self.searching.is_some(),
+                thumbs: self.thumbs.as_ref().map(|(sheet, slot)| (sheet, *slot)),
             };
-            frame.extend(panel.prims(
-                self.doc().stack(self.editor().inside()),
-                &showing,
-                atlas,
-                self.atlas_slot,
-                &self.theme,
-            ));
-            // The name being typed is drawn over the card it belongs to,
-            // rounded the way the card is: the row underneath goes on
-            // showing its eye and its mark, so what is being renamed
-            // stays in its place in the stack.
-            if let Some((index, field)) = &self.renaming
-                && let Some(row) = panel.rows.iter().find(|r| r.index == *index)
+            frame.extend(panel.prims(&showing, atlas, self.atlas_slot, &self.theme));
+            if let (Some(field), Some(text)) = (&self.searching, panel.search_text()) {
+                frame.extend(field.prims(text, atlas, self.atlas_slot, &self.theme, true));
+            }
+            // The name being typed is drawn over the name it replaces,
+            // rounded the way the card is: the row goes on showing its
+            // eye, its chevron and its glyph, so what is being renamed
+            // stays in its place in the tree.
+            if let Some((id, field)) = &self.renaming
+                && let Some(row) = panel.rows.iter().find(|r| r.id == *id)
             {
-                frame.extend([Prim::rounded(
-                    row.card,
-                    layers::ROW_RADIUS,
-                    self.theme.panel,
-                )]);
-                frame.extend(field.prims(row.card, atlas, self.atlas_slot, &self.theme, true));
+                let pad = field::PADDING * self.chrome(view) as f32;
+                let left = row.label_x - pad;
+                let over = ScreenRect {
+                    x: left,
+                    w: row.card.x + row.card.w - left,
+                    ..row.card
+                };
+                frame.extend([Prim::rounded(over, layers::ROW_RADIUS, self.theme.panel)]);
+                frame.extend(field.prims(over, atlas, self.atlas_slot, &self.theme, true));
             }
         }
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
             frame.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
+        }
+        // A menu stands over every panel.
+        if let (Some(laid), Some(opened), Some(atlas)) =
+            (self.menu_laid(view), self.menu.as_ref(), self.atlas.as_ref())
+        {
+            frame.extend(laid.prims(&opened.items, opened.hover, atlas, self.atlas_slot, &self.theme));
         }
         // The send panel is modal, so it is drawn last of everything —
         // over the strip the way it is pressed before it.
@@ -2121,6 +2765,7 @@ impl App {
             Change::Scene => {
                 self.remember();
                 self.touch();
+                self.thumbs_stale = true;
                 self.redraw();
             }
             Change::Camera(camera) => {
@@ -2178,11 +2823,30 @@ impl App {
             }
             return self.update_cursor_icon();
         }
+        // A menu stands over everything else: a line is taken, a press on
+        // it between lines is nothing, and a press anywhere else puts it
+        // away — and is not also a press on what is under it.
+        if let Some(laid) = self.menu_laid(&view) {
+            if button == Button::Left {
+                let items = self.menu.as_ref().map_or(&[][..], |m| &m.items[..]);
+                match laid.hit(x, y, items) {
+                    Some(i) => self.close_menu(Some(i)),
+                    None if laid.contains(x, y) => {}
+                    None => self.close_menu(None),
+                }
+            } else if !laid.contains(x, y) {
+                self.close_menu(None);
+            }
+            return self.update_cursor_icon();
+        }
         // A name being typed is finished by pressing somewhere else, as
         // Enter finishes it: the keyboard cannot be left held by a field
         // the pointer has walked away from.
         if self.renaming.is_some() && button == Button::Left {
             self.commit_rename();
+        }
+        if button == Button::Left {
+            self.searching = None;
         }
         // The strip is over the handle is over the panel is over the
         // dock is over the canvas.
@@ -2214,26 +2878,54 @@ impl App {
                 // is the window's. A press on a card that is already
                 // selected, soon enough after the last one, is what
                 // makes a Select a Rename.
+                if hit == PanelHit::Blend {
+                    self.open_blend_menu(panel.blend);
+                    return self.update_cursor_icon();
+                }
+                // The field takes the keyboard, the caret where it was
+                // pressed.
+                if hit == PanelHit::Search {
+                    self.search_at(&panel, x);
+                    self.redraw();
+                    return self.update_cursor_icon();
+                }
+                // The strength's slider has the pointer to itself from the
+                // press to the release, wherever it wanders.
+                if hit == PanelHit::Opacity {
+                    self.fading = true;
+                    let (editor, doc) = self.active();
+                    let change = editor.set_opacity(doc, whole_percent(panel.opacity_at(x)));
+                    self.apply(change);
+                    self.redraw();
+                    return self.update_cursor_icon();
+                }
                 let hit = self.second_press(hit);
-                self.panel_hit(hit);
-                // A card taken by its name is picked up by the grip the
-                // press made, and follows the pointer from there. A card
-                // whose name is open is not also lifted: a field is not
-                // dragged.
-                if let PanelHit::Select(i) = hit
-                    && let Some(row) = panel.rows.iter().find(|r| r.index == i)
+                self.panel_hit(hit.clone());
+                // A card taken by its name may be about to be carried off,
+                // by the grip the press made — once the pointer has gone
+                // far enough to mean it. A card whose name is open is not:
+                // a field is not dragged.
+                if let PanelHit::Pick(id) = hit
+                    && let Some(row) = panel.rows.iter().find(|r| r.id == id)
                 {
-                    self.carry = Some(Carry {
-                        index: i,
+                    self.pressed = Some(Press {
+                        id,
+                        from: (x, y),
                         grab_dy: y as f32 - row.card.y,
-                        y: row.card.y,
-                        held: true,
-                        // A card caught while it was still settling
-                        // carries on from where it had got to.
-                        t: self.carry.as_ref().map_or(0.0, |c| c.t),
                     });
                 }
                 self.redraw();
+            } else if button == Button::Right {
+                match hit {
+                    // The eye's own menu is its colours, as in Photoshop.
+                    PanelHit::Toggle(id) => {
+                        if let Some(row) = panel.rows.iter().find(|r| r.id == id) {
+                            self.open_tag_menu(id, row.eye);
+                        }
+                    }
+                    PanelHit::Pick(id) => self.open_row_menu(id, (x, y)),
+                    _ => {}
+                }
             }
             return self.update_cursor_icon();
         }
@@ -2350,13 +3042,29 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
-        // A carried layer is left where the pointer put it; the canvas
-        // never saw the press, so it has nothing to end. The card runs
-        // the lift backwards into its row from here.
+        // A press on a card that never went anywhere was a click.
+        if button == Button::Left {
+            self.pressed = None;
+        }
+        // The strength let go of is where the layers rest: one step back
+        // undoes the whole drag.
+        if button == Button::Left && std::mem::take(&mut self.fading) {
+            self.remember();
+            self.redraw();
+            return self.update_cursor_icon();
+        }
+        // A carried layer lands where the drop says; the canvas never saw
+        // the press, so it has nothing to end. The card runs the lift
+        // backwards into its new row from here.
         if button == Button::Left
             && let Some(carry) = self.carry.as_mut().filter(|c| c.held)
         {
             carry.held = false;
+            if let Some(place) = carry.aim.take() {
+                let (editor, doc) = self.active();
+                let change = editor.drop_layers(doc, &place);
+                self.apply(change);
+            }
             // The stack the card was let go of in is a state to step
             // back to, and this is the only place that can say so: the
             // canvas never saw the press, so no `Change` comes back
@@ -2408,23 +3116,60 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
-        // A carried layer has the pointer to itself: the card follows
-        // it, the stack opens at whichever row is under it, and the
-        // canvas sees nothing.
+        // Over a menu the line under the pointer is tried on the board.
+        if self.menu.is_some() {
+            self.hover_menu_at(x, y);
+            return self.update_cursor_icon();
+        }
+        // A press on a card lifts it once it has gone far enough to be a
+        // drag, and not before: a click or a double click never lifts.
+        if let Some(press) = &self.pressed {
+            let slop = DRAG_SLOP * self.view().map_or(1.0, |v| self.chrome(&v));
+            if (x - press.from.0).hypot(y - press.from.1) > slop {
+                let press = self.pressed.take().expect("just read");
+                self.carry = Some(Carry {
+                    id: press.id,
+                    grab_dy: press.grab_dy,
+                    y: y as f32 - press.grab_dy,
+                    held: true,
+                    // A card caught while it was still settling carries
+                    // on from where it had got to.
+                    t: self.carry.as_ref().map_or(0.0, |c| c.t),
+                    aim: None,
+                });
+            }
+        }
+        // A carried layer has the pointer to itself: the card follows it,
+        // the drop is read off the row under it, and the canvas sees
+        // nothing. Nothing moves until the button comes up.
         if self.carry.as_ref().is_some_and(|c| c.held) {
+            let aim = self.view().and_then(|view| {
+                let place = self.panel(&view)?.aim(y)?;
+                let doc = self.doc();
+                let (owner, _) = doc.place(&place)?;
+                let picked: Vec<String> = self
+                    .editor()
+                    .picked(doc)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                doc.can_move(&picked, owner).then_some(place)
+            });
             if let Some(carry) = &mut self.carry {
                 carry.y = y as f32 - carry.grab_dy;
+                carry.aim = aim;
             }
+            self.redraw();
+            return self.update_cursor_icon();
+        }
+        // So does the layers' strength, read off the pointer as it goes.
+        if self.fading {
             if let Some(view) = self.view()
-                && let Some(index) = self.panel(&view).and_then(|p| p.drop_index(y))
+                && let Some(panel) = self.panel(&view)
             {
                 let (editor, doc) = self.active();
-                let change = editor.move_layer_to(doc, index);
+                let change = editor.set_opacity(doc, whole_percent(panel.opacity_at(x)));
                 self.apply(change);
-                let index = self.editor().active_layer(self.doc());
-                if let Some(carry) = &mut self.carry {
-                    carry.index = index;
-                }
             }
             self.redraw();
             return self.update_cursor_icon();
@@ -2478,6 +3223,19 @@ impl App {
                     s.scroll = next;
                     self.redraw();
                 }
+            }
+            return;
+        }
+        // A menu takes the wheel over itself, and nothing else does while
+        // it stands. The line under a pointer that did not move is another
+        // one once the lines have moved, and it is the one tried.
+        if let Some(laid) = self.menu_laid(&view) {
+            if laid.contains(cursor.0, cursor.1)
+                && let Some(opened) = self.menu.as_mut()
+            {
+                opened.scroll = (laid.scroll() - delta.1 as f32).clamp(0.0, laid.max_scroll());
+                self.hover_menu_at(cursor.0, cursor.1);
+                self.redraw();
             }
             return;
         }
@@ -2636,32 +3394,76 @@ impl App {
                 }
                 self.redraw();
             }
+            // The filter's field narrows the tree as it is typed into, and
+            // Enter or Esc gives the keyboard back with the name kept.
+            _ if self.searching.is_some() && pressed => {
+                let Some(field) = self.searching.as_mut() else {
+                    return;
+                };
+                match key {
+                    Key::Named(NamedKey::Escape | NamedKey::Enter) => self.searching = None,
+                    _ => {
+                        edit(field, key, self.modifiers.state());
+                    }
+                }
+                self.sync_search();
+                self.redraw();
+            }
             Key::Named(NamedKey::Space) => self.active().0.hold_space(pressed),
+            // A menu goes away, leaving the board as it found it.
+            Key::Named(NamedKey::Escape) if pressed && self.menu.is_some() => {
+                self.close_menu(None);
+            }
+            // A card in the hand is put back where it came from: Esc is
+            // the drop that does not happen.
+            Key::Named(NamedKey::Escape)
+                if pressed && self.carry.as_ref().is_some_and(|c| c.held) =>
+            {
+                if let Some(carry) = &mut self.carry {
+                    carry.held = false;
+                    carry.aim = None;
+                }
+                self.redraw();
+            }
             Key::Named(NamedKey::Escape) if pressed => {
                 let (editor, doc) = self.active();
                 if editor.escape(doc) {
                     self.redraw();
                 }
             }
+            // The active layer's name, opened where its row is: the panel
+            // comes out, and the list goes to the row.
+            Key::Named(NamedKey::F2) if pressed => {
+                let id = self.editor().active(self.doc()).to_owned();
+                let (editor, doc) = self.active();
+                editor.reveal(doc, &id);
+                self.layers_shown = true;
+                self.focused = None;
+                self.panel_hit(PanelHit::Rename(id));
+                self.redraw();
+            }
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
                 let (editor, doc) = self.active();
-                let change = editor.delete_selection(doc);
+                let change = editor.delete(doc);
                 self.apply(change);
             }
             Key::Character(text) if pressed && self.modifiers.state().control_key() => {
                 // Shift turns the character upper case, so the letter is
                 // read case-insensitively and the modifier separately.
                 let shift = self.modifiers.state().shift_key();
+                let alt = self.modifiers.state().alt_key();
                 match text.to_ascii_lowercase().as_str() {
                     "v" => self.paste(),
+                    "c" if !shift => self.copy_layers(false),
+                    "x" if !shift => self.copy_layers(true),
                     "z" if shift => self.redo(),
                     "z" => self.undo(),
                     "s" if shift => self.ask_name(self.active, Then::Stay),
                     "s" => self.save_active(),
                     "o" => self.ask_open(),
-                    "e" => self.ask_send(),
+                    "e" if !shift && !alt => self.ask_send(),
                     "w" => self.request_close(self.active),
-                    _ => {}
+                    _ => self.layer_command(bare, shift, alt),
                 }
             }
             Key::Character(text) if pressed => {
@@ -2677,6 +3479,27 @@ impl App {
             _ => {}
         }
         self.update_cursor_icon();
+    }
+
+    /// A layer command under `Ctrl`, Photoshop's keys: `G` groups the
+    /// picked layers and `Shift+G` ungroups, `J` duplicates, `Shift+N`
+    /// opens a new layer, the brackets arrange — a step with `[` and `]`,
+    /// all the way with Shift — `/` locks and `,` hides. Read off the bare key, since Shift
+    /// turns a bracket into a brace on one layout and something else on
+    /// the next.
+    fn layer_command(&mut self, bare: &Key, shift: bool, alt: bool) {
+        let Key::Character(c) = bare else { return };
+        let (editor, doc) = self.active();
+        let key = c.to_ascii_lowercase();
+        let change = match (key.as_str(), shift) {
+            ("n", true) => editor.add_layer(doc),
+            _ => match layer_key(&key, shift, alt) {
+                Some(command) if command.merges() => return self.merge_layers(command),
+                Some(command) => editor.run(doc, command),
+                None => Change::None,
+            },
+        };
+        self.apply(change);
     }
 
     /// A character typed with no modifier but Shift: `Shift+L` shows or
@@ -2696,6 +3519,19 @@ impl App {
             self.brushes_dirty = true;
             self.keep_brushes();
             self.redraw();
+            return;
+        }
+        // With a tool that does not paint, a digit is the picked layers'
+        // strength, as in Photoshop: `1` is 10% and `0` is all of it. The
+        // brush keeps the digits for its own opacity.
+        if !shift
+            && matches!(self.editor().tool(), Tool::Select | Tool::Hand | Tool::Frame | Tool::Zoom)
+            && let Some(d) = c.to_digit(10)
+        {
+            let strength = if d == 0 { 1.0 } else { f64::from(d) / 10.0 };
+            let (editor, doc) = self.active();
+            let change = editor.set_opacity(doc, strength);
+            self.apply(change);
             return;
         }
         if shift && c.eq_ignore_ascii_case(&'l') {
@@ -2769,12 +3605,16 @@ impl App {
         // came from: it was never seated, and the hand it is in was the
         // press's doing, not the drag's.
         self.drag = None;
-        // A layer the pointer was carrying stays where the window last
-        // saw it: the reorder was applied as it went, so there is
-        // nothing half-done to put back. The card still has to settle.
+        self.fading = false;
+        self.close_menu(None);
+        // A card the pointer was carrying goes back where it came from:
+        // nothing moves until a drop, and losing the window is not one.
+        // The card still has to settle.
+        self.pressed = None;
         let carrying = match self.carry.as_mut().filter(|c| c.held) {
             Some(carry) => {
                 carry.held = false;
+                carry.aim = None;
                 true
             }
             None => false,
@@ -2799,13 +3639,14 @@ impl App {
     /// over the chrome; resize and rotate cursors over the selection
     /// handles.
     fn update_cursor_icon(&mut self) {
-        let (over_chrome, handle, tool) = match (self.view(), self.cursor) {
+        let (over_chrome, handle, tool, refused) = match (self.view(), self.cursor) {
             (Some(view), Some((x, y))) => (
                 self.over_chrome(&view, (x, y)),
                 self.editor().hover(self.doc(), &view, (x, y)),
                 self.editor().pointer_tool(self.doc(), &view, (x, y)),
+                self.editor().refuses_ink(self.doc(), &view, (x, y)),
             ),
-            _ => (false, None, self.editor().active_tool()),
+            _ => (false, None, self.editor().active_tool(), false),
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
@@ -2830,6 +3671,10 @@ impl App {
             CursorIcon::Move
         } else if over_chrome {
             CursorIcon::Default
+        } else if refused {
+            // The layer the brush would paint on is locked: say so before
+            // the press, which would be refused.
+            CursorIcon::NotAllowed
         } else {
             match (tool, handle) {
                 (Tool::Select, Some(Handle::Resize(Corner::TopLeft | Corner::BottomRight))) => {
@@ -2882,6 +3727,18 @@ impl ApplicationHandler<UserEvent> for App {
                     if clipboard::is_text(&p.mime) {
                         let text = String::from_utf8_lossy(&p.bytes).into_owned();
                         return proxy.send_event(UserEvent::PastedText(text)).is_ok();
+                    }
+                    if clipboard::is_layers(&p.mime) {
+                        let parsed = std::str::from_utf8(&p.bytes)
+                            .map_err(anyhow::Error::from)
+                            .and_then(Document::from_json);
+                        return match parsed {
+                            Ok(clip) => proxy.send_event(UserEvent::PastedLayers(Box::new(clip))).is_ok(),
+                            Err(e) => {
+                                log::warn!("pasting layers: {e:#}");
+                                true
+                            }
+                        };
                     }
                     // Decoding a 4K screenshot is tens of milliseconds:
                     // it happens here, on the paste thread, not on the loop.
@@ -2945,6 +3802,13 @@ impl ApplicationHandler<UserEvent> for App {
     /// which is why the sleep goes back to `Wait` once it is paid.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(due) = self.owed else { return };
+        // A board in the middle of a gesture — or of a menu trying modes
+        // on it — is not what the person has. The debt waits for the rest,
+        // and the event that brings it wakes the loop anyway.
+        if !self.settled() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         if Instant::now() < due {
             event_loop.set_control_flow(ControlFlow::WaitUntil(due));
             return;
@@ -3054,6 +3918,7 @@ impl App {
                 // lettered surface drawing nothing at all.
                 self.ensure_atlas();
                 self.ensure_picture();
+                self.ensure_thumbs();
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
@@ -3093,6 +3958,7 @@ impl App {
             UserEvent::Pen(p) => return self.pen(p),
             UserEvent::Pasted { bytes, bitmap } => return self.pasted(bytes, bitmap),
             UserEvent::PastedText(text) => return self.pasted_text(&text),
+            UserEvent::PastedLayers(clip) => return self.pasted_layers(*clip),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
         };
         match req {
@@ -3146,11 +4012,68 @@ impl App {
             },
             // The server answers `denied` without forwarding; never reaches here.
             Request::Export { .. } | Request::Ping => {}
-            // An agent's three go the other way: the loop *does* them,
-            // on the `Ask` path, and the answer is what goes back.
-            Request::Frames | Request::ReadFrame { .. } | Request::AddFrame { .. } => {}
+            // An agent's three and the layers' ops go the other way: the
+            // loop *does* them, on the `Ask` path, and the answer is what
+            // goes back.
+            Request::Frames
+            | Request::ReadFrame { .. }
+            | Request::AddFrame { .. }
+            | Request::Layers
+            | Request::AddLayer { .. }
+            | Request::RemoveLayers { .. }
+            | Request::RenameLayer { .. }
+            | Request::MoveLayers { .. }
+            | Request::ArrangeLayers { .. }
+            | Request::ShowLayers { .. }
+            | Request::LockLayers { .. }
+            | Request::SetOpacity { .. }
+            | Request::SetBlend { .. }
+            | Request::SetColor { .. }
+            | Request::GroupLayers { .. }
+            | Request::Ungroup { .. }
+            | Request::DuplicateLayers { .. }
+            | Request::MergeLayers { .. }
+            | Request::MergeDown { .. }
+            | Request::MergeVisible
+            | Request::Flatten
+            | Request::SelectLayers { .. }
+            | Request::OpenLayers { .. } => {}
         }
     }
+}
+
+/// The command a layer shortcut asks for: `Ctrl` with `key`, and `Shift`
+/// and `Alt` when they are held. `Ctrl+E` alone is the export's.
+fn layer_key(key: &str, shift: bool, alt: bool) -> Option<Command> {
+    Some(match (key, shift, alt) {
+        ("g", false, false) => Command::Group,
+        ("g", true, false) => Command::Ungroup,
+        ("j", false, false) => Command::Duplicate,
+        ("]", false, false) => Command::Arrange(Arrange::Forward),
+        ("]", true, false) => Command::Arrange(Arrange::Front),
+        ("[", false, false) => Command::Arrange(Arrange::Backward),
+        ("[", true, false) => Command::Arrange(Arrange::Back),
+        ("/", false, false) => Command::Lock,
+        (",", false, false) => Command::Show,
+        ("e", false, true) => Command::Merge,
+        ("e", true, false) => Command::MergeVisible,
+        _ => return None,
+    })
+}
+
+/// Puts back the blend modes `was` says every layer had.
+fn restore_blends(doc: &mut Document, was: &[(String, BlendMode)]) {
+    for (id, mode) in was {
+        if let Some(l) = doc.layer_mut(id) {
+            l.blend = *mode;
+        }
+    }
+}
+
+/// A strength read off the slider, to the whole percent the bar writes it
+/// as: a board keeps `0.19`, not the float the pointer's x made of it.
+fn whole_percent(fraction: f32) -> f64 {
+    (f64::from(fraction) * 100.0).round() / 100.0
 }
 
 /// The face the desktop letters itself with, or the bundled one where
@@ -3375,19 +4298,25 @@ pub fn run(
         shapes: Shapes::default(),
         shown_brush: None,
         carry: None,
+        pressed: None,
+        fading: false,
+        menu: None,
+        thumbs: None,
+        thumbs_stale: true,
         drag: None,
         renaming: None,
+        searching: None,
         last_card: None,
         sending: None,
         slides: layers::Slides::default(),
         scroll: 0.0,
         scrolling: layers::Coming::default(),
         focused: None,
-        standing: None,
         clock: Instant::now(),
         atlas: None,
         atlas_slot: 0,
         clipboard: None,
+        clip: None,
         dialog_sink: None,
         pending: None,
         owed: None,
@@ -3417,6 +4346,54 @@ pub fn run(
 mod tests {
     use super::*;
     use winit::keyboard::ModifiersState;
+
+    #[test]
+    fn a_strength_off_the_slider_is_a_whole_percent() {
+        assert_eq!(whole_percent(0.193_548_38), 0.19);
+        assert_eq!(whole_percent(1.0), 1.0);
+        assert_eq!(whole_percent(0.0), 0.0);
+        assert_eq!(whole_percent(0.506), 0.51);
+    }
+
+    #[test]
+    fn the_layer_shortcuts_ask_for_the_commands_the_menu_teaches() {
+        assert_eq!(layer_key("g", false, false), Some(Command::Group));
+        assert_eq!(layer_key("g", true, false), Some(Command::Ungroup));
+        assert_eq!(layer_key("j", false, false), Some(Command::Duplicate));
+        assert_eq!(layer_key("/", false, false), Some(Command::Lock));
+        assert_eq!(layer_key(",", false, false), Some(Command::Show));
+        assert_eq!(layer_key("]", true, false), Some(Command::Arrange(Arrange::Front)));
+        assert_eq!(layer_key("[", false, false), Some(Command::Arrange(Arrange::Backward)));
+        assert_eq!(layer_key("e", false, true), Some(Command::Merge));
+        assert_eq!(layer_key("e", true, false), Some(Command::MergeVisible));
+        assert_eq!(layer_key("e", false, false), None, "Ctrl+E is the export's");
+        assert_eq!(layer_key("q", false, false), None);
+        // Every key a row's menu writes beside a command is that command's.
+        let (items, lines) = layers::row_menu(|_| true, true, layers::RowState {
+            locked: false,
+            hidden: false,
+            tag: Tag::None,
+            merge: "Merge Down",
+        });
+        for (item, line) in items.iter().zip(&lines) {
+            let (Some(hint), layers::RowLine::Run(command)) = (&item.hint, line) else {
+                continue;
+            };
+            let Some(keys) = hint.strip_prefix("Ctrl+") else {
+                assert_eq!(hint, "Del", "the one key without Ctrl");
+                continue;
+            };
+            let (alt, keys) = match keys.strip_prefix("Alt+") {
+                Some(k) => (true, k),
+                None => (false, keys),
+            };
+            let (shift, key) = match keys.strip_prefix("Shift+") {
+                Some(k) => (true, k),
+                None => (false, keys),
+            };
+            assert_eq!(layer_key(&key.to_lowercase(), shift, alt), Some(*command), "{hint}");
+        }
+    }
 
     #[test]
     fn a_held_key_that_finishes_something_does_not_repeat() {

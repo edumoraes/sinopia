@@ -1580,6 +1580,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "naga",
  "pollster 1.0.1",
  "raw-window-handle",
  "rfd",

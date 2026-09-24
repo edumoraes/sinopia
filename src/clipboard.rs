@@ -53,6 +53,14 @@ pub type Sink = Arc<dyn Fn(Paste) -> bool + Send + Sync>;
 /// choice for a board.
 const IMAGE_MIMES: [&str; 3] = ["image/png", "image/webp", "image/jpeg"];
 
+/// The board's own layers, as a clip: a document fragment in the board's
+/// JSON, which only this program writes and only this program reads.
+pub const LAYERS_MIME: &str = "application/x-omawhite-layers+json";
+
+/// What `Ctrl+V` on the board takes, best first: layers copied from a
+/// board, then an image from anywhere.
+const PASTE_MIMES: [&str; 4] = [LAYERS_MIME, IMAGE_MIMES[0], IMAGE_MIMES[1], IMAGE_MIMES[2]];
+
 /// Text as a clipboard owner may name it, best first: the MIME type with
 /// its charset said, then the UTF-8 atom X11 programs offer, then plain
 /// text, which on Wayland is UTF-8 in practice.
@@ -73,6 +81,11 @@ fn best(offered: &[String], wanted: &[&'static str]) -> Option<&'static str> {
 /// Whether a paste that arrived as `mime` is text, and not an image.
 pub fn is_text(mime: &str) -> bool {
     TEXT_MIMES.contains(&mime)
+}
+
+/// Whether a paste that arrived as `mime` is a board's layers.
+pub fn is_layers(mime: &str) -> bool {
+    mime == LAYERS_MIME
 }
 
 /// How many bytes one image may bring in. Past this the read gives up
@@ -169,11 +182,20 @@ impl Clipboard {
     /// window's own fields included. The text is held by the source
     /// until another selection replaces it.
     pub fn copy_text(&self, text: &str) {
-        let source = self
-            .manager
-            .create_data_source(&self.queue, Arc::new(text.as_bytes().to_vec()));
-        for mime in TEXT_MIMES {
-            source.offer(mime.to_owned());
+        self.offer(&TEXT_MIMES, text.as_bytes().to_vec());
+    }
+
+    /// Offers a clip of the board's layers, in the board's own JSON, as
+    /// the selection: `Ctrl+V` in any board takes it back.
+    pub fn copy_layers(&self, json: String) {
+        self.offer(&[LAYERS_MIME], json.into_bytes());
+    }
+
+    /// Makes `bytes` the selection, as each of `mimes`.
+    fn offer(&self, mimes: &[&str], bytes: Vec<u8>) {
+        let source = self.manager.create_data_source(&self.queue, Arc::new(bytes));
+        for mime in mimes {
+            source.offer((*mime).to_owned());
         }
         self.device
             .set_selection(Some(&source), self.serial.load(Ordering::Relaxed));
@@ -182,17 +204,23 @@ impl Clipboard {
         }
     }
 
-    /// Asks for the selection as an image. Returns whether anything was
-    /// asked for — the bytes themselves arrive on the sink, later. Nothing
-    /// happens, and nothing is reported, when the clipboard holds no image.
-    pub fn paste_image(&self) -> bool {
-        self.receive(&IMAGE_MIMES, MAX_PASTE_BYTES)
+    /// Asks for the selection as a board's layers or, failing that, as an
+    /// image. Returns whether anything was asked for — the bytes arrive
+    /// on the sink, later. Nothing happens, and nothing is reported, when
+    /// the clipboard holds neither.
+    pub fn paste(&self) -> bool {
+        self.receive(&PASTE_MIMES, MAX_PASTE_BYTES)
     }
 
     /// Asks for the selection as text, on the same terms: the text
     /// arrives on the sink, and a clipboard holding none asks nothing.
     pub fn paste_text(&self) -> bool {
         self.receive(&TEXT_MIMES, MAX_TEXT_BYTES)
+    }
+
+    /// Whether the selection holds something `Ctrl+V` on the board takes.
+    pub fn can_paste(&self) -> bool {
+        self.on_offer(&PASTE_MIMES).is_some()
     }
 
     /// Asks the owner for the selection as the best of `wanted` it offers
@@ -417,6 +445,16 @@ mod tests {
         let png = offered(&["image/png"]);
         assert_eq!(best(&png, &TEXT_MIMES), None);
         assert_eq!(best(&png, &IMAGE_MIMES), Some("image/png"));
+    }
+
+    #[test]
+    fn a_paste_takes_the_boards_layers_before_an_image_of_them() {
+        let both = offered(&["image/png", LAYERS_MIME]);
+        assert_eq!(best(&both, &PASTE_MIMES), Some(LAYERS_MIME));
+        let png = offered(&["image/png", "text/plain"]);
+        assert_eq!(best(&png, &PASTE_MIMES), Some("image/png"));
+        assert_eq!(best(&offered(&["text/plain"]), &PASTE_MIMES), None, "text is a field's");
+        assert!(is_layers(LAYERS_MIME) && !is_layers("image/png") && !is_text(LAYERS_MIME));
     }
 
     #[test]

@@ -10,7 +10,7 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames,
 export to the agent and the CLI an agent asks the board through:
 
-- `cargo build` clean, `cargo test` with 898 tests.
+- `cargo build` clean, `cargo test` with 1060 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -282,59 +282,69 @@ export to the agent and the CLI an agent asks the board through:
   machine looks — `~/.claude/skills/`, `~/.codex/skills/` and
   `~/.config/opencode/skills/` all read a directory holding a
   `SKILL.md`, and the installer says which hosts it found.
-- Layers: every element is on one; the document lists them bottom to
-  top, and paint order is the layers' order, then document order within
-  a layer. A handle on the header's line pulls the panel out and puts it
-  back — closed it stands on end off the window's right edge: a chevron
-  pointing the way the panel comes, the word `Layers` turned a quarter
-  turn counter-clockwise so it reads up the tab with its letters facing
-  the canvas, and under it `Shift+L` on a key of its own, so the
-  shortcut is taught by the thing it makes unnecessary. Open it steps
-  aside to the panel's left, a chevron alone — the header behind it
-  already says the word, and a shut door is the only one worth a
-  shortcut. A window too short to letter the tab gives up the key first,
-  then the word. The panel is one card per layer, top first — a hairline
-  border and a light shadow each, the active one filled — with an eye to
-  show or hide it; the header has up, down, add and remove. A card
-  dragged by its name leaves the stack and follows the pointer instead
-  of stepping from row to row: it grows a little, turns a couple of
+- Layers: every element is on one, and the layers are a tree — a group
+  holds layers, groups nest, and a frame holds a stack of its own. Paint
+  order is the tree's, then document order within a layer. A handle on
+  the header's line pulls the panel out and puts it back — closed it
+  stands on end off the window's right edge: a chevron pointing the way
+  the panel comes, the word `Layers` turned a quarter turn
+  counter-clockwise so it reads up the tab with its letters facing the
+  canvas, and under it `Shift+L` on a key of its own, so the shortcut is
+  taught by the thing it makes unnecessary. Open it steps aside to the
+  panel's left, a chevron alone; a window too short to letter the tab
+  gives up the key first, then the word. The panel is the tree, one card
+  per layer, top first, stepped in by how deep it stands: a group's or a
+  frame's chevron opens it in place. Each row is an eye — its cell
+  tinted by the layer's colour tag — then what the layer is: a folder,
+  a frame, or for a raster or vector layer a thumbnail of what it holds
+  with its kind on a badge; then its name, and a lock while it is
+  locked. Under the header a bar speaks for the picked layers: the blend
+  mode — a menu of Photoshop's 27 modes, and Pass Through for a group,
+  each tried on the board as the pointer passes over it — the opacity,
+  and the lock. The header's funnel opens a filter by name, by kind and
+  by colour, which keeps what matches in its place in the tree. The foot
+  holds a new group, a new layer and the bin. A click picks a layer,
+  `Ctrl`+click takes one in or out and `Shift`+click the range, and the
+  pick is one selection with the canvas: picking layers with the Select
+  tool selects their objects, and picking objects picks their layers.
+  A card is lifted only by a drag — never by a click, never by the
+  double click that renames it: it grows a little, turns a couple of
   degrees clockwise, leans toward the canvas, takes a blue outline and a
-  shadow with further to fall, and draws over the cards it passes. The
-  lift eases in over about a seventh of a second and runs backwards when
-  the card is let go, so nothing snaps. The stack reorders live under
-  the pointer — the cards it passes slide out of its way rather than
-  jumping — and the layer is left where the button comes up. The panel
-  is a scroll area: it grows to the room the window has, cuts the card
-  at its edge, and shows a thumb for how much of the stack is in view;
-  the wheel over it walks the list. Picking an element on the canvas
-  makes its layer active, and the panel glides to bring that card into
-  sight. A layer holds one of two things, and its card says which — a
-  grid of pixels or a curve, at the end opposite the eye. A raster
-  layer accumulates: every brush stroke joins the `paint` already on
-  the active one instead of becoming an element of its own, so the
-  layer holds one painting however many strokes went into it, and a
-  pasted image opens a layer of its own so the next stroke paints over
-  the picture instead of beside it. A vector layer holds the one object
-  it was made for: every pencil stroke opens its own, above the active
-  layer, and leaves it active. Painting on a vector layer is not
-  possible, so a brush stroke over one opens a raster layer above it —
-  Photoshop's answer to the same question. The panel's `+` makes a
-  raster layer: a blank sheet to paint on. A layer is the object it
-  holds, and the two go together: deleting the object takes the layer
-  with it, and the trash takes the object — on the last layer, which
-  always stays, it empties it instead. A hidden layer paints
-  nothing and cannot be hit or marqueed; hiding one deselects what was
-  on it, removing one takes its elements along, and the last layer
-  stays. Boards from before have no `layers`: they get `Layer 1` on
-  load, and their elements join it. A layer written before kinds
-  existed is a stack that accumulates, so it reads back as raster —
-  the kind is on disk only when it is `vector`.
+  shadow with further to fall, and a line or an outline shows where it
+  would land — above a row, below it, or into a group or a frame — and
+  every picked layer goes there when the button comes up. A right click
+  on a card opens its menu: rename, duplicate, delete, copy, cut, paste,
+  group, ungroup, merge, merge visible, flatten, lock, hide and the
+  colours, each with the keys that do the same; on the eye, the colours
+  alone. Layers copy, cut and paste through the system clipboard, in
+  place when that place is on show, and a paste takes a board's layers
+  before an image. Merging is Photoshop's — down, the picked siblings, a
+  group, what is visible, or everything — and it keeps curves as curves
+  while that draws the same picture; where a strength or a mode is in
+  the way, what the layers show is drawn into one picture instead. A
+  layer, a group or a frame can be drawn at a strength of its own and
+  in a blend mode, composited as one; a locked layer keeps what it holds
+  — nothing draws on it, picks it, moves it or changes how it draws —
+  and a locked group keeps everything in it. A layer holds one of two
+  things: a raster layer accumulates — every brush stroke joins the
+  `paint` already on it, so it holds one painting however many strokes
+  went into it, and a pasted image opens a layer of its own — and a
+  vector layer holds the one object it was made for: every pencil stroke
+  opens its own. A brush stroke over a vector layer opens a raster layer
+  above it — Photoshop's answer to the same question. A layer is the
+  object it holds, and the two go together: deleting the object takes
+  the layer with it, and on the last layer, which always stays, the bin
+  empties it instead. A hidden layer paints nothing and cannot be hit or
+  marqueed. The panel is a scroll area with a thumb, and it glides to
+  the row of a layer picked on the canvas. Boards from before have no
+  `layers`: they get `Layer 1` on load and their elements join it; every
+  property a layer can have is on disk only when it is not the default,
+  so a board written before any of them reads back as it was.
 - Frames: an area that holds objects, drawn with the Frame tool (`F`) by
   dragging it out. What is inside it is cut to its boundary — ink that
   runs past the edge stops there, and stops being clickable there too. It
   has a layer stack of its own, and it is itself a layer on the board:
-  its card ends in a chevron that goes in, and inside it the panel's
-  header says the frame's name and leads back out. It is born the
+  its row opens in place in the tree, like a group's. It is born the
   theme's surface, and clicking an ink with a frame selected paints its
   ground. What is inside is decided by geometry rather than by the panel:
   a stroke belongs to the frame the press landed in, whatever it does
@@ -422,9 +432,16 @@ export to the agent and the CLI an agent asks the board through:
   that drops one, so a project on a drive nobody has mounted keeps its
   place.
 - CLI: `--new`, `--open <id>`, `--open-file <path>`, `--export <dir>`,
-  `--shutdown`, `--socket <path>`, and the `agent` verb — `agent
-  frames`, `agent read <frame> [--to <dir>]`, `agent add <file>` —
-  which answers one line of JSON and exits non-zero on a refusal.
+  `--shutdown`, `--socket <path>`, the `agent` verb — `agent
+  frames`, `agent read <frame> [--to <dir>]`, `agent add <file>` — and
+  the `layer` verb, which drives every layer of the open board: `list`,
+  `add`, `remove`, `rename`, `move` (into, above, below, or along the
+  stack), `show`/`hide`, `lock`/`unlock`, `opacity`, `blend`, `color`,
+  `group`/`ungroup`, `duplicate`, `merge`, `merge-down`,
+  `merge-visible`, `flatten`, `select`, `expand`/`collapse`. A layer is
+  named by its id or by a name only it goes by, every change is one
+  step the board can undo, and each answers one line of JSON and exits
+  non-zero on a refusal, saying why.
 - Omarchy plugin (`plugin/`, §10.2): a bar widget whose popout holds the
   two ways in — `n` for a new board, `o` for the recent projects, newest
   first, opened by `Enter` or a click. The list shows twenty and marks
@@ -527,10 +544,24 @@ anywhere.
 | `1`–`9`, `0` (Brush selected) | Brush opacity 10%–90%, 100% |
 | `Shift` + `L` | Show / hide the layers panel |
 | Left drag (Frame) | Drag out a frame; what its area covers joins it |
-| Click a frame card's `›` / the panel's title | Work inside that frame / back out to the board |
 | Click an ink with a frame selected | Paint the frame's ground |
-| Click a layer row / its eye | Make it the active layer / show or hide it |
-| Panel `▲` `▼` `+` `🗑` | Move the active layer up / down, add a layer above it, remove it |
+| Click / `Ctrl`+click / `Shift`+click a layer card | Pick it / take it in or out of the pick / pick the range |
+| Click a card's eye / its own lock / its chevron | Show or hide it / open the lock / open or fold a group or frame in place |
+| Drag a layer card | Lift it and drop it above or below a row, or into a group or frame |
+| Double-click a card's name, `F2` | Rename it |
+| Right-click a card / its eye | The row's menu / the colour tags |
+| Panel bar: mode / slider / lock | Blend mode (tried as the pointer passes) / opacity / lock the picked layers |
+| Panel header funnel | Filter the layers by name, kind and colour |
+| Panel foot: folder `+` / `+` / bin | New group / new layer above the active one / remove the picked layers |
+| `1`–`9`, `0` (Select, Hand, Frame, Zoom) | Opacity of the picked layers, 10%–90%, 100% |
+| `Ctrl` + `G` / `Ctrl` + `Shift` + `G` | Group the picked layers / ungroup |
+| `Ctrl` + `J` | Duplicate the picked layers |
+| `Ctrl` + `Shift` + `N` | New layer |
+| `Ctrl` + `]` / `[` (`Shift`: all the way) | Move the picked layers up / down their stack |
+| `Ctrl` + `/` / `Ctrl` + `,` | Lock / hide the picked layers |
+| `Ctrl` + `Alt` + `E` | Merge: down, the picked siblings, or a group |
+| `Ctrl` + `Shift` + `E` | Merge visible |
+| `Ctrl` + `C` / `Ctrl` + `X` | Copy / cut the picked layers |
 | Click (Select) | Select the topmost element under the pointer; empty canvas clears |
 | `Shift` + click (Select) | Add the element to the selection, or remove it |
 | Left drag on empty canvas (Select) | Marquee: selects what it overlaps (`Shift` adds) |
@@ -539,7 +570,7 @@ anywhere.
 | `Shift` + drag a corner handle | Resize keeping the proportions |
 | `Ctrl` + drag a corner handle | Resize about the center (`Shift` too: both) |
 | Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
-| `Ctrl` + `V` | Paste the clipboard image onto the board |
+| `Ctrl` + `V` | Paste layers copied from a board, or else an image |
 | `Ctrl` + `Z` | Undo: back to the state before the last change |
 | `Ctrl` + `Shift` + `Z` | Redo |
 | `Ctrl` + `S` | Save the tab; asks for a name the first time |
@@ -547,7 +578,7 @@ anywhere.
 | `Ctrl` + `O` | Open boards, one tab each |
 | `Ctrl` + `W` | Close the tab; asks if there is unsaved work |
 | Click a tab / its `✕` / the `+` | Switch / close / new board |
-| `Delete` / `Backspace` | Delete the selection |
+| `Delete` / `Backspace` | Delete the selection — or the picked layers, when they were picked in the panel |
 | Left drag (Pencil) | Draw; the stroke is fitted to Béziers on release |
 | Left drag (Hand), `Space` + drag, middle drag | Pan |
 | Wheel, two-finger scroll | Pan (`Shift`: horizontally) |
@@ -597,9 +628,13 @@ src/grid.rs      dotted background (pure, tested)
 src/theme.rs     palette: light default, derived from op: theme or from the desktop's own theme (pure, tested)
 src/omarchy.rs   the desktop's look: colors.toml, shell.toml, the monospace face, Hyprland's rounding (parsing pure, tested)
 contrib/omarchy/omawhite  a theme-set / font-set hook, installed by hand
-src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer (pure, tested)
+src/tree.rs      the layer tree: stacks by the layer holding them, rows, the filter, moves, groups, copies, clip and paste (pure, tested)
+src/merge.rs     which siblings merge, whether exactly, and merging them either way (pure, tested)
+src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer and the pick, the layer commands (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, illustrated icons + line fallback (pure, tested)
-src/layers.rs    layers panel on the right: layout, hit-test, rows, eyes and buttons (pure, tested)
+src/layers.rs    layers panel on the right: the tree's rows, the bar, the filter, the foot, the drop, the menus' lines (pure, tested)
+src/menu.rs      a menu: lines, checks, rules, dots, the keys at a line's end, a scroll area (pure, tested)
+src/thumbs.rs    the sheet the panel's thumbnails are drawn on (pure, tested)
 src/slots.rs     brush strip on the left: the brush in the hand, the two buttons, the ten seats (pure, tested)
 src/palette.rs   brush library beside it: the shelves, the grid of icons, the scroll (pure, tested)
 src/props.rs     brush properties bar under the strip: the basic pair, and the Advanced layout it drops (pure, tested)
@@ -612,7 +647,7 @@ src/graft.rs     what comes back: the fragment, the ids minted anew, the free sp
 src/agents.rs    the agents running here: herdr, tmux and /proc parsed into one list, and reaching one (pure, tested)
 src/skills.rs    each harness's skills: where they live, which may be called, how a call is written (pure, tested)
 src/send.rs      the export dialog: the rows, the folder, the instruction box, the skills menu, the picture (pure, tested)
-src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch a group is composited in
+src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch and the sheets things are composited in, the blend modes
 src/app.rs       winit: window, input routing, socket → event loop bridge
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
 src/tablet.rs    the tablet's pen (zwp_tablet_v2) → event loop bridge; its frame is tested
@@ -625,11 +660,12 @@ skills/omawhite/ the skill an agent installs to read and write frames: SKILL.md 
 
 Frame data flow: grid + document + live stroke + selection overlay +
 brush ring + dock + brush strip + brush library + properties bar +
-layers panel + tab strip →
+layers panel (and its thumbnail sheet) + tab strip + a menu →
 `scene`/`select`/`brush`/`slots`/`palette`/`props`/`layers`/`tabs`
 prims, gathered in a `scene::Frame` whose groups mark
-the strokes composited as one shape → `scene::passes` plans the render
-passes → `gfx` executes them.
+the strokes composited as one shape and whose sheets the layers, groups
+and frames composited as one, at their strength and in their mode →
+`scene::passes` plans the render passes → `gfx` executes them.
 
 User data: `~/.local/share/omawhite/`. Socket:
 `$XDG_RUNTIME_DIR/omawhite.sock`. Project files go wherever the user

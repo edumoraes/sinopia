@@ -17,12 +17,15 @@ use anyhow::Context as _;
 use wgpu::util::DeviceExt as _;
 
 use crate::bitmap::Bitmap;
-use crate::scene::{self, Blend, Frame, ImageSlots, Onto, Prim, Rgba, Viewport};
+use crate::doc::BlendMode;
+use crate::scene::{self, Blend, Frame, ImageSlots, Onto, Prim, Rgba, ScreenRect, Viewport};
 
 const SHADER: &str = r#"
 struct Globals {
     viewport: vec2<f32>,
-    _pad: vec2<f32>,
+    // x: 1 when the target stores sRGB, so a blend mode is worked out on
+    // the values a person picked rather than on light, as Photoshop does.
+    flags: vec2<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -61,6 +64,9 @@ const KIND_GRAIN: u32 = 3u;
 
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
+// What a surface laid with a mode is laid on, copied out just before.
+@group(2) @binding(0) var under: texture_2d<f32>;
+@group(2) @binding(1) var under_samp: sampler;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
@@ -203,29 +209,251 @@ fn shade(in: VsOut) -> vec4<f32> {
     let coverage = edge * clamp(0.5 - cut, 0.0, 1.0);
     return vec4<f32>(rgba.rgb, rgba.a * coverage);
 }
+
+// The sRGB curve, both ways: a mode is worked out on the numbers a
+// person picked, and the target holds light.
+fn to_gamma(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+fn to_light(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
+// The W3C Compositing and Blending helpers for the modes that are not
+// channel by channel.
+fn lum(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.3, 0.59, 0.11));
+}
+
+fn clip_color(c: vec3<f32>) -> vec3<f32> {
+    let l = lum(c);
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    var o = c;
+    if (n < 0.0) {
+        o = l + (o - l) * l / (l - n);
+    }
+    if (x > 1.0) {
+        o = l + (o - l) * (1.0 - l) / (x - l);
+    }
+    return o;
+}
+
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    return clip_color(c + (l - lum(c)));
+}
+
+fn sat(c: vec3<f32>) -> f32 {
+    return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+}
+
+fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    if (x <= n) {
+        return vec3<f32>(0.0);
+    }
+    return (c - n) * s / (x - n);
+}
+
+fn burn(b: f32, s: f32) -> f32 {
+    if (b >= 1.0) {
+        return 1.0;
+    }
+    if (s <= 0.0) {
+        return 0.0;
+    }
+    return 1.0 - min(1.0, (1.0 - b) / s);
+}
+
+fn dodge(b: f32, s: f32) -> f32 {
+    if (b <= 0.0) {
+        return 0.0;
+    }
+    if (s >= 1.0) {
+        return 1.0;
+    }
+    return min(1.0, b / (1.0 - s));
+}
+
+fn soft(b: f32, s: f32) -> f32 {
+    if (s <= 0.5) {
+        return b - (1.0 - 2.0 * s) * b * (1.0 - b);
+    }
+    var d = sqrt(b);
+    if (b <= 0.25) {
+        d = ((16.0 * b - 12.0) * b + 4.0) * b;
+    }
+    return b + (2.0 * s - 1.0) * (d - b);
+}
+
+fn hard(b: f32, s: f32) -> f32 {
+    if (s <= 0.5) {
+        return b * 2.0 * s;
+    }
+    let t = 2.0 * s - 1.0;
+    return b + t - b * t;
+}
+
+// One channel of a separable mode: `b` what is under, `s` what is laid.
+fn separable(mode: u32, b: f32, s: f32) -> f32 {
+    switch mode {
+        case MODE_DARKEN: { return min(b, s); }
+        case MODE_MULTIPLY: { return b * s; }
+        case MODE_COLOR_BURN: { return burn(b, s); }
+        case MODE_LINEAR_BURN: { return max(0.0, b + s - 1.0); }
+        case MODE_LIGHTEN: { return max(b, s); }
+        case MODE_SCREEN: { return b + s - b * s; }
+        case MODE_COLOR_DODGE: { return dodge(b, s); }
+        case MODE_LINEAR_DODGE: { return min(1.0, b + s); }
+        case MODE_OVERLAY: { return hard(s, b); }
+        case MODE_SOFT_LIGHT: { return soft(b, s); }
+        case MODE_HARD_LIGHT: { return hard(b, s); }
+        case MODE_VIVID_LIGHT: {
+            if (s <= 0.5) {
+                return burn(b, 2.0 * s);
+            }
+            return dodge(b, 2.0 * s - 1.0);
+        }
+        case MODE_LINEAR_LIGHT: { return clamp(b + 2.0 * s - 1.0, 0.0, 1.0); }
+        case MODE_PIN_LIGHT: {
+            if (s <= 0.5) {
+                return min(b, 2.0 * s);
+            }
+            return max(b, 2.0 * s - 1.0);
+        }
+        case MODE_HARD_MIX: { return select(0.0, 1.0, b + s >= 1.0); }
+        case MODE_DIFFERENCE: { return abs(b - s); }
+        case MODE_EXCLUSION: { return b + s - 2.0 * b * s; }
+        case MODE_SUBTRACT: { return max(0.0, b - s); }
+        case MODE_DIVIDE: {
+            if (s <= 0.0) {
+                return select(0.0, 1.0, b > 0.0);
+            }
+            return min(1.0, b / s);
+        }
+        default: { return s; }
+    }
+}
+
+// What `mode` makes of `s` laid on `b`, both unpremultiplied.
+fn blended(mode: u32, b: vec3<f32>, s: vec3<f32>) -> vec3<f32> {
+    switch mode {
+        case MODE_DARKER_COLOR: { return select(b, s, s.r + s.g + s.b < b.r + b.g + b.b); }
+        case MODE_LIGHTER_COLOR: { return select(b, s, s.r + s.g + s.b > b.r + b.g + b.b); }
+        case MODE_HUE: { return set_lum(set_sat(s, sat(b)), lum(b)); }
+        case MODE_SATURATION: { return set_lum(set_sat(b, sat(s)), lum(b)); }
+        case MODE_COLOR: { return set_lum(s, lum(b)); }
+        case MODE_LUMINOSITY: { return set_lum(b, lum(s)); }
+        default: {
+            return vec3<f32>(
+                separable(mode, b.r, s.r),
+                separable(mode, b.g, s.g),
+                separable(mode, b.b, s.b),
+            );
+        }
+    }
+}
+
+// A surface laid with a mode: what it is read against is the copy in
+// group 2, at the same place. The answer is premultiplied and meets the
+// target as a plain over, so the W3C formula is the whole of it.
+@fragment
+fn fs_blend(in: VsOut) -> @location(0) vec4<f32> {
+    let half = in.geom.zw * 0.5;
+    let p = in.px - (in.geom.xy + half);
+    let t = (p + half) / max(in.geom.zw, vec2<f32>(1e-6));
+    let uv = mix(in.uv.xy, in.uv.zw, t);
+    let s = textureSampleLevel(tex, samp, uv, 0.0) * in.color;
+    let b = textureSampleLevel(under, under_samp, uv, 0.0);
+    if (s.a <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    // The mode rides one past its number where a dab carries its paper.
+    let mode = u32(in.paper.x) - 1u;
+    let cs = s.rgb / s.a;
+    if (mode == MODE_DISSOLVE) {
+        // Each pixel all of it or none of it, as likely as it is strong.
+        let n = fract(sin(dot(floor(in.px), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+        if (n < s.a) {
+            return vec4<f32>(cs, 1.0);
+        }
+        return vec4<f32>(0.0);
+    }
+    var cb = vec3<f32>(0.0);
+    if (b.a > 0.0) {
+        cb = b.rgb / b.a;
+    }
+    var made = blended(mode, cb, cs);
+    if (globals.flags.x > 0.5) {
+        made = to_light(blended(mode, to_gamma(cb), to_gamma(cs)));
+    }
+    return vec4<f32>(s.a * ((1.0 - b.a) * cs + b.a * made), s.a);
+}
 "#;
+
+/// The shader, with a constant for every blend mode: its number is where
+/// it stands in [`BlendMode::ALL`], the same number a composite carries,
+/// so the two cannot come to disagree.
+fn shader() -> String {
+    let mut out = String::from(SHADER);
+    for mode in BlendMode::ALL {
+        out.push_str(&format!(
+            "const MODE_{}: u32 = {}u;\n",
+            shouted(&format!("{mode:?}")),
+            scene::mode_number(mode)
+        ));
+    }
+    out
+}
+
+/// `ColorBurn` as `COLOR_BURN`.
+fn shouted(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_uppercase());
+    }
+    out
+}
 
 pub struct Gfx {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    /// The six ways a prim reaches a target, all from the one shader:
+    /// The eight ways a prim reaches a target, all from the one shader:
     /// `direct` onto the window (straight alpha over); `composite`
     /// lays an offscreen surface's premultiplied pixels on whatever is
     /// under them; `erase` lays them the other way round, taking their
     /// coverage out of what is there, which is what an eraser does to
-    /// its own layer's sheet; `union` onto the scratch, every channel a
-    /// max, so a swept stroke's spans cover without adding up; `build`
-    /// one over the next, so a stamped stroke's dabs pile up toward its
-    /// opacity and a stroke lands on the sheet it is painting; `wipe`
-    /// with no blending at all, which is how a box clears a surface.
+    /// its own layer's sheet; `mix` lays them as a mix with what is there
+    /// at the blend constant's strength, which is how a group passing
+    /// through goes back onto the copy it was opened on; `union` onto the
+    /// scratch, every channel a max, so a swept stroke's spans cover
+    /// without adding up; `build` one over the next, so a stamped
+    /// stroke's dabs pile up toward its opacity and a stroke lands on the
+    /// sheet it is painting; `wipe` with no blending at all, which is how
+    /// a box clears a surface; and `blit` the same, which is how the
+    /// finished canvas reaches the window.
     direct: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     erase: wgpu::RenderPipeline,
+    mix: wgpu::RenderPipeline,
     union: wgpu::RenderPipeline,
     build: wgpu::RenderPipeline,
     wipe: wgpu::RenderPipeline,
+    blit: wgpu::RenderPipeline,
+    /// A surface laid with a blend mode, read against the copy of what it
+    /// is laid on.
+    blend: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     /// Layout every texture bind group is built with.
@@ -252,27 +480,43 @@ pub struct Gfx {
     /// The export dialog's picture of what is leaving: a slot of its own,
     /// replaced in place each time the picture is taken again.
     picture: Option<u32>,
+    /// The layers panel's sheet of thumbnails: drawn onto on the GPU and
+    /// sampled like an image, its slot kept when it changes size.
+    thumbs: Option<Target>,
     /// The window-sized texture a group is composited in, once a frame
     /// has needed one. Rebuilt when the window changes size; like the
     /// atlas, a slot of its own and never an entry in `slots`.
     scratch: Option<Surface>,
-    /// The second one, on the same terms: what a raster layer's paint
-    /// is built on when one of its strokes rubs the others out.
-    sheet: Option<Surface>,
+    /// The sheets, one a depth, on the same terms: what a layer, a group
+    /// or a frame composited as one is built on, and a raster layer's
+    /// paint when one of its strokes rubs the others out.
+    sheets: Vec<Option<Surface>>,
+    /// What the window is drawn onto before it is shown: a texture the
+    /// frame can copy regions of, which a swapchain image need not be.
+    canvas: Option<Surface>,
+    /// Where what a mode is laid on is copied to, to be read under it.
+    backdrop: Option<Surface>,
 }
+
+/// How many sheets deep the renderer goes. A frame asking for more gets
+/// the rest drawn straight onto the deepest, wrong only in how it blends.
+const MAX_SHEETS: usize = 8;
 
 /// A window-sized texture a frame composites in.
 struct Surface {
     slot: u32,
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     size: (u32, u32),
 }
 
-/// Which of the two a call is about.
+/// Which surface a call is about.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Which {
     Scratch,
-    Sheet,
+    Sheet(usize),
+    Canvas,
+    Backdrop,
 }
 
 impl Gfx {
@@ -305,7 +549,7 @@ impl Gfx {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("omawhite-prims"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader().into()),
         });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -318,7 +562,7 @@ impl Gfx {
             label: Some("globals"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -417,6 +661,37 @@ impl Gfx {
             }),
         );
         let wipe = pipeline("wipe", "fs_premul", None);
+        // What is there keeps the part the constant does not take, and
+        // the composite brings its own strength in its alpha: a mix.
+        let lerp = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusConstant,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let mix = pipeline(
+            "mix",
+            "fs_main",
+            Some(wgpu::BlendState {
+                color: lerp,
+                alpha: lerp,
+            }),
+        );
+        let blit = pipeline("blit", "fs_main", None);
+        // A mode reads a second texture, what it is laid on.
+        let blend_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("blend"),
+            bind_group_layouts: &[Some(&bgl), Some(&tex_bgl), Some(&tex_bgl)],
+            immediate_size: 0,
+        });
+        let blend = self::pipeline(
+            &device,
+            &blend_layout,
+            &shader,
+            config.format,
+            "blend",
+            "fs_blend",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+        );
 
         // Slot 0: what the runs with no image bind. White and opaque, so
         // the shader path is the same whatever it lands on.
@@ -441,9 +716,12 @@ impl Gfx {
             direct,
             composite,
             erase,
+            mix,
             union,
             build,
             wipe,
+            blit,
+            blend,
             globals_buf,
             bind_group,
             tex_bgl,
@@ -455,19 +733,24 @@ impl Gfx {
             shapes: None,
             agent_logos: None,
             picture: None,
+            thumbs: None,
             atlas: None,
             scratch: None,
-            sheet: None,
+            sheets: Vec::new(),
+            canvas: None,
+            backdrop: None,
         })
     }
 
-    /// One of the two offscreen surfaces at `size`, made or remade as
+    /// One of the offscreen surfaces at `size`, made or remade as
     /// needed, and its slot. The window asks for its own size; an export
-    /// asks for the picture's, and puts them back afterwards.
+    /// asks for the picture's.
     fn ensure_surface(&mut self, which: Which, size: (u32, u32)) -> u32 {
         let held = match which {
             Which::Scratch => self.scratch.as_ref(),
-            Which::Sheet => self.sheet.as_ref(),
+            Which::Sheet(d) => self.sheets.get(d).and_then(Option::as_ref),
+            Which::Canvas => self.canvas.as_ref(),
+            Which::Backdrop => self.backdrop.as_ref(),
         };
         // A surface of the right size is already there; one of the
         // wrong size keeps its slot and gives up its texture.
@@ -478,7 +761,9 @@ impl Gfx {
         };
         let label = match which {
             Which::Scratch => "scratch",
-            Which::Sheet => "sheet",
+            Which::Sheet(_) => "sheet",
+            Which::Canvas => "canvas",
+            Which::Backdrop => "backdrop",
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -491,7 +776,13 @@ impl Gfx {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // Copied from and onto, besides drawn on and sampled: a
+            // surface that passes through opens on a copy of the one
+            // under it.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -506,10 +797,22 @@ impl Gfx {
                 (self.textures.len() - 1) as u32
             }
         };
-        let surface = Some(Surface { slot, view, size });
+        let surface = Some(Surface {
+            slot,
+            texture,
+            view,
+            size,
+        });
         match which {
             Which::Scratch => self.scratch = surface,
-            Which::Sheet => self.sheet = surface,
+            Which::Sheet(d) => {
+                if self.sheets.len() <= d {
+                    self.sheets.resize_with(d + 1, || None);
+                }
+                self.sheets[d] = surface;
+            }
+            Which::Canvas => self.canvas = surface,
+            Which::Backdrop => self.backdrop = surface,
         }
         slot
     }
@@ -675,6 +978,65 @@ impl Gfx {
         self.device.limits().max_texture_dimension_2d
     }
 
+    /// Draws `frame` onto the sheet of thumbnails, `size` px and cleared
+    /// to nothing first, and answers the slot it is sampled from. Nothing
+    /// is read back: the pictures stay where they are drawn.
+    pub fn render_thumbs(&mut self, size: (u32, u32), frame: &Frame) -> u32 {
+        let size = (size.0.max(1), size.1.max(1));
+        if self.thumbs.as_ref().is_none_or(|t| t.size != size) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("thumbs"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let group = bind_group(&self.device, &self.tex_bgl, &self.sampler, &view);
+            let slot = match self.thumbs.take() {
+                Some(old) => {
+                    self.textures[old.slot as usize] = group;
+                    old.slot
+                }
+                None => {
+                    self.textures.push(group);
+                    (self.textures.len() - 1) as u32
+                }
+            };
+            self.thumbs = Some(Target {
+                texture,
+                view,
+                size,
+                slot,
+            });
+        }
+        let t = self.thumbs.as_ref().expect("the sheet was made");
+        let (texture, view, slot) = (t.texture.clone(), t.view.clone(), t.slot);
+        let viewport = Viewport {
+            w: size.0,
+            h: size.1,
+        };
+        let encoder = self.encode(&texture, &view, viewport, [0.0; 4], frame);
+        self.queue.submit([encoder.finish()]);
+        slot
+    }
+
+    /// Whether the surfaces keep their channels sRGB-encoded, blending in
+    /// linear light: what a picture read back has to be undone through.
+    pub fn is_srgb(&self) -> bool {
+        self.config.format.is_srgb()
+    }
+
     /// Renders `frame` into a texture of its own and answers the pixels,
     /// tight RGBA8, `w * h * 4` bytes. The copy out is padded to wgpu's
     /// 256-byte row alignment and unpadded here, so the caller gets rows
@@ -719,7 +1081,7 @@ impl Gfx {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = self.encode(&view, Viewport { w, h }, background, frame);
+        let mut encoder = self.encode(&texture, &view, Viewport { w, h }, background, frame);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -766,19 +1128,17 @@ impl Gfx {
                 px.swap(0, 2);
             }
         }
-        // The window's surface is the size it was; the scratch and the
-        // sheet have just been resized to the export and must go back,
-        // or the next frame composites through a texture of the wrong
-        // size.
-        let window = (self.config.width, self.config.height);
-        self.ensure_surface(Which::Scratch, window);
-        self.ensure_surface(Which::Sheet, window);
+        // The surfaces have just been sized for the export: the next
+        // frame the window draws sizes them back to itself, since every
+        // frame asks for its own.
         Ok(out)
     }
 
     /// Renders one frame: clear to `background`, then the frame's passes
     /// as [`scene::passes`] plans them — the prims in order, one draw per
-    /// texture run, with each group composited through the scratch.
+    /// texture run, with each group composited through the scratch and
+    /// each sheet through a surface of its depth — onto the canvas, which
+    /// is then laid on the window whole.
     /// `Ok(false)` = frame skipped (surface occluded or temporarily lost);
     /// the caller may try again later.
     pub fn render(&mut self, background: Rgba, frame: &Frame) -> anyhow::Result<bool> {
@@ -804,30 +1164,87 @@ impl Gfx {
             w: self.config.width,
             h: self.config.height,
         };
-        let encoder = self.encode(&view, viewport, background, frame);
+        // The frame is drawn onto the canvas rather than straight onto
+        // the swapchain image, since a surface passing through opens on a
+        // copy of what is under it — and a swapchain image need not be
+        // one a region can be copied out of.
+        let canvas = self.ensure_surface(Which::Canvas, (viewport.w, viewport.h));
+        let (canvas_texture, canvas_view) = {
+            let c = self.canvas.as_ref().expect("the canvas was ensured");
+            (c.texture.clone(), c.view.clone())
+        };
+        let mut encoder = self.encode(&canvas_texture, &canvas_view, viewport, background, frame);
+        let whole = ScreenRect {
+            x: 0.0,
+            y: 0.0,
+            w: viewport.w as f32,
+            h: viewport.h as f32,
+        };
+        let blit = [Prim::composite(whole, viewport, canvas, 1.0)];
+        let blit_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("blit"),
+                contents: bytemuck::cast_slice(&blit),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("present"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rp.set_pipeline(&self.blit);
+            rp.set_bind_group(0, &self.bind_group, &[]);
+            rp.set_bind_group(1, &self.textures[canvas as usize], &[]);
+            rp.set_vertex_buffer(0, blit_buf.slice(..));
+            rp.draw(0..6, 0..1);
+        }
         self.queue.submit([encoder.finish()]);
         self.queue.present(texture);
         Ok(true)
     }
 
-    /// Encodes one frame's passes onto `target`. The only thing the
-    /// window and an export do differently is what they draw onto and
-    /// how big it is, so this is the whole of the drawing and both
-    /// callers give it a view.
+    /// Encodes one frame's passes onto `target`, whose texture a region
+    /// can be copied out of. The only thing the window and an export do
+    /// differently is what they draw onto and how big it is, so this is
+    /// the whole of the drawing and both callers give it a target.
     fn encode(
         &mut self,
+        target_texture: &wgpu::Texture,
         target: &wgpu::TextureView,
         viewport: Viewport,
         background: Rgba,
         frame: &Frame,
     ) -> wgpu::CommandEncoder {
-        let scratch = self.ensure_surface(Which::Scratch, (viewport.w, viewport.h));
-        let sheet = self.ensure_surface(Which::Sheet, (viewport.w, viewport.h));
-        let globals: [f32; 4] = [viewport.w as f32, viewport.h as f32, 0.0, 0.0];
+        let size = (viewport.w, viewport.h);
+        let scratch = self.ensure_surface(Which::Scratch, size);
+        let deep = scene::depth(frame).min(MAX_SHEETS);
+        let sheets: Vec<u32> = (0..deep)
+            .map(|d| self.ensure_surface(Which::Sheet(d), size))
+            .collect();
+        let srgb = if self.config.format.is_srgb() { 1.0 } else { 0.0 };
+        let globals: [f32; 4] = [viewport.w as f32, viewport.h as f32, srgb, 0.0];
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::cast_slice(&globals));
 
-        let (prims, passes) = scene::passes(frame, viewport, scratch, sheet);
+        let (prims, passes) = scene::passes(frame, viewport, scratch, &sheets);
+        // What a mode is laid on is copied here first, when any is.
+        let backdrop = passes
+            .iter()
+            .any(|p| p.copy.is_some_and(|c| c.to == Onto::Backdrop))
+            .then(|| self.ensure_surface(Which::Backdrop, size));
         // A buffer per frame is the simplest thing that works; reuse and
         // per-element caching come with real profiling (§3).
         let instance_buf = self
@@ -837,8 +1254,6 @@ impl Gfx {
                 contents: bytemuck::cast_slice(&prims),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        let scratch_view = &self.scratch.as_ref().expect("scratch was ensured").view;
-        let sheet_view = &self.sheet.as_ref().expect("sheet was ensured").view;
         let [r, g, b, a] = background;
         let clear = wgpu::LoadOp::Clear(wgpu::Color {
             r: f64::from(r),
@@ -853,31 +1268,64 @@ impl Gfx {
                 label: Some("frame"),
             });
         // The window is cleared by the first pass onto it; everything
-        // else loads what is already there, since a wipe box is what
-        // opens an offscreen surface over the part that is being used.
+        // else loads what is already there, since a wipe box or a copy is
+        // what opens an offscreen surface over the part that is used.
         let mut cleared = false;
         for pass in passes {
-            let (label, target, load) = match pass.onto {
+            let surface = |onto: Onto| -> (&wgpu::Texture, &wgpu::TextureView) {
+                match onto {
+                    Onto::Window => (target_texture, target),
+                    Onto::Scratch => {
+                        let s = self.scratch.as_ref().expect("scratch was ensured");
+                        (&s.texture, &s.view)
+                    }
+                    Onto::Sheet(d) => {
+                        let s = self.sheets[usize::from(d) - 1]
+                            .as_ref()
+                            .expect("every sheet planned was ensured");
+                        (&s.texture, &s.view)
+                    }
+                    Onto::Backdrop => {
+                        let s = self.backdrop.as_ref().expect("the backdrop was ensured");
+                        (&s.texture, &s.view)
+                    }
+                }
+            };
+            if let Some(copy) = pass.copy {
+                let (from, _) = surface(copy.from);
+                let (to, _) = surface(copy.to);
+                if let Some((origin, extent)) = region(copy.rect, size) {
+                    let at = |texture| wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin,
+                        aspect: wgpu::TextureAspect::All,
+                    };
+                    encoder.copy_texture_to_texture(at(from), at(to), extent);
+                }
+            }
+            let (label, load) = match pass.onto {
                 Onto::Window => {
                     let load = if cleared { wgpu::LoadOp::Load } else { clear };
                     cleared = true;
-                    ("window", target, load)
+                    ("window", load)
                 }
-                Onto::Sheet => ("sheet", sheet_view, wgpu::LoadOp::Load),
-                Onto::Scratch => ("scratch", scratch_view, wgpu::LoadOp::Load),
+                Onto::Sheet(_) => ("sheet", wgpu::LoadOp::Load),
+                Onto::Scratch | Onto::Backdrop => ("scratch", wgpu::LoadOp::Load),
             };
+            let (_, view) = surface(pass.onto);
             let pipeline = match (pass.onto, pass.blend) {
                 // The window takes straight alpha; an offscreen surface
                 // holds premultiplied color, so a prim drawn onto one
                 // lands the way a composite does.
                 (Onto::Window, _) => &self.direct,
                 (Onto::Scratch, Blend::Union) => &self.union,
-                (Onto::Sheet | Onto::Scratch, _) => &self.build,
+                (Onto::Sheet(_) | Onto::Scratch | Onto::Backdrop, _) => &self.build,
             };
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(label),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -901,14 +1349,42 @@ impl Gfx {
                 rp.draw(0..6, wipe..wipe + 1);
             }
             if let Some(lay) = pass.lay {
+                let laid = &prims[lay.prim as usize];
+                if lay.blend == Blend::Mix {
+                    // The mix's strength is the composite's own alpha:
+                    // what is there keeps the rest of it.
+                    let k = f64::from(laid.color[3]);
+                    rp.set_blend_constant(wgpu::Color { r: k, g: k, b: k, a: k });
+                }
                 rp.set_pipeline(match lay.blend {
                     Blend::Erase => &self.erase,
+                    Blend::Mix => &self.mix,
+                    Blend::Mode(_) => &self.blend,
                     _ => &self.composite,
                 });
+                if let (Blend::Mode(_), Some(under)) = (lay.blend, backdrop) {
+                    rp.set_bind_group(2, &self.textures[under as usize], &[]);
+                }
                 // The box says which surface it samples.
-                let from = prims[lay.prim as usize].slot as usize;
+                let from = laid.slot as usize;
                 rp.set_bind_group(1, self.textures.get(from).unwrap_or(&self.textures[0]), &[]);
-                rp.draw(0..6, lay.prim..lay.prim + 1);
+                // Nothing outside the box: the quad is rasterized a pixel
+                // or two past it for the ramp, and out there a surface
+                // holds whatever was last drawn on it — and a mix, whose
+                // strength is a constant, would darken what it does not
+                // cover. The box is whole pixels, so inside it every
+                // pixel is covered all the way.
+                let at = ScreenRect {
+                    x: laid.geom[0],
+                    y: laid.geom[1],
+                    w: laid.geom[2],
+                    h: laid.geom[3],
+                };
+                if let Some((origin, extent)) = region(at, size) {
+                    rp.set_scissor_rect(origin.x, origin.y, extent.width, extent.height);
+                    rp.draw(0..6, lay.prim..lay.prim + 1);
+                    rp.set_scissor_rect(0, 0, size.0, size.1);
+                }
             }
             let range = pass.start..pass.end;
             if range.is_empty() {
@@ -926,6 +1402,23 @@ impl Gfx {
         }
         encoder
     }
+}
+
+/// The whole pixels `rect` covers inside a surface `size` big, as a copy
+/// wants them: an origin and an extent. None when nothing of it is in.
+fn region(rect: ScreenRect, size: (u32, u32)) -> Option<(wgpu::Origin3d, wgpu::Extent3d)> {
+    let x0 = rect.x.floor().max(0.0) as u32;
+    let y0 = rect.y.floor().max(0.0) as u32;
+    let x1 = (rect.x + rect.w).ceil().max(0.0).min(size.0 as f32) as u32;
+    let y1 = (rect.y + rect.h).ceil().max(0.0).min(size.1 as f32) as u32;
+    (x1 > x0 && y1 > y0).then_some((
+        wgpu::Origin3d { x: x0, y: y0, z: 0 },
+        wgpu::Extent3d {
+            width: x1 - x0,
+            height: y1 - y0,
+            depth_or_array_layers: 1,
+        },
+    ))
 }
 
 /// One pipeline over the instanced-quad vertex stage: `fragment` names
@@ -987,6 +1480,14 @@ fn pipeline(
 /// The texture format that matches the surface: the pipeline writes its
 /// colors straight through, so an image has to go in the same space the
 /// surface reads out.
+/// A texture drawn onto and sampled, and the slot it is sampled from.
+struct Target {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    size: (u32, u32),
+    slot: u32,
+}
+
 fn texture_format(surface: wgpu::TextureFormat) -> wgpu::TextureFormat {
     if surface.is_srgb() {
         wgpu::TextureFormat::Rgba8UnormSrgb
@@ -1067,4 +1568,43 @@ fn bind_group(
             },
         ],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shader is only compiled when a window opens, so without this
+    /// a WGSL mistake passes the whole suite and fails at the first frame.
+    #[test]
+    fn the_shader_parses_and_validates() {
+        let module = naga::front::wgsl::parse_str(&shader()).expect("the WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .expect("and validates");
+        for entry in ["vs_main", "fs_main", "fs_premul", "fs_blend"] {
+            assert!(
+                module.entry_points.iter().any(|e| e.name == entry),
+                "{entry} is in it"
+            );
+        }
+    }
+
+    #[test]
+    fn every_mode_is_a_constant_of_the_shader_under_its_own_number() {
+        let source = shader();
+        for mode in BlendMode::ALL {
+            let line = format!(
+                "const MODE_{}: u32 = {}u;",
+                shouted(&format!("{mode:?}")),
+                scene::mode_number(mode)
+            );
+            assert!(source.contains(&line), "{line}");
+        }
+        assert_eq!(shouted("ColorBurn"), "COLOR_BURN");
+        assert_eq!(shouted("Normal"), "NORMAL");
+    }
 }

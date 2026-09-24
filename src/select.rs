@@ -94,11 +94,13 @@ pub fn frame_of(doc: &Document, ids: &[String]) -> Option<Frame> {
 
 /// The topmost element under `p` (world units), reaching `slop` beyond its
 /// edges — topmost as painted, so the layers' order counts before the
-/// document's and a hidden layer is never hit. Rects hit anywhere inside;
-/// paths only on their ink.
+/// document's; a hidden layer is never hit, and the pointer passes through
+/// a locked one to what is under it. Rects hit anywhere inside; paths only
+/// on their ink.
 pub fn element_at(doc: &Document, p: Point, slop: f64) -> Option<&str> {
     doc.painted()
         .rev()
+        .filter(|painted| !painted.locked)
         .find(|painted| {
             // What the boundary cut away is not there for the pointer
             // either: the renderer and the pointer read one answer.
@@ -180,7 +182,7 @@ fn ink_hit(curves: &[Cubic], width: f64, p: Point, slop: f64) -> bool {
 }
 
 /// Ids of the painted elements whose box overlaps the unturned box with
-/// `a` and `b` as opposite corners, in paint order.
+/// `a` and `b` as opposite corners, in paint order — none that is locked.
 pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
     let lo = [a[0].min(b[0]), a[1].min(b[1])];
     let hi = [a[0].max(b[0]), a[1].max(b[1])];
@@ -188,6 +190,7 @@ pub fn elements_in(doc: &Document, a: Point, b: Point) -> Vec<String> {
         flo[0] <= hi[0] && fhi[0] >= lo[0] && flo[1] <= hi[1] && fhi[1] >= lo[1]
     };
     doc.painted()
+        .filter(|painted| !painted.locked)
         .filter(|painted| {
             // A boundary that cut ink away keeps the marquee off it too.
             painted
@@ -584,9 +587,7 @@ mod tests {
         ]);
         d.layers.push(Layer {
             id: "top".into(),
-            name: "Layer 2".into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         d.elements[0].set_layer("top");
         // `lower` comes later in `elements`, but its layer is underneath.
@@ -606,14 +607,48 @@ mod tests {
         ]);
         d.layers.push(Layer {
             id: "top".into(),
-            name: "Layer 2".into(),
             visible: false,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         d.elements[0].set_layer("top");
         assert_eq!(element_at(&d, [5.0, 5.0], 0.0), Some("lower"));
         assert_eq!(elements_in(&d, [-1.0, -1.0], [11.0, 11.0]), ids(&["lower"]));
         d.layers[0].visible = false;
+        assert_eq!(element_at(&d, [5.0, 5.0], 0.0), None);
+        assert!(elements_in(&d, [-1.0, -1.0], [11.0, 11.0]).is_empty());
+    }
+
+    #[test]
+    fn a_locked_layer_is_neither_hit_nor_marqueed_but_is_still_there() {
+        let mut d = doc(vec![
+            rect("upper", 0.0, 0.0, 10.0, 10.0, 0.0),
+            rect("lower", 0.0, 0.0, 10.0, 10.0, 0.0),
+        ]);
+        d.layers.push(Layer {
+            id: "top".into(),
+            locked: true,
+            ..Layer::of("Layer 2", Kind::Raster)
+        });
+        d.elements[0].set_layer("top");
+        // The pointer goes through what it cannot take hold of, to what
+        // it can: a locked layer is still painted, just not handled.
+        assert_eq!(element_at(&d, [5.0, 5.0], 0.0), Some("lower"));
+        assert_eq!(elements_in(&d, [-1.0, -1.0], [11.0, 11.0]), ids(&["lower"]));
+        assert_eq!(d.painted().count(), 2, "and it still paints");
+    }
+
+    #[test]
+    fn a_locked_group_locks_what_it_holds() {
+        let mut d = doc(vec![rect("inside", 0.0, 0.0, 10.0, 10.0, 0.0)]);
+        let layer = d.layers[0].id.clone();
+        let inner = d.layers.remove(0);
+        d.layers.push(Layer {
+            id: "g".into(),
+            locked: true,
+            layers: vec![inner],
+            ..Layer::of("Group 1", Kind::Group)
+        });
+        assert_eq!(d.elements[0].layer(), layer);
         assert_eq!(element_at(&d, [5.0, 5.0], 0.0), None);
         assert!(elements_in(&d, [-1.0, -1.0], [11.0, 11.0]).is_empty());
     }

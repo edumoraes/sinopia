@@ -37,9 +37,13 @@ pub enum Kind {
     #[default]
     Raster,
     Vector,
-    /// The layer a frame is the object of. It never appears inside a
-    /// frame's own stack: a frame does not nest.
+    /// The layer a frame is the object of. It stands only at the board's
+    /// root — never in a group, never in a frame's own stack: a frame
+    /// does not nest.
     Frame,
+    /// Layers held together: a group holds a stack of its own and never
+    /// an element, and groups nest.
+    Group,
 }
 
 impl Kind {
@@ -48,10 +52,174 @@ impl Kind {
     }
 }
 
+/// How a layer meets what is under it: Photoshop's modes, in the order
+/// its menu lists them. The separable and non-separable ones are the W3C
+/// Compositing and Blending set; the rest are Photoshop's own. Normal is
+/// the default and absent on disk.
+///
+/// `PassThrough` is a group's alone: its children meet what is under the
+/// group as if the group were not there. Every other mode isolates what
+/// it is set on — composited on its own first, then laid down once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Dissolve,
+    Darken,
+    Multiply,
+    ColorBurn,
+    LinearBurn,
+    DarkerColor,
+    Lighten,
+    Screen,
+    ColorDodge,
+    LinearDodge,
+    LighterColor,
+    Overlay,
+    SoftLight,
+    HardLight,
+    VividLight,
+    LinearLight,
+    PinLight,
+    HardMix,
+    Difference,
+    Exclusion,
+    Subtract,
+    Divide,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+    PassThrough,
+}
+
+impl BlendMode {
+    /// Every mode, in the order Photoshop's menu lists them, pass-through
+    /// last: it is a group's alone.
+    pub const ALL: [BlendMode; 28] = [
+        BlendMode::Normal,
+        BlendMode::Dissolve,
+        BlendMode::Darken,
+        BlendMode::Multiply,
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::DarkerColor,
+        BlendMode::Lighten,
+        BlendMode::Screen,
+        BlendMode::ColorDodge,
+        BlendMode::LinearDodge,
+        BlendMode::LighterColor,
+        BlendMode::Overlay,
+        BlendMode::SoftLight,
+        BlendMode::HardLight,
+        BlendMode::VividLight,
+        BlendMode::LinearLight,
+        BlendMode::PinLight,
+        BlendMode::HardMix,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Subtract,
+        BlendMode::Divide,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+        BlendMode::PassThrough,
+    ];
+
+    fn is_normal(&self) -> bool {
+        *self == BlendMode::Normal
+    }
+
+    /// What the menu calls it: Photoshop's own words.
+    pub fn name(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "Normal",
+            BlendMode::Dissolve => "Dissolve",
+            BlendMode::Darken => "Darken",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::ColorBurn => "Color Burn",
+            BlendMode::LinearBurn => "Linear Burn",
+            BlendMode::DarkerColor => "Darker Color",
+            BlendMode::Lighten => "Lighten",
+            BlendMode::Screen => "Screen",
+            BlendMode::ColorDodge => "Color Dodge",
+            BlendMode::LinearDodge => "Linear Dodge (Add)",
+            BlendMode::LighterColor => "Lighter Color",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::SoftLight => "Soft Light",
+            BlendMode::HardLight => "Hard Light",
+            BlendMode::VividLight => "Vivid Light",
+            BlendMode::LinearLight => "Linear Light",
+            BlendMode::PinLight => "Pin Light",
+            BlendMode::HardMix => "Hard Mix",
+            BlendMode::Difference => "Difference",
+            BlendMode::Exclusion => "Exclusion",
+            BlendMode::Subtract => "Subtract",
+            BlendMode::Divide => "Divide",
+            BlendMode::Hue => "Hue",
+            BlendMode::Saturation => "Saturation",
+            BlendMode::Color => "Color",
+            BlendMode::Luminosity => "Luminosity",
+            BlendMode::PassThrough => "Pass Through",
+        }
+    }
+}
+
+/// A colour a layer is tagged with, to be found again: Photoshop's seven.
+/// It says nothing about how the layer draws. None is the default and
+/// absent on disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tag {
+    #[default]
+    None,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Blue,
+    Violet,
+    Gray,
+}
+
+impl Tag {
+    /// The seven a layer can wear, in Photoshop's order.
+    pub const COLORS: [Tag; 7] = [
+        Tag::Red,
+        Tag::Orange,
+        Tag::Yellow,
+        Tag::Green,
+        Tag::Blue,
+        Tag::Violet,
+        Tag::Gray,
+    ];
+
+    fn is_none(&self) -> bool {
+        *self == Tag::None
+    }
+
+    /// What a menu calls it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Tag::None => "No Color",
+            Tag::Red => "Red",
+            Tag::Orange => "Orange",
+            Tag::Yellow => "Yellow",
+            Tag::Green => "Green",
+            Tag::Blue => "Blue",
+            Tag::Violet => "Violet",
+            Tag::Gray => "Gray",
+        }
+    }
+}
+
 /// A layer: a name, what it holds, whether it shows, and a place in the
-/// order. Elements name it by id. `visible` is absent on disk when true
-/// and `kind` when raster, so boards that never hid anything — or never
-/// saw a vector layer — keep their shape.
+/// order. Elements name it by id. Every field past the kind is absent on
+/// disk at its default — full strength, normal, open, untagged — and so
+/// is `visible` when true and `kind` when raster, so a board that never
+/// used one of them keeps its shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: String,
@@ -60,6 +228,20 @@ pub struct Layer {
     pub visible: bool,
     #[serde(default, skip_serializing_if = "Kind::is_raster")]
     pub kind: Kind,
+    /// The layer composited as one, at this strength: 0–1.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f64,
+    #[serde(default, skip_serializing_if = "BlendMode::is_normal")]
+    pub blend: BlendMode,
+    /// Its content cannot be drawn on, picked, moved or merged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+    #[serde(default, skip_serializing_if = "Tag::is_none")]
+    pub color: Tag,
+    /// A group's children, bottom to top. Empty for every other kind — a
+    /// frame's stack is its frame's, on the element.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
 }
 
 impl Layer {
@@ -70,6 +252,11 @@ impl Layer {
             name: name.to_owned(),
             visible: true,
             kind: Kind::Raster,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            locked: false,
+            color: Tag::None,
+            layers: Vec::new(),
         }
     }
 
@@ -79,6 +266,29 @@ impl Layer {
             kind,
             ..Layer::new(name)
         }
+    }
+
+    /// Whether the board can draw what the layer says of itself: a
+    /// strength is a fraction, only a group holds layers, and only a
+    /// group passes through — whatever wrote it.
+    fn checked(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            is_unit(self.opacity),
+            "layer {:?} has opacity {}, which is not between 0 and 1",
+            self.id,
+            self.opacity
+        );
+        anyhow::ensure!(
+            self.kind == Kind::Group || self.layers.is_empty(),
+            "layer {:?} holds layers, and only a group does",
+            self.id
+        );
+        anyhow::ensure!(
+            self.kind == Kind::Group || self.blend != BlendMode::PassThrough,
+            "layer {:?} passes through, and only a group does",
+            self.id
+        );
+        Ok(())
     }
 }
 
@@ -758,6 +968,13 @@ pub struct Stroke {
     pub pen: Envelope,
 }
 
+impl Stroke {
+    /// Whether it takes ink away rather than laying it.
+    pub fn erases(&self) -> bool {
+        self.stamp.as_ref().is_some_and(|s| s.mark.erases())
+    }
+}
+
 /// What a stroke may look like on disk. Checked on the way in, like a
 /// path's: a fraction is a fraction.
 #[derive(Deserialize)]
@@ -902,11 +1119,12 @@ impl Document {
         Ok(doc)
     }
 
-    /// Settles both stacks: a board without layers gets one, a frame
+    /// Settles every stack: a board without layers gets one, a frame
     /// without layers gets one too, every layer id is unique across the
-    /// whole document, a frame layer and its frame are one thing that
-    /// neither half stands without, no frame nests, and every element
-    /// names a layer that exists in some stack.
+    /// whole document however deep it stands, a frame layer and its frame
+    /// are one thing that neither half stands without, a frame stands
+    /// only at the board's root, nothing stands on a group, and every
+    /// element names a layer that exists in some stack.
     fn settle_layers(&mut self) -> anyhow::Result<()> {
         if self.layers.is_empty() {
             self.layers.push(Layer::new("Layer 1"));
@@ -927,42 +1145,21 @@ impl Document {
         // Every layer of every stack, board first, checked for an id and
         // for being used only once in the whole document — which is what
         // lets an element name its layer and say nothing else about
-        // where it is.
-        let mut seen: Vec<&str> = Vec::new();
-        for (i, layer) in self.layers.iter().enumerate() {
-            if layer.id.is_empty() {
-                anyhow::bail!("layer {i} has no id");
-            }
-            if seen.contains(&layer.id.as_str()) {
-                anyhow::bail!("layer id {:?} is used twice", layer.id);
-            }
-            seen.push(&layer.id);
-        }
+        // where it is. A frame is refused anywhere but the board's root.
+        let mut seen: Vec<&Layer> = Vec::new();
+        settle_stack(&self.layers, Where::Root, &mut seen)?;
         for el in &self.elements {
             let Element::Frame(f) = el else { continue };
-            for layer in &f.layers {
-                if layer.id.is_empty() {
-                    anyhow::bail!("a layer of frame {:?} has no id", f.id);
-                }
-                if layer.kind == Kind::Frame {
-                    anyhow::bail!(
-                        "layer {:?} is a frame inside frame {:?}; frames do not nest",
-                        layer.id,
-                        f.id
-                    );
-                }
-                if seen.contains(&layer.id.as_str()) {
-                    anyhow::bail!("layer id {:?} is used twice", layer.id);
-                }
-                seen.push(&layer.id);
-            }
+            settle_stack(&f.layers, Where::Frame(&f.id), &mut seen)?;
         }
-        // A frame layer and its frame go together in both directions.
+        // A frame layer and its frame go together in both directions, one
+        // to one.
         for layer in &self.layers {
             if layer.kind == Kind::Frame && self.frame_on(&layer.id).is_none() {
                 anyhow::bail!("layer {:?} is a frame layer with no frame on it", layer.id);
             }
         }
+        let mut framed: Vec<&str> = Vec::new();
         for el in &self.elements {
             let Element::Frame(f) = el else { continue };
             if !self
@@ -976,18 +1173,49 @@ impl Document {
                     f.layer
                 );
             }
+            if framed.contains(&f.layer.as_str()) {
+                anyhow::bail!("layer {:?} carries two frames, and a frame layer is one", f.layer);
+            }
+            framed.push(&f.layer);
         }
-        let first = self.layers[0].id.clone();
-        let known: Vec<String> = seen.iter().map(|s| (*s).to_owned()).collect();
+        // An element without a layer joins the first one that holds
+        // objects, which on every board written before layers existed is
+        // the only one there is.
+        let first = self
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, Kind::Raster | Kind::Vector))
+            .map(|l| l.id.clone());
+        let kinds: Vec<(String, Kind)> = seen.iter().map(|l| (l.id.clone(), l.kind)).collect();
         for el in &mut self.elements {
             if el.layer().is_empty() {
-                el.set_layer(&first);
-            } else if !known.iter().any(|id| id == el.layer()) {
-                anyhow::bail!(
+                let Some(first) = &first else {
+                    anyhow::bail!(
+                        "element {:?} names no layer, and the board has none that holds objects",
+                        el.id()
+                    );
+                };
+                el.set_layer(first);
+            }
+            match kinds.iter().find(|(id, _)| id == el.layer()).map(|(_, k)| *k) {
+                None => anyhow::bail!(
                     "element {:?} names layer {:?}, which does not exist",
                     el.id(),
                     el.layer()
-                );
+                ),
+                // A group holds layers and is not an object.
+                Some(Kind::Group) => anyhow::bail!(
+                    "element {:?} stands on layer {:?}, which is a group",
+                    el.id(),
+                    el.layer()
+                ),
+                // A frame layer is the frame it carries, and only that.
+                Some(Kind::Frame) if !matches!(el, Element::Frame(_)) => anyhow::bail!(
+                    "element {:?} stands on layer {:?}, where only its frame stands",
+                    el.id(),
+                    el.layer()
+                ),
+                Some(_) => {}
             }
         }
         Ok(())
@@ -998,6 +1226,54 @@ impl Document {
     pub fn to_json(&self) -> anyhow::Result<String> {
         Ok(serde_json::to_string_pretty(self)?)
     }
+}
+
+/// Where a stack being settled stands: the board's root — the only place
+/// a frame may — somewhere inside a group, or a frame's own stack.
+#[derive(Clone, Copy)]
+enum Where<'a> {
+    Root,
+    Nested,
+    Frame(&'a str),
+}
+
+/// Checks `layers` and everything under them, adding each layer to
+/// `seen` so an id used twice anywhere in the document is caught.
+fn settle_stack<'a>(layers: &'a [Layer], at: Where, seen: &mut Vec<&'a Layer>) -> anyhow::Result<()> {
+    for (i, layer) in layers.iter().enumerate() {
+        if layer.id.is_empty() {
+            match at {
+                Where::Frame(f) => anyhow::bail!("a layer of frame {f:?} has no id"),
+                _ => anyhow::bail!("layer {i} has no id"),
+            }
+        }
+        if seen.iter().any(|l| l.id == layer.id) {
+            anyhow::bail!("layer id {:?} is used twice", layer.id);
+        }
+        layer.checked()?;
+        if layer.kind == Kind::Frame {
+            match at {
+                Where::Root => {}
+                Where::Frame(f) => anyhow::bail!(
+                    "layer {:?} is a frame inside frame {f:?}; frames do not nest",
+                    layer.id
+                ),
+                Where::Nested => anyhow::bail!(
+                    "layer {:?} is a frame inside a group; a frame stands only at the board's root",
+                    layer.id
+                ),
+            }
+        }
+        seen.push(layer);
+        // A group's children stand wherever the group does: inside a
+        // frame they are still the frame's, and still no place for one.
+        let inner = match at {
+            Where::Frame(f) => Where::Frame(f),
+            _ => Where::Nested,
+        };
+        settle_stack(&layer.layers, inner, seen)?;
+    }
+    Ok(())
 }
 
 /// An element in paint order, and the frame whose boundary cuts it.
@@ -1011,6 +1287,9 @@ pub struct Painted<'a> {
     /// The frame whose boundary cuts it, when it is inside one. A frame
     /// is never inside itself.
     pub within: Option<&'a Frame>,
+    /// Its layer is locked, or something holding it is: it is painted,
+    /// and the pointer passes through it.
+    pub locked: bool,
 }
 
 impl Document {
@@ -1048,32 +1327,49 @@ impl Document {
     /// from the top.
     pub fn painted(&self) -> impl DoubleEndedIterator<Item = Painted<'_>> {
         let mut out: Vec<Painted<'_>> = Vec::new();
-        for layer in self.layers.iter().filter(|l| l.visible) {
-            if layer.kind == Kind::Frame {
-                let Some((index, element)) = self
-                    .elements
-                    .iter()
-                    .enumerate()
-                    .find(|(_, el)| el.layer() == layer.id)
-                else {
-                    continue;
-                };
-                let Element::Frame(frame) = element else {
-                    continue;
-                };
-                out.push(Painted {
-                    index,
-                    element,
-                    within: None,
-                });
-                for inner in frame.layers.iter().filter(|l| l.visible) {
-                    out.extend(self.on_layer(&inner.id, Some(frame)));
+        self.paint_stack(&self.layers, None, false, &mut out);
+        out.into_iter()
+    }
+
+    /// `layers` in paint order onto `out`, each element marked with the
+    /// frame that cuts it. A group paints where it stands, its children
+    /// bottom to top; a frame paints itself and then its own stack.
+    fn paint_stack<'a>(
+        &'a self,
+        layers: &'a [Layer],
+        within: Option<&'a Frame>,
+        locked: bool,
+        out: &mut Vec<Painted<'a>>,
+    ) {
+        for layer in layers.iter().filter(|l| l.visible) {
+            let locked = locked || layer.locked;
+            match layer.kind {
+                Kind::Frame => {
+                    let Some((index, element)) = self
+                        .elements
+                        .iter()
+                        .enumerate()
+                        .find(|(_, el)| el.layer() == layer.id)
+                    else {
+                        continue;
+                    };
+                    let Element::Frame(frame) = element else {
+                        continue;
+                    };
+                    out.push(Painted {
+                        index,
+                        element,
+                        within: None,
+                        locked,
+                    });
+                    self.paint_stack(&frame.layers, Some(frame), locked, out);
                 }
-            } else {
-                out.extend(self.on_layer(&layer.id, None));
+                Kind::Group => self.paint_stack(&layer.layers, within, locked, out),
+                Kind::Raster | Kind::Vector => {
+                    out.extend(self.on_layer(&layer.id, within, locked));
+                }
             }
         }
-        out.into_iter()
     }
 
     /// The elements naming `layer`, in document order, each marked with
@@ -1082,6 +1378,7 @@ impl Document {
         &'a self,
         layer: &'a str,
         within: Option<&'a Frame>,
+        locked: bool,
     ) -> impl Iterator<Item = Painted<'a>> {
         self.elements
             .iter()
@@ -1091,13 +1388,9 @@ impl Document {
                     index,
                     element,
                     within,
+                    locked,
                 })
             })
-    }
-
-    /// The index of `id` in the stack `frame` names.
-    pub fn layer_index(&self, frame: Option<&str>, id: &str) -> Option<usize> {
-        self.stack(frame).iter().position(|l| l.id == id)
     }
 
     /// The frame element `id` names.
@@ -1122,174 +1415,6 @@ impl Document {
             _ => None,
         })
     }
-
-    /// The layers of the frame `frame` names, or the board's own when it
-    /// names none. An empty slice for a frame that is not there.
-    pub fn stack(&self, frame: Option<&str>) -> &[Layer] {
-        match frame {
-            None => &self.layers,
-            Some(id) => self.frame(id).map_or(&[], |f| &f.layers),
-        }
-    }
-
-    pub fn stack_mut(&mut self, frame: Option<&str>) -> Option<&mut Vec<Layer>> {
-        match frame {
-            None => Some(&mut self.layers),
-            Some(id) => self.frame_mut(id).map(|f| &mut f.layers),
-        }
-    }
-
-    /// Where a layer lives: the frame holding it — none for the board's
-    /// own stack — and its index in that stack. A layer id is unique
-    /// across the whole document, so this is the whole answer.
-    pub fn locate(&self, layer: &str) -> Option<(Option<&str>, usize)> {
-        if let Some(i) = self.layers.iter().position(|l| l.id == layer) {
-            return Some((None, i));
-        }
-        self.elements.iter().find_map(|el| match el {
-            Element::Frame(f) => f
-                .layers
-                .iter()
-                .position(|l| l.id == layer)
-                .map(|i| (Some(f.id.as_str()), i)),
-            _ => None,
-        })
-    }
-
-    /// The topmost frame whose area holds `p`, or none for the open
-    /// board. A hidden frame claims nothing: what is not painted is not
-    /// there, for the pointer as for the eye.
-    pub fn frame_at(&self, p: [f64; 2]) -> Option<&str> {
-        self.layers
-            .iter()
-            .rev()
-            .filter(|l| l.visible && l.kind == Kind::Frame)
-            .find_map(|l| {
-                self.frame_on(&l.id)
-                    .filter(|f| f.contains(p))
-                    .map(|f| f.id.as_str())
-            })
-    }
-
-    /// Adds a layer of `kind` just above `above` (on top when that is
-    /// past the end) in the stack `frame` names, and answers its index.
-    /// It is named for its kind, with N past every number in use under
-    /// that word **in that stack**, so a frame's first layer is
-    /// `Layer 1` however many the board has. None when the stack is not
-    /// there.
-    pub fn add_layer(&mut self, frame: Option<&str>, above: usize, kind: Kind) -> Option<usize> {
-        let name = self.next_layer_name(frame, kind);
-        let layers = self.stack_mut(frame)?;
-        let at = above.saturating_add(1).min(layers.len());
-        layers.insert(at, Layer::of(&name, kind));
-        Some(at)
-    }
-
-    /// The name a new layer of `kind` takes: one past the highest number
-    /// already carried under that kind's own word. A frame is not a gap
-    /// in the layers' numbering and a layer is not a gap in the frames'.
-    fn next_layer_name(&self, frame: Option<&str>, kind: Kind) -> String {
-        let word = match kind {
-            Kind::Frame => "Frame",
-            Kind::Raster | Kind::Vector => "Layer",
-        };
-        let prefix = format!("{word} ");
-        let highest = self
-            .stack(frame)
-            .iter()
-            .filter_map(|l| l.name.strip_prefix(&prefix)?.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0);
-        format!("{word} {}", highest.saturating_add(1))
-    }
-
-    /// Removes layer `index` of the stack `frame` names, and every
-    /// element on it. A stack keeps its last layer: false then, and for
-    /// an index past the end. A frame layer takes its frame's whole
-    /// stack with it, since a frame's object *is* a stack.
-    pub fn remove_layer(&mut self, frame: Option<&str>, index: usize) -> bool {
-        let Some(layers) = self.stack_mut(frame) else {
-            return false;
-        };
-        if layers.len() < 2 || index >= layers.len() {
-            return false;
-        }
-        let gone = layers.remove(index);
-        let held: Vec<String> = self
-            .frame_on(&gone.id)
-            .map(|f| f.layers.iter().map(|l| l.id.clone()).collect())
-            .unwrap_or_default();
-        self.elements
-            .retain(|el| el.layer() != gone.id && !held.iter().any(|id| id == el.layer()));
-        true
-    }
-
-    /// Swaps layer `index` with the one above it (`up`) or below, and
-    /// answers where it went. Nothing moves past the edge.
-    pub fn move_layer(&mut self, frame: Option<&str>, index: usize, up: bool) -> Option<usize> {
-        let to = if up {
-            index.checked_add(1)?
-        } else {
-            index.checked_sub(1)?
-        };
-        self.reorder_layer(frame, index, to).then_some(to)
-    }
-
-    /// Takes layer `from` out of the stack `frame` names and puts it back
-    /// at `to`, shifting whatever lies between and leaving their order
-    /// alone — what a row dragged several places down does. False when
-    /// either index is past the end, or the layer is already there.
-    pub fn reorder_layer(&mut self, frame: Option<&str>, from: usize, to: usize) -> bool {
-        let Some(layers) = self.stack_mut(frame) else {
-            return false;
-        };
-        if from >= layers.len() || to >= layers.len() || from == to {
-            return false;
-        }
-        let layer = layers.remove(from);
-        layers.insert(to, layer);
-        true
-    }
-
-    /// Moves the layer `layer` — and so the object on it — to the top of
-    /// the stack `to` names. A layer holds one object, so the two are one
-    /// move: the element goes on naming its layer, and its layer changes
-    /// stacks. False when the layer is a frame's own (a frame does not
-    /// nest), when it is already there, or when either end is missing.
-    pub fn rehome_layer(&mut self, layer: &str, to: Option<&str>) -> bool {
-        let Some((from, index)) = self.locate(layer) else {
-            return false;
-        };
-        let from = from.map(|s| s.to_owned());
-        if from.as_deref() == to {
-            return false;
-        }
-        if self.stack(from.as_deref())[index].kind == Kind::Frame {
-            return false;
-        }
-        if self.stack_mut(to).is_none() {
-            return false;
-        }
-        let Some(layers) = self.stack_mut(from.as_deref()) else {
-            return false;
-        };
-        let taken = layers.remove(index);
-        // The stack it came from may now be empty, and a stack is never
-        // empty: it gets a fresh layer, as the parse would have given it.
-        if layers.is_empty() {
-            let name = self.next_layer_name(from.as_deref(), Kind::Raster);
-            if let Some(layers) = self.stack_mut(from.as_deref()) {
-                layers.push(Layer::new(&name));
-            }
-        }
-        match self.stack_mut(to) {
-            Some(layers) => {
-                layers.push(taken);
-                true
-            }
-            None => false,
-        }
-    }
 }
 
 /// New id in ULID format (stable, time-sortable — the bridge to a CRDT).
@@ -1310,9 +1435,7 @@ mod tests {
     fn layer(id: &str, name: &str) -> Layer {
         Layer {
             id: id.into(),
-            name: name.into(),
-            visible: true,
-            kind: Kind::Raster,
+            ..Layer::of(name, Kind::Raster)
         }
     }
 
@@ -1443,6 +1566,323 @@ mod tests {
     }
 
     #[test]
+    fn a_layer_says_nothing_of_its_opacity_blend_lock_or_colour_at_their_defaults() {
+        // Every board written before these existed opens meaning what it
+        // meant: full strength, normal, open, untagged.
+        let json = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l1", "name": "Layer 1" } ],
+            "elements": []
+        }"##;
+        let doc = Document::from_json(json).unwrap();
+        let l = &doc.layers[0];
+        assert_eq!(l.opacity, 1.0);
+        assert_eq!(l.blend, BlendMode::Normal);
+        assert!(!l.locked);
+        assert_eq!(l.color, Tag::None);
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        for field in ["opacity", "blend", "locked", "color"] {
+            assert!(v["layers"][0].get(field).is_none(), "{field}: {v}");
+        }
+        let fresh = Layer::new("Layer 2");
+        assert_eq!(
+            (fresh.opacity, fresh.blend, fresh.locked, fresh.color),
+            (1.0, BlendMode::Normal, false, Tag::None)
+        );
+    }
+
+    #[test]
+    fn a_layers_opacity_blend_lock_and_colour_go_to_disk_and_come_back() {
+        let mut doc = sample_doc();
+        doc.layers[0].opacity = 0.4;
+        doc.layers[0].blend = BlendMode::ColorDodge;
+        doc.layers[0].locked = true;
+        doc.layers[0].color = Tag::Violet;
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["layers"][0]["opacity"].as_f64(), Some(0.4));
+        assert_eq!(v["layers"][0]["blend"], "colorDodge");
+        assert_eq!(v["layers"][0]["locked"], true);
+        assert_eq!(v["layers"][0]["color"], "violet");
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_layers_opacity_is_a_fraction() {
+        for bad in ["-0.1", "1.5"] {
+            let json = format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "layers": [ {{ "id": "l1", "name": "Layer 1", "opacity": {bad} }} ],
+                    "elements": []
+                }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains("opacity"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_blend_mode_or_colour_is_an_error() {
+        for (field, value) in [("blend", "burn"), ("color", "pink")] {
+            let json = format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "layers": [ {{ "id": "l1", "name": "Layer 1", "{field}": "{value}" }} ],
+                    "elements": []
+                }}"##
+            );
+            let err = Document::from_json(&json).unwrap_err().to_string();
+            assert!(err.contains(value), "{field}: {err}");
+        }
+    }
+
+    /// A board whose `layers` are the JSON given and whose elements are
+    /// one 1×1 rect on each layer id in `on`, in that order.
+    fn board_of(layers: &str, on: &[&str]) -> anyhow::Result<Document> {
+        let elements: Vec<String> = on
+            .iter()
+            .map(|l| {
+                format!(
+                    r#"{{ "id": "on_{l}", "type": "rect", "layer": "{l}",
+                          "x": 0, "y": 0, "w": 1, "h": 1,
+                          "stroke": null, "fill": null, "text": null }}"#
+                )
+            })
+            .collect();
+        Document::from_json(&format!(
+            r##"{{
+                "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                "layers": {layers},
+                "elements": [ {} ]
+            }}"##,
+            elements.join(", ")
+        ))
+    }
+
+    #[test]
+    fn a_group_holds_layers_and_says_so_on_disk() {
+        let doc = board_of(
+            r#"[ { "id": "a", "name": "Layer 1" },
+                 { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                     { "id": "b", "name": "Layer 2" },
+                     { "id": "h", "name": "Group 2", "kind": "group", "layers": [
+                         { "id": "c", "name": "Layer 3", "kind": "vector" } ] } ] } ]"#,
+            &["a", "b", "c"],
+        )
+        .unwrap();
+        let g = &doc.layers[1];
+        assert_eq!(g.kind, Kind::Group);
+        assert_eq!(g.layers.len(), 2, "its children, bottom to top");
+        assert_eq!(g.layers[1].layers[0].id, "c", "and groups nest");
+
+        let json = doc.to_json().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["layers"][1]["kind"], "group");
+        assert_eq!(v["layers"][1]["layers"][0]["id"], "b");
+        assert!(
+            v["layers"][0].get("layers").is_none(),
+            "a layer that holds none says nothing: {v}"
+        );
+        assert_eq!(Document::from_json(&json).unwrap(), doc);
+    }
+
+    #[test]
+    fn only_a_group_holds_layers() {
+        let err = board_of(
+            r#"[ { "id": "a", "name": "Layer 1", "layers": [ { "id": "b", "name": "Layer 2" } ] } ]"#,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"a\"") && err.contains("group"), "{err}");
+    }
+
+    #[test]
+    fn an_id_is_used_once_in_the_whole_tree() {
+        let err = board_of(
+            r#"[ { "id": "a", "name": "Layer 1" },
+                 { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                     { "id": "a", "name": "Layer 2" } ] } ]"#,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"a\"") && err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn a_frame_stands_only_at_the_boards_root() {
+        // Inside a group on the board: Photoshop's rule for artboards.
+        let err = Document::from_json(
+            r##"{
+                "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                "camera": { "x": 0, "y": 0, "zoom": 1 },
+                "layers": [ { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                    { "id": "fl", "name": "Frame 1", "kind": "frame" } ] } ],
+                "elements": [ { "id": "fr", "type": "frame", "layer": "fl",
+                    "x": 0, "y": 0, "w": 10, "h": 10, "layers": [] } ]
+            }"##,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("fl") && err.contains("root"), "{err}");
+
+        // And inside a group inside a frame, which is a frame in a frame.
+        let err = Document::from_json(
+            r##"{
+                "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                "camera": { "x": 0, "y": 0, "zoom": 1 },
+                "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+                "elements": [ { "id": "fr", "type": "frame", "layer": "fl",
+                    "x": 0, "y": 0, "w": 10, "h": 10, "layers": [
+                        { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                            { "id": "f2", "name": "Frame 2", "kind": "frame" } ] } ] } ]
+            }"##,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("f2"), "{err}");
+    }
+
+    #[test]
+    fn pass_through_is_a_groups_alone() {
+        let err = board_of(
+            r#"[ { "id": "a", "name": "Layer 1", "blend": "passThrough" } ]"#,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"a\"") && err.contains("pass"), "{err}");
+        let doc = board_of(
+            r#"[ { "id": "g", "name": "Group 1", "kind": "group", "blend": "passThrough" } ]"#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(doc.layers[0].blend, BlendMode::PassThrough);
+    }
+
+    #[test]
+    fn nothing_stands_on_a_group() {
+        // A group holds layers, never an element: it is not an object.
+        let err = board_of(
+            r#"[ { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                     { "id": "a", "name": "Layer 1" } ] } ]"#,
+            &["g"],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("on_g") && err.contains("group"), "{err}");
+    }
+
+    #[test]
+    fn a_frame_layer_carries_its_frame_and_nothing_else() {
+        let board = |extra: &str| {
+            Document::from_json(&format!(
+                r##"{{
+                    "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                    "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                    "layers": [ {{ "id": "fl", "name": "Frame 1", "kind": "frame" }} ],
+                    "elements": [ {{ "id": "fr", "type": "frame", "layer": "fl",
+                        "x": 0, "y": 0, "w": 10, "h": 10, "layers": [] }}{extra} ]
+                }}"##
+            ))
+        };
+        assert!(board("").is_ok());
+        // A rect on it would never be painted: the frame layer paints its
+        // frame and then the frame's own stack.
+        let err = board(
+            r#", { "id": "r", "type": "rect", "layer": "fl",
+                   "x": 0, "y": 0, "w": 1, "h": 1, "stroke": null, "fill": null, "text": null }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"r\"") && err.contains("only its frame"), "{err}");
+        // Two frames on one layer: the second would never be painted.
+        let err = board(
+            r#", { "id": "fr2", "type": "frame", "layer": "fl",
+                   "x": 0, "y": 0, "w": 10, "h": 10, "layers": [] }"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"fl\"") && err.contains("two frames"), "{err}");
+    }
+
+    #[test]
+    fn a_nested_layers_opacity_is_checked_too() {
+        let err = board_of(
+            r#"[ { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                     { "id": "a", "name": "Layer 1", "opacity": 2 } ] } ]"#,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("opacity"), "{err}");
+    }
+
+    #[test]
+    fn painted_walks_a_group_where_it_stands_in_the_stack() {
+        // Document order disagrees with paint order on purpose.
+        let doc = board_of(
+            r#"[ { "id": "a", "name": "Layer 1" },
+                 { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                     { "id": "b", "name": "Layer 2" },
+                     { "id": "h", "name": "Group 2", "kind": "group", "layers": [
+                         { "id": "c", "name": "Layer 3" } ] } ] },
+                 { "id": "d", "name": "Layer 4" } ]"#,
+            &["d", "c", "a", "b"],
+        )
+        .unwrap();
+        let order: Vec<&str> = doc.painted().map(|p| p.element.id()).collect();
+        assert_eq!(order, ["on_a", "on_b", "on_c", "on_d"]);
+    }
+
+    #[test]
+    fn a_hidden_group_hides_everything_in_it() {
+        let doc = board_of(
+            r#"[ { "id": "a", "name": "Layer 1" },
+                 { "id": "g", "name": "Group 1", "kind": "group", "visible": false, "layers": [
+                     { "id": "b", "name": "Layer 2" },
+                     { "id": "h", "name": "Group 2", "kind": "group", "layers": [
+                         { "id": "c", "name": "Layer 3" } ] } ] } ]"#,
+            &["a", "b", "c"],
+        )
+        .unwrap();
+        let order: Vec<&str> = doc.painted().map(|p| p.element.id()).collect();
+        assert_eq!(order, ["on_a"]);
+    }
+
+    #[test]
+    fn a_group_inside_a_frame_is_cut_by_it() {
+        let doc = Document::from_json(
+            r##"{
+                "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                "camera": { "x": 0, "y": 0, "zoom": 1 },
+                "layers": [ { "id": "fl", "name": "Frame 1", "kind": "frame" } ],
+                "elements": [
+                    { "id": "fr", "type": "frame", "layer": "fl",
+                      "x": 0, "y": 0, "w": 10, "h": 10, "layers": [
+                        { "id": "a", "name": "Layer 1" },
+                        { "id": "g", "name": "Group 1", "kind": "group", "layers": [
+                            { "id": "b", "name": "Layer 2" } ] } ] },
+                    { "id": "on_b", "type": "rect", "layer": "b",
+                      "x": 0, "y": 0, "w": 1, "h": 1, "stroke": null, "fill": null, "text": null }
+                ]
+            }"##,
+        )
+        .unwrap();
+        let painted: Vec<(&str, Option<&str>)> = doc
+            .painted()
+            .map(|p| (p.element.id(), p.within.map(|f| f.id.as_str())))
+            .collect();
+        assert_eq!(painted, [("fr", None), ("on_b", Some("fr"))]);
+    }
+
+    #[test]
     fn add_layer_makes_the_kind_it_is_asked_for() {
         let mut doc = Document::new("t");
         assert_eq!(doc.add_layer(None, 0, Kind::Vector).unwrap(), 1);
@@ -1479,9 +1919,8 @@ mod tests {
         let mut doc = sample_doc();
         doc.layers.push(Layer {
             id: "L2".into(),
-            name: "Layer 2".into(),
             visible: false,
-            kind: Kind::Raster,
+            ..Layer::of("Layer 2", Kind::Raster)
         });
         doc.elements[1].set_layer("L2");
         let json = doc.to_json().unwrap();
@@ -1968,13 +2407,6 @@ mod tests {
     }
 
     #[test]
-    fn layer_index_finds_a_layer_by_id() {
-        let doc = three_layers();
-        assert_eq!(doc.layer_index(None, "middle"), Some(1));
-        assert_eq!(doc.layer_index(None, "nope"), None);
-    }
-
-    #[test]
     fn add_layer_inserts_above_and_names_past_the_highest_number() {
         let mut doc = Document::new("t");
         assert_eq!(doc.add_layer(None, 0, Kind::Raster).unwrap(), 1);
@@ -2019,33 +2451,6 @@ mod tests {
         assert!(!doc.remove_layer(None, 0), "a board keeps its last layer");
         assert_eq!(doc.layers.len(), 1);
         assert_eq!(doc.elements.len(), 1);
-    }
-
-    #[test]
-    fn move_layer_swaps_with_the_neighbour_and_stops_at_the_edge() {
-        let mut doc = three_layers();
-        assert_eq!(doc.move_layer(None, 0, true), Some(1));
-        assert_eq!(doc.layers[1].id, "bottom");
-        assert_eq!(doc.layers[0].id, "middle");
-        assert_eq!(doc.move_layer(None, 2, true), None, "already on top");
-        assert_eq!(doc.move_layer(None, 0, false), None, "already at the bottom");
-        assert_eq!(doc.move_layer(None, 9, true), None, "no such layer");
-        assert_eq!(doc.move_layer(None, 1, false), Some(0));
-        assert_eq!(doc.layers[0].id, "bottom");
-    }
-
-    #[test]
-    fn reorder_layer_lifts_one_out_and_drops_it_in() {
-        let mut doc = three_layers();
-        assert!(doc.reorder_layer(None, 2, 0), "the top one to the bottom");
-        let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, vec!["top", "bottom", "middle"], "the others keep their order");
-        assert!(doc.reorder_layer(None, 0, 2));
-        let ids: Vec<&str> = doc.layers.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, vec!["bottom", "middle", "top"]);
-        assert!(!doc.reorder_layer(None, 1, 1), "nowhere to go");
-        assert!(!doc.reorder_layer(None, 3, 0), "no such layer");
-        assert!(!doc.reorder_layer(None, 0, 3), "no such place");
     }
 
     #[test]
@@ -2446,9 +2851,10 @@ mod tests {
     fn stack_answers_the_board_or_one_frame() {
         let doc = framed();
         assert_eq!(doc.stack(None).len(), 2, "the board's own");
-        let ids: Vec<&str> = doc.stack(Some("fr")).iter().map(|l| l.id.as_str()).collect();
+        let ids: Vec<&str> = doc.stack(Some("fl")).iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["in"]);
         assert!(doc.stack(Some("nobody")).is_empty());
+        assert!(doc.stack(Some("in")).is_empty(), "a raster layer holds none");
     }
 
     #[test]
@@ -2456,7 +2862,7 @@ mod tests {
         let doc = framed();
         assert_eq!(doc.locate("bottom"), Some((None, 0)));
         assert_eq!(doc.locate("fl"), Some((None, 1)));
-        assert_eq!(doc.locate("in"), Some((Some("fr"), 0)));
+        assert_eq!(doc.locate("in"), Some((Some("fl"), 0)), "held by the frame's own layer");
         assert_eq!(doc.locate("nobody"), None);
     }
 
@@ -2469,17 +2875,15 @@ mod tests {
     }
 
     #[test]
-    fn frame_at_names_the_topmost_frame_over_a_point_and_skips_hidden_ones() {
+    fn stack_at_names_the_topmost_frame_over_a_point_and_skips_hidden_ones() {
         let mut doc = framed();
-        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr"));
-        assert_eq!(doc.frame_at([500.0, 500.0]), None, "the open board");
+        assert_eq!(doc.stack_at([50.0, 50.0]), Some("fl"), "by the frame's layer");
+        assert_eq!(doc.stack_at([500.0, 500.0]), None, "the open board");
 
         // A second frame over the same place, higher up, wins.
         doc.layers.push(Layer {
             id: "fl2".into(),
-            name: "Frame 2".into(),
-            visible: true,
-            kind: Kind::Frame,
+            ..Layer::of("Frame 2", Kind::Frame)
         });
         doc.elements.push(Element::Frame(Frame {
             id: "fr2".into(),
@@ -2491,11 +2895,11 @@ mod tests {
             background: None,
             layers: vec![layer("in2", "Layer 1")],
         }));
-        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr2"));
+        assert_eq!(doc.stack_at([50.0, 50.0]), Some("fl2"));
 
         // A hidden frame claims nothing.
         doc.layers[2].visible = false;
-        assert_eq!(doc.frame_at([50.0, 50.0]), Some("fr"));
+        assert_eq!(doc.stack_at([50.0, 50.0]), Some("fl"));
     }
 
     /// A board holding a frame layer that no frame is on is not a
@@ -2568,8 +2972,8 @@ mod tests {
                             "x": 0, "y": 0, "w": 10, "h": 10, "layers": [] } ]
         }"##;
         let doc = Document::from_json(json).unwrap();
-        assert_eq!(doc.stack(Some("fr")).len(), 1);
-        assert_eq!(doc.stack(Some("fr"))[0].name, "Layer 1");
+        assert_eq!(doc.stack(Some("fl")).len(), 1);
+        assert_eq!(doc.stack(Some("fl"))[0].name, "Layer 1");
     }
 
     /// An area of no size is not an area.
@@ -2594,12 +2998,12 @@ mod tests {
     #[test]
     fn a_layer_added_inside_a_frame_stays_inside_it() {
         let mut doc = framed();
-        let at = doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
+        let at = doc.add_layer(Some("fl"), 0, Kind::Raster).unwrap();
         assert_eq!(at, 1);
-        assert_eq!(doc.stack(Some("fr")).len(), 2);
+        assert_eq!(doc.stack(Some("fl")).len(), 2);
         assert_eq!(doc.layers.len(), 2, "the board's stack did not grow");
         assert_eq!(
-            doc.stack(Some("fr"))[1].name,
+            doc.stack(Some("fl"))[1].name,
             "Layer 2",
             "named within its own stack"
         );
@@ -2608,15 +3012,15 @@ mod tests {
     #[test]
     fn removing_the_last_layer_of_a_frame_is_refused_like_the_boards() {
         let mut doc = framed();
-        assert!(!doc.remove_layer(Some("fr"), 0));
-        assert_eq!(doc.stack(Some("fr")).len(), 1);
+        assert!(!doc.remove_layer(Some("fl"), 0));
+        assert_eq!(doc.stack(Some("fl")).len(), 1);
     }
 
     #[test]
     fn removing_a_frames_layer_takes_the_elements_on_it() {
         let mut doc = framed();
-        doc.add_layer(Some("fr"), 0, Kind::Raster).unwrap();
-        assert!(doc.remove_layer(Some("fr"), 0));
+        doc.add_layer(Some("fl"), 0, Kind::Raster).unwrap();
+        assert!(doc.remove_layer(Some("fl"), 0));
         assert!(
             !doc.elements.iter().any(|el| el.id() == "inside"),
             "the rect on it went too"
@@ -2638,10 +3042,10 @@ mod tests {
     #[test]
     fn rehoming_a_layer_moves_it_and_its_object_between_stacks() {
         let mut doc = framed();
-        assert!(doc.rehome_layer("bottom", Some("fr")));
+        assert!(doc.rehome_layer("bottom", Some("fl")));
         assert_eq!(
             doc.locate("bottom"),
-            Some((Some("fr"), 1)),
+            Some((Some("fl"), 1)),
             "on top of the frame's stack"
         );
         // The element did not move — it named its layer, and its layer
@@ -2659,21 +3063,21 @@ mod tests {
     fn rehoming_never_leaves_a_stack_empty() {
         let mut doc = framed();
         assert!(doc.rehome_layer("in", None));
-        assert_eq!(doc.stack(Some("fr")).len(), 1);
-        assert_ne!(doc.stack(Some("fr"))[0].id, "in");
+        assert_eq!(doc.stack(Some("fl")).len(), 1);
+        assert_ne!(doc.stack(Some("fl"))[0].id, "in");
     }
 
     #[test]
     fn a_frames_own_layer_never_rehomes() {
         let mut doc = framed();
-        assert!(!doc.rehome_layer("fl", Some("fr")), "a frame does not nest");
+        assert!(!doc.rehome_layer("fl", Some("fl")), "a frame does not nest");
     }
 
     #[test]
     fn rehoming_where_it_already_is_does_nothing() {
         let mut doc = framed();
         assert!(!doc.rehome_layer("bottom", None));
-        assert!(!doc.rehome_layer("nobody", Some("fr")));
+        assert!(!doc.rehome_layer("nobody", Some("fl")));
         assert!(!doc.rehome_layer("bottom", Some("nobody")));
     }
 
