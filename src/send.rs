@@ -38,6 +38,12 @@ const BAR_W: f32 = 4.0;
 const BAR_GAP: f32 = 4.0;
 const BAR_MIN: f32 = 16.0;
 
+/// What the dialog is, and — at the title's far end, in muted ink — the
+/// keys that finish it: `Shift+Enter` is the one nobody would guess, and
+/// the box is no use to someone who cannot break a line in it.
+const TITLE: &str = "Send to the agent";
+const KEYS: &str = "Enter sends · Shift+Enter breaks a line · Esc closes";
+
 /// The most lines the instruction box grows to. Past it the box keeps
 /// its height and scrolls.
 pub const MAX_LINES: usize = 20;
@@ -403,8 +409,17 @@ impl Panel {
             Prim::rounded(self.rect, corner, theme.panel),
         ];
         let baseline = atlas.baseline_in(self.title);
-        for g in atlas.layout("Send to the agent", self.title.x, baseline) {
+        for g in atlas.layout(TITLE, self.title.x, baseline) {
             out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink));
+        }
+        // The keys give way to the title in a narrow window, and go
+        // before they would run into it.
+        let room = self.title.w - atlas.measure(TITLE) - NAME_GAP * self.scale;
+        if atlas.measure(KEYS) <= room {
+            let at = self.title.x + self.title.w - atlas.measure(KEYS);
+            for g in atlas.layout(KEYS, at, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted));
+            }
         }
         let s = self.scale;
         let folders = crate::agents::folders(look.agents);
@@ -1081,6 +1096,50 @@ mod tests {
                 && q.color == f.theme.active_bg),
             "the pick wears the active fill"
         );
+    }
+
+    #[test]
+    fn the_title_says_which_keys_send_break_a_line_and_close() {
+        let f = Fixture::new();
+        let agents = [Agent::at("claude", "/w/a", Reach::None)];
+        let p = Panel::layout(viewport(), 1.0, &lines(1));
+        let prims = p.prims(&f.look(&agents), &f.ink(0, None));
+        // A glyph is on the title when its middle is: the last one's
+        // ink runs a hair past its advance, and so past the edge.
+        let on_title: Vec<ScreenRect> = prims
+            .iter()
+            .filter(|q| q.kind == crate::scene::KIND_IMAGE)
+            .map(Prim::bounds)
+            .filter(|b| {
+                let (x, y) = b.center();
+                p.title.contains(f64::from(x), f64::from(y))
+            })
+            .collect();
+        let inked = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
+        assert_eq!(on_title.len(), inked(TITLE) + inked(KEYS));
+        let right = on_title.iter().map(|b| b.x + b.w).fold(0.0, f32::max);
+        assert!(
+            right > p.title.x + p.title.w - 20.0,
+            "the keys end at the far edge"
+        );
+    }
+
+    #[test]
+    fn in_a_narrow_window_the_keys_give_way_to_the_title() {
+        let f = Fixture::new();
+        let agents = [Agent::at("claude", "/w/a", Reach::None)];
+        let narrow = Viewport { w: 380, h: 800 };
+        let p = Panel::layout(narrow, 1.0, &lines(1));
+        let prims = p.prims(&f.look(&agents), &f.ink(0, None));
+        let muted_on_title = prims
+            .iter()
+            .filter(|q| q.kind == crate::scene::KIND_IMAGE && q.color == f.theme.muted)
+            .filter(|q| {
+                let (x, y) = q.bounds().center();
+                p.title.contains(f64::from(x), f64::from(y))
+            })
+            .count();
+        assert_eq!(muted_on_title, 0);
     }
 
     #[test]
