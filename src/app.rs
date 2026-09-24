@@ -209,12 +209,12 @@ struct App {
     /// A brush the pointer is carrying out of the library, if any. It
     /// does not outlive the release: there is nothing to settle.
     drag: Option<Dragging>,
-    /// A card being renamed: the row's index and the name being typed.
+    /// A card being renamed: its layer's id and the name being typed.
     /// It is the window's, not a tab's — like every other panel state.
-    renaming: Option<(usize, Field)>,
+    renaming: Option<(String, Field)>,
     /// When the last press landed on a card, and on which. A second
     /// press on the same card inside [`DOUBLE_CLICK`] opens the rename.
-    last_card: Option<(usize, Instant)>,
+    last_card: Option<(String, Instant)>,
     /// The send in progress: what is going, where it can go, which one
     /// is picked, and the two fields. It is the window's, like the tool
     /// and the ink.
@@ -229,10 +229,6 @@ struct App {
     /// active layer glides to show it; scrolling away from it does not
     /// snap back, because it has not changed.
     focused: Option<String>,
-    /// The frame the panel was last standing in. A different stack under
-    /// it means the slides and the scroll are measured against a list
-    /// that is not there any more, so they start over.
-    standing: Option<String>,
     /// When the panel was last eased, for everything on it that moves.
     clock: Instant,
     /// Built once the scale factor is known, rebuilt when it changes.
@@ -364,8 +360,8 @@ const DRAG_SLOP: f64 = 4.0;
 /// button comes up, running the lift backwards until the card is a row
 /// again.
 struct Carry {
-    /// Into the document's layers, kept level with the active layer.
-    index: usize,
+    /// The layer it is the card of.
+    id: String,
     /// Between the press and the card's top edge: what it is held by.
     grab_dy: f32,
     /// Where the card's top edge is asked to be, in physical px.
@@ -379,7 +375,7 @@ struct Carry {
 impl Carry {
     fn lift(&self) -> layers::Lift {
         layers::Lift {
-            index: self.index,
+            id: self.id.clone(),
             y: self.y,
             t: self.t,
         }
@@ -742,8 +738,9 @@ impl App {
         let Open {
             project, editor, ..
         } = &self.open[self.active];
-        self.slides
-            .restack(project.doc.stack(editor.inside()), row);
+        let rows = project.doc.rows(|id| editor.is_open(id));
+        let ids: Vec<&str> = rows.iter().map(|r| r.layer.id.as_str()).collect();
+        self.slides.restack(&ids, row);
         self.scrolling.tick(dt);
         // The window may have grown or shrunk under it: the panel is the
         // authority on how far the stack can be scrolled.
@@ -768,30 +765,21 @@ impl App {
     /// list stays where the wheel left it otherwise.
     fn follow_active(&mut self) {
         let Some(view) = self.view() else { return };
-        let inside = self.editor().inside();
-        let stack = self.doc().stack(inside);
-        let index = self.editor().active_layer(self.doc());
-        let id = stack.get(index).map(|l| l.id.clone());
-        let depth = stack.len();
-        if self.focused == id {
+        let doc = self.doc();
+        let active = self.editor().active(doc).to_owned();
+        if self.focused.as_deref() == Some(active.as_str()) {
             return;
         }
-        // Going into a frame or out of it puts a different stack under
-        // the panel: a slide carried across it would animate a row into a
-        // row that is not the same row, and a scroll kept would be
-        // measured against a list that is not there any more.
-        if self.standing != inside.map(str::to_owned) {
-            self.standing = inside.map(str::to_owned);
-            self.slides = layers::Slides::default();
-            self.scrolling = layers::Coming::default();
-            self.scroll = 0.0;
-        }
-        self.focused = id;
+        let rows = doc.rows(|id| self.editor().is_open(id));
+        let pos = rows.iter().position(|r| r.layer.id == active);
+        let depth = rows.len();
+        self.focused = Some(active);
         // A card in the hand takes the panel where the pointer says.
         let Some(panel) = self.panel(&view).filter(|_| self.carry.is_none()) else {
             return;
         };
-        let want = panel.scroll_showing(index, depth);
+        let Some(pos) = pos else { return };
+        let want = panel.scroll_showing(pos, depth);
         if want != self.scroll {
             self.scrolling.send(self.scroll - want);
             self.scroll = want;
@@ -1234,33 +1222,23 @@ impl App {
     }
 
     /// The layers panel, when it is up and there is an atlas to letter
-    /// it with.
+    /// it with. It shows the whole tree, each group and frame open or
+    /// shut as the tab's editor keeps it.
     fn panel(&self, view: &View) -> Option<Panel> {
         if !self.layers_shown {
             return None;
         }
         let atlas = self.atlas.as_ref()?;
         let top = self.strip_top(view);
-        // The panel shows one flat stack, whichever one the editor is
-        // standing in — which is what keeps its lift, its slides and its
-        // scroll from having to know that frames exist at all.
-        let inside = self.editor().inside();
-        let name = inside.and_then(|id| self.frame_name(id));
+        let rows = self.doc().rows(|id| self.editor().is_open(id));
         Some(Panel::layout(
             view.viewport,
             self.chrome(view),
             top,
             atlas,
-            self.doc().stack(inside),
-            name,
+            &rows,
             self.scroll + self.scrolling.offset(),
         ))
-    }
-
-    /// What a frame's card is called: the name of the layer it is the
-    /// object of, which is also what the panel stands in.
-    fn frame_name(&self, layer: &str) -> Option<&str> {
-        self.doc().layer(layer).map(|l| l.name.as_str())
     }
 
     /// The panel's handle, once there is an atlas to letter it with. It
@@ -1430,71 +1408,63 @@ impl App {
         self.brushes_dirty = true;
     }
 
-    /// A click on the layers panel, handed to the editor.
     /// Writes the name being typed onto its layer and shuts the field.
     /// A name of nothing but space leaves the layer as it was, which is
     /// `rename_layer`'s own answer.
     fn commit_rename(&mut self) {
-        let Some((index, field)) = self.renaming.take() else {
+        let Some((id, field)) = self.renaming.take() else {
             return;
         };
         let name = field.value().to_owned();
         let (editor, doc) = self.active();
-        let change = editor.rename_layer(doc, index, &name);
+        let change = editor.rename_layer(doc, &id, &name);
         self.apply(change);
     }
 
     /// What a press on the panel means once the clock is taken into
-    /// account: a press on a card that is already selected, inside
+    /// account: a press on a card that is already picked, inside
     /// [`DOUBLE_CLICK`] of the last one on that same card, asks for the
     /// name rather than for the layer.
     fn second_press(&mut self, hit: PanelHit) -> PanelHit {
-        let PanelHit::Select(i) = hit else {
+        let PanelHit::Pick(id) = hit else {
             return hit;
         };
         let now = Instant::now();
         let again = self
             .last_card
-            .is_some_and(|(was, at)| was == i && now.duration_since(at) < DOUBLE_CLICK);
-        self.last_card = Some((i, now));
-        if again { PanelHit::Rename(i) } else { hit }
+            .as_ref()
+            .is_some_and(|(was, at)| *was == id && now.duration_since(*at) < DOUBLE_CLICK);
+        self.last_card = Some((id.clone(), now));
+        if again {
+            PanelHit::Rename(id)
+        } else {
+            PanelHit::Pick(id)
+        }
     }
 
+    /// A click on the layers panel, handed to the editor.
     fn panel_hit(&mut self, hit: PanelHit) {
         // A rename opens a field rather than changing the document, so
         // it is answered before the editor is borrowed. The name comes
-        // off the stack: a row's own label is cut down to what fits.
-        if let PanelHit::Rename(i) = hit {
-            let inside = self.editor().inside();
+        // off the layer: a row's own label is cut down to what fits.
+        if let PanelHit::Rename(id) = hit {
             let name = self
                 .doc()
-                .stack(inside)
-                .get(i)
+                .layer(&id)
                 .map(|l| l.name.clone())
                 .unwrap_or_default();
-            self.renaming = Some((i, Field::name(&name)));
+            self.renaming = Some((id, Field::name(&name)));
             return;
         }
         let (editor, doc) = self.active();
         let change = match hit {
-            PanelHit::Select(i) => editor.select_layer(doc, i),
-            PanelHit::Toggle(i) => editor.toggle_layer(doc, i),
+            PanelHit::Pick(id) => editor.select_layer(doc, &id),
+            PanelHit::Toggle(id) => editor.toggle_layer(doc, &id),
+            PanelHit::Open(id) => editor.toggle_open(&id),
+            PanelHit::Group => editor.add_group(doc),
             PanelHit::Add => editor.add_layer(doc),
             PanelHit::Remove => editor.remove_layer(doc),
-            PanelHit::Up => editor.move_layer(doc, true),
-            PanelHit::Down => editor.move_layer(doc, false),
-            PanelHit::Enter(i) => match doc
-                .stack(editor.inside())
-                .get(i)
-                .filter(|l| doc.frame_on(&l.id).is_some())
-                .map(|l| l.id.clone())
-            {
-                Some(frame) => editor.enter_frame(doc, &frame),
-                None => Change::None,
-            },
-            PanelHit::Leave => editor.leave_frame(doc),
-            PanelHit::Rename(_) => Change::None,
-            PanelHit::Panel => Change::None,
+            PanelHit::Rename(_) | PanelHit::Panel => Change::None,
         };
         self.apply(change);
     }
@@ -2039,32 +2009,30 @@ impl App {
             frame.extend(handle.prims(atlas, self.atlas_slot, &self.theme));
         }
         if let (Some(panel), Some(atlas)) = (self.panel(view), self.atlas.as_ref()) {
-            let active = self.editor().active_layer(self.doc());
+            let lift = self.carry.as_ref().map(Carry::lift);
             let showing = layers::Showing {
-                active,
-                lift: self.carry.as_ref().map(Carry::lift),
+                active: self.editor().active(self.doc()),
+                picked: &[],
+                lift: lift.as_ref(),
                 slides: &self.slides,
             };
-            frame.extend(panel.prims(
-                self.doc().stack(self.editor().inside()),
-                &showing,
-                atlas,
-                self.atlas_slot,
-                &self.theme,
-            ));
-            // The name being typed is drawn over the card it belongs to,
-            // rounded the way the card is: the row underneath goes on
-            // showing its eye and its mark, so what is being renamed
-            // stays in its place in the stack.
-            if let Some((index, field)) = &self.renaming
-                && let Some(row) = panel.rows.iter().find(|r| r.index == *index)
+            frame.extend(panel.prims(&showing, atlas, self.atlas_slot, &self.theme));
+            // The name being typed is drawn over the name it replaces,
+            // rounded the way the card is: the row goes on showing its
+            // eye, its chevron and its glyph, so what is being renamed
+            // stays in its place in the tree.
+            if let Some((id, field)) = &self.renaming
+                && let Some(row) = panel.rows.iter().find(|r| r.id == *id)
             {
-                frame.extend([Prim::rounded(
-                    row.card,
-                    layers::ROW_RADIUS,
-                    self.theme.panel,
-                )]);
-                frame.extend(field.prims(row.card, atlas, self.atlas_slot, &self.theme, true));
+                let pad = field::PADDING * self.chrome(view) as f32;
+                let left = row.label_x - pad;
+                let over = ScreenRect {
+                    x: left,
+                    w: row.card.x + row.card.w - left,
+                    ..row.card
+                };
+                frame.extend([Prim::rounded(over, layers::ROW_RADIUS, self.theme.panel)]);
+                frame.extend(field.prims(over, atlas, self.atlas_slot, &self.theme, true));
             }
         }
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
@@ -2210,16 +2178,16 @@ impl App {
                 // selected, soon enough after the last one, is what
                 // makes a Select a Rename.
                 let hit = self.second_press(hit);
-                self.panel_hit(hit);
+                self.panel_hit(hit.clone());
                 // A card taken by its name is picked up by the grip the
                 // press made, and follows the pointer from there. A card
                 // whose name is open is not also lifted: a field is not
                 // dragged.
-                if let PanelHit::Select(i) = hit
-                    && let Some(row) = panel.rows.iter().find(|r| r.index == i)
+                if let PanelHit::Pick(id) = hit
+                    && let Some(row) = panel.rows.iter().find(|r| r.id == id)
                 {
                     self.carry = Some(Carry {
-                        index: i,
+                        id,
                         grab_dy: y as f32 - row.card.y,
                         y: row.card.y,
                         held: true,
@@ -2410,16 +2378,20 @@ impl App {
             if let Some(carry) = &mut self.carry {
                 carry.y = y as f32 - carry.grab_dy;
             }
-            if let Some(view) = self.view()
-                && let Some(index) = self.panel(&view).and_then(|p| p.drop_index(y))
-            {
+            // Among its own siblings only, for now: the row under the
+            // pointer names the place, when it stands in the same stack.
+            let aim = self.view().and_then(|view| {
+                let panel = self.panel(&view)?;
+                let carried = self.carry.as_ref()?.id.clone();
+                let over = panel.drop_row(y)?;
+                let (owner, index) = self.doc().locate(&over.id)?;
+                let (from, _) = self.doc().locate(&carried)?;
+                (owner == from).then_some(index)
+            });
+            if let Some(index) = aim {
                 let (editor, doc) = self.active();
                 let change = editor.move_layer_to(doc, index);
                 self.apply(change);
-                let index = self.editor().active_layer(self.doc());
-                if let Some(carry) = &mut self.carry {
-                    carry.index = index;
-                }
             }
             self.redraw();
             return self.update_cursor_icon();
@@ -2656,6 +2628,13 @@ impl App {
                     "o" => self.ask_open(),
                     "e" => self.ask_send(),
                     "w" => self.request_close(self.active),
+                    // Photoshop's: the active layer a step down its stack,
+                    // or a step up.
+                    "[" | "]" => {
+                        let (editor, doc) = self.active();
+                        let change = editor.move_layer(doc, text.as_str() == "]");
+                        self.apply(change);
+                    }
                     _ => {}
                 }
             }
@@ -3378,7 +3357,6 @@ pub fn run(
         scroll: 0.0,
         scrolling: layers::Coming::default(),
         focused: None,
-        standing: None,
         clock: Instant::now(),
         atlas: None,
         atlas_slot: 0,

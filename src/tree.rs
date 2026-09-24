@@ -70,6 +70,14 @@ impl Document {
     }
 
 
+    /// The layers holding `id`, nearest first.
+    pub fn ancestors(&self, id: &str) -> Vec<&Layer> {
+        let mut trail = self.trail(id).unwrap_or_default();
+        trail.pop();
+        trail.reverse();
+        trail
+    }
+
     /// The frame whose stack `id` stands in, through however many groups
     /// — none for a layer on the board, a frame's own layer included.
     pub fn frame_holding(&self, id: &str) -> Option<&Frame> {
@@ -81,6 +89,47 @@ impl Document {
     }
 
 
+
+    /// Whether `id` is on show: it and everything holding it visible.
+    pub fn shown(&self, id: &str) -> bool {
+        self.trail(id).is_some_and(|t| t.iter().all(|l| l.visible))
+    }
+
+    /// Every layer in the order the panel lists it — top first, a
+    /// holder's layers under it and one deeper — descending only into
+    /// the holders `open` says are expanded.
+    pub fn rows(&self, open: impl Fn(&str) -> bool) -> Vec<Row<'_>> {
+        let mut out = Vec::new();
+        self.rows_in(&self.layers, None, &open, &mut out);
+        out
+    }
+
+    /// `layers`, top first, onto `out`: what `parent` is — whether it
+    /// shows, whether it is locked — reaches every row under it. None is
+    /// the board's own root, which nothing holds.
+    fn rows_in<'a>(
+        &'a self,
+        layers: &'a [Layer],
+        parent: Option<&Row<'a>>,
+        open: &impl Fn(&str) -> bool,
+        out: &mut Vec<Row<'a>>,
+    ) {
+        for layer in layers.iter().rev() {
+            let holds = matches!(layer.kind, Kind::Group | Kind::Frame);
+            let row = Row {
+                layer,
+                owner: parent.map(|p| p.layer.id.as_str()),
+                depth: parent.map_or(0, |p| p.depth + 1),
+                shown: parent.is_none_or(|p| p.shown) && layer.visible,
+                locked: parent.is_some_and(|p| p.locked) || layer.locked,
+                open: holds && open(&layer.id),
+            };
+            out.push(row);
+            if row.open {
+                self.rows_in(self.inner(layer), Some(&row), open, out);
+            }
+        }
+    }
 
     /// The stack `owner` holds — the board's root for none. Empty for a
     /// layer that holds nothing, or that is not there.
@@ -288,6 +337,20 @@ impl Document {
 }
 
 
+/// One line of the panel's tree: the layer, the layer holding its stack
+/// (none on the board's root), how deep it stands, and what the layers
+/// holding it make of it — on show only when they all are, locked when
+/// any one is — and, for a group or a frame, whether it is open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Row<'a> {
+    pub layer: &'a Layer,
+    pub owner: Option<&'a str>,
+    pub depth: usize,
+    pub shown: bool,
+    pub locked: bool,
+    pub open: bool,
+}
+
 /// Every name in `layers` and the groups under them.
 fn names_in(layers: &[Layer], out: &mut Vec<String>) {
     for l in layers {
@@ -402,6 +465,83 @@ pub(crate) mod tests {
         assert_eq!(doc.locate("nope"), None);
     }
 
+
+    #[test]
+    fn ancestors_come_nearest_first() {
+        let doc = nested();
+        let ids = |id: &str| -> Vec<String> {
+            doc.ancestors(id).iter().map(|l| l.id.clone()).collect()
+        };
+        assert_eq!(ids("C"), ["H", "G"]);
+        assert_eq!(ids("E"), ["K", "F"]);
+        assert!(ids("A").is_empty());
+    }
+
+    #[test]
+    fn the_panel_lists_top_first_and_only_opens_what_is_open() {
+        let doc = nested();
+        let listed = |open: &[&str]| -> Vec<(String, usize)> {
+            doc.rows(|id| open.contains(&id))
+                .iter()
+                .map(|r| (r.layer.id.clone(), r.depth))
+                .collect()
+        };
+        let all_shut = listed(&[]);
+        assert_eq!(
+            all_shut,
+            [("F".into(), 0), ("G".into(), 0), ("A".into(), 0)],
+            "a shut holder hides what it holds"
+        );
+        let open = listed(&["F", "G", "H", "K"]);
+        let want: Vec<(String, usize)> = [
+            ("F", 0),
+            ("K", 1),
+            ("E", 2),
+            ("D", 1),
+            ("G", 0),
+            ("H", 1),
+            ("C", 2),
+            ("B", 1),
+            ("A", 0),
+        ]
+        .iter()
+        .map(|(id, d)| ((*id).to_owned(), *d))
+        .collect();
+        assert_eq!(open, want);
+        // Every row knows the stack it stands in, and whether it is open.
+        let rows = doc.rows(|_| true);
+        let c = rows.iter().find(|r| r.layer.id == "C").unwrap();
+        assert_eq!(c.owner, Some("H"));
+        let d = rows.iter().find(|r| r.layer.id == "D").unwrap();
+        assert_eq!(d.owner, Some("F"));
+        assert!(rows.iter().find(|r| r.layer.id == "G").unwrap().open);
+        assert!(!c.open, "a layer that holds none is never open");
+    }
+
+    #[test]
+    fn a_row_is_on_show_and_open_as_everything_holding_it_says() {
+        let mut doc = nested();
+        doc.layer_mut("G").unwrap().visible = false;
+        doc.layer_mut("F").unwrap().locked = true;
+        let rows = doc.rows(|_| true);
+        let row = |id: &str| *rows.iter().find(|r| r.layer.id == id).unwrap();
+        assert!(!row("G").shown && !row("C").shown, "hidden with its group");
+        assert!(row("C").layer.visible, "though its own eye is open");
+        assert!(row("A").shown);
+        assert!(row("E").locked && row("F").locked, "locked with its frame");
+        assert!(!row("C").locked);
+    }
+
+    #[test]
+    fn a_layer_shows_only_when_everything_holding_it_does() {
+        let mut doc = nested();
+        assert!(doc.shown("C"));
+        doc.layer_mut("G").unwrap().visible = false;
+        assert!(!doc.shown("C"), "hidden by its group's group");
+        assert!(doc.shown("A"));
+        doc.layer_mut("F").unwrap().visible = false;
+        assert!(!doc.shown("E"), "hidden with its frame");
+    }
 
     #[test]
     fn the_frame_holding_a_layer_is_found_through_its_groups() {
