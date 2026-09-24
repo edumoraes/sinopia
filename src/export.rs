@@ -133,8 +133,9 @@ pub fn frames(doc: &Document) -> Vec<Card> {
 }
 
 /// A document holding only what the scope covers, in paint order, with
-/// the layers those elements name and nothing else. It is a document in
-/// the schema's own terms, so it parses back (§8).
+/// the layers those elements stand on and nothing else — the groups they
+/// stand in included, so a page keeps the shape it had on the board. It is
+/// a document in the schema's own terms, so it parses back (§8).
 pub fn sub_document(doc: &Document, scope: &Scope) -> Document {
     let wanted = scope.ids();
     let mut out = Document::new(&doc.title);
@@ -142,18 +143,18 @@ pub fn sub_document(doc: &Document, scope: &Scope) -> Document {
     let mut elements: Vec<Element> = Vec::new();
     match scope {
         // A frame brings what stands inside it: the frame itself, then
-        // its own stack bottom to top, which is the order `painted()`
-        // walks — *without* its visibility filter. A hidden layer has to
-        // travel hidden rather than be dropped, for the reason
-        // `graft::plant` reads `elements` on the way back: what a person
-        // put away is still their work, and a read that quietly left it
-        // behind would hand the agent a frame to edit that is missing
-        // half of what it says it holds.
+        // its own stack bottom to top, however deep a group holds a layer
+        // — the order `painted()` walks, *without* its visibility filter.
+        // A hidden layer has to travel hidden rather than be dropped, for
+        // the reason `graft::plant` reads `elements` on the way back:
+        // what a person put away is still their work, and a read that
+        // quietly left it behind would hand the agent a frame to edit
+        // that is missing half of what it says it holds.
         Scope::Frame(f) => {
             if let Some(fr) = doc.frame(f) {
                 elements.push(Element::Frame(fr.clone()));
-                for inner in &fr.layers {
-                    let on_it = doc.elements.iter().filter(|el| el.layer() == inner.id);
+                for inner in leaves(&fr.layers) {
+                    let on_it = doc.elements.iter().filter(|el| el.layer() == inner);
                     elements.extend(on_it.cloned());
                 }
             }
@@ -168,16 +169,8 @@ pub fn sub_document(doc: &Document, scope: &Scope) -> Document {
             }
         }
     }
-    let mut layers: Vec<Layer> = Vec::new();
-    for el in &elements {
-        let name = el.layer();
-        if layers.iter().any(|l| l.id == name) {
-            continue;
-        }
-        if let Some((None, at)) = doc.locate(name) {
-            layers.push(doc.layers[at].clone());
-        }
-    }
+    let needed: Vec<&str> = elements.iter().map(Element::layer).collect();
+    let mut layers = pruned(doc, &doc.layers, &needed, &elements);
     // A board is never without a layer, in memory or on disk.
     if layers.is_empty() {
         layers.push(Layer::of("Layer 1", Kind::Raster));
@@ -188,6 +181,48 @@ pub fn sub_document(doc: &Document, scope: &Scope) -> Document {
     }
     out.layers = layers;
     out.elements = elements;
+    out
+}
+
+/// The layers that can hold an object under `layers`, in paint order: a
+/// group's where it stands.
+fn leaves(layers: &[Layer]) -> Vec<&str> {
+    layers
+        .iter()
+        .flat_map(|l| match l.kind {
+            Kind::Group => leaves(&l.layers),
+            _ => vec![l.id.as_str()],
+        })
+        .collect()
+}
+
+/// `layers` cut down to what `needed` stands on: a layer when something
+/// stands on it, a group when anything under it is kept, and a frame
+/// layer whole when its frame is among `elements` — the frame carries its
+/// own stack. A frame that stays behind has what was picked in it lifted
+/// out, in its place, so it is painted where it was.
+fn pruned(doc: &Document, layers: &[Layer], needed: &[&str], elements: &[Element]) -> Vec<Layer> {
+    let mut out = Vec::new();
+    for l in layers {
+        match l.kind {
+            Kind::Frame if elements.iter().any(|el| el.layer() == l.id) => out.push(l.clone()),
+            Kind::Frame => out.extend(pruned(doc, doc.inner(l), needed, elements)),
+            Kind::Group => {
+                let kept = pruned(doc, &l.layers, needed, elements);
+                if !kept.is_empty() {
+                    out.push(Layer {
+                        layers: kept,
+                        ..l.clone()
+                    });
+                }
+            }
+            Kind::Raster | Kind::Vector => {
+                if needed.contains(&l.id.as_str()) {
+                    out.push(l.clone());
+                }
+            }
+        }
+    }
     out
 }
 
@@ -622,6 +657,82 @@ mod tests {
         assert_eq!(sub.elements.len(), 1);
         assert_eq!(sub.layers.len(), 1);
         assert_eq!(sub.layers[0].id, "l0");
+    }
+
+    /// [`board`] with a group in the frame — `[in, g[deep]]`, a rect on
+    /// `deep` — and one on the board — `[l0, fl, bg[up]]`, a rect on `up`.
+    fn grouped() -> Document {
+        let mut doc = board();
+        let Some(f) = doc.frame_mut("f1") else {
+            unreachable!("the board has its frame")
+        };
+        f.layers.push(Layer {
+            id: "g".into(),
+            layers: vec![Layer {
+                id: "deep".into(),
+                ..Layer::of("Layer 2", Kind::Raster)
+            }],
+            ..Layer::of("Group 1", Kind::Group)
+        });
+        doc.layers.push(Layer {
+            id: "bg".into(),
+            layers: vec![Layer {
+                id: "up".into(),
+                ..Layer::of("Layer 3", Kind::Raster)
+            }],
+            ..Layer::of("Group 1", Kind::Group)
+        });
+        doc.elements
+            .push(Element::Rect(rect("deeper", "deep", 30.0, 10.0, 10.0, 10.0)));
+        doc.elements
+            .push(Element::Rect(rect("grouped", "up", 600.0, 500.0, 10.0, 10.0)));
+        doc
+    }
+
+    /// What `sub` says about itself, read back through the board's own
+    /// parse — a sub-document is a document.
+    fn parses(sub: &Document) -> Document {
+        Document::from_json(&sub.to_json().unwrap()).expect("a sub-document parses")
+    }
+
+    #[test]
+    fn a_frames_sub_document_carries_what_stands_in_its_groups() {
+        let doc = grouped();
+        let sub = sub_document(&doc, &Scope::Frame("f1".into()));
+        let ids: Vec<_> = sub.elements.iter().map(Element::id).collect();
+        assert_eq!(ids, ["f1", "inside", "deeper"], "the frame, then its stack in order");
+        parses(&sub);
+    }
+
+    #[test]
+    fn a_selections_sub_document_keeps_the_groups_its_layers_stand_in() {
+        let doc = grouped();
+        let sub = sub_document(
+            &doc,
+            &Scope::Selection(vec!["outside".into(), "grouped".into()]),
+        );
+        let back = parses(&sub);
+        assert_eq!(back.elements.len(), 2);
+        assert_eq!(back.locate("up"), Some((Some("bg"), 0)), "still in its group");
+        assert!(back.layer("fl").is_none(), "the frame it did not pick stays behind");
+    }
+
+    #[test]
+    fn a_selection_inside_a_frame_is_lifted_out_of_it() {
+        let doc = grouped();
+        // One object in the frame, one in a group in it, one on the board
+        // — none of them the frame itself.
+        let sub = sub_document(
+            &doc,
+            &Scope::Selection(vec!["inside".into(), "deeper".into(), "outside".into()]),
+        );
+        let back = parses(&sub);
+        assert_eq!(back.elements.len(), 3);
+        assert!(back.frame("f1").is_none(), "no frame travels that was not picked");
+        assert_eq!(back.locate("in").map(|(o, _)| o), Some(None), "lifted to the root");
+        assert_eq!(back.locate("deep"), Some((Some("g"), 0)), "its group comes too");
+        let order: Vec<&str> = back.painted().map(|p| p.element.id()).collect();
+        assert_eq!(order, ["outside", "inside", "deeper"], "in the order they were painted");
     }
 
     #[test]

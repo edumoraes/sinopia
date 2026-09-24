@@ -48,12 +48,13 @@ pub fn only_frame(fragment: &Document) -> anyhow::Result<&Frame> {
         frame.id,
         frame.layer
     );
+    let held = ids_in(&frame.layers);
     for el in &fragment.elements {
         if matches!(el, Element::Frame(_)) {
             continue;
         }
         anyhow::ensure!(
-            frame.layers.iter().any(|l| l.id == el.layer()),
+            held.iter().any(|id| *id == el.layer()),
             "element {:?} is on layer {:?}, which is not one of frame {:?}'s: \
              a fragment carries what stands in its frame and nothing beside it",
             el.id(),
@@ -136,10 +137,10 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
             .expect("only_frame checked the frame stands on a layer of the fragment")
     };
     let id = new_id();
-    let inner: Vec<(String, String)> = frame
-        .layers
-        .iter()
-        .map(|l| (l.id.clone(), new_id()))
+    // Every layer of the frame's stack, however deep a group holds it.
+    let inner: Vec<(String, String)> = ids_in(&frame.layers)
+        .into_iter()
+        .map(|was| (was.to_owned(), new_id()))
         .collect();
 
     let at = spot(board);
@@ -157,10 +158,7 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
             Element::Frame(f) => {
                 f.id = id.clone();
                 f.layer = stem.id.clone();
-                for l in &mut f.layers {
-                    let to = minted(&inner, &l.id).expect("every inner layer was just minted");
-                    l.id = to;
-                }
+                renamed(&mut f.layers, &inner);
             }
             other => {
                 let to = minted(&inner, other.layer()).with_context(|| {
@@ -215,6 +213,23 @@ fn placed(el: &Element) -> bool {
         Element::Rect(r) => [r.x, r.y, r.w, r.h, r.rotation].iter().all(ok),
         Element::Image(i) => [i.x, i.y, i.w, i.h, i.rotation].iter().all(ok),
         Element::Frame(f) => [f.x, f.y, f.w, f.h].iter().all(ok),
+    }
+}
+
+/// Every layer id in `layers` and in the groups under them.
+fn ids_in(layers: &[Layer]) -> Vec<&str> {
+    layers
+        .iter()
+        .flat_map(|l| std::iter::once(l.id.as_str()).chain(ids_in(&l.layers)))
+        .collect()
+}
+
+/// `layers`, and every group's under them, given the ids they were
+/// minted as.
+fn renamed(layers: &mut [Layer], pairs: &[(String, String)]) {
+    for l in layers {
+        l.id = minted(pairs, &l.id).expect("every inner layer was just minted");
+        renamed(&mut l.layers, pairs);
     }
 }
 
@@ -292,6 +307,58 @@ mod tests {
 
     fn frame_of<'a>(doc: &'a Document, id: &str) -> &'a Frame {
         doc.frame(id).expect("a frame by that id")
+    }
+
+    /// [`fragment`] with a group in its frame's stack — `[in, g[deep]]` —
+    /// and one more rect, on the layer inside the group.
+    fn grouped_fragment() -> Document {
+        let mut doc = fragment();
+        let Element::Frame(f) = &mut doc.elements[0] else {
+            unreachable!("the fragment opens with its frame")
+        };
+        f.layers.push(Layer {
+            id: "g".into(),
+            layers: vec![Layer {
+                id: "deep".into(),
+                ..Layer::of("Layer 2", Kind::Raster)
+            }],
+            ..Layer::of("Group 1", Kind::Group)
+        });
+        doc.elements.push(rect("r2", "deep", 40.0, 10.0, 10.0, 10.0));
+        doc
+    }
+
+    #[test]
+    fn what_stands_in_a_group_in_the_frame_stands_in_the_frame() {
+        let doc = grouped_fragment();
+        assert!(only_frame(&doc).is_ok());
+    }
+
+    #[test]
+    fn every_layer_under_a_group_is_minted_anew_too() {
+        let mut b = board();
+        let frag = grouped_fragment();
+        plant(&mut b, &frag).unwrap();
+        plant(&mut b, &frag).unwrap();
+        // No id is used twice, however deep it stands: the board is one
+        // that parses.
+        let back = Document::from_json(&b.to_json().unwrap()).unwrap();
+        assert_eq!(back.elements.len(), b.elements.len());
+        assert!(b.layer("deep").is_none() && b.layer("g").is_none());
+        for el in &b.elements {
+            assert!(b.layer(el.layer()).is_some(), "{} stands somewhere", el.id());
+        }
+        // And each planted group still holds its own layer.
+        let groups: Vec<&Layer> = b
+            .elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Frame(f) => f.layers.iter().find(|l| l.kind == Kind::Group),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups.len(), 2);
+        assert_ne!(groups[0].layers[0].id, groups[1].layers[0].id);
     }
 
     #[test]
