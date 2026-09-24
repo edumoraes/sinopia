@@ -112,10 +112,11 @@ into the foot at the size it is shown in px (`export::fit_view`, never
 past 4 logical px a world unit — logical, so a small scope is as sharp
 at scale 2 as at 1), uploaded into a slot of its own replaced in
 place, and taken again when that size changes. The layout knows the
-shape before the picture exists (`export::shape`): as wide as the dialog
-for a wide scope, at most 160 px tall, and in a short window it gives
-up height before the box gives up its last line — and goes once too
-small to read.
+shape before the picture exists (`export::shape`): a glance at what
+leaves, not a second canvas — at most half the dialog's width and 80 px
+tall, half of what it first was, which read as a second board. In a
+short window it gives up height before the box gives up its last line,
+and goes once too small to read.
 
 ## Security
 

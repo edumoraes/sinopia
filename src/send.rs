@@ -50,11 +50,12 @@ const KEYS: &str = "Enter sends · Shift+Enter breaks a line · Esc closes";
 /// its height and scrolls.
 pub const MAX_LINES: usize = 20;
 
-/// The picture of what leaves, at the dialog's foot: no taller than
-/// this, never shorter than the least of it worth showing, and set off
+/// The picture of what leaves, at the dialog's foot — a glance at it,
+/// not a second canvas: no taller than this and no wider than half the
+/// dialog, never shorter than the least of it worth showing, and set off
 /// from the box above it.
-const THUMB_H: f32 = 160.0;
-const THUMB_MIN: f32 = 48.0;
+const THUMB_H: f32 = 80.0;
+const THUMB_MIN: f32 = 24.0;
 const THUMB_GAP: f32 = 10.0;
 const THUMB_RADIUS: f32 = 6.0;
 
@@ -237,8 +238,9 @@ impl Panel {
         // The picture as tall as its shape and the dialog's width allow;
         // in a window too short for it and one line to type in, it gives
         // up height first — and goes, once too small to read.
+        let widest = inner_w / 2.0;
         let picture_h = spec.picture.and_then(|aspect| {
-            let tall = (THUMB_H * s).min(inner_w / aspect.max(f32::MIN_POSITIVE));
+            let tall = (THUMB_H * s).min(widest / aspect.max(f32::MIN_POSITIVE));
             let tall = tall.min(room - THUMB_GAP * s - spec.line_h);
             (tall >= THUMB_MIN * s).then_some(tall)
         });
@@ -286,7 +288,7 @@ impl Panel {
             h: shown as f32 * spec.line_h + inset * 2.0,
         };
         let picture = spec.picture.zip(picture_h).map(|(aspect, ph)| {
-            let pw = (ph * aspect).min(inner_w);
+            let pw = (ph * aspect).min(widest);
             ScreenRect {
                 x: inner + (inner_w - pw) / 2.0,
                 y: line.y + line.h + THUMB_GAP * s,
@@ -821,14 +823,16 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_picture_spans_the_dialog_and_a_tall_one_stops_at_its_height() {
+    fn a_wide_picture_spans_half_the_dialog_and_a_tall_one_stands_80_px() {
+        // A glance at what leaves, not a second canvas: at most half the
+        // dialog's width and 80 logical px of its height.
         let p = Panel::layout(viewport(), 1.0, &pictured(8.0));
         let inner = p.rect.w - 2.0 * PADDING;
-        assert!((p.picture.unwrap().w - inner).abs() < 0.5);
+        assert!((p.picture.unwrap().w - inner / 2.0).abs() < 0.5);
         let tall = Panel::layout(viewport(), 1.0, &pictured(0.5))
             .picture
             .unwrap();
-        assert!((tall.h - THUMB_H).abs() < 0.5);
+        assert!((tall.h - 80.0).abs() < 0.5, "{tall:?}");
         let (cx, _) = p.rect.center();
         assert!((tall.x + tall.w / 2.0 - cx).abs() < 0.5, "centred");
     }
@@ -843,13 +847,13 @@ mod tests {
 
     #[test]
     fn a_short_window_keeps_a_line_to_type_in_and_shrinks_the_picture() {
-        let short = Viewport { w: 1200, h: 360 };
+        let short = Viewport { w: 1200, h: 270 };
         let p = Panel::layout(short, 1.0, &pictured(1.0));
         assert!(p.shown >= 1);
-        assert!(p.rect.y + p.rect.h <= 360.0 - MARGIN + 0.5, "{:?}", p.rect);
+        assert!(p.rect.y + p.rect.h <= 270.0 - MARGIN + 0.5, "{:?}", p.rect);
         let t = p.picture.unwrap();
         assert!(t.h < THUMB_H && t.h >= THUMB_MIN, "{t:?}");
-        let tiny = Viewport { w: 1200, h: 250 };
+        let tiny = Viewport { w: 1200, h: 220 };
         assert!(
             Panel::layout(tiny, 1.0, &pictured(1.0)).picture.is_none(),
             "a picture too small to read is no picture"
