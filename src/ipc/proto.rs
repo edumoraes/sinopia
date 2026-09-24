@@ -11,7 +11,10 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::doc::{BlendMode, Tag};
+use crate::editor::Listed;
 use crate::export::Card;
+use crate::tree::{Arrange, Place};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -64,6 +67,85 @@ pub enum Request {
     AddFrame {
         path: PathBuf,
     },
+    /// The open board's layers, the whole tree top first. It and every
+    /// op under it are the command line's hold on the layers: answered by
+    /// the loop like an agent's three, a change each one step of the
+    /// history, and every layer named by its id — a name is the command
+    /// line's to resolve, since two layers may go by one.
+    Layers,
+    /// A new raster layer — or group — above `above`, or above the
+    /// active layer, called `name` or the next free name.
+    AddLayer {
+        group: bool,
+        name: Option<String>,
+        above: Option<String>,
+    },
+    RemoveLayers {
+        ids: Vec<String>,
+    },
+    RenameLayer {
+        id: String,
+        name: String,
+    },
+    /// Into a group or a frame, or just above or below a layer.
+    MoveLayers {
+        ids: Vec<String>,
+        to: Place,
+    },
+    /// Within their own stacks: to the front, a step, to the back.
+    ArrangeLayers {
+        ids: Vec<String>,
+        how: Arrange,
+    },
+    ShowLayers {
+        ids: Vec<String>,
+        visible: bool,
+    },
+    LockLayers {
+        ids: Vec<String>,
+        locked: bool,
+    },
+    SetOpacity {
+        ids: Vec<String>,
+        opacity: f64,
+    },
+    SetBlend {
+        ids: Vec<String>,
+        blend: BlendMode,
+    },
+    SetColor {
+        ids: Vec<String>,
+        color: Tag,
+    },
+    GroupLayers {
+        ids: Vec<String>,
+    },
+    /// Each group named, taken apart.
+    Ungroup {
+        ids: Vec<String>,
+    },
+    DuplicateLayers {
+        ids: Vec<String>,
+    },
+    /// Siblings into one, or a group alone into a layer.
+    MergeLayers {
+        ids: Vec<String>,
+    },
+    MergeDown {
+        id: String,
+    },
+    MergeVisible,
+    Flatten,
+    /// The layers picked, as the panel picks them — and with the select
+    /// tool in hand, their objects.
+    SelectLayers {
+        ids: Vec<String>,
+    },
+    /// Groups and frames shown open in the panel, or shut.
+    OpenLayers {
+        ids: Vec<String>,
+        open: bool,
+    },
 }
 
 impl Request {
@@ -82,15 +164,44 @@ impl Request {
             Request::Frames => "frames",
             Request::ReadFrame { .. } => "read_frame",
             Request::AddFrame { .. } => "add_frame",
+            Request::Layers => "layers",
+            Request::AddLayer { .. } => "add_layer",
+            Request::RemoveLayers { .. } => "remove_layers",
+            Request::RenameLayer { .. } => "rename_layer",
+            Request::MoveLayers { .. } => "move_layers",
+            Request::ArrangeLayers { .. } => "arrange_layers",
+            Request::ShowLayers { .. } => "show_layers",
+            Request::LockLayers { .. } => "lock_layers",
+            Request::SetOpacity { .. } => "set_opacity",
+            Request::SetBlend { .. } => "set_blend",
+            Request::SetColor { .. } => "set_color",
+            Request::GroupLayers { .. } => "group_layers",
+            Request::Ungroup { .. } => "ungroup",
+            Request::DuplicateLayers { .. } => "duplicate_layers",
+            Request::MergeLayers { .. } => "merge_layers",
+            Request::MergeDown { .. } => "merge_down",
+            Request::MergeVisible => "merge_visible",
+            Request::Flatten => "flatten",
+            Request::SelectLayers { .. } => "select_layers",
+            Request::OpenLayers { .. } => "open_layers",
         }
     }
 
     /// Whether the answer to this request *is* the work: the three an
-    /// agent asks (§8), which the event loop does rather than acks.
+    /// agent asks (§8) and every layer op, which the event loop does
+    /// rather than acks — a listing wants the live document, and a change
+    /// answers with what it left picked.
     pub fn is_asked(&self) -> bool {
-        matches!(
+        !matches!(
             self,
-            Request::Frames | Request::ReadFrame { .. } | Request::AddFrame { .. }
+            Request::Ping
+                | Request::New
+                | Request::Open { .. }
+                | Request::OpenFile { .. }
+                | Request::Raise
+                | Request::Export { .. }
+                | Request::Theme { .. }
+                | Request::Shutdown
         )
     }
 }
@@ -135,6 +246,12 @@ pub enum Event {
     /// A frame an agent handed over is on the board, under the id and
     /// the name it now goes by — enough to read it straight back.
     Framed { id: String, name: String },
+    /// The open board's layers, the whole tree top first.
+    Layers { layers: Vec<Listed> },
+    /// A change to the layers landed, and these are the layers it left
+    /// picked: the new one, the group, the copies, what a merge kept, or
+    /// the ones it acted on.
+    Done { ids: Vec<String> },
 }
 
 /// `ev`, or `denied` in its place when it would not fit a frame. An
@@ -212,6 +329,81 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         "add_frame" => Request::AddFrame {
             path: absolute(take_string(&mut map, "path")?)?,
         },
+        "layers" => Request::Layers,
+        "add_layer" => Request::AddLayer {
+            group: match take_optional_string(&mut map, "kind")?.as_deref() {
+                None | Some("raster") => false,
+                Some("group") => true,
+                Some(other) => anyhow::bail!("a layer added is a raster layer or a group, not {other:?}"),
+            },
+            name: take_optional_string(&mut map, "name")?,
+            above: take_optional_string(&mut map, "above")?,
+        },
+        "remove_layers" => Request::RemoveLayers {
+            ids: take_ids(&mut map)?,
+        },
+        "rename_layer" => Request::RenameLayer {
+            id: take_string(&mut map, "id")?,
+            name: take_string(&mut map, "name")?,
+        },
+        "move_layers" => Request::MoveLayers {
+            ids: take_ids(&mut map)?,
+            to: take_place(&mut map)?,
+        },
+        "arrange_layers" => Request::ArrangeLayers {
+            ids: take_ids(&mut map)?,
+            how: match take_string(&mut map, "how")?.as_str() {
+                "front" => Arrange::Front,
+                "forward" => Arrange::Forward,
+                "backward" => Arrange::Backward,
+                "back" => Arrange::Back,
+                other => anyhow::bail!("unknown arrangement: {other:?}"),
+            },
+        },
+        "show_layers" => Request::ShowLayers {
+            ids: take_ids(&mut map)?,
+            visible: take_bool(&mut map, "visible")?,
+        },
+        "lock_layers" => Request::LockLayers {
+            ids: take_ids(&mut map)?,
+            locked: take_bool(&mut map, "locked")?,
+        },
+        "set_opacity" => Request::SetOpacity {
+            ids: take_ids(&mut map)?,
+            opacity: take_opacity(&mut map)?,
+        },
+        "set_blend" => Request::SetBlend {
+            ids: take_ids(&mut map)?,
+            blend: take_named(&mut map, "blend")?,
+        },
+        "set_color" => Request::SetColor {
+            ids: take_ids(&mut map)?,
+            color: take_named(&mut map, "color")?,
+        },
+        "group_layers" => Request::GroupLayers {
+            ids: take_ids(&mut map)?,
+        },
+        "ungroup" => Request::Ungroup {
+            ids: take_ids(&mut map)?,
+        },
+        "duplicate_layers" => Request::DuplicateLayers {
+            ids: take_ids(&mut map)?,
+        },
+        "merge_layers" => Request::MergeLayers {
+            ids: take_ids(&mut map)?,
+        },
+        "merge_down" => Request::MergeDown {
+            id: take_string(&mut map, "id")?,
+        },
+        "merge_visible" => Request::MergeVisible,
+        "flatten" => Request::Flatten,
+        "select_layers" => Request::SelectLayers {
+            ids: take_ids(&mut map)?,
+        },
+        "open_layers" => Request::OpenLayers {
+            ids: take_ids(&mut map)?,
+            open: take_bool(&mut map, "open")?,
+        },
         other => anyhow::bail!("unknown op: {other:?}"),
     };
 
@@ -226,7 +418,14 @@ pub fn request_line(req: &Request) -> String {
     map.insert("v".into(), PROTOCOL_VERSION.into());
     let path = |p: &PathBuf| Value::from(p.to_string_lossy().into_owned());
     match req {
-        Request::Ping | Request::New | Request::Raise | Request::Shutdown | Request::Frames => {}
+        Request::Ping
+        | Request::New
+        | Request::Raise
+        | Request::Shutdown
+        | Request::Frames
+        | Request::Layers
+        | Request::MergeVisible
+        | Request::Flatten => {}
         Request::Open { id } => {
             map.insert("id".into(), id.clone().into());
         }
@@ -253,6 +452,76 @@ pub fn request_line(req: &Request) -> String {
         }
         Request::AddFrame { path: at } => {
             map.insert("path".into(), path(at));
+        }
+        Request::AddLayer { group, name, above } => {
+            if *group {
+                map.insert("kind".into(), "group".into());
+            }
+            if let Some(name) = name {
+                map.insert("name".into(), name.clone().into());
+            }
+            if let Some(above) = above {
+                map.insert("above".into(), above.clone().into());
+            }
+        }
+        Request::RenameLayer { id, name } => {
+            map.insert("id".into(), id.clone().into());
+            map.insert("name".into(), name.clone().into());
+        }
+        Request::MergeDown { id } => {
+            map.insert("id".into(), id.clone().into());
+        }
+        Request::RemoveLayers { ids }
+        | Request::GroupLayers { ids }
+        | Request::Ungroup { ids }
+        | Request::DuplicateLayers { ids }
+        | Request::MergeLayers { ids }
+        | Request::SelectLayers { ids } => {
+            map.insert("ids".into(), ids.clone().into());
+        }
+        Request::MoveLayers { ids, to } => {
+            map.insert("ids".into(), ids.clone().into());
+            let (place, target) = match to {
+                Place::Into(t) => ("into", t),
+                Place::Above(t) => ("above", t),
+                Place::Below(t) => ("below", t),
+            };
+            map.insert("place".into(), place.into());
+            map.insert("target".into(), target.clone().into());
+        }
+        Request::ArrangeLayers { ids, how } => {
+            map.insert("ids".into(), ids.clone().into());
+            let how = match how {
+                Arrange::Front => "front",
+                Arrange::Forward => "forward",
+                Arrange::Backward => "backward",
+                Arrange::Back => "back",
+            };
+            map.insert("how".into(), how.into());
+        }
+        Request::ShowLayers { ids, visible } => {
+            map.insert("ids".into(), ids.clone().into());
+            map.insert("visible".into(), (*visible).into());
+        }
+        Request::LockLayers { ids, locked } => {
+            map.insert("ids".into(), ids.clone().into());
+            map.insert("locked".into(), (*locked).into());
+        }
+        Request::SetOpacity { ids, opacity } => {
+            map.insert("ids".into(), ids.clone().into());
+            map.insert("opacity".into(), (*opacity).into());
+        }
+        Request::SetBlend { ids, blend } => {
+            map.insert("ids".into(), ids.clone().into());
+            map.insert("blend".into(), serde_json::to_value(blend).expect("a mode is a name"));
+        }
+        Request::SetColor { ids, color } => {
+            map.insert("ids".into(), ids.clone().into());
+            map.insert("color".into(), serde_json::to_value(color).expect("a colour is a name"));
+        }
+        Request::OpenLayers { ids, open } => {
+            map.insert("ids".into(), ids.clone().into());
+            map.insert("open".into(), (*open).into());
         }
     }
     map.insert("op".into(), req.op().into());
@@ -299,6 +568,76 @@ fn take_string(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<String
         Some(other) => anyhow::bail!("field {key} must be a string, got {other}"),
         None => anyhow::bail!("field {key} missing"),
     }
+}
+
+/// A field that may be left out, but not left empty: an empty name is no
+/// name, and an empty id is no layer.
+fn take_optional_string(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<Option<String>> {
+    match map.remove(key) {
+        None => Ok(None),
+        Some(Value::String(s)) if !s.is_empty() => Ok(Some(s)),
+        Some(other) => anyhow::bail!("field {key} must be a string that says something, got {other}"),
+    }
+}
+
+/// The layers an op acts on: a list of ids, none of them empty, and
+/// never an empty list — nothing named is nothing to act on.
+fn take_ids(map: &mut Map<String, Value>) -> anyhow::Result<Vec<String>> {
+    let Some(Value::Array(items)) = map.remove("ids") else {
+        anyhow::bail!("field ids must be a list of layer ids");
+    };
+    anyhow::ensure!(!items.is_empty(), "field ids names no layer");
+    items
+        .into_iter()
+        .map(|item| match item {
+            Value::String(s) if !s.is_empty() => Ok(s),
+            other => anyhow::bail!("ids must be layer ids, got {other}"),
+        })
+        .collect()
+}
+
+fn take_bool(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<bool> {
+    match map.remove(key) {
+        Some(Value::Bool(b)) => Ok(b),
+        Some(other) => anyhow::bail!("field {key} must be true or false, got {other}"),
+        None => anyhow::bail!("field {key} missing"),
+    }
+}
+
+/// A strength: a fraction, refused rather than clamped outside one.
+fn take_opacity(map: &mut Map<String, Value>) -> anyhow::Result<f64> {
+    let value = match map.remove("opacity") {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(other) => anyhow::bail!("field opacity must be a number, got {other}"),
+        None => anyhow::bail!("field opacity missing"),
+    };
+    match value {
+        Some(v) if (0.0..=1.0).contains(&v) => Ok(v),
+        _ => anyhow::bail!("field opacity must be between 0 and 1"),
+    }
+}
+
+/// A blend mode or a colour, by the name a board writes it under.
+fn take_named<T: serde::de::DeserializeOwned>(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<T> {
+    match map.remove(key) {
+        Some(Value::String(s)) => serde_json::from_value(Value::String(s.clone()))
+            .map_err(|_| anyhow::anyhow!("unknown {key}: {s:?}")),
+        Some(other) => anyhow::bail!("field {key} must be a name, got {other}"),
+        None => anyhow::bail!("field {key} missing"),
+    }
+}
+
+/// Where layers go: into a group or a frame, or above or below a layer.
+fn take_place(map: &mut Map<String, Value>) -> anyhow::Result<Place> {
+    let place = take_string(map, "place")?;
+    let target = take_string(map, "target")?;
+    anyhow::ensure!(!target.is_empty(), "field target names no layer");
+    Ok(match place.as_str() {
+        "into" => Place::Into(target),
+        "above" => Place::Above(target),
+        "below" => Place::Below(target),
+        other => anyhow::bail!("unknown place: {other:?}"),
+    })
 }
 
 /// A path arriving on the wire, checked for shape before it is a path.
@@ -369,6 +708,7 @@ fn reject_leftovers(map: &Map<String, Value>, ctx: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doc::Kind;
 
     #[test]
     fn parses_bare_ops() {
@@ -583,7 +923,7 @@ mod tests {
                 path: PathBuf::from("/home/you/Work/foo/frame.json"),
             },
         ];
-        for req in all {
+        for req in all.into_iter().chain(layer_ops()) {
             let line = request_line(&req);
             assert!(line.ends_with('\n'), "line must end in \\n: {line:?}");
             assert_eq!(parse_request(line.trim_end()).unwrap(), req, "line: {line}");
@@ -711,5 +1051,217 @@ mod tests {
         };
         assert_eq!(op, "frames");
         assert!(reason.contains(&MAX_FRAME_BYTES.to_string()), "{reason}");
+    }
+
+    fn two() -> Vec<String> {
+        vec!["A".into(), "B".into()]
+    }
+
+    /// One of every layer op, every field it takes filled.
+    fn layer_ops() -> Vec<Request> {
+        vec![
+            Request::Layers,
+            Request::AddLayer {
+                group: true,
+                name: Some("Sky".into()),
+                above: Some("A".into()),
+            },
+            Request::AddLayer {
+                group: false,
+                name: None,
+                above: None,
+            },
+            Request::RemoveLayers { ids: two() },
+            Request::RenameLayer {
+                id: "A".into(),
+                name: "Sky".into(),
+            },
+            Request::MoveLayers {
+                ids: two(),
+                to: Place::Into("G".into()),
+            },
+            Request::MoveLayers {
+                ids: two(),
+                to: Place::Above("G".into()),
+            },
+            Request::MoveLayers {
+                ids: two(),
+                to: Place::Below("G".into()),
+            },
+            Request::ArrangeLayers {
+                ids: two(),
+                how: Arrange::Front,
+            },
+            Request::ArrangeLayers {
+                ids: two(),
+                how: Arrange::Backward,
+            },
+            Request::ShowLayers {
+                ids: two(),
+                visible: false,
+            },
+            Request::LockLayers {
+                ids: two(),
+                locked: true,
+            },
+            Request::SetOpacity {
+                ids: two(),
+                opacity: 0.5,
+            },
+            Request::SetBlend {
+                ids: two(),
+                blend: BlendMode::ColorDodge,
+            },
+            Request::SetColor {
+                ids: two(),
+                color: Tag::Violet,
+            },
+            Request::GroupLayers { ids: two() },
+            Request::Ungroup { ids: two() },
+            Request::DuplicateLayers { ids: two() },
+            Request::MergeLayers { ids: two() },
+            Request::MergeDown { id: "B".into() },
+            Request::MergeVisible,
+            Request::Flatten,
+            Request::SelectLayers { ids: two() },
+            Request::OpenLayers {
+                ids: two(),
+                open: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn parses_the_layer_ops() {
+        for (line, want) in [
+            (r#"{ "v": 1, "op": "layers" }"#, Request::Layers),
+            (
+                r#"{ "v": 1, "op": "add_layer" }"#,
+                Request::AddLayer {
+                    group: false,
+                    name: None,
+                    above: None,
+                },
+            ),
+            (
+                r#"{ "v": 1, "op": "add_layer", "kind": "group", "name": "Sky", "above": "A" }"#,
+                Request::AddLayer {
+                    group: true,
+                    name: Some("Sky".into()),
+                    above: Some("A".into()),
+                },
+            ),
+            (
+                r#"{ "v": 1, "op": "move_layers", "ids": ["A", "B"], "place": "into", "target": "G" }"#,
+                Request::MoveLayers {
+                    ids: two(),
+                    to: Place::Into("G".into()),
+                },
+            ),
+            (
+                r#"{ "v": 1, "op": "arrange_layers", "ids": ["A", "B"], "how": "back" }"#,
+                Request::ArrangeLayers {
+                    ids: two(),
+                    how: Arrange::Back,
+                },
+            ),
+            (
+                r#"{ "v": 1, "op": "set_opacity", "ids": ["A", "B"], "opacity": 0.25 }"#,
+                Request::SetOpacity {
+                    ids: two(),
+                    opacity: 0.25,
+                },
+            ),
+            (
+                r#"{ "v": 1, "op": "set_blend", "ids": ["A", "B"], "blend": "passThrough" }"#,
+                Request::SetBlend {
+                    ids: two(),
+                    blend: BlendMode::PassThrough,
+                },
+            ),
+            (
+                r#"{ "v": 1, "op": "set_color", "ids": ["A", "B"], "color": "none" }"#,
+                Request::SetColor {
+                    ids: two(),
+                    color: Tag::None,
+                },
+            ),
+            (
+                r#"{ "v": 1, "op": "merge_down", "id": "B" }"#,
+                Request::MergeDown { id: "B".into() },
+            ),
+            (r#"{ "v": 1, "op": "flatten" }"#, Request::Flatten),
+        ] {
+            assert_eq!(parse_request(line).unwrap(), want, "line: {line}");
+        }
+        for req in layer_ops() {
+            assert!(req.is_asked(), "{}: the answer is the work", req.op());
+        }
+    }
+
+    #[test]
+    fn a_layer_op_is_as_closed_as_every_other() {
+        for line in [
+            r#"{ "v": 1, "op": "layers", "of": "board" }"#,
+            r#"{ "v": 1, "op": "remove_layers" }"#,
+            r#"{ "v": 1, "op": "remove_layers", "ids": [] }"#,
+            r#"{ "v": 1, "op": "remove_layers", "ids": [1] }"#,
+            r#"{ "v": 1, "op": "remove_layers", "ids": [""] }"#,
+            r#"{ "v": 1, "op": "remove_layers", "ids": "A" }"#,
+            r#"{ "v": 1, "op": "add_layer", "kind": "frame" }"#,
+            r#"{ "v": 1, "op": "add_layer", "name": "" }"#,
+            r#"{ "v": 1, "op": "rename_layer", "id": "A" }"#,
+            r#"{ "v": 1, "op": "move_layers", "ids": ["A"], "place": "beside", "target": "B" }"#,
+            r#"{ "v": 1, "op": "move_layers", "ids": ["A"], "place": "into" }"#,
+            r#"{ "v": 1, "op": "arrange_layers", "ids": ["A"], "how": "sideways" }"#,
+            r#"{ "v": 1, "op": "show_layers", "ids": ["A"], "visible": "yes" }"#,
+            r#"{ "v": 1, "op": "lock_layers", "ids": ["A"] }"#,
+            r#"{ "v": 1, "op": "set_opacity", "ids": ["A"], "opacity": 1.5 }"#,
+            r#"{ "v": 1, "op": "set_opacity", "ids": ["A"], "opacity": -0.1 }"#,
+            r#"{ "v": 1, "op": "set_opacity", "ids": ["A"], "opacity": "half" }"#,
+            r#"{ "v": 1, "op": "set_blend", "ids": ["A"], "blend": "sparkle" }"#,
+            r#"{ "v": 1, "op": "set_color", "ids": ["A"], "color": "pink" }"#,
+            r#"{ "v": 1, "op": "merge_down", "ids": ["A"] }"#,
+            r#"{ "v": 1, "op": "merge_visible", "ids": ["A"] }"#,
+            r#"{ "v": 1, "op": "open_layers", "ids": ["A"], "open": 1 }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn the_layer_events_match_the_wire_format() {
+        let listed = Listed {
+            id: "A".into(),
+            name: "Sky".into(),
+            kind: Kind::Raster,
+            owner: Some("G".into()),
+            depth: 1,
+            visible: true,
+            shown: false,
+            locked: false,
+            opacity: 0.5,
+            blend: BlendMode::ColorDodge,
+            color: Tag::Red,
+            active: true,
+            picked: true,
+            elements: 2,
+        };
+        let ev = Event::Layers {
+            layers: vec![listed],
+        };
+        let line = event_line(&ev);
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["ev"], "layers");
+        assert_eq!(v["layers"][0]["kind"], "raster");
+        assert_eq!(v["layers"][0]["blend"], "colorDodge");
+        assert_eq!(v["layers"][0]["color"], "red");
+        assert_eq!(v["layers"][0]["owner"], "G");
+        assert_eq!(parse_event(line.trim_end()).unwrap(), ev);
+        let done = Event::Done { ids: two() };
+        let line = event_line(&done);
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!((v["ev"].as_str(), v["ids"][1].as_str()), (Some("done"), Some("B")));
+        assert_eq!(parse_event(line.trim_end()).unwrap(), done);
     }
 }

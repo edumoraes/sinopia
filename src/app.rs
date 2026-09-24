@@ -26,7 +26,9 @@ use crate::clipboard::{self, Clipboard, Paste};
 use crate::dialogs::{self, Answer, Reply};
 use crate::doc::{BlendMode, Document, Element, Image, Layer, Tag};
 use crate::dock::{Dock, Hit};
-use crate::editor::{Button, Change, Command, Editor, Gesture, Pick, SCROLL_LINE_PX, Stylus, Tool};
+use crate::editor::{
+    Button, Change, Command, Editor, Gesture, Keeps, Pick, SCROLL_LINE_PX, Stylus, Tool, locked_among,
+};
 use crate::export;
 use crate::merge;
 use crate::thumbs;
@@ -1235,21 +1237,25 @@ impl App {
     /// the lot, one step. A picture that cannot be taken leaves the board
     /// as it was.
     fn merge_layers(&mut self, command: Command) {
+        match self.try_merge(command) {
+            Ok(change) => self.apply(change),
+            Err(e) => log::warn!("merging: {e:#}"),
+        }
+    }
+
+    /// The merge itself, pictures and all, left for the caller to apply.
+    fn try_merge(&mut self, command: Command) -> anyhow::Result<Change> {
         let runs = self.editor().merges(self.doc(), command);
         let mut drawn = Vec::with_capacity(runs.len());
         for run in &runs {
-            if self.doc().exact(run) {
-                drawn.push(None);
-                continue;
-            }
-            match self.picture_of(run) {
-                Ok(image) => drawn.push(Some(image)),
-                Err(e) => return log::warn!("merging: {e:#}"),
-            }
+            drawn.push(if self.doc().exact(run) {
+                None
+            } else {
+                Some(self.picture_of(run)?)
+            });
         }
         let (editor, doc) = self.active();
-        let change = editor.merge(doc, command, &drawn);
-        self.apply(change);
+        Ok(editor.merge(doc, command, &drawn))
     }
 
     /// The picture a run is merged into: what its members show, drawn onto
@@ -1732,9 +1738,7 @@ impl App {
             match take.and_then(|i| lines.get(i)) {
                 Some(layers::RowLine::Rename) => self.panel_hit(PanelHit::Rename(id.clone())),
                 Some(layers::RowLine::Copy) => self.copy_layers(false),
-                Some(&layers::RowLine::Run(
-                    command @ (Command::Merge | Command::MergeVisible | Command::Flatten),
-                )) => {
+                Some(&layers::RowLine::Run(command)) if command.merges() => {
                     self.merge_layers(command);
                     self.redraw();
                     return;
@@ -2146,13 +2150,196 @@ impl App {
                 Ok((id, name)) => Event::Framed { id, name },
                 Err(e) => denied(&e),
             },
-            // The server only asks the three; every other op is acked
-            // and forwarded, and never arrives here.
-            other => Event::Denied {
-                op: other.op().to_owned(),
+            Request::Layers => Event::Layers {
+                layers: self.editor().listing(self.doc()),
+            },
+            // What is acked and forwarded never arrives here; every other
+            // op is one on the layers.
+            Request::Ping
+            | Request::New
+            | Request::Open { .. }
+            | Request::OpenFile { .. }
+            | Request::Raise
+            | Request::Export { .. }
+            | Request::Theme { .. }
+            | Request::Shutdown => Event::Denied {
+                op: op.to_owned(),
                 reason: "not an op the board answers".into(),
             },
+            layer => match self.layer_op(layer) {
+                Ok(ids) => Event::Done { ids },
+                Err(e) => denied(&e),
+            },
         }
+    }
+
+    /// A change to the layers asked for on the command line, made the
+    /// way the panel makes it — the layers named are picked, then acted
+    /// on — and one step of the history. Answers what it left picked. A
+    /// refusal says why and changes nothing but the pick.
+    fn layer_op(&mut self, req: Request) -> anyhow::Result<Vec<String>> {
+        let change = match req {
+            Request::AddLayer { group, name, above } => {
+                let (editor, doc) = self.active();
+                editor
+                    .add_layer_as(doc, group, name.as_deref(), above.as_deref())
+                    .map_err(anyhow::Error::msg)?
+            }
+            Request::RemoveLayers { ids } => {
+                self.pick(&ids)?;
+                self.refusing(Command::Remove, "there is nothing there to remove")?
+            }
+            Request::RenameLayer { id, name } => {
+                anyhow::ensure!(!name.trim().is_empty(), "a name has to say something");
+                self.pick(std::slice::from_ref(&id))?;
+                let (editor, doc) = self.active();
+                editor.rename_layer(doc, &id, &name)
+            }
+            Request::MoveLayers { ids, to } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                let (Place::Into(target) | Place::Above(target) | Place::Below(target)) = &to;
+                anyhow::ensure!(doc.layer(target).is_some(), "no layer {target:?} on the board");
+                let fits = doc
+                    .place(&to)
+                    .is_some_and(|(owner, _)| doc.can_move(&ids, owner));
+                anyhow::ensure!(
+                    fits,
+                    "they cannot go there: a frame stays on the board's root, nothing goes into a locked \
+                     group or into itself, and only a group or a frame takes layers in"
+                );
+                editor.drop_layers(doc, &to)
+            }
+            Request::ArrangeLayers { ids, how } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                if let Some(id) = locked_among(doc, &ids, Keeps::Place) {
+                    anyhow::bail!("{id:?} stands in a locked group, and a lock keeps its place");
+                }
+                editor.run(doc, Command::Arrange(how))
+            }
+            Request::ShowLayers { ids, visible } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                editor.show_layers(doc, visible)
+            }
+            Request::LockLayers { ids, locked } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                editor.lock_layers(doc, locked)
+            }
+            Request::SetOpacity { ids, opacity } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                if let Some(id) = locked_among(doc, &ids, Keeps::Look) {
+                    anyhow::bail!("{id:?} is locked, and a lock keeps how a layer draws");
+                }
+                editor.set_opacity(doc, opacity)
+            }
+            Request::SetBlend { ids, blend } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                if let Some(id) = locked_among(doc, &ids, Keeps::Look) {
+                    anyhow::bail!("{id:?} is locked, and a lock keeps how a layer draws");
+                }
+                if blend == BlendMode::PassThrough
+                    && let Some(id) = ids.iter().find(|id| doc.layer(id).is_some_and(|l| l.kind != crate::doc::Kind::Group))
+                {
+                    anyhow::bail!("{id:?} is no group, and only a group passes through");
+                }
+                editor.set_blend(doc, blend)
+            }
+            Request::SetColor { ids, color } => {
+                self.pick(&ids)?;
+                let (editor, doc) = self.active();
+                editor.set_tag(doc, &ids[0], color)
+            }
+            Request::GroupLayers { ids } => {
+                self.pick(&ids)?;
+                self.refusing(
+                    Command::Group,
+                    "they cannot be grouped: a frame never goes into a group, and a locked group takes nothing in",
+                )?
+            }
+            Request::Ungroup { ids } => {
+                let mut left = Vec::new();
+                for id in &ids {
+                    self.pick(std::slice::from_ref(id))?;
+                    let _ = self.refusing(
+                        Command::Ungroup,
+                        &format!("{id:?} does not come apart: only a group does, and never one that is locked"),
+                    )?;
+                    left.extend(self.editor().picked(self.doc()).into_iter().map(str::to_owned));
+                }
+                let (editor, doc) = self.active();
+                editor.pick_ids(doc, &left).map_err(anyhow::Error::msg)?;
+                Change::Scene
+            }
+            Request::DuplicateLayers { ids } => {
+                self.pick(&ids)?;
+                self.refusing(Command::Duplicate, "nothing inside a locked group is duplicated where it stands")?
+            }
+            Request::MergeLayers { ids } => {
+                self.pick(&ids)?;
+                let lone = ids.len() == 1
+                    && self
+                        .doc()
+                        .layer(&ids[0])
+                        .is_some_and(|l| l.kind != crate::doc::Kind::Group);
+                anyhow::ensure!(!lone, "one layer alone merges down, or not at all: ask merge_down");
+                self.merging(Command::Merge)?
+            }
+            Request::MergeDown { id } => {
+                self.pick(std::slice::from_ref(&id))?;
+                self.merging(Command::MergeDown)?
+            }
+            Request::MergeVisible => self.merging(Command::MergeVisible)?,
+            Request::Flatten => self.merging(Command::Flatten)?,
+            Request::SelectLayers { ids } => {
+                self.pick(&ids)?;
+                Change::Selection
+            }
+            Request::OpenLayers { ids, open } => {
+                let (editor, doc) = self.active();
+                for id in &ids {
+                    let holds = doc
+                        .layer(id)
+                        .is_some_and(|l| matches!(l.kind, crate::doc::Kind::Group | crate::doc::Kind::Frame));
+                    anyhow::ensure!(holds, "{id:?} is no group or frame to open");
+                }
+                for id in &ids {
+                    let _ = editor.set_open(id, open);
+                }
+                Change::Selection
+            }
+            other => anyhow::bail!("{} is not an op on the layers", other.op()),
+        };
+        self.apply(change);
+        self.redraw();
+        Ok(self.editor().picked(self.doc()).into_iter().map(str::to_owned).collect())
+    }
+
+    /// Picks exactly `ids` on the active board, or says which is missing.
+    fn pick(&mut self, ids: &[String]) -> anyhow::Result<()> {
+        let (editor, doc) = self.active();
+        editor.pick_ids(doc, ids).map_err(anyhow::Error::msg)
+    }
+
+    /// Runs `command` on the pick, refusing with `why` what it cannot do.
+    fn refusing(&mut self, command: Command, why: &str) -> anyhow::Result<Change> {
+        let (editor, doc) = self.active();
+        anyhow::ensure!(editor.can(doc, command), "{why}");
+        Ok(editor.run(doc, command))
+    }
+
+    /// A merge, pictures and all, refused when there is nothing it merges.
+    fn merging(&mut self, command: Command) -> anyhow::Result<Change> {
+        let can = self.editor().can(self.doc(), command);
+        anyhow::ensure!(
+            can,
+            "nothing merges there: only siblings do, never a frame, nothing locked, and nothing into a group"
+        );
+        self.try_merge(command)
     }
 
     /// One frame of the open board, written under `dir` as the page §8
@@ -3307,9 +3494,7 @@ impl App {
         let change = match (key.as_str(), shift) {
             ("n", true) => editor.add_layer(doc),
             _ => match layer_key(&key, shift, alt) {
-                Some(command @ (Command::Merge | Command::MergeVisible | Command::Flatten)) => {
-                    return self.merge_layers(command);
-                }
+                Some(command) if command.merges() => return self.merge_layers(command),
                 Some(command) => editor.run(doc, command),
                 None => Change::None,
             },
@@ -3827,9 +4012,32 @@ impl App {
             },
             // The server answers `denied` without forwarding; never reaches here.
             Request::Export { .. } | Request::Ping => {}
-            // An agent's three go the other way: the loop *does* them,
-            // on the `Ask` path, and the answer is what goes back.
-            Request::Frames | Request::ReadFrame { .. } | Request::AddFrame { .. } => {}
+            // An agent's three and the layers' ops go the other way: the
+            // loop *does* them, on the `Ask` path, and the answer is what
+            // goes back.
+            Request::Frames
+            | Request::ReadFrame { .. }
+            | Request::AddFrame { .. }
+            | Request::Layers
+            | Request::AddLayer { .. }
+            | Request::RemoveLayers { .. }
+            | Request::RenameLayer { .. }
+            | Request::MoveLayers { .. }
+            | Request::ArrangeLayers { .. }
+            | Request::ShowLayers { .. }
+            | Request::LockLayers { .. }
+            | Request::SetOpacity { .. }
+            | Request::SetBlend { .. }
+            | Request::SetColor { .. }
+            | Request::GroupLayers { .. }
+            | Request::Ungroup { .. }
+            | Request::DuplicateLayers { .. }
+            | Request::MergeLayers { .. }
+            | Request::MergeDown { .. }
+            | Request::MergeVisible
+            | Request::Flatten
+            | Request::SelectLayers { .. }
+            | Request::OpenLayers { .. } => {}
         }
     }
 }

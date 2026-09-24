@@ -4,6 +4,8 @@
 //! Pure — `app` feeds it pointer events in screen px together with the
 //! current [`View`] and the document, and stores whatever comes back.
 
+use serde::{Deserialize, Serialize};
+
 use crate::bitmap;
 use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
@@ -345,6 +347,53 @@ pub struct Editor {
     filtering: bool,
 }
 
+/// One layer as the command line lists it: where it stands in the tree,
+/// what it is and how it draws, and whether it is the active layer or
+/// among the picked. `visible` is its own eye; `shown` is whether it is
+/// on show at all, which every layer holding it has a say in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Listed {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    /// The layer holding its stack; none on the board's root.
+    pub owner: Option<String>,
+    pub depth: usize,
+    pub visible: bool,
+    pub shown: bool,
+    pub locked: bool,
+    pub opacity: f64,
+    pub blend: BlendMode,
+    pub color: Tag,
+    pub active: bool,
+    pub picked: bool,
+    /// How many objects stand on it.
+    pub elements: usize,
+}
+
+/// What a lock keeps a layer from being asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keeps {
+    /// How it draws — its strength and its mode — which its own lock and
+    /// every holder's keep.
+    Look,
+    /// Where it stands in its stack, which only a locked holder keeps: a
+    /// layer's own lock is about what it holds, not about its place.
+    Place,
+}
+
+/// The first of `ids` a lock keeps from what `keeps` names, if any: what
+/// the command line refuses rather than answering done while nothing
+/// changed.
+pub fn locked_among(doc: &Document, ids: &[String], keeps: Keeps) -> Option<String> {
+    ids.iter()
+        .find(|id| match keeps {
+            Keeps::Look => doc.locked(id),
+            Keeps::Place => doc.locate(id).is_some_and(|(owner, _)| doc.fixed(owner)),
+        })
+        .cloned()
+}
+
 /// A command on the picked layers: what a shortcut, a row's menu and
 /// the command line all ask for, so the three cannot come to disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,10 +411,24 @@ pub enum Command {
     /// The picked siblings into one, a group alone into a layer, or one
     /// layer down into the one under it: `Ctrl+Alt+E`.
     Merge,
+    /// The active layer — a group too — into the one under it, as the
+    /// command line asks by name.
+    MergeDown,
     /// Every visible sibling of every stack into one: `Ctrl+Shift+E`.
     MergeVisible,
     /// Merge visible, and what is hidden goes.
     Flatten,
+}
+
+impl Command {
+    /// Whether it merges: those wait on pictures `app` takes of what is
+    /// not exact, and go through [`Editor::merge`].
+    pub fn merges(self) -> bool {
+        matches!(
+            self,
+            Command::Merge | Command::MergeDown | Command::MergeVisible | Command::Flatten
+        )
+    }
 }
 
 /// What a new frame is born with until `app` says otherwise: white, the
@@ -808,6 +871,12 @@ impl Editor {
         self.set_locked(doc, &picked, lock)
     }
 
+    /// Locks the picked layers, or opens them — as asked, not toggled.
+    pub fn lock_layers(&mut self, doc: &mut Document, locked: bool) -> Change {
+        let picked = self.picked_ids(doc);
+        self.set_locked(doc, &picked, locked)
+    }
+
     /// Opens a lock, or closes it, on `id` alone: the lock on its row.
     pub fn toggle_lock_of(&mut self, doc: &mut Document, id: &str) -> Change {
         let Some(locked) = doc.layer(id).map(|l| l.locked) else {
@@ -885,23 +954,29 @@ impl Editor {
     /// them all once every one is hidden: `Ctrl+,`. What is hidden is no
     /// longer held.
     pub fn toggle_shown(&mut self, doc: &mut Document) -> Change {
-        let picked = self.picked_ids(doc);
-        let hide = picked
+        let hide = self
+            .picked_ids(doc)
             .iter()
             .any(|id| doc.layer(id).is_some_and(|l| l.visible));
+        self.show_layers(doc, !hide)
+    }
+
+    /// Shows the picked layers, or hides them — as asked, not toggled.
+    /// What is hidden is no longer held.
+    pub fn show_layers(&mut self, doc: &mut Document, visible: bool) -> Change {
         let mut changed = false;
-        for id in &picked {
-            if let Some(l) = doc.layer_mut(id)
-                && l.visible == hide
+        for id in self.picked_ids(doc) {
+            if let Some(l) = doc.layer_mut(&id)
+                && l.visible != visible
             {
-                l.visible = !hide;
+                l.visible = visible;
                 changed = true;
             }
         }
         if !changed {
             return Change::None;
         }
-        if hide {
+        if !visible {
             self.drag = None;
             self.selection.retain(|sel| {
                 doc.elements
@@ -1022,6 +1097,80 @@ impl Editor {
         Change::Scene
     }
 
+    /// Picks exactly `ids`, the last of them active, as the panel picks —
+    /// what a command from the command line acts on — and opens the rows
+    /// holding them. Every id has to be a layer of the board: a name that
+    /// is not picks nothing at all.
+    pub fn pick_ids(&mut self, doc: &Document, ids: &[String]) -> Result<(), String> {
+        let Some(last) = ids.last() else {
+            return Err("no layer named".into());
+        };
+        if let Some(missing) = ids.iter().find(|id| doc.layer(id).is_none()) {
+            return Err(format!("no layer {missing:?} on the board"));
+        }
+        self.picked = ids.to_vec();
+        self.layer = Some(last.clone());
+        self.in_panel = true;
+        for id in ids {
+            self.reveal(doc, id);
+        }
+        self.follow_the_pick(doc);
+        Ok(())
+    }
+
+    /// A new raster layer — or group — above `above`, or above the
+    /// active layer when none is named, called `name` when there is one.
+    pub fn add_layer_as(
+        &mut self,
+        doc: &mut Document,
+        group: bool,
+        name: Option<&str>,
+        above: Option<&str>,
+    ) -> Result<Change, String> {
+        if let Some(above) = above {
+            self.pick_ids(doc, &[above.to_owned()])?;
+        }
+        let change = if group {
+            self.add_group(doc)
+        } else {
+            self.add_layer(doc)
+        };
+        if change == Change::None {
+            return Err("nothing can be added there: a locked group takes nothing in".into());
+        }
+        if let Some(name) = name {
+            let id = self.active(doc).to_owned();
+            let _ = self.rename_layer(doc, &id, name);
+        }
+        Ok(change)
+    }
+
+    /// Every layer of the board, the whole tree top first whatever the
+    /// panel has open, with where it stands and what it is.
+    pub fn listing(&self, doc: &Document) -> Vec<Listed> {
+        let active = self.active(doc);
+        let picked = self.picked(doc);
+        doc.rows(|_| true)
+            .iter()
+            .map(|r| Listed {
+                id: r.layer.id.clone(),
+                name: r.layer.name.clone(),
+                kind: r.layer.kind,
+                owner: r.owner.map(str::to_owned),
+                depth: r.depth,
+                visible: r.layer.visible,
+                shown: r.shown,
+                locked: r.layer.locked,
+                opacity: r.layer.opacity,
+                blend: r.layer.blend,
+                color: r.layer.color,
+                active: r.layer.id == active,
+                picked: picked.contains(&r.layer.id.as_str()),
+                elements: doc.elements.iter().filter(|el| el.layer() == r.layer.id).count(),
+            })
+            .collect()
+    }
+
     /// Does `command` to the picked layers.
     pub fn run(&mut self, doc: &mut Document, command: Command) -> Change {
         match command {
@@ -1032,7 +1181,9 @@ impl Editor {
             Command::Lock => self.toggle_lock(doc),
             Command::Show => self.toggle_shown(doc),
             Command::Arrange(how) => self.arrange(doc, how),
-            Command::Merge | Command::MergeVisible | Command::Flatten => self.merge(doc, command, &[]),
+            Command::Merge | Command::MergeDown | Command::MergeVisible | Command::Flatten => {
+                self.merge(doc, command, &[])
+            }
         }
     }
 
@@ -1058,6 +1209,7 @@ impl Editor {
                     Merge::Down(active)
                 })
             }
+            Command::MergeDown => Some(Merge::Down(self.active(doc).to_owned())),
             Command::MergeVisible => Some(Merge::Visible),
             Command::Flatten => Some(Merge::Flatten),
             _ => None,
@@ -1116,7 +1268,7 @@ impl Editor {
     /// merge is asked by its runs instead — one that is not exact waits
     /// on a picture `app` can always take.
     pub fn can(&self, doc: &Document, command: Command) -> bool {
-        if matches!(command, Command::Merge | Command::MergeVisible | Command::Flatten) {
+        if command.merges() {
             let hidden = command == Command::Flatten && doc.rows(|_| true).iter().any(|r| !r.layer.visible);
             return hidden || !self.merges(doc, command).is_empty();
         }
@@ -1275,6 +1427,14 @@ impl Editor {
     /// Whether the panel shows `holder`'s layers under its row.
     pub fn is_open(&self, holder: &str) -> bool {
         self.open.iter().any(|id| id == holder)
+    }
+
+    /// Opens `holder`'s row, or shuts it, as asked.
+    pub fn set_open(&mut self, holder: &str, open: bool) -> Change {
+        if self.is_open(holder) != open {
+            return self.toggle_open(holder);
+        }
+        Change::None
     }
 
     /// Opens `holder`'s row, or shuts it.
@@ -4885,6 +5045,87 @@ mod tests {
         assert!(doc.elements.iter().all(|el| el.id() != "b"), "hidden, and gone");
         assert_eq!(e.active(&doc), "G", "its layer went with the group it stood in, which is left");
         assert!(!e.can(&doc, Command::Flatten), "flat already");
+    }
+
+    #[test]
+    fn layers_are_picked_by_id_and_every_id_has_to_be_there() {
+        let doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        assert_eq!(e.pick_ids(&doc, &["C".into(), "A".into()]), Ok(()));
+        assert_eq!(e.picked(&doc), ["C", "A"]);
+        assert_eq!(e.active(&doc), "A", "the last one named leads");
+        let before = e.at();
+        assert!(e.pick_ids(&doc, &["A".into(), "nope".into()]).unwrap_err().contains("nope"));
+        assert_eq!(e.at(), before, "a refusal picks nothing");
+        assert!(e.pick_ids(&doc, &[]).is_err(), "nothing named is nothing to act on");
+    }
+
+    #[test]
+    fn a_listing_is_the_whole_tree_top_first_with_the_pick() {
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("H").unwrap().visible = false;
+        doc.layer_mut("A").unwrap().opacity = 0.25;
+        let mut e = Editor::new();
+        e.pick_ids(&doc, &["B".into(), "C".into()]).unwrap();
+        let list = e.listing(&doc);
+        let ids: Vec<&str> = list.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["F", "K", "E", "D", "G", "H", "C", "B", "A"], "shut rows too");
+        let c = list.iter().find(|l| l.id == "C").unwrap();
+        assert_eq!((c.owner.as_deref(), c.depth, c.visible, c.shown), (Some("H"), 2, true, false));
+        assert!(c.active && c.picked);
+        let b = list.iter().find(|l| l.id == "B").unwrap();
+        assert!(!b.active && b.picked);
+        assert_eq!(list.iter().find(|l| l.id == "A").unwrap().opacity, 0.25);
+        assert_eq!(list.iter().find(|l| l.id == "F").unwrap().elements, 1, "its frame");
+    }
+
+    #[test]
+    fn the_picked_layers_are_shown_hidden_locked_and_opened_as_asked() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        e.pick_ids(&doc, &["A".into(), "B".into()]).unwrap();
+        assert_eq!(e.show_layers(&mut doc, false), Change::Scene);
+        assert!(!doc.layer("A").unwrap().visible && !doc.layer("B").unwrap().visible);
+        assert_eq!(e.show_layers(&mut doc, false), Change::None, "already so: not a toggle");
+        assert_eq!(e.show_layers(&mut doc, true), Change::Scene);
+        assert_eq!(e.lock_layers(&mut doc, true), Change::Scene);
+        assert!(doc.layer("A").unwrap().locked && doc.layer("B").unwrap().locked);
+        assert_eq!(e.lock_layers(&mut doc, true), Change::None);
+        assert!(e.is_open("G"), "it holds what was picked");
+        assert!(!e.is_open("H"));
+        let _ = e.set_open("H", true);
+        let _ = e.set_open("H", true);
+        assert!(e.is_open("H"), "opened, and not shut again");
+        let _ = e.set_open("H", false);
+        assert!(!e.is_open("H"));
+    }
+
+    #[test]
+    fn what_a_lock_keeps_is_named_before_anything_is_asked_of_it() {
+        let mut doc = crate::tree::tests::nested();
+        doc.layer_mut("H").unwrap().locked = true;
+        let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // How it draws: a lock of its own or a holder's keeps it.
+        assert_eq!(locked_among(&doc, &ids(&["A", "C"]), Keeps::Look), Some("C".into()));
+        assert_eq!(locked_among(&doc, &ids(&["A", "H"]), Keeps::Look), Some("H".into()));
+        assert_eq!(locked_among(&doc, &ids(&["A", "B"]), Keeps::Look), None);
+        // Where it stands: only a locked holder keeps that.
+        assert_eq!(locked_among(&doc, &ids(&["H"]), Keeps::Place), None, "its own lock does not");
+        assert_eq!(locked_among(&doc, &ids(&["C"]), Keeps::Place), Some("C".into()));
+    }
+
+    #[test]
+    fn a_layer_is_added_where_it_is_asked_under_the_name_it_is_given() {
+        let mut doc = crate::tree::tests::nested();
+        let mut e = Editor::new();
+        assert_eq!(e.add_layer_as(&mut doc, false, Some("Sky"), Some("A")), Ok(Change::Scene));
+        let sky = e.active(&doc).to_owned();
+        assert_eq!(doc.layer(&sky).unwrap().name, "Sky");
+        assert_eq!(doc.layers[1].id, sky, "right above A");
+        assert_eq!(e.add_layer_as(&mut doc, true, None, None), Ok(Change::Scene));
+        let group = e.active(&doc).to_owned();
+        assert_eq!(doc.layer(&group).unwrap().kind, Kind::Group);
+        assert!(e.add_layer_as(&mut doc, false, None, Some("nope")).is_err());
     }
 
     #[test]
