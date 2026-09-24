@@ -3043,9 +3043,16 @@ impl App {
                     if found.is_empty() {
                         self.sending = None;
                     } else {
-                        let target = sending.target.min(found.len() - 1);
+                        // Aimed at the same agent, wherever the list now
+                        // puts it — it comes back with the focused one
+                        // first — or at that one, if it has gone.
+                        let aimed = sending
+                            .agents
+                            .get(sending.target)
+                            .and_then(|a| agents::find(&found, a))
+                            .unwrap_or(0);
                         sending.agents = found;
-                        sending.aim(target);
+                        sending.aim(aimed);
                     }
                     self.redraw();
                 }

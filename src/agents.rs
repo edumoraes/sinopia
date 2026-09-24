@@ -194,6 +194,14 @@ pub fn merge(all: Vec<Agent>) -> Vec<Agent> {
     out
 }
 
+/// Where `agent` stands in `list`: the entry that is the same agent — the
+/// same kind in the same directory, which is what [`merge`] takes an agent
+/// to be — wherever the list now puts it.
+pub fn find(list: &[Agent], agent: &Agent) -> Option<usize> {
+    list.iter()
+        .position(|a| a.kind == agent.kind && a.cwd == agent.cwd)
+}
+
 /// What is running now. Every backend that is not there answers nothing,
 /// which is the same as a backend with nothing to say.
 pub fn list() -> Vec<Agent> {
@@ -492,6 +500,28 @@ mod tests {
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].reach, Reach::Herdr("w1:p1".into()));
         assert_eq!(merged[1].reach, Reach::None);
+    }
+
+    #[test]
+    fn an_agent_is_found_again_in_a_list_that_came_back_in_another_order() {
+        // Coming back to the window lists the agents again, the focused
+        // one first: the one the dialog was aimed at has to be found by
+        // what it is, not by where it stood.
+        let a = Agent::at("claude", "/w/a", Reach::Herdr("p1".into()));
+        let b = Agent::at("codex", "/w/b", Reach::Tmux("%1".into()));
+        let again = [
+            b.clone(),
+            Agent {
+                focused: true,
+                ..a.clone()
+            },
+        ];
+        assert_eq!(find(&again, &a), Some(1));
+        assert_eq!(find(&again, &b), Some(0));
+        assert_eq!(
+            find(&again, &Agent::at("claude", "/w/c", Reach::None)),
+            None
+        );
     }
 
     #[test]
