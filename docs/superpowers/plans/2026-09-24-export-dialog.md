@@ -53,4 +53,19 @@ implemented.
   - [x] 6c. rendered through the same path as `board.png`, uploaded to a
         slot of its own, redrawn when its size changes
 - [x] 7. Docs: README, AGENTS.md, the design note
-- [ ] 8. Live check of every item in a running window; CI green
+- [x] 8. Live check of every item in a running window; CI green
+
+## After the review
+
+An independent read of the branch found eight faults; each is fixed
+under a test of its own, and one older fault with them.
+
+- [x] held Enter, Tab and Esc no longer repeat through the dialog
+- [x] no skill call is typed at an agent herdr reports blocked
+- [x] a Claude plugin's skill is called by its folder
+- [x] End on a word broken mid-word goes after its last letter
+- [x] a cut scrolls, settles the menu, and needs a clipboard
+- [x] the skills menu stands only while its line is in sight
+- [x] a name holds no more than a directory name may
+- [x] the picture's ceiling is a logical density
+- [x] coming back to the window keeps the agent aimed at (older)
