@@ -11,7 +11,7 @@ use crate::text::Atlas;
 use crate::theme::Theme;
 
 /// Logical px, all of them.
-const WIDTH: f32 = 420.0;
+const WIDTH: f32 = 640.0;
 const PADDING: f32 = 12.0;
 const ROW_H: f32 = 30.0;
 const FIELD_H: f32 = 28.0;
@@ -19,6 +19,8 @@ const GAP: f32 = 6.0;
 const RADIUS: f32 = 12.0;
 const ROW_RADIUS: f32 = 7.0;
 const TITLE_H: f32 = 24.0;
+/// The least room left between the dialog and the window's edge.
+const MARGIN: f32 = 24.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hit {
@@ -44,7 +46,9 @@ impl Panel {
     /// agents are running — the caller does not open a panel for none.
     pub fn layout(viewport: Viewport, scale: f64, rows: usize, folder: bool) -> Panel {
         let s = scale as f32;
-        let w = WIDTH * s;
+        // As wide as it was drawn, unless the window is narrower than
+        // that and its margins: then the window's.
+        let w = (WIDTH * s).min(viewport.w as f32 - MARGIN * 2.0 * s);
         let fields = if folder { 2.0 } else { 1.0 };
         let h = PADDING * 2.0 * s
             + TITLE_H * s
@@ -197,6 +201,24 @@ mod tests {
         assert!(with.folder.is_some());
         assert!(with.rect.h > without.rect.h);
         assert!(with.rect.contains_rect(&with.folder.unwrap()));
+    }
+
+    #[test]
+    fn the_dialog_is_wide_enough_for_a_logo_a_name_a_folder_and_a_status() {
+        let p = Panel::layout(Viewport { w: 1600, h: 900 }, 1.0, 2, false);
+        assert_eq!(p.rect.w, 640.0);
+        let p = Panel::layout(Viewport { w: 3200, h: 1800 }, 2.0, 2, false);
+        assert_eq!(p.rect.w, 1280.0, "logical px, like the rest of the chrome");
+    }
+
+    #[test]
+    fn a_narrow_window_keeps_a_margin_either_side_of_the_dialog() {
+        let p = Panel::layout(Viewport { w: 500, h: 800 }, 1.0, 2, false);
+        assert!(p.rect.x >= MARGIN - 0.5, "{:?}", p.rect);
+        assert!(p.rect.x + p.rect.w <= 500.0 - MARGIN + 0.5, "{:?}", p.rect);
+        for r in p.rows.iter().chain([&p.line]) {
+            assert!(p.rect.contains_rect(r), "{r:?} outside {:?}", p.rect);
+        }
     }
 
     #[test]
