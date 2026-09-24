@@ -278,7 +278,7 @@ pub fn row_menu(can: impl Fn(Command) -> bool, paste: bool, state: RowState) -> 
             false,
         ),
     ];
-    let mut items = vec![Item::new("Rename")];
+    let mut items = vec![Item::new("Rename").hint("F2")];
     let mut lines = vec![RowLine::Rename];
     for (label, keys, line, rule) in lines_of {
         let enabled = match line {
@@ -2846,6 +2846,7 @@ mod tests {
         assert!(!items[line("Ungroup")].enabled, "nothing there to take apart");
         assert!(items[line("Group")].enabled);
         assert_eq!(items[line("Duplicate")].hint.as_deref(), Some("Ctrl+J"));
+        assert_eq!(items[line("Rename")].hint.as_deref(), Some("F2"));
         assert_eq!(lines[line("Copy")], RowLine::Copy);
         assert_eq!(lines[line("Cut")], RowLine::Cut);
         assert_eq!(lines[line("Paste")], RowLine::Paste);

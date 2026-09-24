@@ -3109,6 +3109,17 @@ impl App {
                     self.redraw();
                 }
             }
+            // The active layer's name, opened where its row is: the panel
+            // comes out, and the list goes to the row.
+            Key::Named(NamedKey::F2) if pressed => {
+                let id = self.editor().active(self.doc()).to_owned();
+                let (editor, doc) = self.active();
+                editor.reveal(doc, &id);
+                self.layers_shown = true;
+                self.focused = None;
+                self.panel_hit(PanelHit::Rename(id));
+                self.redraw();
+            }
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
                 let (editor, doc) = self.active();
                 let change = editor.delete(doc);
