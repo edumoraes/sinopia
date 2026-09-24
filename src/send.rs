@@ -7,6 +7,7 @@
 use crate::agents::Agent;
 use crate::field::{self, Boxed, Field};
 use crate::scene::{Prim, ScreenRect, Viewport};
+use crate::skills::{self, Call, Skill};
 use crate::text::{Atlas, Line};
 use crate::theme::Theme;
 
@@ -40,6 +41,26 @@ const BAR_MIN: f32 = 16.0;
 /// The most lines the instruction box grows to. Past it the box keeps
 /// its height and scrolls.
 pub const MAX_LINES: usize = 20;
+
+/// The most skills the menu shows at once; the pick scrolls the rest in.
+pub const MENU_ROWS: usize = 6;
+const MENU_ROW_H: f32 = 28.0;
+const MENU_W: f32 = 520.0;
+const MENU_PAD: f32 = 4.0;
+/// Between a skill's call and what it says it is for.
+const CALL_GAP: f32 = 12.0;
+
+/// What an empty instruction box says: whom the instruction is for,
+/// and — where that agent's harness can be asked for a skill from its
+/// prompt — which key calls one, since the menu is otherwise a thing
+/// nobody would know to look for.
+pub fn hint(agent: &Agent) -> String {
+    let ask = format!("What should {} do with it?", agent.name());
+    match skills::harness(&agent.kind) {
+        Some(h) => format!("{ask}  {} calls a skill", skills::mark(h.call)),
+        None => ask,
+    }
+}
 
 /// Cell `i` of the logo sheet, which holds one square per agent in
 /// [`crate::agents::KNOWN`]'s order.
@@ -82,6 +103,38 @@ pub struct Look<'a> {
     pub focus: Hit,
     /// How far down its lines the instruction is scrolled, in px.
     pub scroll: f32,
+    /// The skills answering the call being typed, when one is.
+    pub menu: Option<Menu<'a>>,
+}
+
+/// The skills under the caret: the target's skills, which of them answer
+/// what has been typed of a call — best first — which of those is picked,
+/// and how the target's harness is called.
+#[derive(Debug, Clone, Copy)]
+pub struct Menu<'a> {
+    pub skills: &'a [Skill],
+    pub matches: &'a [usize],
+    pub pick: usize,
+    pub call: Call,
+}
+
+/// Where the menu stands: its box, a row per skill in sight, and which
+/// of the matches the first of those rows is.
+#[derive(Debug, Clone)]
+pub struct MenuLayout {
+    pub rect: ScreenRect,
+    pub rows: Vec<ScreenRect>,
+    pub first: usize,
+}
+
+impl MenuLayout {
+    /// Which match a press on the menu landed on.
+    pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|r| r.contains(x, y))
+            .map(|i| self.first + i)
+    }
 }
 
 /// What it is drawn with: the glyph atlas and its slot, where the sheet
@@ -115,6 +168,8 @@ pub struct Panel {
     /// What the logical px above were laid out at, so what is drawn
     /// inside the rects is measured the same way the rects were.
     pub scale: f32,
+    /// The window it stands in, which is what the menu has to fit.
+    pub window: ScreenRect,
 }
 
 impl Panel {
@@ -204,7 +259,52 @@ impl Panel {
             line_h: spec.line_h,
             text_w: Panel::text_width(viewport, scale),
             scale: s,
+            window: ScreenRect {
+                x: 0.0,
+                y: 0.0,
+                w: viewport.w as f32,
+                h: viewport.h as f32,
+            },
         }
+    }
+
+    /// Where the menu of `count` skills stands for a caret on line `k`
+    /// of `b`: under that line, where it reads as the line's own — or
+    /// over it, when the window has no room below — as wide as a call and
+    /// a line of what it is for, and showing [`MENU_ROWS`] at most, with
+    /// `pick` among them.
+    pub fn menu(&self, b: &Boxed, k: usize, count: usize, pick: usize) -> MenuLayout {
+        let s = self.scale;
+        let shown = count.min(MENU_ROWS);
+        let row_h = MENU_ROW_H * s;
+        let h = shown as f32 * row_h + MENU_PAD * 2.0 * s;
+        let w = (MENU_W * s).min(b.rect.w - b.inset);
+        let top = b.top(k);
+        let below = top + b.line_h;
+        let floor = self.window.y + self.window.h - MARGIN * s;
+        let y = if below + h <= floor {
+            below
+        } else {
+            (top - h).max(self.window.y)
+        };
+        let rect = ScreenRect {
+            x: b.rect.x + b.inset,
+            y,
+            w,
+            h,
+        };
+        let first = pick
+            .saturating_sub(MENU_ROWS - 1)
+            .min(count.saturating_sub(shown));
+        let rows = (0..shown)
+            .map(|i| ScreenRect {
+                x: rect.x + MENU_PAD * s,
+                y: rect.y + MENU_PAD * s + i as f32 * row_h,
+                w: rect.w - MENU_PAD * 2.0 * s,
+                h: row_h,
+            })
+            .collect();
+        MenuLayout { rect, rows, first }
     }
 
     /// The instruction's box as the field draws itself into it, with
@@ -360,12 +460,70 @@ impl Panel {
         ));
         let lines = look.line.wrap(atlas, self.text_w);
         let b = self.boxed(&lines, look.scroll);
+        // Until there is an instruction, the box says whom it is for and
+        // what calls a skill.
+        if look.line.value().is_empty()
+            && let Some(agent) = look.agents.get(look.target)
+        {
+            let row = ScreenRect {
+                y: b.top(0),
+                h: b.line_h,
+                ..self.line
+            };
+            let text = atlas.truncate(&hint(agent), self.text_w);
+            for g in atlas.layout(&text, self.line.x + b.inset, atlas.baseline_in(row)) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(self.line));
+            }
+        }
         out.extend(
             look.line
                 .prims_boxed(&b, atlas, slot, theme, look.focus == Hit::Line),
         );
         if let Some(thumb) = self.thumb(lines.len(), look.scroll) {
             out.push(Prim::rounded(thumb, thumb.w / 2.0, theme.muted));
+        }
+        // The menu last, over everything it may stand on.
+        if let Some(menu) = look.menu {
+            out.extend(self.menu_prims(&menu, &b, look.line.caret_line(&lines), ink));
+        }
+        out
+    }
+
+    /// The menu of skills: each one written as its call, and what it is
+    /// for after it in muted ink, cut to the row; the pick filled.
+    fn menu_prims(&self, menu: &Menu, b: &Boxed, k: usize, ink: &Ink) -> Vec<Prim> {
+        let (atlas, slot, theme) = (ink.atlas, ink.slot, ink.theme);
+        let s = self.scale;
+        let m = self.menu(b, k, menu.matches.len(), menu.pick);
+        let corner = theme.corner(ROW_RADIUS, 1.0);
+        let mut out = vec![
+            Prim::soft(m.rect, corner, 12.0, theme.shadow),
+            Prim::rounded(m.rect, corner, theme.panel),
+        ];
+        for (i, row) in m.rows.iter().enumerate() {
+            let at = m.first + i;
+            let Some(skill) = menu.matches.get(at).and_then(|&j| menu.skills.get(j)) else {
+                continue;
+            };
+            if at == menu.pick {
+                out.push(Prim::rounded(*row, corner, theme.active_bg));
+            }
+            // Crush's call is a sentence; its menu names the skill.
+            let call = match menu.call {
+                Call::Words => skill.name.clone(),
+                c => skills::call_text(c, &skill.name),
+            };
+            let baseline = atlas.baseline_in(*row);
+            let x = row.x + field::PADDING * s;
+            for g in atlas.layout(&call, x, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, theme.ink).clipped(*row));
+            }
+            let x = x + atlas.measure(&call) + CALL_GAP * s;
+            let room = row.x + row.w - field::PADDING * s - x;
+            let said = atlas.truncate(&skill.description, room);
+            for g in atlas.layout(&said, x, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, theme.muted).clipped(*row));
+            }
         }
         out
     }
@@ -435,6 +593,7 @@ mod tests {
                 line: &self.line,
                 focus: Hit::Line,
                 scroll: 0.0,
+                menu: None,
             }
         }
     }
@@ -708,6 +867,116 @@ mod tests {
             "a sheet not uploaded yet moves nothing"
         );
         assert_eq!(at("pi", Some(9)), with, "nor does a mark nobody drew");
+    }
+
+    fn skills(n: usize) -> Vec<crate::skills::Skill> {
+        (0..n)
+            .map(|i| crate::skills::Skill {
+                name: format!("skill-{i}"),
+                description: format!("what skill {i} is for"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_menu_opens_under_the_line_the_caret_is_on() {
+        let p = Panel::layout(viewport(), 1.0, &lines(3));
+        let lines = [Line { start: 0, end: 0 }; 3];
+        let b = p.boxed(&lines, 0.0);
+        let m = p.menu(&b, 1, 4, 0);
+        let line_bottom = b.rect.y + b.inset + 2.0 * LINE_H;
+        assert!((m.rect.y - line_bottom).abs() < 0.01, "{:?}", m.rect);
+        assert_eq!(m.rows.len(), 4);
+        assert!(m.rect.x >= b.rect.x && m.rect.x + m.rect.w <= b.rect.x + b.rect.w);
+    }
+
+    #[test]
+    fn a_menu_with_no_room_below_opens_above_the_line() {
+        let short = Viewport { w: 1200, h: 420 };
+        let p = Panel::layout(short, 1.0, &lines(1));
+        let lines = [Line { start: 0, end: 0 }];
+        let b = p.boxed(&lines, 0.0);
+        let m = p.menu(&b, 0, MENU_ROWS, 0);
+        assert!(
+            m.rect.y + m.rect.h <= b.rect.y + b.inset + 0.01,
+            "{:?}",
+            m.rect
+        );
+        assert!(m.rect.y >= 0.0);
+    }
+
+    #[test]
+    fn the_menu_shows_six_at_most_and_keeps_the_pick_in_sight() {
+        let p = Panel::layout(viewport(), 1.0, &lines(1));
+        let lines = [Line { start: 0, end: 0 }];
+        let b = p.boxed(&lines, 0.0);
+        let m = p.menu(&b, 0, 10, 8);
+        assert_eq!(m.rows.len(), MENU_ROWS);
+        assert_eq!(m.first, 3, "the pick is the last row shown");
+        let (x, y) = m.rows[MENU_ROWS - 1].center();
+        assert_eq!(m.hit(f64::from(x), f64::from(y)), Some(8));
+        assert_eq!(m.hit(-1.0, -1.0), None);
+    }
+
+    #[test]
+    fn the_menu_writes_each_skill_as_its_call_and_marks_the_pick() {
+        let f = Fixture::new();
+        let agents = [Agent::at("claude", "/w/a", Reach::None)];
+        let all = skills(3);
+        let matches = [2, 0];
+        let p = Panel::layout(viewport(), 1.0, &lines(1));
+        let menu = Menu {
+            skills: &all,
+            matches: &matches,
+            pick: 1,
+            call: crate::skills::Call::Slash,
+        };
+        let without = p.prims(&f.look(&agents), &f.ink(0, None));
+        let with = p.prims(
+            &Look {
+                menu: Some(menu),
+                ..f.look(&agents)
+            },
+            &f.ink(0, None),
+        );
+        assert!(with.len() > without.len() + "/skill-2".len());
+        let lines = [Line { start: 0, end: 0 }];
+        let m = p.menu(&p.boxed(&lines, 0.0), 0, 2, 1);
+        let picked = m.rows[1];
+        assert!(
+            with.iter().any(|q| q.kind == crate::scene::KIND_BOX
+                && q.bounds() == picked
+                && q.color == f.theme.active_bg),
+            "the pick wears the active fill"
+        );
+    }
+
+    #[test]
+    fn an_empty_box_says_how_a_skill_is_called() {
+        let f = Fixture::new();
+        let claude = [Agent::at("claude", "/w/a", Reach::None)];
+        let codex = [Agent::at("codex", "/w/a", Reach::None)];
+        let pi = [Agent::at("pi", "/w/a", Reach::None)];
+        assert_eq!(
+            hint(&claude[0]),
+            "What should Claude Code do with it?  / calls a skill"
+        );
+        assert_eq!(
+            hint(&codex[0]),
+            "What should Codex do with it?  $ calls a skill"
+        );
+        assert_eq!(hint(&pi[0]), "What should pi do with it?");
+        let p = Panel::layout(viewport(), 1.0, &lines(1));
+        let empty = p.prims(&f.look(&claude), &f.ink(0, None));
+        let typed = Field::lines("x");
+        let written = p.prims(
+            &Look {
+                line: &typed,
+                ..f.look(&claude)
+            },
+            &f.ink(0, None),
+        );
+        assert!(empty.len() > written.len(), "the hint, until there is text");
     }
 
     #[test]

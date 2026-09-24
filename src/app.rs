@@ -48,6 +48,7 @@ use crate::scene::{
 };
 use crate::select::{self, Handle};
 use crate::send;
+use crate::skills;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
@@ -278,6 +279,13 @@ struct Sending {
     scroll: f32,
     /// A press in the box is being dragged, selecting as it goes.
     selecting: bool,
+    /// The target's skills, read when it became the target.
+    skills: Vec<skills::Skill>,
+    /// Which of the skills answering the call being typed is picked.
+    pick: usize,
+    /// Where the call started whose menu `Esc` put away: it stays away
+    /// for that call, and comes back for the next one.
+    dismissed: Option<usize>,
 }
 
 impl Sending {
@@ -287,6 +295,54 @@ impl Sending {
             (send::Hit::Folder, Some(folder)) => folder,
             _ => &mut self.line,
         }
+    }
+
+    /// The call being typed in the instruction and the skills answering
+    /// it, best first — when the box has the keyboard, the target's
+    /// harness takes skills, any answer, and `Esc` has not put this
+    /// call's menu away.
+    fn menu(&self) -> Option<(skills::Token, Vec<usize>, skills::Call)> {
+        if self.focus != send::Hit::Line {
+            return None;
+        }
+        let call = skills::harness(&self.agents.get(self.target)?.kind)?.call;
+        let token = skills::token(self.line.value(), self.line.caret(), call)?;
+        if self.dismissed == Some(token.start) {
+            return None;
+        }
+        let matches = skills::matching(&self.skills, &token.query);
+        (!matches.is_empty()).then_some((token, matches, call))
+    }
+
+    /// The target is another agent: its own skills, and a fresh menu.
+    fn aim(&mut self, target: usize) {
+        self.target = target;
+        self.skills = self
+            .agents
+            .get(target)
+            .map(|a| skills::list(&a.kind, &a.cwd))
+            .unwrap_or_default();
+        self.pick = 0;
+        self.dismissed = None;
+    }
+
+    /// After an edit: a call no longer being typed lets go of the
+    /// menu it put away, and the pick stays on a row that exists.
+    fn settle(&mut self, edited: bool) {
+        let typing_a_call = self.agents.get(self.target).is_some_and(|a| {
+            skills::harness(&a.kind).is_some_and(|h| {
+                skills::token(self.line.value(), self.line.caret(), h.call).is_some()
+            })
+        });
+        if !typing_a_call {
+            self.dismissed = None;
+        }
+        let n = self.menu().map_or(0, |(_, m, _)| m.len());
+        self.pick = if edited || n == 0 {
+            0
+        } else {
+            self.pick.min(n - 1)
+        };
     }
 }
 
@@ -1008,6 +1064,25 @@ impl App {
         sending.scroll = sending.scroll.clamp(0.0, panel.max_scroll(lines.len()));
     }
 
+    /// Writes the call to the `at`th skill answering the call being
+    /// typed over what was typed of it.
+    fn take_skill(&mut self, at: usize) {
+        let Some(sending) = self.sending.as_mut() else {
+            return;
+        };
+        let Some((token, matches, call)) = sending.menu() else {
+            return;
+        };
+        let Some(skill) = matches.get(at).and_then(|&i| sending.skills.get(i)) else {
+            return;
+        };
+        let name = skill.name.clone();
+        skills::accept(&mut sending.line, &token, call, &name);
+        sending.settle(true);
+        self.follow_caret();
+        self.redraw();
+    }
+
     /// Whether a field has the keyboard.
     fn typing(&self) -> bool {
         self.sending.is_some() || self.renaming.is_some()
@@ -1059,6 +1134,9 @@ impl App {
     fn pasted_text(&mut self, text: &str) {
         if let Some(field) = self.field_in_hand() {
             field.paste(text);
+            if let Some(sending) = self.sending.as_mut() {
+                sending.settle(true);
+            }
             self.follow_caret();
             self.redraw();
         }
@@ -1461,7 +1539,13 @@ impl App {
             focus: send::Hit::Line,
             scroll: 0.0,
             selecting: false,
+            skills: Vec::new(),
+            pick: 0,
+            dismissed: None,
         });
+        if let Some(sending) = self.sending.as_mut() {
+            sending.aim(0);
+        }
         self.redraw();
     }
 
@@ -1957,6 +2041,7 @@ impl App {
         if let (Some(sending), Some(atlas), Some((panel, _))) =
             (&self.sending, self.atlas.as_ref(), self.send_panel(view))
         {
+            let menu = sending.menu();
             let look = send::Look {
                 agents: &sending.agents,
                 target: sending.target,
@@ -1964,6 +2049,12 @@ impl App {
                 line: &sending.line,
                 focus: sending.focus,
                 scroll: sending.scroll,
+                menu: menu.as_ref().map(|(_, matches, call)| send::Menu {
+                    skills: &sending.skills,
+                    matches,
+                    pick: sending.pick,
+                    call: *call,
+                }),
             };
             let ink = send::Ink {
                 atlas,
@@ -2013,9 +2104,24 @@ impl App {
                 return;
             };
             if button == Button::Left {
+                // The menu stands over the dialog, so it is pressed first.
+                let on_menu = self.sending.as_ref().and_then(|s| {
+                    let (_, matches, _) = s.menu()?;
+                    let k = s.line.caret_line(&lines);
+                    let m = panel.menu(&panel.boxed(&lines, s.scroll), k, matches.len(), s.pick);
+                    m.hit(x, y)
+                });
+                if let Some(at) = on_menu {
+                    self.take_skill(at);
+                    return self.update_cursor_icon();
+                }
                 let shift = self.modifiers.state().shift_key();
                 match (panel.hit(x, y), self.sending.as_mut(), self.atlas.as_ref()) {
-                    (Some(send::Hit::Target(i)), Some(s), _) => s.target = i,
+                    (Some(send::Hit::Target(i)), Some(s), _) => {
+                        if i != s.target {
+                            s.aim(i);
+                        }
+                    }
                     // A press in the box puts the caret under it — with
                     // Shift, carries the selection there — and a drag
                     // from it goes on selecting.
@@ -2025,6 +2131,7 @@ impl App {
                         let to = s.line.index_at(atlas, &lines, k, along);
                         s.line.go(to, shift);
                         s.selecting = true;
+                        s.settle(false);
                     }
                     (Some(hit), Some(s), _) => s.focus = hit,
                     // A press outside a modal panel closes it.
@@ -2390,6 +2497,36 @@ impl App {
                     return;
                 };
                 let in_box = sending.focus == send::Hit::Line;
+                // While a menu of skills is up, the arrows walk it, Tab
+                // or Enter takes the pick, and Esc puts the menu away —
+                // the dialog stays.
+                if let Some((token, matches, _)) = sending.menu() {
+                    let n = matches.len();
+                    match key {
+                        Key::Named(NamedKey::ArrowDown) => {
+                            sending.pick = (sending.pick + 1) % n;
+                            return self.redraw();
+                        }
+                        Key::Named(NamedKey::ArrowUp) => {
+                            sending.pick = (sending.pick + n - 1) % n;
+                            return self.redraw();
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            sending.dismissed = Some(token.start);
+                            return self.redraw();
+                        }
+                        Key::Named(NamedKey::Tab) => {
+                            let pick = sending.pick;
+                            return self.take_skill(pick);
+                        }
+                        Key::Named(NamedKey::Enter) if !mods.shift_key() => {
+                            let pick = sending.pick;
+                            return self.take_skill(pick);
+                        }
+                        _ => {}
+                    }
+                }
+                let mut edited = true;
                 match key {
                     Key::Named(NamedKey::Escape) => self.sending = None,
                     // Shift+Enter breaks the line, as it does in the
@@ -2403,7 +2540,8 @@ impl App {
                         // one, since the fields are two at most and the
                         // list is the thing being chosen from.
                         let n = sending.agents.len();
-                        sending.target = (sending.target + 1) % n.max(1);
+                        sending.aim((sending.target + 1) % n.max(1));
+                        edited = false;
                     }
                     // In the box the arrows and Home and End walk the
                     // lines as it shows them; with Ctrl, Home and End
@@ -2427,6 +2565,9 @@ impl App {
                     _ => {
                         edit(sending.writing(), key, mods);
                     }
+                }
+                if let Some(sending) = self.sending.as_mut() {
+                    sending.settle(edited);
                 }
                 self.follow_caret();
                 self.redraw();
@@ -2813,8 +2954,9 @@ impl App {
                     if found.is_empty() {
                         self.sending = None;
                     } else {
-                        sending.target = sending.target.min(found.len() - 1);
+                        let target = sending.target.min(found.len() - 1);
                         sending.agents = found;
+                        sending.aim(target);
                     }
                     self.redraw();
                 }

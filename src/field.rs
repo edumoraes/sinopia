@@ -95,7 +95,7 @@ pub struct Boxed<'a> {
 
 impl Boxed<'_> {
     /// Where line `k`'s top stands on screen.
-    fn top(&self, k: usize) -> f32 {
+    pub fn top(&self, k: usize) -> f32 {
         self.rect.y + self.inset + k as f32 * self.line_h - self.scroll
     }
 
@@ -162,7 +162,6 @@ impl Field {
     }
 
     /// The caret's place, in characters.
-    #[cfg(test)]
     pub fn caret(&self) -> usize {
         self.caret
     }
