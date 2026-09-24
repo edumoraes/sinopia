@@ -10,7 +10,7 @@ Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames,
 export to the agent and the CLI an agent asks the board through:
 
-- `cargo build` clean, `cargo test` with 888 tests.
+- `cargo build` clean, `cargo test` with 897 tests.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -240,12 +240,13 @@ export to the agent and the CLI an agent asks the board through:
   board's text, which is inventory. Every field takes the keys a text
   box does: Shift, Ctrl and the pointer select, `Ctrl+A` takes all,
   `Ctrl+C`, `Ctrl+X` and `Ctrl+V` go through the system clipboard, and
-  held keys repeat. Typing the target's mark — `/` for Claude Code,
+  held keys repeat — never Enter, Tab or Esc. Typing the target's mark — `/` for Claude Code,
   OpenCode, Gemini CLI and Crush, `$` for Codex — opens a menu of that
   harness's skills, read from where that harness reads them, plugins
   included for Claude Code; the arrows pick one and Tab or Enter writes
   its call. A call reaches Claude Code typed and the rest pasted, since
-  a slash inside a paste is text there. With nothing selected, or no
+  a slash inside a paste is text there — and is never typed at an agent
+  herdr says is waiting on an answer. With nothing selected, or no
   agent running, the key opens nothing and says which half is missing.
   A layer's name is now the person's to give: a second press on a card
   opens it for editing, and a frame is born `Frame 1` rather than

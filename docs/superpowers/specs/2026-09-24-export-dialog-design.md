@@ -129,3 +129,25 @@ small to read.
   same `O_NONBLOCK` open and regular-file check a capped read uses: a
   FIFO named `SKILL.md` cannot park the window's thread.
 - A description is only ever drawn, and drawn cut to its row.
+- herdr's `agent prompt` refuses a blocked agent before any input is
+  sent; the keys a call is typed with go ahead of it and would not be.
+  So the pane's status is asked of herdr right before typing, and a
+  blocked agent — or one herdr cannot say anything about — is sent
+  nothing: typed into the question it holds open, a digit in a name
+  could pick one of its options.
+- A held key repeats in a field only if it writes or moves. Enter,
+  Tab and Esc finish something, and a repeat of them would send the
+  unfinished prompt, re-aim the dialog or close it.
+
+## What a review found
+
+An independent read of the branch found eight faults, each now fixed
+under a test of its own: held Enter/Tab/Esc repeating through the
+dialog's commands; the typed call slipping past herdr's blocked guard;
+a Claude plugin's skill offered under its frontmatter's name instead of
+its folder's; End one letter short on a word broken mid-word; a cut
+that neither scrolled nor settled the menu; the menu hanging over the
+rows once its line was scrolled away; the name fields taking a
+mebibyte of paste; and the picture's ceiling blurring small scopes at
+scale 2. One more predated the branch — the target kept by index across
+a re-listing that reorders — and is fixed with them.
