@@ -69,7 +69,8 @@ checkout — and the running instance stay untouched.
   refused while the real `omawhite` answered, and made without it. The
   clipboard's `Backend error` on the way out predates the rename: the old
   binary prints it too.
-- [ ] 12. PR stacked on #11; CI, Packaging and Plugin green.
+- [x] 12. PR stacked on #11 (#12); CI, Packaging and Plugin green — the
+  Recipes job ran `native-packages validate` and `desktop-file-validate`.
 
 ## After merging, on this machine
 
