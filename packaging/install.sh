@@ -38,5 +38,5 @@ install -Dm644 -t "$share/doc/$name" "$here/README.md"
 
 install -Dm755 -t "$share/omawhite/omarchy" "$here/contrib/omarchy/sinopia"
 install -Dm644 -t "$share/omawhite/plugin" "$here"/plugin/*
-install -Dm644 -t "$share/omawhite/skills/omawhite" "$here/skills/omawhite/SKILL.md"
-install -Dm755 -t "$share/omawhite/skills/omawhite" "$here/skills/omawhite/install.sh"
+install -Dm644 -t "$share/omawhite/skills/sinopia" "$here/skills/sinopia/SKILL.md"
+install -Dm755 -t "$share/omawhite/skills/sinopia" "$here/skills/sinopia/install.sh"

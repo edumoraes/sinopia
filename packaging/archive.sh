@@ -33,7 +33,7 @@ install -m755 "$bin" "$work/$name/omawhite"
 	LICENSE THIRD-PARTY.md README.md \
 	packaging/install.sh packaging/applications/omawhite.desktop \
 	assets/logo/app-icon.svg assets/fonts/LiberationSans-LICENSE.txt \
-	contrib/omarchy/sinopia plugin skills/omawhite \
+	contrib/omarchy/sinopia plugin skills/sinopia \
 	"$work/$name/")
 
 # Owned by nobody in particular, in a fixed order: the archive says

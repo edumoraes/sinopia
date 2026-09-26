@@ -16,7 +16,7 @@ The rest is opt-in, for each person who wants it:
     omarchy hook install font-set /usr/share/omawhite/omarchy/sinopia
 
   The skill that lets the agents here read and add frames
-    /usr/share/omawhite/skills/omawhite/install.sh
+    /usr/share/omawhite/skills/sinopia/install.sh
 
 Boards live in ~/.local/share/omawhite, and removing the package leaves
 them there.
