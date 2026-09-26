@@ -15,6 +15,7 @@ use image::ImageEncoder as _;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+use winit::platform::wayland::WindowAttributesExtWayland as _;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -3703,8 +3704,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
+        // The app id is the desktop entry's name: what the compositor and
+        // the launcher match the window to, and so what gives it an icon.
         let attrs = Window::default_attributes()
-            .with_title(format!("Omawhite — {}", self.project().label()));
+            .with_title(format!("Omawhite — {}", self.project().label()))
+            .with_name("omawhite", "");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => return self.fail(event_loop, anyhow::anyhow!("creating window: {e}")),
