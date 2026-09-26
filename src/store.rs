@@ -56,6 +56,29 @@ pub fn data_root(xdg_data_home: Option<&str>, home: &str) -> PathBuf {
     }
 }
 
+/// What the data directory was called while the board went by its
+/// working name, Omawhite.
+const LEGACY_DIR: &str = "omawhite";
+
+/// The directory the boards were left in under the working name, beside
+/// `root`, when they still have to be brought over: `root` does not exist
+/// yet and the old one is a directory of its own. A symlink is somebody's
+/// arrangement and is not moved, and a `root` that exists means the move
+/// was made, or that there was never anything to move.
+///
+/// The move itself is one `rename`, so the boards, the blobs and the
+/// brushes arrive whole or not at all — and it is the caller's, since
+/// whether an instance under the old name is still writing there is a
+/// question for the socket.
+pub fn left_behind(root: &Path) -> Option<PathBuf> {
+    let old = root.parent()?.join(LEGACY_DIR);
+    if root.symlink_metadata().is_ok() {
+        return None;
+    }
+    let dir = old.symlink_metadata().ok()?;
+    dir.is_dir().then_some(old)
+}
+
 impl Store {
     /// Opens (creating if needed) the layout under `root`, directories at
     /// 0700.
@@ -771,6 +794,45 @@ mod tests {
             data_root(Some(""), "/home/edu"),
             PathBuf::from("/home/edu/.local/share/sinopia")
         );
+    }
+
+    #[test]
+    fn the_boards_left_under_the_working_name_are_found_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sinopia");
+        let old = tmp.path().join("omawhite");
+        // Nothing to bring over.
+        assert_eq!(left_behind(&root), None);
+        // The old directory alone: that is the move to make.
+        std::fs::create_dir(&old).unwrap();
+        assert_eq!(left_behind(&root), Some(old.clone()));
+        // Once the new one exists the move is made, whatever is left.
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(left_behind(&root), None);
+    }
+
+    #[test]
+    fn a_symlink_is_not_ours_to_move_either_way() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("sinopia");
+        let old = tmp.path().join("omawhite");
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        // The old name pointing somewhere is the person's arrangement.
+        std::os::unix::fs::symlink(&elsewhere, &old).unwrap();
+        assert_eq!(left_behind(&root), None);
+        // A new name that is a dangling link still stands as a name.
+        std::fs::remove_file(&old).unwrap();
+        std::fs::create_dir(&old).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("gone"), &root).unwrap();
+        assert_eq!(left_behind(&root), None);
+    }
+
+    #[test]
+    fn a_file_under_the_old_name_is_not_a_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("omawhite"), b"").unwrap();
+        assert_eq!(left_behind(&tmp.path().join("sinopia")), None);
     }
 
     #[test]

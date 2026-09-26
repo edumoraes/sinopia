@@ -18,7 +18,7 @@ use std::sync::Arc;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use winit::window::Window;
 
-use crate::project::EXTENSION;
+use crate::project::{EXTENSION, LEGACY_EXTENSION};
 
 /// What the user said about work that would be lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +56,7 @@ const FILTER: &str = "Sinopia board";
 pub fn open(window: &Window, sink: Sink) {
     let dialog = FileDialog::new()
         .set_title("Open board")
-        .add_filter(FILTER, &[EXTENSION, "json"])
+        .add_filter(FILTER, &[EXTENSION, LEGACY_EXTENSION, "json"])
         .set_parent(window);
     spawn(
         "open",

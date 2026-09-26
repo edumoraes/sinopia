@@ -14,6 +14,11 @@ use crate::doc::Document;
 /// store writes — a board is a board wherever it is kept.
 pub const EXTENSION: &str = "sinopia";
 
+/// What a project file was called while the board went by its working
+/// name, Omawhite. Still offered by Open, since a file saved under it is
+/// somebody's work and the schema inside never changed; never written.
+pub const LEGACY_EXTENSION: &str = "omawhite";
+
 /// What a document with no name of its own is called.
 const UNTITLED: &str = "untitled";
 

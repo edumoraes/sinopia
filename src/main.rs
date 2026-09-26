@@ -253,8 +253,37 @@ fn default_socket_path() -> anyhow::Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(dir).join("sinopia.sock"))
 }
 
+/// The socket an instance listened on while the board went by its working
+/// name, Omawhite.
+const LEGACY_SOCKET: &str = "omawhite.sock";
+
+/// Opens the store, bringing the boards over from where the working name
+/// kept them the first time round — unless an instance under that name is
+/// still running. Its unsaved drafts are written there, so moving the
+/// directory would lose them, and opening an empty store beside it would
+/// leave every board behind for good.
 fn open_default_store() -> anyhow::Result<Store> {
     let xdg = std::env::var("XDG_DATA_HOME").ok();
     let home = std::env::var("HOME").context("HOME not set")?;
-    Store::open(store::data_root(xdg.as_deref(), &home))
+    let root = store::data_root(xdg.as_deref(), &home);
+    if let Some(old) = store::left_behind(&root) {
+        anyhow::ensure!(
+            !legacy_instance_running(),
+            "the boards are still in {old:?}, where a running omawhite keeps them; \
+             close it, then start sinopia again to bring them over"
+        );
+        std::fs::rename(&old, &root)
+            .with_context(|| format!("bringing the boards over from {old:?} to {root:?}"))?;
+        log::info!("brought the boards over from {old:?} to {root:?}");
+    }
+    Store::open(root)
+}
+
+/// Whether an instance under the working name answers on its socket. A
+/// socket file nobody listens on is what a crash leaves, and does not
+/// count.
+fn legacy_instance_running() -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|dir| std::path::PathBuf::from(dir).join(LEGACY_SOCKET))
+        .is_some_and(|path| std::os::unix::net::UnixStream::connect(path).is_ok())
 }
