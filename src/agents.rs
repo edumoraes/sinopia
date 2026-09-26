@@ -399,7 +399,7 @@ pub fn send(agent: &Agent, text: &str) -> anyhow::Result<()> {
                 anyhow::ensure!(keyed.success(), "tmux would not type into {pane}");
             }
             let text = pasted.as_str();
-            let buffer = "omawhite";
+            let buffer = "sinopia";
             // load-buffer reads the text from stdin, so it is never a
             // word on a command line.
             let mut child = Command::new("tmux")

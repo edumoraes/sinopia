@@ -1,4 +1,4 @@
-//! omawhite — local-first whiteboard for Omarchy (see ARCHITECTURE.md).
+//! sinopia — local-first whiteboard for Omarchy (see ARCHITECTURE.md).
 //!
 //! Single instance: if the socket answers, the intent is forwarded and this
 //! process exits; otherwise this process becomes the main instance.
@@ -100,7 +100,7 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // §5: a second omawhite becomes a command on the socket, not a second window.
+    // §5: a second sinopia becomes a command on the socket, not a second window.
     if let Some(reply) = try_forward(&socket_path, &request)? {
         // Read through the module that owns the schema. Poking at a
         // `Value` was a second, looser parser — and it failed open: a
@@ -117,14 +117,14 @@ fn main() -> anyhow::Result<()> {
     // Nobody listening: actions that need a live instance fail explicitly.
     match action {
         Action::Export(_) => {
-            anyhow::bail!("no omawhite instance running; open the board before exporting")
+            anyhow::bail!("no sinopia instance running; open the board before exporting")
         }
         // The board that is *open* is the one being read and written,
         // with the work nobody has saved yet inside it. There is nothing
         // to answer without one, and opening a window to answer would
         // answer about a different board.
         Action::Frames | Action::Read { .. } | Action::Add(_) | Action::Layer(_) => {
-            anyhow::bail!("no omawhite instance running; open the board first")
+            anyhow::bail!("no sinopia instance running; open the board first")
         }
         Action::Shutdown => {
             log::info!("no instance running; nothing to shut down");
@@ -187,7 +187,7 @@ fn destination(to: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBu
 /// and binds nobody.
 fn frame_id(socket: &std::path::Path, asked: &str) -> anyhow::Result<String> {
     let reply = try_forward(socket, &Request::Frames)?
-        .context("no omawhite instance running; open the board first")?;
+        .context("no sinopia instance running; open the board first")?;
     let frames = match parse_event(&reply)? {
         Event::Frames { frames } => frames,
         Event::Denied { reason, .. } => anyhow::bail!("the board refused the listing: {reason}"),
@@ -200,7 +200,7 @@ fn frame_id(socket: &std::path::Path, asked: &str) -> anyhow::Result<String> {
     match by_name.as_slice() {
         [one] => Ok(one.id.clone()),
         [] => anyhow::bail!(
-            "no frame {asked:?} on the board that is open; `omawhite agent frames` lists them"
+            "no frame {asked:?} on the board that is open; `sinopia agent frames` lists them"
         ),
         many => anyhow::bail!(
             "{} frames go by {asked:?} — ask for one by id: {}",
@@ -218,7 +218,7 @@ fn frame_id(socket: &std::path::Path, asked: &str) -> anyhow::Result<String> {
 /// a frame's name.
 fn layer_listing(socket: &std::path::Path) -> anyhow::Result<Vec<editor::Listed>> {
     let reply = try_forward(socket, &Request::Layers)?
-        .context("no omawhite instance running; open the board first")?;
+        .context("no sinopia instance running; open the board first")?;
     match parse_event(&reply)? {
         Event::Layers { layers } => Ok(layers),
         Event::Denied { reason, .. } => anyhow::bail!("the board refused the listing: {reason}"),
@@ -250,7 +250,7 @@ fn open_recent(store: &Store, entry: store::IndexEntry) -> anyhow::Result<Projec
 fn default_socket_path() -> anyhow::Result<std::path::PathBuf> {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .context("XDG_RUNTIME_DIR not set (required for the socket, §5)")?;
-    Ok(std::path::PathBuf::from(dir).join("omawhite.sock"))
+    Ok(std::path::PathBuf::from(dir).join("sinopia.sock"))
 }
 
 fn open_default_store() -> anyhow::Result<Store> {

@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn bind_creates_private_socket() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("omawhite.sock");
+        let path = tmp.path().join("sinopia.sock");
         let server = Server::bind(&path).unwrap();
         assert_eq!(server.path(), path);
         let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
@@ -156,7 +156,7 @@ mod tests {
         // single file they simply failed for the length of a graft or a
         // render.
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("omawhite.sock");
+        let path = tmp.path().join("sinopia.sock");
         let server = Server::bind(&path).unwrap();
         let (started, waiting) = std::sync::mpsc::channel();
         let started = std::sync::Mutex::new(started);
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn bind_replaces_stale_socket_but_respects_live_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("omawhite.sock");
+        let path = tmp.path().join("sinopia.sock");
 
         // Stale: bind + drop leaves the file → the next bind takes over.
         drop(Server::bind(&path).unwrap());
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn request_gets_handler_reply_via_forward() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("omawhite.sock");
+        let path = tmp.path().join("sinopia.sock");
         let server = Server::bind(&path).unwrap();
         server.serve(|req| match req {
             Request::Ping => Event::Ready {
@@ -235,7 +235,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
 
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("omawhite.sock");
+        let path = tmp.path().join("sinopia.sock");
         let server = Server::bind(&path).unwrap();
         server.serve(|_| Event::Ready {
             id: "x".into(),

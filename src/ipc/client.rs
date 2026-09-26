@@ -1,6 +1,6 @@
 //! Client side of the socket: single instance by forwarding (§5).
 //!
-//! A second `omawhite` opens no second window: if the socket answers, the
+//! A second `sinopia` opens no second window: if the socket answers, the
 //! intent is forwarded and the process exits.
 
 use std::io::{BufReader, ErrorKind, Write};
@@ -66,7 +66,7 @@ mod tests {
     fn forward_returns_none_when_nothing_listens() {
         let tmp = tempfile::tempdir().unwrap();
         // Socket never created.
-        let missing = tmp.path().join("omawhite.sock");
+        let missing = tmp.path().join("sinopia.sock");
         assert_eq!(try_forward(&missing, &Request::Ping).unwrap(), None);
 
         // Stale socket: listener created and dropped (file stays behind).

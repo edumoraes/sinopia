@@ -908,7 +908,7 @@ impl App {
         let Some(w) = &self.window else { return };
         let project = self.project();
         let mark = if project.dirty { "• " } else { "" };
-        w.set_title(&format!("{mark}Omawhite — {}", project.label()));
+        w.set_title(&format!("{mark}Sinopia — {}", project.label()));
     }
 
     /// Closes tab `index`, asking about unsaved work first. A draft is
@@ -3707,8 +3707,8 @@ impl ApplicationHandler<UserEvent> for App {
         // The app id is the desktop entry's name: what the compositor and
         // the launcher match the window to, and so what gives it an icon.
         let attrs = Window::default_attributes()
-            .with_title(format!("Omawhite — {}", self.project().label()))
-            .with_name("omawhite", "");
+            .with_title(format!("Sinopia — {}", self.project().label()))
+            .with_name("sinopia", "");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => return self.fail(event_loop, anyhow::anyhow!("creating window: {e}")),

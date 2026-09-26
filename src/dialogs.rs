@@ -49,7 +49,7 @@ pub enum Reply {
 
 pub type Sink = Arc<dyn Fn(Reply) + Send + Sync>;
 
-const FILTER: &str = "Omawhite board";
+const FILTER: &str = "Sinopia board";
 
 /// Asks for boards to open. Several at once is allowed: each becomes a
 /// tab.
@@ -126,7 +126,7 @@ pub fn confirm_close(window: &Window, sink: Sink, key: String, label: &str) {
 /// wait for it.
 fn spawn(what: &'static str, ask: impl FnOnce() -> Reply + Send + 'static, sink: Sink) {
     let spawned = std::thread::Builder::new()
-        .name(format!("omawhite-{}", what.replace(' ', "-")))
+        .name(format!("sinopia-{}", what.replace(' ', "-")))
         .spawn(move || sink(ask()));
     if let Err(e) = spawned {
         log::error!("{what} dialog: {e}");

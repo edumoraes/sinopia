@@ -400,17 +400,17 @@ mod tests {
     #[test]
     fn truncating_returns_what_already_fits() {
         let a = atlas();
-        let wide = a.measure("notes.omawhite") + 10.0;
-        assert_eq!(a.truncate("notes.omawhite", wide), "notes.omawhite");
+        let wide = a.measure("notes.sinopia") + 10.0;
+        assert_eq!(a.truncate("notes.sinopia", wide), "notes.sinopia");
     }
 
     #[test]
     fn a_truncated_label_fits_its_budget() {
         let a = atlas();
-        let budget = a.measure("notes.omawhite") / 2.0;
-        let cut = a.truncate("notes.omawhite", budget);
+        let budget = a.measure("notes.sinopia") / 2.0;
+        let cut = a.truncate("notes.sinopia", budget);
         assert!(cut.ends_with('…'), "{cut:?}");
-        assert!(cut.chars().count() < "notes.omawhite".chars().count());
+        assert!(cut.chars().count() < "notes.sinopia".chars().count());
         assert!(a.measure(&cut) <= budget);
     }
 

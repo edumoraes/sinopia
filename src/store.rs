@@ -47,12 +47,12 @@ pub struct Store {
     root: PathBuf,
 }
 
-/// Resolves the data directory: `$XDG_DATA_HOME/omawhite` or
-/// `~/.local/share/omawhite`. Pure so it stays testable.
+/// Resolves the data directory: `$XDG_DATA_HOME/sinopia` or
+/// `~/.local/share/sinopia`. Pure so it stays testable.
 pub fn data_root(xdg_data_home: Option<&str>, home: &str) -> PathBuf {
     match xdg_data_home {
-        Some(x) if !x.is_empty() => Path::new(x).join("omawhite"),
-        _ => Path::new(home).join(".local/share/omawhite"),
+        Some(x) if !x.is_empty() => Path::new(x).join("sinopia"),
+        _ => Path::new(home).join(".local/share/sinopia"),
     }
 }
 
@@ -260,7 +260,7 @@ impl Store {
 /// Writes `doc` as a project file at a path the user chose.
 ///
 /// Atomic like everything else, but it keeps the process umask instead of
-/// forcing 0600: that mode belongs to `~/.local/share/omawhite` (§9.3),
+/// forcing 0600: that mode belongs to `~/.local/share/sinopia` (§9.3),
 /// and a project saved into a shared directory is the user's to share.
 ///
 /// The path is not measured against the export allowlist (§8.2). That
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn open_creates_private_layout() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("omawhite");
+        let root = tmp.path().join("sinopia");
         let store = Store::open(&root).unwrap();
         assert_eq!(store.root(), root);
         for dir in [
@@ -639,7 +639,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("d")).unwrap();
         let doc = doc_with_title("plan");
-        let path = tmp.path().join("plan.omawhite");
+        let path = tmp.path().join("plan.sinopia");
         store.remember_file_at(&doc, &path, 100).unwrap();
 
         let index = store.index().unwrap();
@@ -659,7 +659,7 @@ mod tests {
         let store = Store::open(tmp.path().join("d")).unwrap();
         let doc = doc_with_title("plan");
         store.save_at(&doc, 100).unwrap();
-        let path = tmp.path().join("plan.omawhite");
+        let path = tmp.path().join("plan.sinopia");
         store.remember_file_at(&doc, &path, 200).unwrap();
 
         let index = store.index().unwrap();
@@ -672,7 +672,7 @@ mod tests {
     fn two_documents_written_to_one_path_leave_one_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("d")).unwrap();
-        let path = tmp.path().join("plan.omawhite");
+        let path = tmp.path().join("plan.sinopia");
         store
             .remember_file_at(&doc_with_title("first"), &path, 100)
             .unwrap();
@@ -760,16 +760,16 @@ mod tests {
     fn data_root_prefers_xdg_and_falls_back_to_home() {
         assert_eq!(
             data_root(Some("/custom/data"), "/home/edu"),
-            PathBuf::from("/custom/data/omawhite")
+            PathBuf::from("/custom/data/sinopia")
         );
         assert_eq!(
             data_root(None, "/home/edu"),
-            PathBuf::from("/home/edu/.local/share/omawhite")
+            PathBuf::from("/home/edu/.local/share/sinopia")
         );
         // Empty XDG counts as unset (XDG basedir spec).
         assert_eq!(
             data_root(Some(""), "/home/edu"),
-            PathBuf::from("/home/edu/.local/share/omawhite")
+            PathBuf::from("/home/edu/.local/share/sinopia")
         );
     }
 
@@ -777,13 +777,13 @@ mod tests {
     fn writing_a_blob_names_it_by_its_sha256() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path().join("d")).unwrap();
-        let hash = store.write_blob(b"omawhite").unwrap();
+        let hash = store.write_blob(b"sinopia").unwrap();
         assert_eq!(
             hash,
-            "6d72b889920b8d63704bf588d33b5a9d09ac16f33f7a8a201dcd618136cd94bf"
+            "bd036ee09bf2f6da01fd30ebaf25dd2ebc8833b10ea3809c2c126738d96b4b0f"
         );
         let path = store.root().join("blobs").join(&hash);
-        assert_eq!(std::fs::read(&path).unwrap(), b"omawhite");
+        assert_eq!(std::fs::read(&path).unwrap(), b"sinopia");
         assert_eq!(mode_of(&path), 0o600);
     }
 
@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn a_project_file_roundtrips_through_a_path_of_its_own() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("notes.omawhite");
+        let path = tmp.path().join("notes.sinopia");
         let doc = doc_with_title("auth flow");
         save_document_to(&path, &doc).unwrap();
         assert_eq!(load_document_from(&path).unwrap(), doc);
@@ -836,21 +836,21 @@ mod tests {
     #[test]
     fn saving_a_project_leaves_no_temp_file_behind() {
         let tmp = tempfile::tempdir().unwrap();
-        save_document_to(&tmp.path().join("notes.omawhite"), &doc_with_title("t")).unwrap();
+        save_document_to(&tmp.path().join("notes.sinopia"), &doc_with_title("t")).unwrap();
         let left: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert_eq!(left, ["notes.omawhite"]);
+        assert_eq!(left, ["notes.sinopia"]);
     }
 
     #[test]
     fn a_project_file_keeps_the_umask_not_the_stores_0600() {
-        // 0600 is what `~/.local/share/omawhite` is for (§9.3). Forcing it
+        // 0600 is what `~/.local/share/sinopia` is for (§9.3). Forcing it
         // on a file the user placed in a shared directory would quietly
         // undo the sharing they asked for.
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("notes.omawhite");
+        let path = tmp.path().join("notes.sinopia");
         save_document_to(&path, &doc_with_title("t")).unwrap();
         assert_ne!(mode_of(&path), 0o600);
     }
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn saving_a_project_replaces_what_was_there() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("notes.omawhite");
+        let path = tmp.path().join("notes.sinopia");
         save_document_to(&path, &doc_with_title("first")).unwrap();
         save_document_to(&path, &doc_with_title("second")).unwrap();
         assert_eq!(load_document_from(&path).unwrap().title, "second");
@@ -867,27 +867,27 @@ mod tests {
     #[test]
     fn a_project_file_that_is_not_a_board_is_an_error_not_a_panic() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("notes.omawhite");
+        let path = tmp.path().join("notes.sinopia");
         std::fs::write(&path, b"{ not json").unwrap();
         assert!(
             load_document_from(&path)
                 .unwrap_err()
                 .to_string()
-                .contains("notes.omawhite")
+                .contains("notes.sinopia")
         );
     }
 
     #[test]
     fn a_project_file_from_a_newer_schema_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("notes.omawhite");
+        let path = tmp.path().join("notes.sinopia");
         let json = doc_with_title("t")
             .to_json()
             .unwrap()
             .replace("\"schema\": 1", "\"schema\": 999");
         std::fs::write(&path, json).unwrap();
         let err = load_document_from(&path).unwrap_err().to_string();
-        assert!(err.contains("notes.omawhite"), "{err}");
+        assert!(err.contains("notes.sinopia"), "{err}");
     }
 
     #[test]
@@ -895,7 +895,7 @@ mod tests {
         // The parse is the guard, and it does not loosen for a file that
         // came from outside the store.
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("hostile.omawhite");
+        let path = tmp.path().join("hostile.sinopia");
         std::fs::write(
             &path,
             r#"{"schema":1,"id":"01","title":"t",
@@ -910,15 +910,15 @@ mod tests {
     #[test]
     fn a_missing_project_file_is_an_error_that_names_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("gone.omawhite");
+        let path = tmp.path().join("gone.sinopia");
         let err = load_document_from(&path).unwrap_err().to_string();
-        assert!(err.contains("gone.omawhite"), "{err}");
+        assert!(err.contains("gone.sinopia"), "{err}");
     }
 
     #[test]
     fn saving_into_a_directory_that_is_not_there_fails_without_a_stray_temp() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("nope").join("notes.omawhite");
+        let path = tmp.path().join("nope").join("notes.sinopia");
         assert!(save_document_to(&path, &doc_with_title("t")).is_err());
         assert!(!tmp.path().join("nope").exists());
     }
