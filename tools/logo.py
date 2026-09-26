@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draw the Omawhite marks.
+"""Draw the Sinopia marks.
 
 Every mark is one monoline geometry on a 24-grid: round caps and joins, the
 grid line icons are drawn on. The geometry lives here and only here --
@@ -196,29 +196,31 @@ EXPLORATIONS = [
 # straights at the same weight, so the two halves are one drawing and the
 # file leans on no font being installed anywhere.
 #
-# Baseline 20, x-height 10, cap and ascender 6 -- centrelines, not edges.
+# Baseline 20, x-height 10, cap and ascender 6, descender 24 -- centrelines,
+# not edges.
 
-BASE, CAP = 20, 6
+BASE, CAP, DESC = 20, 6, 24
 
 LETTERS = {
-    "O": (12, [circle(6, 13, 6)]),
-    "m": (14, [path("M0 20V13.5A3.5 3.5 0 0 1 7 13.5V20"),
-               path("M7 20V13.5A3.5 3.5 0 0 1 14 13.5V20")]),
-    "a": (10, [circle(5, 15, 5), line(10, 10, 10, 20)]),
-    "w": (14, [path("M0 10L3.5 20L7 12L10.5 20L14 10")]),
-    "h": (7,  [line(0, 6, 0, 20), path("M0 13.5A3.5 3.5 0 0 1 7 13.5V20")]),
+    "S": (8,  [path("M7.2766 8.2793A4 3 0 1 0 4 13A4 3 0 1 1 0.7234 17.7207")]),
     "i": (0,  [line(0, 10, 0, 20), circle(0, 6, STROKE / 2, fill=True)]),
-    "t": (6,  [path("M3 6.5V17C3 19 4.3 20 6 20"), line(0.5, 10, 6, 10)]),
-    "e": (10, [path("M10 15A5 5 0 1 0 8.53 18.54"), line(0, 15, 10, 15)]),
+    "n": (7,  [line(0, 10, 0, 20), path("M0 13.5A3.5 3.5 0 0 1 7 13.5V20")]),
+    "o": (10, [circle(5, 15, 5)]),
+    "p": (10, [circle(5, 15, 5), line(0, 10, 0, DESC)]),
+    "a": (10, [circle(5, 15, 5), line(10, 10, 10, 20)]),
 }
 
-WORD = "Omawhite"
+WORD = "Sinopia"
+
+# How far down the word reaches: a descender takes the page down with it.
+DESCENDERS = {"p"}
+FOOT = DESC if DESCENDERS & set(WORD) else BASE
 
 # The gap after each pair, centre to centre. A round letter beside a round one
 # needs less air than two flats do or the word reads spotty, so the spacing is
-# a table and not one number -- eight letters is small enough to say it plainly.
+# a table and not one number -- seven letters is small enough to say it plainly.
 GAP = 3.4
-KERN = {"Om": 3.0, "ma": 3.4, "aw": 2.9, "wh": 2.9, "hi": 3.9, "it": 3.9, "te": 3.2}
+KERN = {"Si": 3.0, "in": 3.9, "no": 3.4, "op": 3.0, "pi": 3.0, "ia": 3.4}
 
 
 def wordmark(dx=0, dy=0):
@@ -292,7 +294,7 @@ def _page(draw, s, tx, ty, word, left, right, dy=0.0):
             f'stroke-width="{n(STROKE / s)}">' + "".join(draw()) + "</g>")
     pad = STROKE / 2 + 1
     top = min(y0 * s + ty, CAP + dy) - pad
-    bottom = max(y1 * s + ty, BASE + dy) + pad
+    bottom = max(y1 * s + ty, FOOT + dy) + pad
     return (f"{n(left - pad)} {n(top)} {n(right - left + 2 * pad)} {n(bottom - top)}",
             [icon] + word)
 
