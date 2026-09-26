@@ -1,6 +1,10 @@
-# Omawhite
+# Development
 
-Local-first whiteboard for Omarchy with export for the agent. Native Rust
+What exists today, how it is driven, and how the code is laid out. The
+project itself is presented in [README.md](README.md).
+
+Sinopia — the code still carries the working name, Omawhite — is a
+local-first whiteboard for Omarchy with export for the agent. Native Rust
 engine (winit + wgpu). See [ARCHITECTURE.md](ARCHITECTURE.md) — a **draft**:
 the real architecture emerges from development.
 
