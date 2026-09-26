@@ -65,15 +65,15 @@ jobs:
       # release's and not an archive GitHub makes on request.
       - name: Source archive
         run: |
-          git archive --format=tar.gz --prefix="omawhite-${GITHUB_REF_NAME#v}/" \
-            -o "dist/omawhite-${GITHUB_REF_NAME}-source.tar.gz" HEAD
+          git archive --format=tar.gz --prefix="sinopia-${GITHUB_REF_NAME#v}/" \
+            -o "dist/sinopia-${GITHUB_REF_NAME}-source.tar.gz" HEAD
       - name: Checksums
         working-directory: dist
         run: sha256sum -- * > checksums.txt
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
-          name: Omawhite ${{ github.ref_name }}
+          name: Sinopia ${{ github.ref_name }}
           body_path: packaging/release-notes/${{ github.ref_name }}.md
           generate_release_notes: false
           # A tag with a suffix (v0.2.0-rc1) is a pre-release: it stays

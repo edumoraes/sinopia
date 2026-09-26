@@ -58,7 +58,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y desktop-file-utils
-          desktop-file-validate packaging/applications/omawhite.desktop
+          desktop-file-validate packaging/applications/sinopia.desktop
       # From the published release: both archives are downloaded and held
       # to its checksums.txt before a recipe names them.
       - name: Fill the recipes in
@@ -84,7 +84,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [omawhite-bin, omawhite]
+        package: [sinopia-bin, sinopia]
     steps:
       - uses: actions/download-artifact@v7
         with:
@@ -103,11 +103,11 @@ jobs:
           chown -R builder: /home/builder/recipe
           su builder -c 'cd ~/recipe && makepkg --syncdeps --noconfirm'
           pacman -U --noconfirm /home/builder/recipe/*.pkg.tar.zst
-          omawhite --version
-          test -f /usr/share/applications/omawhite.desktop
-          test -f /usr/share/omawhite/plugin/manifest.json
+          sinopia --version
+          test -f /usr/share/applications/sinopia.desktop
+          test -f /usr/share/sinopia/plugin/manifest.json
           pacman -R --noconfirm "$PACKAGE"
-          test ! -e /usr/bin/omawhite
+          test ! -e /usr/bin/sinopia
 
   publish:
     name: Publish

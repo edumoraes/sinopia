@@ -1,5 +1,5 @@
 # Maintainer: Eduardo de Moraes <edumoraesdg@gmail.com>
-pkgname=omawhite-git
+pkgname=sinopia-git
 pkgver=@VERSION@
 pkgrel=1
 pkgdesc="Local-first whiteboard for Omarchy with export for the agent"
@@ -18,8 +18,8 @@ optdepends=('xdg-desktop-portal-gtk: a file chooser for Save and Open'
             'tmux: sending a board to an agent running in tmux'
             'fontconfig: lettering the chrome in the desktop monospace face'
             'quickshell: the bar widget, on the Omarchy shell')
-provides=("omawhite=${pkgver}")
-conflicts=('omawhite' 'omawhite-bin')
+provides=("sinopia=${pkgver}")
+conflicts=('sinopia' 'sinopia-bin')
 # Cargo.toml's release profile strips the binary: nothing to split out.
 options=('!debug')
 source=("${pkgname}::git+${url}.git")
@@ -56,5 +56,5 @@ check() {
 
 package() {
   cd "$pkgname"
-  sh packaging/install.sh target/release/omawhite "$pkgdir" "$pkgname"
+  sh packaging/install.sh target/release/sinopia "$pkgdir" "$pkgname"
 }
