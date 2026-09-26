@@ -33,3 +33,11 @@ winit = "0.30.13"
 # validates the WGSL, which otherwise fails only at the first window.
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 tempfile = "3.27.0"
+
+# What a package ships (§10.1): link-time optimised and stripped. Thin
+# rather than fat, since every tag and every source install pays for
+# this build.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
