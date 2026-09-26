@@ -1,0 +1,156 @@
+name: Packaging
+
+on:
+  # A change to the recipes or their configuration is checked for shape.
+  pull_request:
+    paths:
+      - native-packages.yaml
+      - packaging/**
+      - .github/workflows/packaging.yml
+  # A published release's recipes built, checked and — when asked —
+  # published again: the way to put a release on the AUR by hand.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A published release, such as v1.2.3 (empty only validates)
+        type: string
+        default: ''
+      publish:
+        description: Attach the recipes to the release and push them to the AUR
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: false
+    secrets:
+      AUR_SSH_KEY:
+        required: false
+      AUR_KNOWN_HOSTS:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  recipes:
+    name: Recipes
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      # The version native-packages.yaml pins, read from there so the two
+      # cannot drift apart.
+      - name: Install native-packages
+        run: |
+          version=$(ruby -ryaml -e 'print YAML.safe_load_file("native-packages.yaml").dig("tool", "version")')
+          gem install native-packages --version "$version" --no-document
+      - run: native-packages validate
+      - name: The desktop entry
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils
+          desktop-file-validate packaging/applications/omawhite.desktop
+      # From the published release: both archives are downloaded and held
+      # to its checksums.txt before a recipe names them.
+      - name: Fill the recipes in
+        if: inputs.version != ''
+        run: native-packages build --release "$VERSION" --output dist/native-packages
+      - uses: actions/upload-artifact@v7
+        if: inputs.version != ''
+        with:
+          name: recipes
+          path: dist/native-packages/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # Each recipe built, installed and removed on a clean Arch, before any
+  # of them is published: an AUR package reaches people on their next
+  # update, so a broken one is found here or by them.
+  arch:
+    name: Arch (${{ matrix.package }})
+    needs: recipes
+    if: inputs.version != ''
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [omawhite-bin, omawhite]
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: recipes
+          path: dist/native-packages
+      # makepkg will not build as root, and installs what a recipe needs
+      # through sudo.
+      - name: Build, install and remove
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          pacman -Syu --noconfirm --needed base-devel
+          useradd --create-home builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          cp -r "dist/native-packages/recipes/arch/$PACKAGE" /home/builder/recipe
+          chown -R builder: /home/builder/recipe
+          su builder -c 'cd ~/recipe && makepkg --syncdeps --noconfirm'
+          pacman -U --noconfirm /home/builder/recipe/*.pkg.tar.zst
+          omawhite --version
+          test -f /usr/share/applications/omawhite.desktop
+          test -f /usr/share/omawhite/plugin/manifest.json
+          pacman -R --noconfirm "$PACKAGE"
+          test ! -e /usr/bin/omawhite
+
+  publish:
+    name: Publish
+    needs: [recipes, arch]
+    if: inputs.publish && inputs.version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - name: Install native-packages
+        run: |
+          version=$(ruby -ryaml -e 'print YAML.safe_load_file("native-packages.yaml").dig("tool", "version")')
+          gem install native-packages --version "$version" --no-document
+      - uses: actions/download-artifact@v7
+        with:
+          name: recipes
+          path: dist/native-packages
+      - name: Attach the recipes to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: native-packages publish --from dist/native-packages --to github
+      # Off until the three AUR packages exist and the key is in place:
+      # native-packages updates an AUR package, it cannot create one.
+      # PACKAGING.md has the first push and the settings.
+      - name: Push the recipes to the AUR
+        if: vars.PUBLISH_AUR == 'true'
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          AUR_KNOWN_HOSTS: ${{ secrets.AUR_KNOWN_HOSTS }}
+          GIT_AUTHOR_NAME: ${{ github.actor }}
+          GIT_AUTHOR_EMAIL: ${{ github.actor }}@users.noreply.github.com
+          GIT_COMMITTER_NAME: ${{ github.actor }}
+          GIT_COMMITTER_EMAIL: ${{ github.actor }}@users.noreply.github.com
+          GIT_SSH_COMMAND: ssh -o BatchMode=yes -o StrictHostKeyChecking=yes
+        run: |
+          test -n "$AUR_SSH_KEY"
+          test -n "$AUR_KNOWN_HOSTS"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$AUR_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+          native-packages publish --from dist/native-packages --to aur
