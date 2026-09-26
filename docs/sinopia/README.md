@@ -172,4 +172,4 @@ The drawings in `illustrations/` were made for this page. The photographs in `im
 
 ---
 
-<sub>The code still carries the working name, Omawhite: the binary, the plugin, the packages and the paths. Renaming them is a change of its own.</sub>
+<sub>The app was built under a working name, Omawhite, which its history still carries.</sub>

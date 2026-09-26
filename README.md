@@ -35,16 +35,16 @@ Sinopia keeps that sketch close to the work. It opens on a shortcut beside your 
 On Arch and Omarchy, from the AUR:
 
 ```sh
-yay -S omawhite-bin   # the latest release, ready made
-yay -S omawhite       # the latest release, built from source
-yay -S omawhite-git   # the latest commit, built from source
+yay -S sinopia-bin   # the latest release, ready made
+yay -S sinopia       # the latest release, built from source
+yay -S sinopia-git   # the latest commit, built from source
 ```
 
 Then open it from the app launcher, or from a terminal:
 
 ```sh
-omawhite          # the most recent board
-omawhite --new    # a new one
+sinopia          # the most recent board
+sinopia --new    # a new one
 ```
 
 Three extras come with the package, switched off, and the install message says how to turn each one on:
@@ -55,9 +55,9 @@ Three extras come with the package, switched off, and the install message says h
 
 The first release has not been cut yet. Until it is, build from source with `cargo build --release` (Rust, on Wayland with Vulkan).
 
-## The name, and the code
+## An earlier name
 
-Sinopia is the name the project is growing into. The code still carries its working name, Omawhite: the command, the packages, the plugin and the folders on disk. Renaming them is a change of its own.
+Sinopia was built under a working name, Omawhite, and the repository's address still carries it. Boards kept under that name come along the first time Sinopia starts, and `.omawhite` files still open.
 
 ## More
 
@@ -65,7 +65,7 @@ Sinopia is the name the project is growing into. The code still carries its work
 - [DEVELOPMENT.md](DEVELOPMENT.md): what exists today, every key and control, and how the code is laid out.
 - [ARCHITECTURE.md](ARCHITECTURE.md): the working draft of the design.
 - [PACKAGING.md](PACKAGING.md): how a release reaches people.
-- [skills/omawhite](skills/omawhite/SKILL.md): the skill an agent uses to read and add frames.
+- [skills/sinopia](skills/sinopia/SKILL.md): the skill an agent uses to read and add frames.
 
 ## License
 
