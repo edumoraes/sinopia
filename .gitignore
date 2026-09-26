@@ -8,3 +8,6 @@ docs/boards/
 
 # A release packed by hand, by packaging/archive.sh.
 /dist
+
+# The AUR clones native-packages stages its updates in.
+/.cache
