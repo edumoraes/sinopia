@@ -8,9 +8,16 @@ the real architecture emerges from development.
 
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames,
-export to the agent and the CLI an agent asks the board through:
+export to the agent, the CLI an agent asks the board through, and the
+packaging that distributes it (item 7):
 
 - `cargo build` clean, `cargo test` with 1060 tests.
+- Releases: a `v*` tag builds the binary, publishes it with its source
+  and checksums, and fills in three AUR recipes — `omawhite-bin`,
+  `omawhite` and `omawhite-git` — which are built and installed on a
+  clean Arch before they are published (see **Install** below and
+  [PACKAGING.md](PACKAGING.md)). The first release, v0.1.0, has not been
+  cut yet.
 - Wayland window + wgpu, one instanced pipeline of SDF primitives (rounded
   boxes and round-capped segments, analytic antialiasing) for everything
   on screen.
@@ -589,6 +596,24 @@ anywhere.
 
 Zoom range is 10%–1000%. The camera is saved with the board.
 
+## Install
+
+On Arch and Omarchy, from the AUR:
+
+```sh
+yay -S omawhite-bin   # the latest release, ready made
+yay -S omawhite       # the latest release, built from source
+yay -S omawhite-git   # the latest commit, built from source
+```
+
+Any of the three puts Omawhite in the app launcher, and brings the bar
+widget, the theme hook and the agent skill under `/usr/share/omawhite`,
+switched off: its install message says how to switch each one on.
+
+Omawhite is MIT-licensed. What it embeds that is someone else's — a font,
+Sketchbook's brushes, the agents' marks — is listed in
+[THIRD-PARTY.md](THIRD-PARTY.md).
+
 ## Run
 
 ```sh
@@ -654,8 +679,13 @@ src/tablet.rs    the tablet's pen (zwp_tablet_v2) → event loop bridge; its fra
 src/clipboard.rs selection reads and writes (wl_data_device) → event loop bridge
 src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
 assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
-plugin/          the Omarchy bar widget (QML): manifest, BarWidget, install notes
+plugin/          the Omarchy bar widget (QML): manifest, BarWidget, its README and licence —
+                 mirrored to edumoraes/omawhite-plugin at each release (PACKAGING.md)
 skills/omawhite/ the skill an agent installs to read and write frames: SKILL.md and an installer
+assets/logo/     the marks, written by tools/logo.py; app-icon.svg is the launcher's icon
+packaging/       what a release ships: install.sh (the layout every package installs), archive.sh
+                 (the release archive), the desktop entry, the AUR recipes, the release notes
+native-packages.yaml  fills the AUR recipes in from a release and publishes them (PACKAGING.md)
 ```
 
 Frame data flow: grid + document + live stroke + selection overlay +

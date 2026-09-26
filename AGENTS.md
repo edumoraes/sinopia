@@ -55,6 +55,22 @@ Headless-ish smoke test (opens a window, renders 3 frames, exits):
 XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- --socket /tmp/omawhite-smoke.sock --smoke-frames 3
 ```
 
+# Releases
+
+A `vX.Y.Z` tag is a release: `release.yml` checks it against `Cargo.toml`,
+`plugin/manifest.json` and `packaging/release-notes/vX.Y.Z.md`, builds,
+publishes the archives and `checksums.txt`, and hands over to
+`packaging.yml`, which fills the three AUR recipes in with native-packages,
+builds and installs them on a clean Arch, and only then publishes them.
+Every recipe installs through `packaging/install.sh`, from the release
+archive or the source tree alike — a file a package should carry goes
+there, and into `packaging/archive.sh`'s list, which CI packs on every push.
+After the packages, `plugin.yml` mirrors `plugin/` — its history split out
+of the tag — to `edumoraes/omawhite-plugin`, the repository `omarchy plugin
+add` clones; the plugin is developed here and never in the mirror.
+[PACKAGING.md](PACKAGING.md) has the rest, including the one-time setup of
+the AUR packages and of the mirror.
+
 # Architecture
 
 Module layout is in the README. The shape that matters:
