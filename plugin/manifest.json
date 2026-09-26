@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "edu.omawhite",
-  "name": "Omawhite",
+  "id": "edu.sinopia",
+  "name": "Sinopia",
   "version": "0.1.0",
   "author": "Eduardo de Moraes",
   "license": "MIT",
-  "description": "Opens the Omawhite whiteboard from the bar: a new board, or one of the recent projects.",
+  "description": "Opens the Sinopia whiteboard from the bar: a new board, or one of the recent projects.",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Omawhite",
+    "displayName": "Sinopia",
     "description": "A click opens the popout: n for a new board, o for the recent projects.",
     "category": "Productivity",
     "allowMultiple": false,
