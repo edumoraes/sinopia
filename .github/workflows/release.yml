@@ -21,11 +21,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       # Both are checked before anything is built: a release that would
       # be refused should not cost a build first.
-      - name: The tag, Cargo.toml and the notes agree
+      - name: The tag, Cargo.toml, the plugin and the notes agree
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::tagged $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+          # The plugin is released with the engine and carries its number.
+          plugin=$(jq -r .version plugin/manifest.json)
+          if [ "$plugin" != "$version" ]; then
+            echo "::error::Cargo.toml says $version, but plugin/manifest.json says $plugin"
             exit 1
           fi
           if [ ! -s "packaging/release-notes/$GITHUB_REF_NAME.md" ]; then
@@ -84,4 +90,13 @@ jobs:
     with:
       version: ${{ github.ref_name }}
       publish: true
+    secrets: inherit
+
+  # After the engine: the mirror is only as far along as the packages.
+  plugin:
+    name: Plugin
+    needs: packaging
+    uses: ./.github/workflows/plugin.yml
+    with:
+      version: ${{ github.ref_name }}
     secrets: inherit
