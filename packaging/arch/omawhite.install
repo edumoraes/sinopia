@@ -12,8 +12,8 @@ The rest is opt-in, for each person who wants it:
     omarchy plugin enable edu.omawhite right
 
   A theme change reaching a board left open on another monitor
-    omarchy hook install theme-set /usr/share/omawhite/omarchy/omawhite
-    omarchy hook install font-set /usr/share/omawhite/omarchy/omawhite
+    omarchy hook install theme-set /usr/share/omawhite/omarchy/sinopia
+    omarchy hook install font-set /usr/share/omawhite/omarchy/sinopia
 
   The skill that lets the agents here read and add frames
     /usr/share/omawhite/skills/omawhite/install.sh
