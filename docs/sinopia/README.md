@@ -78,57 +78,53 @@ Sinopia is meant to live in that room. It opens on a shortcut next to the termin
 
 ## The bottega
 
-A Renaissance fresco was rarely the work of one pair of hands. It came out of a *bottega*, a workshop where a master and assistants shared the work, and it passed through a sequence of drawings, each one a step closer to the wall. Sinopia rebuilds that workshop for one person and their agents.
+A Renaissance fresco was rarely the work of one pair of hands. It came out of a *bottega*, a workshop where a master and assistants shared the work, and it passed through a sequence of drawings, each one a step closer to the wall.
 
-![Six round vignettes of the same tree, one for each stage of a fresco, with what each stage is in Sinopia written beneath: primo pensiero, schizzo, cartone, spolvero, giornata, affresco. Two arcs run back: an agent's frame grafted beside the person's, and every state at rest kept for undo.](illustrations/04-bottega.svg)
+![Six round vignettes of the same tree, one for each stage of a fresco: primo pensiero, schizzo, cartone, spolvero, giornata, affresco.](illustrations/04-bottega.svg)
 
-The *primo pensiero*, the first thought, is a few lines on a scrap of paper: the whole picture as a gesture, before anyone knows whether it works. In Sinopia it is the first mark on an empty board, made with the pencil or the brush, or a screenshot pasted in.
+The *primo pensiero*, the first thought, is a few lines on a scrap of paper: the whole picture as a gesture, before anyone knows whether it works.
 
-The *schizzo*, the sketch, is that first thought worked over, tried again, crossed out and tried again beside itself. The board has no edges and holds layers and groups, so you can go on being wrong until the shape turns up.
+The *schizzo*, the sketch, is that first thought worked over, tried again, crossed out and tried again beside itself, until the shape turns up.
 
-The *cartone*, the cartoon, is a drawing at the full size of the painting, clean enough to transfer. English got the word *cartoon* from it. In Sinopia the cartone is the frame: an area with a name and a boundary, the one thing on a board that can be named, bounded and addressed. A frame is how you point at part of the board and say "build this".
+The *cartone*, the cartoon, is a drawing at the full size of the painting, clean enough to transfer. English got the word *cartoon* from it.
 
 ![A chalk drawing of a woman in profile, Isabella d'Este, on a worn sheet. Her outlines are pricked with rows of tiny holes.](images/leonardo-isabella-cartoon.jpg)
 
 *Leonardo da Vinci, cartoon for a portrait of Isabella d'Este, Louvre. The outlines are pricked for transfer. Public domain.*
 
-The *spolvero* is the pounce. The painter pricked the cartoon's lines with a needle, held the sheet against the wet plaster and patted it with a small bag of charcoal dust. The dust went through the holes and left the drawing on the wall as a line of dots. In Sinopia the pounce is the export to the agent. `Ctrl+E`, or an agent asking for a frame with `agent read`, lands the frame in the project as a page: a picture of it, its structure as JSON and an inventory in Markdown. Those are the dots the assistant paints by.
+The *spolvero* is the pounce. The painter pricked the cartoon's lines with a needle, held the sheet against the wet plaster and patted it with a small bag of charcoal dust. The dust went through the holes and left the drawing on the wall as a line of dots, for the assistants to paint by.
 
-The *giornata* is a day's work. Fresco is painted into wet plaster, so only as much fresh plaster was laid as could be painted before it set, and a wall went up one patch a day. An agent's task is a giornata: one frame, one patch, done while it is fresh.
+![The pounce in three steps: a cartoon of the tree pricked along its lines with a needle, a bag of charcoal dust patted over the pricked sheet, and the dotted drawing on fresh plaster with a painter starting to paint along the dots.](illustrations/05-spolvero.svg)
 
-The *affresco* is the fresco itself, the painting in the wall and part of it. Here it is whatever the agent builds from the frame, an interface or a program or a feature.
+The *giornata* is a day's work. Fresco is painted into wet plaster, so only as much fresh plaster was laid as could be painted before it set, and a wall went up one patch a day.
 
-Two things run the other way. An agent can hand a frame back, and `agent add` grafts it onto the board beside the others, never over them. The board also keeps its *pentimenti*, the traces of earlier work that show through where a painter changed their mind: every state the board came to rest in can be walked back.
+The *affresco* is the fresco itself, the painting in the wall and part of it.
 
-![Two rows that match. Above, in the bottega: a cartoon pricked along its lines, a bag of charcoal dust patted over it, and the dotted drawing on fresh plaster with a painter starting to paint along the dots. Below, in Sinopia: a frame named garden on the dotted board; the page the export writes, board.png, board.json and board.md; and an agent in a terminal building from it.](illustrations/05-spolvero.svg)
+Some of the earlier work always shows through. Painters call those traces *pentimenti*, repentances: the places where someone changed their mind, and the wall kept the record.
+
+Sinopia takes the shape of that workshop and not its parts. The idea is simple: the thinking happens in the drawing, before anything is built, and the people and agents who build work from that drawing instead of from a guess.
 
 ## Anatomy of a wall
 
 A fresco is built in layers, and the layers explain the method. The *arriccio*, a rough plaster of lime and sand, goes on the masonry and is left coarse. The sinopia is drawn on the arriccio. Over the sinopia, one day at a time, goes the *intonaco*, a fine plaster laid wet and painted while wet. The paint binds into it as the lime sets and becomes part of the wall.
 
-![An exploded view of a fresco wall in five layers. From the bottom: masonry, rough plaster, the red drawing floating on its own, fine plaster laid in daily patches, and the painting. The left side names each layer in the workshop; the right side says what it is in Sinopia: Omarchy, the board, your drawing, the agents' work, what gets built.](illustrations/06-anatomy.svg)
+![An exploded view of a fresco wall in five layers. From the bottom: masonry, rough plaster, the red drawing floating on its own, fine plaster laid in daily patches, and the painting.](illustrations/06-anatomy.svg)
 
-Sinopia stacks the same way. Under everything is the machine, Omarchy, and on it the board. On the board is your drawing: strokes, layers, notes, pasted references, the frames you marked out. Over the drawing, a task at a time, goes whatever the agents build from it. The code ends up covering the board the way the intonaco covered the red lines, and the figures on the wall still stand where the red line put them, give or take a change of mind.
+The drawing sits in the middle of that stack. It comes after the ground is ready and before any of the finished work, and the finished work covers it. Nobody sees the sinopia once the wall is done, yet the figures on the wall still stand where the red line put them, give or take a change of mind. That is the place the app wants to hold: under the work, and ahead of it.
 
 ## What the name asks of the app
 
-A name makes promises, and the code already keeps the ones this name makes.
+A name makes promises. These are the ones this name makes.
 
-Drawing comes first, since disegno is the father of the arts. Sinopia is a place to draw, with a pencil that fits real curves to the hand, a library of 211 brushes from Sketchbook, and a pen that answers to pressure and tilt. The part that talks to agents is there to serve the drawing.
+Drawing comes first, since disegno is the father of the arts. Sinopia is a place to draw before it is anything else, and the part that talks to agents is there to serve the drawing.
 
-Rough work is welcome. A *componimento inculto* needs room, so the board has no edges, layers hold whatever is not settled yet, and nothing asks you to tidy up before you are ready.
+Rough work is welcome. A *componimento inculto* needs room, and nothing should ask you to tidy up before you are ready.
 
-The board stays yours. In a bottega the master drew the sinopia and the assistants painted from it. An agent can list the frames, read one, and hand a new one back, which the board places beside what is already there. It cannot draw into a frame that exists, and it cannot delete, move or switch tabs. One frame goes out and one frame comes in.
+The drawing stays yours. In a bottega the master drew the sinopia and the assistants painted from it. Agents can read the drawing and bring work back to it, but they do not take it over.
 
-The transfer is faithful. A pounce works because the dots are the drawing, and in the same way what an agent is shown and what it may take are one answer. A frame on a layer you hid is refused rather than sent as a blank page, and the picture is drawn from the same sub-document the JSON describes.
+The drawing informs and the person decides. What an agent reads is a picture of what was drawn, never an order, and which parts get built is up to you.
 
-The drawing informs and the person decides. What an agent reads arrives framed as an inventory of what was drawn, never as an order, and which parts get built is up to you.
-
-Pentimenti are kept. Undo walks back through every state the board came to rest in. Hidden work travels hidden in both directions, because whoever hid it still owns it.
-
-The wall is local. A fresco lives in the wall it was painted on, and boards live on your disk, in files only you can read. Nothing goes over the network.
-
-The pigment does not follow fashion. The chrome wears the desktop's theme and changes when the theme does, but the inks stay put: a board is a document, and ink picked today has to be the same colour tomorrow.
+The wall is local. A fresco lives in the wall it was painted on, and a board lives on your disk.
 
 ## The name
 
@@ -141,22 +137,6 @@ Italian painters kept the word for the red and drew with it. Cennini tells the f
 In Italian it is said *si-NÒ-pia*.
 
 It is a quiet name for a drawing nobody was meant to see, which shaped what everybody sees.
-
-## A vocabulary for what comes next
-
-The bottega's words are free for the parts of the app that still need names. None of them is in the code yet. They are written down here so the app can grow in one language.
-
-| Word | In the bottega | In Sinopia |
-|---|---|---|
-| *sinopia* | the drawing under the fresco | the app, and the board |
-| *primo pensiero* | the first thought | a new board |
-| *schizzo* | the sketch | strokes and layers |
-| *cartone* | the full-size drawing, ready to transfer | a frame |
-| *spolvero* | pouncing the cartoon onto the wall | the export to the agent |
-| *giornata* | one day's patch of plaster | one agent's task |
-| *pentimento* | earlier work showing through | the history |
-| *bottega* | the workshop: a master and assistants | a person and their agents |
-| *affresco* | the painting, part of the wall | what gets built |
 
 ## Coda
 
