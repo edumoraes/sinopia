@@ -356,6 +356,39 @@ impl Editor {
         Change::Selection
     }
 
+    /// Ends the session when what it types into is no longer there to
+    /// type into: its text gone from the board — removed, merged, undone
+    /// away — or kept by a lock. A text not yet on the board is not gone.
+    /// Answers what ending it did, or nothing when it goes on.
+    pub fn settle_typing(&mut self, doc: &mut Document) -> Change {
+        let Some(t) = &self.typing else {
+            return Change::None;
+        };
+        if t.pending.is_some() {
+            return Change::None;
+        }
+        match text_of(doc, &t.id) {
+            None => {
+                self.typing = None;
+                self.placing = None;
+                Change::Selection
+            }
+            Some(text) if doc.locked(&text.layer) => self.end_typing(doc),
+            Some(_) => Change::None,
+        }
+    }
+
+    /// Whether a press at `screen` lands away from the text being typed —
+    /// which leaves it before anything else the press does.
+    pub fn leaves_text(&self, view: &View, screen: (f64, f64), doc: &Document) -> bool {
+        let Some(text) = self.typed(doc) else {
+            return false;
+        };
+        let world = point(view.screen_to_world(screen.0, screen.1));
+        let slop = HIT_SLOP_PX * view.scale / view.px_per_world();
+        !select::frame(&Element::Text(text.clone())).is_some_and(|f| f.contains(world, slop))
+    }
+
     /// A press with the Text tool, or a double click on a text with any
     /// tool: `clicks` counts the presses in a row. Inside the text being
     /// typed, it puts the caret there — a double click takes the word, a
@@ -578,6 +611,10 @@ impl Editor {
     /// text to what it now says. The layer of a text is named after it
     /// for as long as nobody has named it by hand.
     fn write(&mut self, doc: &mut Document, fonts: &Fonts) -> Change {
+        let settled = self.settle_typing(doc);
+        if self.typing.is_none() {
+            return settled;
+        }
         let Some(t) = self.typing.as_mut() else {
             return Change::None;
         };
@@ -860,7 +897,7 @@ impl Editor {
         }
         self.selection
             .iter()
-            .filter(|id| text_of(doc, id).is_some())
+            .filter(|id| text_of(doc, id).is_some_and(|t| !doc.locked(&t.layer)))
             .cloned()
             .collect()
     }
@@ -1768,5 +1805,43 @@ mod tests {
         let _ = typed(&mut e, &mut doc, "still here");
         let t = only(&doc);
         assert_eq!(doc.context(&t.layer), None, "on the board, where its frame was");
+    }
+
+    #[test]
+    fn a_text_whose_layer_is_locked_mid_session_takes_no_more_typing() {
+        let mut e = texting();
+        let mut doc = Document::new("t");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "abc");
+        let layer = only(&doc).layer.clone();
+        doc.layer_mut(&layer).unwrap().locked = true;
+        let _ = typed(&mut e, &mut doc, "d");
+        assert_eq!(only(&doc).text, "abc", "a lock keeps what it holds");
+        assert!(e.typing().is_none(), "and the session is over");
+    }
+
+    #[test]
+    fn a_session_whose_text_went_is_over() {
+        let mut e = texting();
+        let mut doc = Document::new("t");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "abc");
+        doc.elements.clear();
+        assert_eq!(e.settle_typing(&mut doc), Change::Selection);
+        assert!(e.typing().is_none(), "nothing left to type into holds the keyboard");
+        let mut still = texting();
+        let _ = click(&mut still, &mut doc, 0.0, 0.0);
+        assert_eq!(still.settle_typing(&mut doc), Change::None, "a text not yet typed is not gone");
+        assert!(still.typing().is_some());
+    }
+
+    #[test]
+    fn a_press_says_whether_it_leaves_the_text_being_typed() {
+        let (mut e, mut doc) = with_text("here");
+        let t = only(&doc).clone();
+        assert!(!e.leaves_text(&view(), at(t.x + 2.0, t.y + 2.0), &doc), "nothing is typed");
+        let _ = e.edit_text(&t.id, &mut doc, &fonts(), None);
+        assert!(!e.leaves_text(&view(), at(t.x + 2.0, t.y + 2.0), &doc));
+        assert!(e.leaves_text(&view(), at(t.x + 300.0, t.y + 300.0), &doc));
     }
 }

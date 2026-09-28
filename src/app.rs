@@ -2543,6 +2543,9 @@ impl App {
     /// on — and one step of the history. Answers what it left picked. A
     /// refusal says why and changes nothing but the pick.
     fn layer_op(&mut self, req: Request) -> anyhow::Result<Vec<String>> {
+        // What the command line changes is a step of its own, never folded
+        // into the text the person is typing.
+        self.end_typing();
         let change = match req {
             Request::AddLayer { group, name, above } => {
                 let (editor, doc) = self.active();
@@ -2732,6 +2735,7 @@ impl App {
     /// change like any other, so it is one undo step and a draft owes
     /// the disk a save for it.
     fn add_frame(&mut self, path: &Path) -> anyhow::Result<(String, String)> {
+        self.end_typing();
         let mut fragment = read_fragment(path)?;
         // An agent sets text it cannot measure: its artistic boxes are
         // fitted here, before the board picks the spot by them.
@@ -3468,6 +3472,13 @@ impl App {
     /// being asked to save after merely looking around would teach the
     /// dot to mean nothing.
     fn apply(&mut self, change: Change) {
+        // A change that took the text being typed away, or locked it,
+        // ends the session before it is written down: nothing is left for
+        // it to hold the keyboard for.
+        if change != Change::None {
+            let (editor, doc) = self.active();
+            let _ = editor.settle_typing(doc);
+        }
         match change {
             Change::None => {}
             Change::Selection => {
@@ -3597,6 +3608,9 @@ impl App {
         if let Some(panel) = self.panel(&view)
             && let Some(hit) = panel.hit(x, y)
         {
+            // What the panel does to the layers is a step of its own: the
+            // text being typed is left first, as a press elsewhere leaves it.
+            self.end_typing();
             if button == Button::Left {
                 // `Panel::hit` cannot see a second press: counting them
                 // is the window's. A press on a card that is already
@@ -3773,6 +3787,12 @@ impl App {
         let double = clicks >= 2 && tool == Tool::Select && editor.text_at(doc, view, at).is_some();
         if !(tool == Tool::Text || typing || double) || matches!(tool, Tool::Hand | Tool::Zoom) {
             return false;
+        }
+        // Leaving the text being typed is a change of its own session,
+        // written down before the press starts anything else — a new text,
+        // or typing into another — which is a session of its own.
+        if self.editor().leaves_text(view, at, self.doc()) {
+            self.end_typing();
         }
         let ink = self.ink_hex().to_owned();
         let change = self.with_text(|e, d, f| e.text_press(view, at, d, f, clicks, &ink));
@@ -4072,6 +4092,11 @@ impl App {
     /// arrives as a different character on every layout there is.
     fn key(&mut self, key: &Key, bare: &Key, text: Option<&str>, state: ElementState) {
         let pressed = state == ElementState::Pressed;
+        if pressed {
+            let (editor, doc) = self.active();
+            let change = editor.settle_typing(doc);
+            self.apply(change);
+        }
         match key {
             // The clipboard's keys come first for whichever field has the
             // keyboard: they are the window's to answer, not the field's.
