@@ -1,5 +1,5 @@
 #!/bin/sh
-# Lays omawhite out under a package root. Every recipe calls this — the
+# Lays sinopia out under a package root. Every recipe calls this — the
 # prebuilt package from inside the release archive, the source and git
 # packages from inside the source tree — so the three cannot come to
 # install different things: both trees keep these files at the same
@@ -8,9 +8,9 @@
 #   packaging/install.sh <binary> <root> [<name>]
 #
 # <name> names the licence and doc directories, which Arch keeps per
-# package: omawhite, omawhite-bin or omawhite-git.
+# package: sinopia, sinopia-bin or sinopia-git.
 #
-# What lands under share/omawhite is opt-in, wired up by each person for
+# What lands under share/sinopia is opt-in, wired up by each person for
 # themselves — the plugin, the theme hook, the agent skill. A package
 # never writes into a home directory.
 
@@ -23,20 +23,20 @@ fi
 
 bin=$1
 share=$2/usr/share
-name=${3:-omawhite}
+name=${3:-sinopia}
 here=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
-install -Dm755 "$bin" "$2/usr/bin/omawhite"
-install -Dm644 "$here/packaging/applications/omawhite.desktop" \
-	"$share/applications/omawhite.desktop"
+install -Dm755 "$bin" "$2/usr/bin/sinopia"
+install -Dm644 "$here/packaging/applications/sinopia.desktop" \
+	"$share/applications/sinopia.desktop"
 install -Dm644 "$here/assets/logo/app-icon.svg" \
-	"$share/icons/hicolor/scalable/apps/omawhite.svg"
+	"$share/icons/hicolor/scalable/apps/sinopia.svg"
 
 install -Dm644 -t "$share/licenses/$name" "$here/LICENSE" \
 	"$here/THIRD-PARTY.md" "$here/assets/fonts/LiberationSans-LICENSE.txt"
 install -Dm644 -t "$share/doc/$name" "$here/README.md"
 
-install -Dm755 -t "$share/omawhite/omarchy" "$here/contrib/omarchy/omawhite"
-install -Dm644 -t "$share/omawhite/plugin" "$here"/plugin/*
-install -Dm644 -t "$share/omawhite/skills/omawhite" "$here/skills/omawhite/SKILL.md"
-install -Dm755 -t "$share/omawhite/skills/omawhite" "$here/skills/omawhite/install.sh"
+install -Dm755 -t "$share/sinopia/omarchy" "$here/contrib/omarchy/sinopia"
+install -Dm644 -t "$share/sinopia/plugin" "$here"/plugin/*
+install -Dm644 -t "$share/sinopia/skills/sinopia" "$here/skills/sinopia/SKILL.md"
+install -Dm755 -t "$share/sinopia/skills/sinopia" "$here/skills/sinopia/install.sh"

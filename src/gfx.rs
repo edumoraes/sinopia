@@ -536,7 +536,7 @@ impl Gfx {
         }))
         .context("no compatible GPU adapter")?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("omawhite"),
+            label: Some("sinopia"),
             ..Default::default()
         }))
         .context("creating the wgpu device")?;
@@ -548,7 +548,7 @@ impl Gfx {
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("omawhite-prims"),
+            label: Some("sinopia-prims"),
             source: wgpu::ShaderSource::Wgsl(shader().into()),
         });
 
@@ -612,7 +612,7 @@ impl Gfx {
         });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("omawhite"),
+            label: Some("sinopia"),
             bind_group_layouts: &[Some(&bgl), Some(&tex_bgl)],
             immediate_size: 0,
         });

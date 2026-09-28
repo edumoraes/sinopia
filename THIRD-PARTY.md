@@ -1,6 +1,6 @@
 # Third-party material
 
-The MIT license in [LICENSE](LICENSE) covers omawhite's source code and the
+The MIT license in [LICENSE](LICENSE) covers Sinopia's source code and the
 art made for it. The binary also embeds material that belongs to others,
 and that license does not cover it:
 

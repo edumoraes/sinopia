@@ -736,12 +736,12 @@ mod tests {
     #[test]
     fn parses_open_file_with_an_absolute_path() {
         let got =
-            parse_request(r#"{ "v": 1, "op": "open_file", "path": "/home/you/plan.omawhite" }"#)
+            parse_request(r#"{ "v": 1, "op": "open_file", "path": "/home/you/plan.sinopia" }"#)
                 .unwrap();
         assert_eq!(
             got,
             Request::OpenFile {
-                path: PathBuf::from("/home/you/plan.omawhite")
+                path: PathBuf::from("/home/you/plan.sinopia")
             }
         );
     }
@@ -752,8 +752,8 @@ mod tests {
         // caller's, so the line would name a different file at each end.
         // `..`: a line whose destination cannot be read off it.
         for line in [
-            r#"{ "v": 1, "op": "open_file", "path": "plan.omawhite" }"#,
-            r#"{ "v": 1, "op": "open_file", "path": "./plan.omawhite" }"#,
+            r#"{ "v": 1, "op": "open_file", "path": "plan.sinopia" }"#,
+            r#"{ "v": 1, "op": "open_file", "path": "./plan.sinopia" }"#,
             r#"{ "v": 1, "op": "open_file", "path": "/home/you/../etc/shadow" }"#,
         ] {
             assert!(parse_request(line).is_err(), "{line} should be refused");
@@ -900,7 +900,7 @@ mod tests {
                 id: "01JABC".into(),
             },
             Request::OpenFile {
-                path: PathBuf::from("/home/you/Work/plan.omawhite"),
+                path: PathBuf::from("/home/you/Work/plan.sinopia"),
             },
             Request::Export {
                 dir: PathBuf::from("/home/you/Work/foo"),

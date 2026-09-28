@@ -18,7 +18,7 @@ use std::sync::Arc;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
 use winit::window::Window;
 
-use crate::project::EXTENSION;
+use crate::project::{EXTENSION, LEGACY_EXTENSION};
 
 /// What the user said about work that would be lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,14 +49,14 @@ pub enum Reply {
 
 pub type Sink = Arc<dyn Fn(Reply) + Send + Sync>;
 
-const FILTER: &str = "Omawhite board";
+const FILTER: &str = "Sinopia board";
 
 /// Asks for boards to open. Several at once is allowed: each becomes a
 /// tab.
 pub fn open(window: &Window, sink: Sink) {
     let dialog = FileDialog::new()
         .set_title("Open board")
-        .add_filter(FILTER, &[EXTENSION, "json"])
+        .add_filter(FILTER, &[EXTENSION, LEGACY_EXTENSION, "json"])
         .set_parent(window);
     spawn(
         "open",
@@ -126,7 +126,7 @@ pub fn confirm_close(window: &Window, sink: Sink, key: String, label: &str) {
 /// wait for it.
 fn spawn(what: &'static str, ask: impl FnOnce() -> Reply + Send + 'static, sink: Sink) {
     let spawned = std::thread::Builder::new()
-        .name(format!("omawhite-{}", what.replace(' ', "-")))
+        .name(format!("sinopia-{}", what.replace(' ', "-")))
         .spawn(move || sink(ask()));
     if let Err(e) = spawned {
         log::error!("{what} dialog: {e}");

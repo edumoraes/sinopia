@@ -1,12 +1,12 @@
 #!/usr/bin/env sh
-# Installs the omawhite skill where each agent on this machine looks for
+# Installs the sinopia skill where each agent on this machine looks for
 # one. A skill is a directory named after it holding a `SKILL.md`, and
 # three hosts agree on that shape — they only disagree on where the
 # directory goes:
 #
-#   Claude Code  ${CLAUDE_CONFIG_DIR:-~/.claude}/skills/omawhite/
-#   Codex        ${CODEX_HOME:-~/.codex}/skills/omawhite/
-#   OpenCode     ${XDG_CONFIG_HOME:-~/.config}/opencode/skills/omawhite/
+#   Claude Code  ${CLAUDE_CONFIG_DIR:-~/.claude}/skills/sinopia/
+#   Codex        ${CODEX_HOME:-~/.codex}/skills/sinopia/
+#   OpenCode     ${XDG_CONFIG_HOME:-~/.config}/opencode/skills/sinopia/
 #
 # Usage:
 #   ./install.sh              # every host found on this machine
@@ -51,13 +51,13 @@ host() {
 	fi
 }
 
-echo "omawhite skill:"
+echo "sinopia skill:"
 host "Claude Code" claude "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" \
-	"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/omawhite"
+	"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/sinopia"
 host "Codex" codex "${CODEX_HOME:-$HOME/.codex}" \
-	"${CODEX_HOME:-$HOME/.codex}/skills/omawhite"
+	"${CODEX_HOME:-$HOME/.codex}/skills/sinopia"
 host "OpenCode" opencode "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" \
-	"${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/omawhite"
+	"${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills/sinopia"
 
 if [ "$found" -eq 0 ]; then
 	echo
@@ -69,17 +69,17 @@ fi
 # The binary has to be new enough to answer the verb, not merely be
 # there: a skill whose every command errors is worse than none, and an
 # old build on PATH is the likeliest way to get one.
-if ! command -v omawhite >/dev/null 2>&1; then
+if ! command -v sinopia >/dev/null 2>&1; then
 	echo
-	echo "note: 'omawhite' is not on PATH. The skill's commands need the"
+	echo "note: 'sinopia' is not on PATH. The skill's commands need the"
 	echo "      binary; put it on PATH or in ~/.local/bin."
-elif ! omawhite agent --help >/dev/null 2>&1; then
+elif ! sinopia agent --help >/dev/null 2>&1; then
 	echo
-	echo "note: the omawhite on PATH does not know the 'agent' verb —"
-	echo "      $(command -v omawhite) predates it. Build and install a"
+	echo "note: the sinopia on PATH does not know the 'agent' verb —"
+	echo "      $(command -v sinopia) predates it. Build and install a"
 	echo "      newer one, or the skill's commands will all fail:"
 	echo "        cargo build --release && install -m755 \\"
-	echo "          target/release/omawhite ~/.local/bin/omawhite"
+	echo "          target/release/sinopia ~/.local/bin/sinopia"
 fi
 
 cat <<EOF
@@ -87,6 +87,6 @@ cat <<EOF
 A host that reads one instructions file rather than a skills directory
 wants a line pointing at the installed copy instead:
 
-    See ~/.claude/skills/omawhite/SKILL.md for reading and writing
-    frames on the omawhite board.
+    See ~/.claude/skills/sinopia/SKILL.md for reading and writing
+    frames on the Sinopia board.
 EOF

@@ -12,7 +12,7 @@ use crate::tree::{Arrange, Place};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "omawhite",
+    name = "sinopia",
     version,
     about = "Local-first whiteboard with export for the agent"
 )]
@@ -42,7 +42,7 @@ pub struct Cli {
     #[arg(long, group = "action")]
     pub theme: bool,
 
-    /// Socket path (default: $XDG_RUNTIME_DIR/omawhite.sock)
+    /// Socket path (default: $XDG_RUNTIME_DIR/sinopia.sock)
     #[arg(long, value_name = "PATH", global = true)]
     pub socket: Option<PathBuf>,
 
@@ -276,7 +276,7 @@ pub fn resolve_layer(listing: &[Listed], asked: &str) -> anyhow::Result<String> 
     match by_name.as_slice() {
         [one] => Ok(one.id.clone()),
         [] => anyhow::bail!(
-            "no layer {asked:?} on the board that is open; `omawhite layer list` lists them"
+            "no layer {asked:?} on the board that is open; `sinopia layer list` lists them"
         ),
         many => anyhow::bail!(
             "{} layers go by {asked:?} — name one by its id: {}",
@@ -416,7 +416,7 @@ pub enum Action {
 impl Cli {
     /// Parsed, then checked for the one conflict clap's own `ArgGroup`
     /// cannot see: a group reaches args and never a subcommand. Without
-    /// it `omawhite --shutdown agent frames` parsed clean and quietly
+    /// it `sinopia --shutdown agent frames` parsed clean and quietly
     /// did the verb, dropping the flag — so a wrapper that appends
     /// `--new` to whatever it is handed would silently do something
     /// else, while `--new --shutdown` has always been a hard error.
@@ -493,7 +493,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("omawhite").chain(args.iter().copied()))
+        Cli::try_parse_from(std::iter::once("sinopia").chain(args.iter().copied()))
             .and_then(Cli::verified)
     }
 
@@ -516,10 +516,10 @@ mod tests {
         assert_eq!(parse(&["--shutdown"]).unwrap().action(), Action::Shutdown);
         assert_eq!(parse(&["--theme"]).unwrap().action(), Action::Theme);
         assert_eq!(
-            parse(&["--open-file", "/home/you/plan.omawhite"])
+            parse(&["--open-file", "/home/you/plan.sinopia"])
                 .unwrap()
                 .action(),
-            Action::OpenFile(PathBuf::from("/home/you/plan.omawhite"))
+            Action::OpenFile(PathBuf::from("/home/you/plan.sinopia"))
         );
     }
 

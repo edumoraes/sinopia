@@ -3,10 +3,9 @@
 What exists today, how it is driven, and how the code is laid out. The
 project itself is presented in [README.md](README.md).
 
-Sinopia — the code still carries the working name, Omawhite — is a
-local-first whiteboard for Omarchy with export for the agent. Native Rust
-engine (winit + wgpu). See [ARCHITECTURE.md](ARCHITECTURE.md) — a **draft**:
-the real architecture emerges from development.
+Sinopia is a local-first whiteboard for Omarchy with export for the agent.
+Native Rust engine (winit + wgpu). See [ARCHITECTURE.md](ARCHITECTURE.md) —
+a **draft**: the real architecture emerges from development.
 
 ## Status
 
@@ -15,10 +14,10 @@ selection, navigation, pasted images, projects in tabs, frames,
 export to the agent, the CLI an agent asks the board through, and the
 packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1060 tests.
+- `cargo build` clean, `cargo test` with 1063 tests.
 - Releases: a `v*` tag builds the binary, publishes it with its source
-  and checksums, and fills in three AUR recipes — `omawhite-bin`,
-  `omawhite` and `omawhite-git` — which are built and installed on a
+  and checksums, and fills in three AUR recipes — `sinopia-bin`,
+  `sinopia` and `sinopia-git` — which are built and installed on a
   clean Arch before they are published (see **Install** below and
   [PACKAGING.md](PACKAGING.md)). The first release, v0.1.0, has not been
   cut yet.
@@ -266,13 +265,13 @@ packaging that distributes it (item 7):
   `Layer 3`.
 - The CLI an agent asks the board through: `Ctrl+E` pushes a page at an
   agent; this is the way back, and a **frame** is the whole of what
-  travels either way. `omawhite agent frames` lists what the open board
+  travels either way. `sinopia agent frames` lists what the open board
   has — id, name, box and how much is standing in each.
-  `omawhite agent read <frame> --to <dir>` writes one of them into that
+  `sinopia agent read <frame> --to <dir>` writes one of them into that
   directory as the same three files `Ctrl+E` writes, so an agent
   exports a picture to itself; a name is resolved against the listing
   and an ambiguous one is refused naming both ids, because the protocol
-  itself speaks only ids. `omawhite agent add <fragment.json>` puts a
+  itself speaks only ids. `sinopia agent add <fragment.json>` puts a
   frame **on** the board: the fragment is exactly what `read` writes —
   one frame plus what stands on its own layers — so a page read off the
   board can be handed straight back, and it arrives as a new frame
@@ -288,7 +287,7 @@ packaging that distributes it (item 7):
   tab in front where several are — and
   their answer is real work rather than an ack, so they go over the
   socket on a path of their own and wait for the loop to do it. The
-  skill that teaches an agent all of this is `skills/omawhite/`, one
+  skill that teaches an agent all of this is `skills/sinopia/`, one
   markdown file and an installer that puts it where each host on the
   machine looks — `~/.claude/skills/`, `~/.codex/skills/` and
   `~/.config/opencode/skills/` all read a directory holding a
@@ -414,7 +413,7 @@ packaging that distributes it (item 7):
   and a `+` for a new one. Every tab keeps its own tool, selection and
   camera. `Ctrl+S` saves — asking for a name the first time, unless the
   board came from the store, where it already has one; `Ctrl+Shift+S`
-  always asks; `Ctrl+O` opens one or more `.omawhite` files, each in its
+  always asks; `Ctrl+O` opens one or more `.sinopia` files, each in its
   own tab; `Ctrl+W` closes the tab, asking first if work would be lost.
   A drawing change dirties the tab, a pan or a zoom does not. A **draft**
   — a board with no name of its own — keeps itself: its changes reach the
@@ -520,9 +519,9 @@ neutral is the colour of the panel under it.
 A change arrives two ways. The board re-reads the theme whenever the
 window comes back into focus — which is the moment the theme switcher
 gives the keyboard back, and asks nothing of anybody. For a board left
-in sight, `contrib/omarchy/omawhite` is a hook to symlink into
+in sight, `contrib/omarchy/sinopia` is a hook to symlink into
 `~/.config/omarchy/hooks/theme-set.d/` (and `font-set.d/`); it runs
-`omawhite --theme`, which never opens a window. Nothing on disk changes
+`sinopia --theme`, which never opens a window. Nothing on disk changes
 either way: a theme is what the window is painted with.
 
 The split is worth stating: the palette and the text size come from the
@@ -605,16 +604,16 @@ Zoom range is 10%–1000%. The camera is saved with the board.
 On Arch and Omarchy, from the AUR:
 
 ```sh
-yay -S omawhite-bin   # the latest release, ready made
-yay -S omawhite       # the latest release, built from source
-yay -S omawhite-git   # the latest commit, built from source
+yay -S sinopia-bin   # the latest release, ready made
+yay -S sinopia       # the latest release, built from source
+yay -S sinopia-git   # the latest commit, built from source
 ```
 
-Any of the three puts Omawhite in the app launcher, and brings the bar
-widget, the theme hook and the agent skill under `/usr/share/omawhite`,
+Any of the three puts Sinopia in the app launcher, and brings the bar
+widget, the theme hook and the agent skill under `/usr/share/sinopia`,
 switched off: its install message says how to switch each one on.
 
-Omawhite is MIT-licensed. What it embeds that is someone else's — a font,
+Sinopia is MIT-licensed. What it embeds that is someone else's — a font,
 Sketchbook's brushes, the agents' marks — is listed in
 [THIRD-PARTY.md](THIRD-PARTY.md).
 
@@ -630,8 +629,8 @@ cargo test                     # full suite
 Smoke test (opens the window, renders 3 frames, exits):
 
 ```sh
-XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- \
-  --socket /tmp/omawhite-smoke.sock --smoke-frames 3
+XDG_DATA_HOME=/tmp/sinopia-smoke cargo run -- \
+  --socket /tmp/sinopia-smoke.sock --smoke-frames 3
 ```
 
 ## Layout
@@ -640,7 +639,7 @@ XDG_DATA_HOME=/tmp/omawhite-smoke cargo run -- \
 src/main.rs      CLI dispatch → forward to the live instance, or become it
 src/cli.rs       flags (clap), mutually exclusive actions
 src/doc.rs       document §6.1 (pure data, serde): layers and frames, rect, path, image
-src/store.rs     ~/.local/share/omawhite: boards/, blobs/, index.json, perms §9.3
+src/store.rs     ~/.local/share/sinopia: boards/, blobs/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
 src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
@@ -656,7 +655,7 @@ src/select.rs    selection: element frames, hit-testing, handles, transforms, ov
 src/grid.rs      dotted background (pure, tested)
 src/theme.rs     palette: light default, derived from op: theme or from the desktop's own theme (pure, tested)
 src/omarchy.rs   the desktop's look: colors.toml, shell.toml, the monospace face, Hyprland's rounding (parsing pure, tested)
-contrib/omarchy/omawhite  a theme-set / font-set hook, installed by hand
+contrib/omarchy/sinopia  a theme-set / font-set hook, installed by hand
 src/tree.rs      the layer tree: stacks by the layer holding them, rows, the filter, moves, groups, copies, clip and paste (pure, tested)
 src/merge.rs     which siblings merge, whether exactly, and merging them either way (pure, tested)
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer and the pick, the layer commands (pure, tested)
@@ -684,8 +683,8 @@ src/clipboard.rs selection reads and writes (wl_data_device) → event loop brid
 src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
 assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
 plugin/          the Omarchy bar widget (QML): manifest, BarWidget, its README and licence —
-                 mirrored to edumoraes/omawhite-plugin at each release (PACKAGING.md)
-skills/omawhite/ the skill an agent installs to read and write frames: SKILL.md and an installer
+                 mirrored to edumoraes/sinopia-plugin at each release (PACKAGING.md)
+skills/sinopia/  the skill an agent installs to read and write frames: SKILL.md and an installer
 assets/logo/     the marks, written by tools/logo.py; app-icon.svg is the launcher's icon
 packaging/       what a release ships: install.sh (the layout every package installs), archive.sh
                  (the release archive), the desktop entry, the AUR recipes, the release notes
@@ -701,8 +700,8 @@ the strokes composited as one shape and whose sheets the layers, groups
 and frames composited as one, at their strength and in their mode →
 `scene::passes` plans the render passes → `gfx` executes them.
 
-User data: `~/.local/share/omawhite/`. Socket:
-`$XDG_RUNTIME_DIR/omawhite.sock`. Project files go wherever the user
+User data: `~/.local/share/sinopia/`. Socket:
+`$XDG_RUNTIME_DIR/sinopia.sock`. Project files go wherever the user
 puts them.
 
 Dialogs come from `xdg-desktop-portal` (any backend with a file

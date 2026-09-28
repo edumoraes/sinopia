@@ -12,7 +12,12 @@ use crate::doc::Document;
 
 /// Extension of a project file. The contents are the same schema the
 /// store writes — a board is a board wherever it is kept.
-pub const EXTENSION: &str = "omawhite";
+pub const EXTENSION: &str = "sinopia";
+
+/// What a project file was called while the board went by its working
+/// name, Omawhite. Still offered by Open, since a file saved under it is
+/// somebody's work and the schema inside never changed; never written.
+pub const LEGACY_EXTENSION: &str = "omawhite";
 
 /// What a document with no name of its own is called.
 const UNTITLED: &str = "untitled";
@@ -125,7 +130,7 @@ pub fn active_after_close(len: usize, active: usize, closed: usize) -> Option<us
     })
 }
 
-/// A path's name without its extension — `~/notes.omawhite` is `notes`.
+/// A path's name without its extension — `~/notes.sinopia` is `notes`.
 /// A path that ends in `..` or `/` has no name to show, so it falls back
 /// rather than showing an empty tab.
 fn file_label(path: &Path) -> String {
@@ -152,7 +157,7 @@ mod tests {
     fn a_file_is_called_by_its_own_name_not_the_documents_title() {
         // The title travelled with the JSON; the name is what the user
         // chose in the dialog, and it is what the tab must show.
-        assert_eq!(file("/home/edu/notes.omawhite").label(), "notes");
+        assert_eq!(file("/home/edu/notes.sinopia").label(), "notes");
     }
 
     #[test]
@@ -198,7 +203,7 @@ mod tests {
     #[test]
     fn a_board_and_a_file_both_know_where_to_save() {
         assert!(!Project::opened(doc("t"), Origin::Board("01ABC".into())).needs_a_name());
-        assert!(!file("/home/edu/notes.omawhite").needs_a_name());
+        assert!(!file("/home/edu/notes.sinopia").needs_a_name());
     }
 
     #[test]
@@ -214,7 +219,7 @@ mod tests {
     fn saving_as_rehomes_an_untitled_into_a_file() {
         let mut p = Project::untitled();
         p.touch();
-        let path = PathBuf::from("/home/edu/notes.omawhite");
+        let path = PathBuf::from("/home/edu/notes.sinopia");
         p.saved(Origin::File(path.clone()));
         assert_eq!(p.origin, Origin::File(path));
         assert!(!p.dirty);
@@ -225,7 +230,7 @@ mod tests {
     #[test]
     fn saving_a_board_as_a_file_leaves_the_store_behind() {
         let mut p = Project::opened(doc("auth flow"), Origin::Board("01ABC".into()));
-        p.saved(Origin::File(PathBuf::from("/home/edu/auth.omawhite")));
+        p.saved(Origin::File(PathBuf::from("/home/edu/auth.sinopia")));
         // From here Ctrl+S writes the file; the board in the store keeps
         // whatever it had at the last save and stops being this tab's home.
         assert_eq!(p.label(), "auth");
@@ -233,16 +238,16 @@ mod tests {
 
     #[test]
     fn the_suggested_name_carries_the_extension() {
-        assert_eq!(Project::untitled().suggested_name(), "untitled.omawhite");
+        assert_eq!(Project::untitled().suggested_name(), "untitled.sinopia");
         let board = Project::opened(doc("auth flow"), Origin::Board("01ABC".into()));
-        assert_eq!(board.suggested_name(), "auth flow.omawhite");
+        assert_eq!(board.suggested_name(), "auth flow.sinopia");
     }
 
     #[test]
     fn saving_a_file_again_suggests_the_name_it_already_has() {
         assert_eq!(
-            file("/home/edu/notes.omawhite").suggested_name(),
-            "notes.omawhite"
+            file("/home/edu/notes.sinopia").suggested_name(),
+            "notes.sinopia"
         );
     }
 

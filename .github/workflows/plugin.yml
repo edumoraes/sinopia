@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 env:
-  MIRROR: git@github.com:edumoraes/omawhite-plugin.git
+  MIRROR: git@github.com:edumoraes/sinopia-plugin.git
   # Omarchy's own validator — the one `omarchy plugin add` runs before it
   # installs anything — at a fixed commit.
   OMARCHY_VALIDATE: https://raw.githubusercontent.com/omacom/omarchy/f8835df6449c5349ad96fd75e338b2280bb8e0f8/bin/omarchy-plugin-validate

@@ -4,7 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Omawhite on the bar: an icon whose popout holds the two ways into the
+// Sinopia on the bar: an icon whose popout holds the two ways into the
 // board — a new one, or one of the recent projects.
 //
 // The plugin speaks intent and nothing else (§3). It does not interpret a
@@ -17,8 +17,8 @@ import qs.Ui
 // opened, switchPanel, setting and the IpcHandler.
 Panel {
   id: root
-  moduleName: "edu.omawhite"
-  ipcTarget: "edu.omawhite"
+  moduleName: "edumoraes.sinopia"
+  ipcTarget: "edumoraes.sinopia"
 
   // How many rows the list shows at once. The index keeps everything, so
   // what falls past this is reached by typing rather than by scrolling
@@ -156,7 +156,7 @@ Panel {
 
   FileView {
     id: index
-    path: Quickshell.env("HOME") + "/.local/share/omawhite/index.json"
+    path: Quickshell.env("HOME") + "/.local/share/sinopia/index.json"
     watchChanges: true
     printErrors: false          // no projects yet is a state, not an error
     onLoaded: root.absorb(text())
@@ -205,7 +205,7 @@ Panel {
 
   // ------------------------------------------------------------ the engine
 
-  // §10.1's search, in order: `omawhite` on the PATH, then ~/.local/bin,
+  // §10.1's search, in order: `sinopia` on the PATH, then ~/.local/bin,
   // then the configurable path, then the dev build sitting beside a
   // monorepo checkout. That last leg is why the plugin works before the
   // engine is packaged at all; in a copy installed from git it simply is
@@ -224,13 +224,13 @@ Panel {
     locate.command = [
       "sh", "-c",
       'dir=$(readlink -f "$1" 2>/dev/null || printf %s "$1"); shift;' +
-      ' if command -v omawhite >/dev/null 2>&1; then command -v omawhite; exit 0; fi;' +
-      ' for c in "$@" "$dir/../target/release/omawhite" "$dir/../target/debug/omawhite"; do' +
+      ' if command -v sinopia >/dev/null 2>&1; then command -v sinopia; exit 0; fi;' +
+      ' for c in "$@" "$dir/../target/release/sinopia" "$dir/../target/debug/sinopia"; do' +
       '   [ -n "$c" ] && [ -x "$c" ] && { printf %s\\\\n "$c"; exit 0; };' +
       ' done; exit 0',
       "sh",
       root.pluginDir,
-      Quickshell.env("HOME") + "/.local/bin/omawhite",
+      Quickshell.env("HOME") + "/.local/bin/sinopia",
       String(root.setting("enginePath", ""))
     ]
     locate.running = true
@@ -426,7 +426,7 @@ Panel {
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
 
-    tooltipText: "Omawhite"
+    tooltipText: "Sinopia"
       + (root.projects.length > 0
          ? "  ·  " + root.projects.length + (root.projects.length === 1 ? " project" : " projects")
          : "")
@@ -473,7 +473,7 @@ Panel {
         PanelHero {
           width: parent.width
           foreground: root.foreground
-          title: root.screen === "menu" ? "Omawhite" : "Recent projects"
+          title: root.screen === "menu" ? "Sinopia" : "Recent projects"
           detail: root.screen === "open" && root.projects.length > 0
             ? (root.filter === ""
                ? String(root.projects.length)
@@ -500,7 +500,7 @@ Panel {
           Text {
             width: parent.width
             textFormat: Text.PlainText
-            text: "No omawhite on the PATH, in ~/.local/bin, or built in this checkout."
+            text: "No sinopia on the PATH, in ~/.local/bin, or built in this checkout."
             color: root.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall

@@ -34,4 +34,4 @@ jobs:
       # The archive a release carries, packed around this build and
       # installed from inside: a file the packages need that nobody ships
       # fails on the push rather than on the tag.
-      - run: sh packaging/archive.sh v0.0.0 target/debug/omawhite "$RUNNER_TEMP/dist"
+      - run: sh packaging/archive.sh v0.0.0 target/debug/sinopia "$RUNNER_TEMP/dist"

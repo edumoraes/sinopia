@@ -55,7 +55,7 @@ const IMAGE_MIMES: [&str; 3] = ["image/png", "image/webp", "image/jpeg"];
 
 /// The board's own layers, as a clip: a document fragment in the board's
 /// JSON, which only this program writes and only this program reads.
-pub const LAYERS_MIME: &str = "application/x-omawhite-layers+json";
+pub const LAYERS_MIME: &str = "application/x-sinopia-layers+json";
 
 /// What `Ctrl+V` on the board takes, best first: layers copied from a
 /// board, then an image from anywhere.

@@ -1,7 +1,7 @@
 # Shared CLI: gem install native-packages --version 0.7.0
 #
 # The release's own archives are what gets distributed: the binary one for
-# omawhite-bin, the source one for omawhite. This file only fills the AUR
+# sinopia-bin, the source one for sinopia. This file only fills the AUR
 # recipes in with their checksums and publishes them — no native package
 # is built here, hence no targets. See PACKAGING.md.
 ---
@@ -10,60 +10,60 @@ tool:
   version: '0.7.0'
   nfpm: '2.47.0'
 nfpm:
-  name: omawhite
+  name: sinopia
   maintainer: Eduardo de Moraes <edumoraesdg@gmail.com>
-  homepage: https://github.com/edumoraes/omawhite
+  homepage: https://github.com/edumoraes/sinopia
   description: Local-first whiteboard for Omarchy with export for the agent
   license: MIT
 targets: {}
 release:
-  repository: edumoraes/omawhite
+  repository: edumoraes/sinopia
   checksums: checksums.txt
 assets:
   AMD64:
-    file: omawhite-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
-    local: dist/omawhite-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+    file: sinopia-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+    local: dist/sinopia-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
   SOURCE:
-    file: omawhite-v@VERSION@-source.tar.gz
-    local: dist/omawhite-v@VERSION@-source.tar.gz
+    file: sinopia-v@VERSION@-source.tar.gz
+    local: dist/sinopia-v@VERSION@-source.tar.gz
 templates:
-  arch/omawhite/PKGBUILD: packaging/arch/omawhite/PKGBUILD.in
-  arch/omawhite/omawhite.install: packaging/arch/omawhite.install
-  arch/omawhite-bin/PKGBUILD: packaging/arch/omawhite-bin/PKGBUILD.in
-  arch/omawhite-bin/omawhite-bin.install: packaging/arch/omawhite.install
-  arch/omawhite-git/PKGBUILD: packaging/arch/omawhite-git/PKGBUILD.in
-  arch/omawhite-git/omawhite-git.install: packaging/arch/omawhite.install
+  arch/sinopia/PKGBUILD: packaging/arch/sinopia/PKGBUILD.in
+  arch/sinopia/sinopia.install: packaging/arch/sinopia.install
+  arch/sinopia-bin/PKGBUILD: packaging/arch/sinopia-bin/PKGBUILD.in
+  arch/sinopia-bin/sinopia-bin.install: packaging/arch/sinopia.install
+  arch/sinopia-git/PKGBUILD: packaging/arch/sinopia-git/PKGBUILD.in
+  arch/sinopia-git/sinopia-git.install: packaging/arch/sinopia.install
 repositories:
   aur-source:
     group: aur
-    url: https://aur.archlinux.org/omawhite.git
-    push_url: ssh://aur@aur.archlinux.org/omawhite.git
+    url: https://aur.archlinux.org/sinopia.git
+    push_url: ssh://aur@aur.archlinux.org/sinopia.git
     branch: master
     package_path: "."
     files:
-      arch/omawhite: "."
+      arch/sinopia: "."
     version_file: ".SRCINFO"
     version_pattern: "^\\s*pkgver = (\\S+)"
     publish: push
   aur-bin:
     group: aur
-    url: https://aur.archlinux.org/omawhite-bin.git
-    push_url: ssh://aur@aur.archlinux.org/omawhite-bin.git
+    url: https://aur.archlinux.org/sinopia-bin.git
+    push_url: ssh://aur@aur.archlinux.org/sinopia-bin.git
     branch: master
     package_path: "."
     files:
-      arch/omawhite-bin: "."
+      arch/sinopia-bin: "."
     version_file: ".SRCINFO"
     version_pattern: "^\\s*pkgver = (\\S+)"
     publish: push
   aur-git:
     group: aur
-    url: https://aur.archlinux.org/omawhite-git.git
-    push_url: ssh://aur@aur.archlinux.org/omawhite-git.git
+    url: https://aur.archlinux.org/sinopia-git.git
+    push_url: ssh://aur@aur.archlinux.org/sinopia-git.git
     branch: master
     package_path: "."
     files:
-      arch/omawhite-git: "."
+      arch/sinopia-git: "."
     version_file: ".SRCINFO"
     version_pattern: "^\\s*pkgver = (\\S+)"
     publish: push

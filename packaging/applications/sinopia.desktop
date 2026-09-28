@@ -1,20 +1,20 @@
 [Desktop Entry]
 Type=Application
 Version=1.5
-Name=Omawhite
+Name=Sinopia
 GenericName=Whiteboard
 Comment=Local-first whiteboard with export for the agent
-Exec=omawhite
-Icon=omawhite
+Exec=sinopia
+Icon=sinopia
 Terminal=false
 Categories=Graphics;2DGraphics;
 Keywords=whiteboard;board;draw;sketch;canvas;agent;
 # The window is matched by its app id; it does not take the launcher's
 # activation token, so it promises no startup notification.
-StartupWMClass=omawhite
+StartupWMClass=sinopia
 StartupNotify=false
 Actions=new;
 
 [Desktop Action new]
 Name=New Board
-Exec=omawhite --new
+Exec=sinopia --new

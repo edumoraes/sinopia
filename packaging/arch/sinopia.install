@@ -1,0 +1,24 @@
+# Said once, at install: on every upgrade it would be noise.
+post_install() {
+  cat <<'EOF'
+Sinopia is in the app launcher. `sinopia` opens the most recent board,
+`sinopia --new` a new one.
+
+The rest is opt-in, for each person who wants it:
+
+  The bar widget, on the Omarchy shell
+    mkdir -p ~/.config/omarchy/plugins
+    ln -s /usr/share/sinopia/plugin ~/.config/omarchy/plugins/edumoraes.sinopia
+    omarchy plugin enable edumoraes.sinopia right
+
+  A theme change reaching a board left open on another monitor
+    omarchy hook install theme-set /usr/share/sinopia/omarchy/sinopia
+    omarchy hook install font-set /usr/share/sinopia/omarchy/sinopia
+
+  The skill that lets the agents here read and add frames
+    /usr/share/sinopia/skills/sinopia/install.sh
+
+Boards live in ~/.local/share/sinopia, and removing the package leaves
+them there.
+EOF
+}

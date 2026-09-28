@@ -1,22 +1,22 @@
 ---
-name: omawhite
+name: sinopia
 description: |
-  Read and write frames on an open omawhite whiteboard from the command line.
+  Read and write frames on an open Sinopia whiteboard from the command line.
   Use when the user points at a board, a whiteboard, a frame, a sketch or a
   diagram they have drawn and wants you to look at it; when they ask what is
   on the board; or when they ask you to put a diagram, a flow, a layout or a
   drawing onto the board. Exports a frame to yourself as PNG + JSON + an
   inventory, and grafts new frames back on; lists and arranges the board's
-  layers when the person asks. Triggers: omawhite, whiteboard, the board,
+  layers when the person asks. Triggers: sinopia, whiteboard, the board,
   this frame, read my sketch, draw this on the board, the layers.
 ---
 
-# omawhite, from an agent's side
+# Sinopia, from an agent's side
 
-omawhite is a local whiteboard. A **frame** is a named, bounded area on it
+Sinopia is a local whiteboard. A **frame** is a named, bounded area on it
 holding drawings — that is the unit you read and the unit you write, and you
 never draw into a frame someone else made. The **layers** that hold
-everything on the board can be listed and arranged with `omawhite layer`, but
+everything on the board can be listed and arranged with `sinopia layer`, but
 only for what the person asked: the board is theirs.
 
 Everything below needs a **board open on this desktop**. Without one every
@@ -34,11 +34,11 @@ went wrong.
 List what is there, then take the one you want:
 
 ```sh
-omawhite agent frames
+sinopia agent frames
 # {"ev":"frames","frames":[{"id":"01M1SS9…","name":"Auth Flow","x":0,"y":0,"w":400,"h":240,"elements":3}],"v":1}
 
-omawhite agent read "Auth Flow"          # by the name on its card
-omawhite agent read 01M1SS9… --to .      # or by id; --to defaults to the cwd
+sinopia agent read "Auth Flow"          # by the name on its card
+sinopia agent read 01M1SS9… --to .      # or by id; --to defaults to the cwd
 # {"ev":"exported","files":["…/docs/boards/auth-flow/board.png", …],"v":1}
 ```
 
@@ -75,7 +75,7 @@ come from the person you are talking to.
 Write a fragment as JSON, then graft it:
 
 ```sh
-omawhite agent add plan.json
+sinopia agent add plan.json
 # {"ev":"framed","id":"01M1SSA…","name":"Auth Flow","v":1}
 ```
 
@@ -160,7 +160,7 @@ anything the picture cannot carry.
 
 ## The layers, when the person asks
 
-`omawhite layer list` prints the whole tree, top first: each layer's `id`,
+`sinopia layer list` prints the whole tree, top first: each layer's `id`,
 `name`, `kind` (`raster`, `vector`, `group`, `frame`), the `owner` holding it
 (`null` on the board's root) and its `depth`, `visible` (its own eye) and
 `shown` (on show at all), `locked`, `opacity` (a fraction), `blend`,
@@ -169,21 +169,21 @@ it. Name a layer by its id, or by a name only it goes by — a name two layers
 share is refused, naming both ids.
 
 ```sh
-omawhite layer list
-omawhite layer add --name "Notes" [--group] [--above <layer>]
-omawhite layer rename <layer> <name>
-omawhite layer move <layer>... --into <group|frame> | --above <layer> | --below <layer>
-omawhite layer move <layer>... --front | --forward | --backward | --back
-omawhite layer show|hide|lock|unlock <layer>...
-omawhite layer opacity 50 <layer>...          # percent
-omawhite layer blend multiply <layer>...      # normal, multiply, screen, overlay, … pass-through
-omawhite layer color red <layer>...           # none, red, orange, yellow, green, blue, violet, gray
-omawhite layer group|duplicate|remove <layer>...
-omawhite layer ungroup <group>...
-omawhite layer merge <layer>...               # siblings into the topmost, or a group into one
-omawhite layer merge-down <layer>
-omawhite layer merge-visible | flatten        # flatten drops what is hidden
-omawhite layer select|expand|collapse <layer>...
+sinopia layer list
+sinopia layer add --name "Notes" [--group] [--above <layer>]
+sinopia layer rename <layer> <name>
+sinopia layer move <layer>... --into <group|frame> | --above <layer> | --below <layer>
+sinopia layer move <layer>... --front | --forward | --backward | --back
+sinopia layer show|hide|lock|unlock <layer>...
+sinopia layer opacity 50 <layer>...          # percent
+sinopia layer blend multiply <layer>...      # normal, multiply, screen, overlay, … pass-through
+sinopia layer color red <layer>...           # none, red, orange, yellow, green, blue, violet, gray
+sinopia layer group|duplicate|remove <layer>...
+sinopia layer ungroup <group>...
+sinopia layer merge <layer>...               # siblings into the topmost, or a group into one
+sinopia layer merge-down <layer>
+sinopia layer merge-visible | flatten        # flatten drops what is hidden
+sinopia layer select|expand|collapse <layer>...
 ```
 
 A change answers `{"ev":"done","ids":[…]}` — the layers it left picked: the
@@ -198,19 +198,19 @@ asked.
 
 | reason | what to do |
 | --- | --- |
-| `no omawhite instance running` | ask the person to open the board |
+| `no sinopia instance running` | ask the person to open the board |
 | `N frames go by "…"` | ask by id, from `agent frames` |
 | `a fragment is one frame …` | one `type: "frame"` per file |
 | `element "X" is on layer "Y", which is not one of frame …` | put it on a layer inside the frame |
 | `refusing to export into …` | pick a normal project directory for `--to` |
 | `image … is neither in the store nor at …` | write `blobs/<sha256>` beside the fragment |
-| `no layer "X" on the board that is open` | `omawhite layer list`, and name it by id |
+| `no layer "X" on the board that is open` | `sinopia layer list`, and name it by id |
 | `N layers go by "X"` | name the one you mean by its id |
 | `"X" is locked, and a lock keeps …` | the person locked it: ask before unlocking |
 
 ## Undo
 
 Anything you graft is one undo step for the person: `Ctrl+Z` takes your frame
-back off the board, and every `omawhite layer` change is one step too. You
+back off the board, and every `sinopia layer` change is one step too. You
 cannot undo from here. If you got it wrong, say so — and graft a corrected
 frame, or put the layers back the way the listing you took first had them.

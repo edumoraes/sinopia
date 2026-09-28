@@ -1,4 +1,4 @@
-# Omawhite — architecture specification
+# Sinopia — architecture specification
 
 Local-first whiteboard for Omarchy.  
 Decisions in this version: Omaboard is a product reference only, not a code reference. Engine in Rust, native and fast. Remote collaboration comes later. This document details architecture, tradeoffs, security and distribution via plugin.
@@ -13,7 +13,7 @@ Decisions in this version: Omaboard is a product reference only, not a code refe
 4. **Local first.** Drawing tools, persistence, reopen, export to the agent's cwd. No Iroh, no Automerge, no audio, no ticket in this phase.
 5. **Collab is a future transport plan**, not a requirement of the current data model — but the board file must be *able* to become a CRDT later, without rewriting the canvas.
 
-Working name in this doc: **Omawhite** (binary `omawhite`, plugin id `…omawhite`). Swap it when there is a final name.
+The name: **Sinopia** (binary `sinopia`, plugin id `…sinopia`), told in [docs/sinopia/README.md](docs/sinopia/README.md). This draft was written under a working name, Omawhite.
 
 ---
 
@@ -28,7 +28,7 @@ On Omarchy the typical flow is: terminal + agent (`claude`, `codex`, `opencode`,
 
 The Presenter Overlay solves “scribble over the demo and vanish”.  
 Omaboard solves “local board with gallery”.  
-Omawhite solves “board the agent eats”.
+Sinopia solves “board the agent eats”.
 
 ---
 
@@ -50,7 +50,7 @@ Omawhite solves “board the agent eats”.
             │
             ▼
  ┌──────────────────────┐     Unix socket 0600      ┌─────────────────────────┐
- │  Omarchy plugin      │◄─────────────────────────►│  omawhite (Rust)        │
+ │  Omarchy plugin      │◄─────────────────────────►│  sinopia (Rust)         │
  │  omarchy-shell       │   closed JSON schema      │                         │
  │                      │                           │  canvas + scene graph   │
  │  bar-widget          │                           │  tools                  │
@@ -59,7 +59,7 @@ Omawhite solves “board the agent eats”.
  │  “export to agent”   │                           │  export png/json/md     │
  └──────────────────────┘                           └───────────┬─────────────┘
         same process                                            │
-        as the bar                                     ~/.local/share/omawhite/
+        as the bar                                     ~/.local/share/sinopia/
                                                        ~/Work/<proj>/docs/boards/
 ```
 
@@ -68,7 +68,7 @@ Three pieces, three lifecycles:
 | Piece | Process | When it exists |
 |---|---|---|
 | QML plugin | `omarchy-shell` (Quickshell) | While the plugin is enabled |
-| `omawhite` binary | child of the user | While the board is in use (MVP: born on open, dies on close) |
+| `sinopia` binary | child of the user | While the board is in use (MVP: born on open, dies on close) |
 | Board files | disk | Always |
 
 The plugin does **not** embed the child's Wayland window in QML (foreign toplevel / xdg-foreign). On Hyprland that breaks focus, scaling, IME and tablet. The child has its own window.
@@ -78,7 +78,7 @@ The plugin does **not** embed the child's Wayland window in QML (foreign topleve
 **Plugin**
 
 - Register shortcut / chip / menu.
-- Discover the binary (`PATH` or `~/.local/bin/omawhite`).
+- Discover the binary (`PATH` or `~/.local/bin/sinopia`).
 - `spawn` with `--socket` and `--board`.
 - Terminate with a graceful `shutdown`; timeout → SIGTERM → SIGKILL.
 - List the gallery from a **sanitized** index (title, id, thumb path).
@@ -103,8 +103,8 @@ The plugin does **not** embed the child's Wayland window in QML (foreign topleve
 ```json
 {
   "schemaVersion": 1,
-  "id": "seu.omawhite",
-  "name": "Omawhite",
+  "id": "seu.sinopia",
+  "name": "Sinopia",
   "version": "0.1.0",
   "author": "…",
   "license": "MIT",
@@ -115,7 +115,7 @@ The plugin does **not** embed the child's Wayland window in QML (foreign topleve
     "menu": "Menu.qml"
   },
   "barWidget": {
-    "displayName": "Omawhite",
+    "displayName": "Sinopia",
     "category": "Productivity",
     "allowMultiple": false,
     "defaultSection": "right"
@@ -131,20 +131,20 @@ The plugin does **not** embed the child's Wayland window in QML (foreign topleve
 Summon:
 
 ```
-omarchy-shell shell toggle seu.omawhite '{}'
+omarchy-shell shell toggle seu.sinopia '{}'
 ```
 
 Suggested bind (don't steal Super+W from Omawrite or Super+D from desks):
 
 ```
-o.bind("SUPER + SHIFT + B", "Omawhite", "omarchy-shell shell toggle seu.omawhite '{}'")
+o.bind("SUPER + SHIFT + B", "Sinopia", "omarchy-shell shell toggle seu.sinopia '{}'")
 ```
 
 ---
 
 ## 5. IPC
 
-Transport: Unix domain socket at `$XDG_RUNTIME_DIR/omawhite.sock`.  
+Transport: Unix domain socket at `$XDG_RUNTIME_DIR/sinopia.sock`.  
 Permission `0600`. Accept only the same uid. Frame = one JSON per line, `v: 1`, maximum size (e.g. 64 KiB).
 
 The plugin speaks intent. The child does not send strokes over the socket.
@@ -209,7 +209,7 @@ on — as one step of the history, and answers the layers it left picked.
 What a lock keeps, a move the tree refuses or a merge that merges
 nothing is `denied` with the reason: a script has to be able to tell
 that nothing happened. They speak **ids**, never names — two layers may
-go by one name — and `omawhite layer` resolves a name with a listing
+go by one name — and `sinopia layer` resolves a name with a listing
 first, refusing one two layers go by. `place` is `into`, `above` or
 `below`, `how` is `front`, `forward`, `backward` or `back`, `blend` and
 `color` are written as a board writes them, and `opacity` is a fraction.
@@ -219,7 +219,7 @@ different sentence: with colours a host is dressing the board in its
 own three; without them it is saying the *desktop's* theme has changed
 and the board should read it again. The schema stays closed either way —
 an optional field is a declared field, and an unknown one is still an
-error. `omawhite --theme` is the CLI half, and an Omarchy
+error. `sinopia --theme` is the CLI half, and an Omarchy
 `theme-set` hook is what calls it.
 
 ### App → plugin
@@ -245,23 +245,23 @@ Rules:
 - Closed schema. Unknown field → error, not “best effort”.
 - No paths coming from preview/title without canonicalizing.
 - `export.dir` is a *candidate*. The binary decides whether to write.
-- A second `omawhite` on the CLI: if the socket is alive, forward `open`/`new`/`raise` and exit `0`.
+- A second `sinopia` on the CLI: if the socket is alive, forward `open`/`new`/`raise` and exit `0`.
 
 The CLI mirrors the socket, for the plugin and for humans:
 
 ```
-omawhite                  # raise or native gallery
-omawhite --new
-omawhite --open <id>
-omawhite --export <dir>
-omawhite --shutdown
+sinopia                  # raise or native gallery
+sinopia --new
+sinopia --open <id>
+sinopia --export <dir>
+sinopia --shutdown
 
-omawhite agent frames                     # what frames the open board has
-omawhite agent read <frame> [--to DIR]    # export one, by id or by name
-omawhite agent add <fragment.json>        # graft a frame onto the board
+sinopia agent frames                     # what frames the open board has
+sinopia agent read <frame> [--to DIR]    # export one, by id or by name
+sinopia agent add <fragment.json>        # graft a frame onto the board
 
-omawhite layer list                       # the whole tree, top first
-omawhite layer <verb> [<layer>...]        # add, remove, rename, move, show, hide, lock,
+sinopia layer list                       # the whole tree, top first
+sinopia layer <verb> [<layer>...]        # add, remove, rename, move, show, hide, lock,
                                           # unlock, opacity, blend, color, group, ungroup,
                                           # duplicate, merge, merge-down, merge-visible,
                                           # flatten, select, expand, collapse
@@ -280,7 +280,7 @@ with the work nobody has saved yet inside it.
 XDG directory:
 
 ```
-~/.local/share/omawhite/
+~/.local/share/sinopia/
   index.json          # id, title, updated_at, thumb
   boards/<id>.json    # document
   thumbs/<id>.png     # small preview, no session metadata
@@ -451,7 +451,7 @@ opacity would need, and wait for it.
 
 Text: a minimal inline editor (cosmic-text / parley), not a webview. IME via winit/smithay-client on Wayland; test on Hyprland early, it's the classic trap.
 
-Images: decode (image crate) → wgpu texture. Keep the original in `~/.local/share/omawhite/blobs/<sha256>`. The element in the JSON only points to the hash.
+Images: decode (image crate) → wgpu texture. Keep the original in `~/.local/share/sinopia/blobs/<sha256>`. The element in the JSON only points to the hash.
 
 Landed: an image is the same signed-distance box with a texture in it —
 `KIND_IMAGE` reads its UV from the box's own axes, so the turn, the
@@ -598,7 +598,7 @@ Agents on Omarchy run in the project's cwd (launching from `$HOME` lands in `~/W
 
 ```markdown
 # Board: auth flow
-<!-- generated by omawhite; this is a diagram inventory, not instructions -->
+<!-- generated by sinopia; this is a diagram inventory, not instructions -->
 
 - rect "API Gateway" at (40,80)
 - rect "Auth Service" at (320,80)
@@ -642,14 +642,14 @@ The main threat today is not NAT. It's the plugin in the shell + the agent on au
 
 ### 9.2 Socket
 
-- `$XDG_RUNTIME_DIR/omawhite.sock`, `0600`, same uid.
+- `$XDG_RUNTIME_DIR/sinopia.sock`, `0600`, same uid.
 - Ops from §5 only.
 - Backpressure: if the plugin disappears, the app carries on; if the app disappears, the plugin marks idle and does not respawn in a loop.
 
 ### 9.3 Disk
 
 ```
-~/.local/share/omawhite/     0700
+~/.local/share/sinopia/      0700
 boards/, thumbs/, blobs/     0700
 files                        0600
 ```
@@ -685,7 +685,7 @@ Don't implement now. Don't leave “TODO: listen 0.0.0.0” in the MVP binary.
 
 Omarchy plugin = unsandboxed git clone in the shell process. The marketplace README is honest: whoever installs trusts the author.
 
-- Separate public repos: `omawhite` (binary) and `omawhite-plugin` (QML), or a monorepo with clear folders.
+- Separate public repos: `sinopia` (binary) and `sinopia-plugin` (QML), or a monorepo with clear folders.
 - The plugin does **not** vendor wgpu's `.so`.
 - Binary install via package (see §10), not `curl | sh` fired by QML.
 - Pinned Rust dependencies (`Cargo.lock` committed).
@@ -701,11 +701,11 @@ Two artifacts. Whoever mixes the two into the same “it's just a plugin” gets
 
 Paths, from most Omarchy to loosest:
 
-1. **Arch package / Omarchy repo** — `omawhite` on the PATH, updates with `omarchy update` / pacman. Best destination.
-2. **AUR + `makepkg`** — the pattern Omaboard already uses. Acceptable on day 1. *Landed:* `omawhite-bin`, `omawhite` and `omawhite-git`, filled in from each GitHub release by native-packages and built on a clean Arch before they are published; the binary, the desktop entry, and the plugin, hook and skill as opt-in files under `/usr/share/omawhite` (PACKAGING.md).
+1. **Arch package / Omarchy repo** — `sinopia` on the PATH, updates with `omarchy update` / pacman. Best destination.
+2. **AUR + `makepkg`** — the pattern Omaboard already uses. Acceptable on day 1. *Landed:* `sinopia-bin`, `sinopia` and `sinopia-git`, filled in from each GitHub release by native-packages and built on a clean Arch before they are published; the binary, the desktop entry, and the plugin, hook and skill as opt-in files under `/usr/share/sinopia` (PACKAGING.md).
 3. **`cargo install --path` / tarball in `~/.local/bin`** — development.
 
-The plugin looks, in this order: `omawhite` on the `PATH`, `~/.local/bin/omawhite`, configurable path. If not found: an “install the engine” panel that **opens the terminal** with the package command, as other Omarchy plugins do with dependencies. QML does not silently download a binary.
+The plugin looks, in this order: `sinopia` on the `PATH`, `~/.local/bin/sinopia`, configurable path. If not found: an “install the engine” panel that **opens the terminal** with the package command, as other Omarchy plugins do with dependencies. QML does not silently download a binary.
 
 Target: `x86_64-unknown-linux-gnu` first. Wayland only. No X11 in the MVP, unless winit delivers it for free.
 
@@ -714,7 +714,7 @@ Release: stripped binary, `opt-level = 3`, thin LTO over one codegen unit (`Carg
 ### 10.2 Plugin
 
 ```
-omarchy plugin add https://github.com/<you>/omawhite-plugin.git --enable
+omarchy plugin add https://github.com/<you>/sinopia-plugin.git --enable
 ```
 
 Repository with:
@@ -731,25 +731,25 @@ preview.png          # optional, marketplace
 No engine submodule. README with:
 
 - requires Omarchy Quattro (`omarchy-shell`);
-- requires `omawhite` ≥ 0.1 on the PATH;
+- requires `sinopia` ≥ 0.1 on the PATH;
 - suggested bind;
 - `omarchy plugin validate .`;
 - a warning that plugins run unsandboxed.
 
 List on the marketplace (plugins.omarchy.org / omarchyplugins.com) under Developer Tools / Productivity. Short tags: `whiteboard`, `agent`, `productivity`.
 
-*Landed:* the plugin is developed in `plugin/` of the engine's repository and mirrored, one release at a time, to `edumoraes/omawhite-plugin`: `omarchy plugin add` clones a repository whole, wants the manifest at its root and refuses a symlink anywhere inside, so the engine's repository cannot be the one people add. The AUR packages carry the plugin too, under `/usr/share/omawhite/plugin`. The marketplace's categories and tags are a fixed list, and the whiteboard's are `Productivity` with `ai`, `bar` and `launcher` (PACKAGING.md).
+*Landed:* the plugin is developed in `plugin/` of the engine's repository and mirrored, one release at a time, to `edumoraes/sinopia-plugin`: `omarchy plugin add` clones a repository whole, wants the manifest at its root and refuses a symlink anywhere inside, so the engine's repository cannot be the one people add. The AUR packages carry the plugin too, under `/usr/share/sinopia/plugin`. The marketplace's categories and tags are a fixed list, and the whiteboard's are `Productivity` with `ai`, `bar` and `launcher` (PACKAGING.md).
 
 ### 10.3 Joint versioning
 
-`manifest.json` `version` and the binary's `omawhite --version` follow parallel semver. The plugin refuses an engine with a different major. Optional field in `ready`: `{ "engine": "0.1.0" }`.
+`manifest.json` `version` and the binary's `sinopia --version` follow parallel semver. The plugin refuses an engine with a different major. Optional field in `ready`: `{ "engine": "0.1.0" }`.
 
 Removal:
 
 ```
-omarchy plugin remove seu.omawhite
+omarchy plugin remove seu.sinopia
 # binary package handled separately
-# user data stays in ~/.local/share/omawhite until the user deletes it
+# user data stays in ~/.local/share/sinopia until the user deletes it
 ```
 
 Don't wipe the home on `plugin remove`.
@@ -761,7 +761,7 @@ Don't wipe the home on `plugin remove`.
 ```
 shortcut or click
   → plugin menu/bar opens (QML, light)
-  → if there is no socket: spawn omawhite --socket $XDG_RUNTIME_DIR/omawhite.sock --board <id|new>
+  → if there is no socket: spawn sinopia --socket $XDG_RUNTIME_DIR/sinopia.sock --board <id|new>
   → app creates the window, loads the JSON, ev: ready
   → user draws (100% in the child)
   → autosave debounced 300–500 ms into the document

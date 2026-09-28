@@ -1569,34 +1569,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "omawhite"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "clap",
- "env_logger",
- "fontdue",
- "image",
- "libc",
- "log",
- "naga",
- "pollster 1.0.1",
- "raw-window-handle",
- "rfd",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "ulid",
- "wayland-backend",
- "wayland-client",
- "wayland-protocols",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2127,6 +2099,34 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "sinopia"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "clap",
+ "env_logger",
+ "fontdue",
+ "image",
+ "libc",
+ "log",
+ "naga",
+ "pollster 1.0.1",
+ "raw-window-handle",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ulid",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wgpu",
+ "winit",
+]
 
 [[package]]
 name = "slab"
