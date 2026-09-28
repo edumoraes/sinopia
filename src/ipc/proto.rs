@@ -11,9 +11,9 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::doc::{BlendMode, Tag};
+use crate::doc::{Align, BlendMode, Tag, TextMode, Valign};
 use crate::editor::Listed;
-use crate::export::Card;
+use crate::export::{Card, TextCard};
 use crate::tree::{Arrange, Place};
 
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -146,6 +146,80 @@ pub enum Request {
         ids: Vec<String>,
         open: bool,
     },
+    /// The texts on show on the open board.
+    Texts,
+    /// A text put on the board, on a text layer of its own: in the frame
+    /// `frame` names, its place measured from the frame's corner, or on
+    /// the open board. A text's words are carried on the line itself, as
+    /// a layer's name is — they are the intent, and the frame's cap is
+    /// the most they can be.
+    AddText {
+        frame: Option<String>,
+        spec: TextSpec,
+    },
+    /// Text `id` changed as `spec` says.
+    SetText {
+        id: String,
+        spec: TextSpec,
+    },
+}
+
+impl TextSpec {
+    /// Writes every field it says onto `t`: the words, the box, the turn
+    /// and the style. Where the box lands on the board is the caller's
+    /// to say when the text is new — a frame's corner is where `x` and
+    /// `y` count from then.
+    pub fn apply(&self, t: &mut crate::doc::Text) {
+        fn set<T: Clone>(to: &mut T, from: &Option<T>) {
+            if let Some(v) = from {
+                *to = v.clone();
+            }
+        }
+        set(&mut t.text, &self.text);
+        set(&mut t.mode, &self.mode);
+        set(&mut t.x, &self.x);
+        set(&mut t.y, &self.y);
+        set(&mut t.w, &self.w);
+        set(&mut t.h, &self.h);
+        set(&mut t.rotation, &self.rotation);
+        let s = &mut t.style;
+        set(&mut s.font, &self.font);
+        set(&mut s.size, &self.size);
+        set(&mut s.bold, &self.bold);
+        set(&mut s.italic, &self.italic);
+        set(&mut s.underline, &self.underline);
+        set(&mut s.strike, &self.strike);
+        set(&mut s.align, &self.align);
+        set(&mut s.valign, &self.valign);
+        set(&mut s.leading, &self.leading);
+        set(&mut s.tracking, &self.tracking);
+        set(&mut s.color, &self.color);
+    }
+}
+
+/// What `add_text` and `set_text` say about a text: each field, when it
+/// is there, is what the text says or how it is set from now on. Every
+/// value is checked on the way in, as the board's own parse checks it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextSpec {
+    pub text: Option<String>,
+    pub mode: Option<TextMode>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub w: Option<f64>,
+    pub h: Option<f64>,
+    pub rotation: Option<f64>,
+    pub font: Option<String>,
+    pub size: Option<f64>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<bool>,
+    pub strike: Option<bool>,
+    pub align: Option<Align>,
+    pub valign: Option<Valign>,
+    pub leading: Option<f64>,
+    pub tracking: Option<f64>,
+    pub color: Option<String>,
 }
 
 impl Request {
@@ -184,6 +258,9 @@ impl Request {
             Request::Flatten => "flatten",
             Request::SelectLayers { .. } => "select_layers",
             Request::OpenLayers { .. } => "open_layers",
+            Request::Texts => "texts",
+            Request::AddText { .. } => "add_text",
+            Request::SetText { .. } => "set_text",
         }
     }
 
@@ -252,6 +329,10 @@ pub enum Event {
     /// picked: the new one, the group, the copies, what a merge kept, or
     /// the ones it acted on.
     Done { ids: Vec<String> },
+    /// The texts on show, in paint order.
+    Texts { texts: Vec<TextCard> },
+    /// A text landed or changed: its id, and its layer's.
+    Texted { id: String, layer: String },
 }
 
 /// `ev`, or `denied` in its place when it would not fit a frame. An
@@ -404,6 +485,22 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
             ids: take_ids(&mut map)?,
             open: take_bool(&mut map, "open")?,
         },
+        "texts" => Request::Texts,
+        "add_text" => {
+            let frame = take_optional_string(&mut map, "frame")?;
+            let spec = take_spec(&mut map)?;
+            anyhow::ensure!(
+                spec.text.as_deref().is_some_and(|t| !t.is_empty()),
+                "field text missing: a text has to say something"
+            );
+            Request::AddText { frame, spec }
+        }
+        "set_text" => {
+            let id = take_string(&mut map, "id")?;
+            let spec = take_spec(&mut map)?;
+            anyhow::ensure!(spec != TextSpec::default(), "set_text says nothing to change");
+            Request::SetText { id, spec }
+        }
         other => anyhow::bail!("unknown op: {other:?}"),
     };
 
@@ -523,6 +620,17 @@ pub fn request_line(req: &Request) -> String {
             map.insert("ids".into(), ids.clone().into());
             map.insert("open".into(), (*open).into());
         }
+        Request::Texts => {}
+        Request::AddText { frame, spec } => {
+            if let Some(frame) = frame {
+                map.insert("frame".into(), frame.clone().into());
+            }
+            put_spec(&mut map, spec);
+        }
+        Request::SetText { id, spec } => {
+            map.insert("id".into(), id.clone().into());
+            put_spec(&mut map, spec);
+        }
     }
     map.insert("op".into(), req.op().into());
     let mut line = Value::Object(map).to_string();
@@ -560,6 +668,117 @@ pub fn read_frame(r: &mut impl std::io::BufRead) -> anyhow::Result<Option<String
         line.pop();
     }
     Ok(Some(line))
+}
+
+/// A text's fields, each where it is given.
+fn put_spec(map: &mut Map<String, Value>, spec: &TextSpec) {
+    let mut put = |key: &str, value: Option<Value>| {
+        if let Some(v) = value {
+            map.insert(key.into(), v);
+        }
+    };
+    let named = |v: Option<Value>| v;
+    put("text", spec.text.clone().map(Value::from));
+    put("mode", named(spec.mode.map(|m| serde_json::to_value(m).expect("a mode is a name"))));
+    put("x", spec.x.map(Value::from));
+    put("y", spec.y.map(Value::from));
+    put("w", spec.w.map(Value::from));
+    put("h", spec.h.map(Value::from));
+    put("rotation", spec.rotation.map(Value::from));
+    put("font", spec.font.clone().map(Value::from));
+    put("size", spec.size.map(Value::from));
+    put("bold", spec.bold.map(Value::from));
+    put("italic", spec.italic.map(Value::from));
+    put("underline", spec.underline.map(Value::from));
+    put("strike", spec.strike.map(Value::from));
+    put("align", spec.align.map(|a| serde_json::to_value(a).expect("an alignment is a name")));
+    put("valign", spec.valign.map(|v| serde_json::to_value(v).expect("an alignment is a name")));
+    put("leading", spec.leading.map(Value::from));
+    put("tracking", spec.tracking.map(Value::from));
+    put("color", spec.color.clone().map(Value::from));
+}
+
+/// A text's fields as the line gives them, every one checked as the
+/// board's own parse would: printable words with no control character
+/// but a newline, finite numbers inside what a text may be, a family
+/// that names something, and a colour that is `#rgb` or `#rrggbb`.
+fn take_spec(map: &mut Map<String, Value>) -> anyhow::Result<TextSpec> {
+    let text = match map.remove("text") {
+        None => None,
+        Some(Value::String(s)) => {
+            anyhow::ensure!(
+                s.chars().all(|c| c == '\n' || !c.is_control()),
+                "field text may hold newlines but no other control character"
+            );
+            Some(s)
+        }
+        Some(other) => anyhow::bail!("field text must be a string, got {other}"),
+    };
+    let number = |map: &mut Map<String, Value>, key: &str, range: Option<(f64, f64)>| -> anyhow::Result<Option<f64>> {
+        let v = match map.remove(key) {
+            None => return Ok(None),
+            Some(Value::Number(n)) => n.as_f64().filter(|v| v.is_finite()),
+            Some(other) => anyhow::bail!("field {key} must be a number, got {other}"),
+        };
+        let Some(v) = v else {
+            anyhow::bail!("field {key} must be a finite number");
+        };
+        if let Some((lo, hi)) = range {
+            anyhow::ensure!((lo..=hi).contains(&v), "field {key} must be between {lo} and {hi}, got {v}");
+        }
+        Ok(Some(v))
+    };
+    let flag = |map: &mut Map<String, Value>, key: &str| -> anyhow::Result<Option<bool>> {
+        match map.remove(key) {
+            None => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(b)),
+            Some(other) => anyhow::bail!("field {key} must be true or false, got {other}"),
+        }
+    };
+    let optional_named = |map: &mut Map<String, Value>, key: &str| -> anyhow::Result<Option<Value>> {
+        Ok(map.remove(key))
+    };
+    let mode: Option<TextMode> = match optional_named(map, "mode")? {
+        None => None,
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|_| anyhow::anyhow!("unknown mode: {v}"))?),
+    };
+    let align: Option<Align> = match optional_named(map, "align")? {
+        None => None,
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|_| anyhow::anyhow!("unknown align: {v}"))?),
+    };
+    let valign: Option<Valign> = match optional_named(map, "valign")? {
+        None => None,
+        Some(v) => Some(serde_json::from_value(v.clone()).map_err(|_| anyhow::anyhow!("unknown valign: {v}"))?),
+    };
+    let color = take_optional_string(map, "color")?;
+    if let Some(c) = &color {
+        let hex = c.strip_prefix('#').unwrap_or("");
+        anyhow::ensure!(
+            matches!(hex.len(), 3 | 6) && hex.chars().all(|d| d.is_ascii_hexdigit()),
+            "field color must be #rgb or #rrggbb, got {c:?}"
+        );
+    }
+    let spec = TextSpec {
+        text,
+        mode,
+        x: number(map, "x", None)?,
+        y: number(map, "y", None)?,
+        w: number(map, "w", Some((0.0, f64::MAX)))?,
+        h: number(map, "h", Some((0.0, f64::MAX)))?,
+        rotation: number(map, "rotation", None)?,
+        font: take_optional_string(map, "font")?,
+        size: number(map, "size", Some((crate::doc::MIN_TEXT_SIZE, crate::doc::MAX_TEXT_SIZE)))?,
+        bold: flag(map, "bold")?,
+        italic: flag(map, "italic")?,
+        underline: flag(map, "underline")?,
+        strike: flag(map, "strike")?,
+        align,
+        valign,
+        leading: number(map, "leading", Some((crate::doc::MIN_LEADING, crate::doc::MAX_LEADING)))?,
+        tracking: number(map, "tracking", Some((crate::doc::MIN_TRACKING, crate::doc::MAX_TRACKING)))?,
+        color,
+    };
+    Ok(spec)
 }
 
 fn take_string(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<String> {
@@ -1263,5 +1482,141 @@ mod tests {
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!((v["ev"].as_str(), v["ids"][1].as_str()), (Some("done"), Some("B")));
         assert_eq!(parse_event(line.trim_end()).unwrap(), done);
+    }
+
+    fn text_ops() -> Vec<Request> {
+        vec![
+            Request::Texts,
+            Request::AddText {
+                frame: None,
+                spec: TextSpec {
+                    text: Some("Hello".into()),
+                    ..TextSpec::default()
+                },
+            },
+            Request::AddText {
+                frame: Some("F1".into()),
+                spec: TextSpec {
+                    text: Some("two\nlines".into()),
+                    mode: Some(TextMode::Frame),
+                    x: Some(10.0),
+                    y: Some(-4.5),
+                    w: Some(200.0),
+                    h: Some(80.0),
+                    rotation: Some(15.0),
+                    font: Some("Noto Serif".into()),
+                    size: Some(18.0),
+                    bold: Some(true),
+                    italic: Some(false),
+                    underline: Some(true),
+                    strike: Some(false),
+                    align: Some(Align::Justify),
+                    valign: Some(Valign::Middle),
+                    leading: Some(1.5),
+                    tracking: Some(-20.0),
+                    color: Some("#ff8800".into()),
+                },
+            },
+            Request::SetText {
+                id: "T1".into(),
+                spec: TextSpec {
+                    size: Some(40.0),
+                    ..TextSpec::default()
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn the_text_ops_round_trip_and_are_asked() {
+        for req in text_ops() {
+            let line = request_line(&req);
+            assert_eq!(parse_request(line.trim_end()).unwrap(), req, "line: {line}");
+            assert!(req.is_asked(), "{}: the answer is the work", req.op());
+        }
+    }
+
+    #[test]
+    fn a_text_op_is_as_closed_as_every_other() {
+        for line in [
+            r#"{ "v": 1, "op": "texts", "of": "board" }"#,
+            r#"{ "v": 1, "op": "add_text" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a\u001b[31mred" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a\rb" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "size": 0 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "size": "big" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "leading": 50 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "tracking": 1e9 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "mode": "poster" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "align": "middle" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "color": "red" }"#,
+            r##"{ "v": 1, "op": "add_text", "text": "a", "color": "#12345" }"##,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "w": -3 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "x": "left" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "font": "" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "frame": "" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "bold": 1 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "shadow": true }"#,
+            r#"{ "v": 1, "op": "set_text", "size": 12 }"#,
+            r#"{ "v": 1, "op": "set_text", "id": "T" }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn the_text_events_match_the_wire_format() {
+        let doc = crate::doc::Document::from_json(
+            r##"{ "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                  "camera": { "x": 0, "y": 0, "zoom": 1 },
+                  "layers": [ { "id": "L", "name": "Hi", "kind": "text" } ],
+                  "elements": [ { "id": "T", "type": "text", "layer": "L", "x": 1, "y": 2,
+                      "w": 30, "h": 20, "text": "Hi", "size": 16, "bold": true, "color": "#000" } ] }"##,
+        )
+        .unwrap();
+        let ev = Event::Texts {
+            texts: crate::export::texts(&doc),
+        };
+        let line = event_line(&ev);
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["ev"], "texts");
+        assert_eq!(v["texts"][0]["id"], "T");
+        assert_eq!(v["texts"][0]["text"], "Hi");
+        assert_eq!(v["texts"][0]["bold"], true);
+        assert_eq!(v["texts"][0]["name"], "Hi");
+        assert_eq!(parse_event(line.trim_end()).unwrap(), ev);
+        let placed = Event::Texted {
+            id: "T".into(),
+            layer: "L".into(),
+        };
+        let line = event_line(&placed);
+        assert_eq!(parse_event(line.trim_end()).unwrap(), placed);
+    }
+
+    #[test]
+    fn a_spec_writes_what_it_says_and_leaves_the_rest() {
+        let mut t = crate::doc::Text {
+            id: "T".into(),
+            layer: "L".into(),
+            x: 1.0,
+            y: 2.0,
+            w: 3.0,
+            h: 4.0,
+            rotation: 0.0,
+            mode: TextMode::Artistic,
+            text: "was".into(),
+            style: crate::doc::TextStyle::default(),
+        };
+        TextSpec {
+            text: Some("now".into()),
+            size: Some(40.0),
+            italic: Some(true),
+            ..TextSpec::default()
+        }
+        .apply(&mut t);
+        assert_eq!((t.text.as_str(), t.style.size, t.style.italic), ("now", 40.0, true));
+        assert_eq!((t.x, t.y, t.w, t.h), (1.0, 2.0, 3.0, 4.0));
+        assert!(!t.style.bold);
     }
 }

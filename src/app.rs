@@ -81,6 +81,13 @@ const SAFETY_DELAY: std::time::Duration = std::time::Duration::from_millis(1200)
 /// How close two presses on one card have to be to be a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// How far in from a frame's corner a text the command line puts in it
+/// stands, when it is not told where, in world units.
+const TEXT_INSET: f64 = 16.0;
+
+/// How wide a text frame the command line makes is, when it is not told.
+const TEXT_FRAME_W: f64 = 240.0;
+
 /// How long the caret of a text being typed shows, and then hides.
 const BLINK: std::time::Duration = std::time::Duration::from_millis(530);
 
@@ -2359,6 +2366,13 @@ impl App {
             Request::Layers => Event::Layers {
                 layers: self.editor().listing(self.doc()),
             },
+            Request::Texts => Event::Texts {
+                texts: export::texts(self.doc()),
+            },
+            Request::AddText { .. } | Request::SetText { .. } => match self.text_op(req) {
+                Ok((id, layer)) => Event::Texted { id, layer },
+                Err(e) => denied(&e),
+            },
             // What is acked and forwarded never arrives here; every other
             // op is one on the layers.
             Request::Ping
@@ -2376,6 +2390,88 @@ impl App {
                 Ok(ids) => Event::Done { ids },
                 Err(e) => denied(&e),
             },
+        }
+    }
+
+    /// A text added or changed from the command line: one step of the
+    /// history, the text fitted and its layer named as typing would. A
+    /// new one stands in the frame named — its place counted from the
+    /// frame's corner, a little in from it when none is given — or on
+    /// the open board, where the window is looking when no place is.
+    fn text_op(&mut self, req: Request) -> anyhow::Result<(String, String)> {
+        self.end_typing();
+        match req {
+            Request::AddText { frame, spec } => {
+                let doc = self.doc();
+                let (born, corner, inset) = match &frame {
+                    Some(id) => {
+                        let listed = export::frames(doc);
+                        anyhow::ensure!(
+                            listed.iter().any(|c| c.id == *id),
+                            "no frame {id:?} on show on the board that is open; `sinopia agent frames` lists them"
+                        );
+                        let f = doc.frame(id).context("the frame listed is on the board")?;
+                        anyhow::ensure!(!doc.locked(&f.layer), "frame {id:?} is locked, and a lock keeps what it holds");
+                        (Some(f.layer.clone()), (f.x, f.y), TEXT_INSET)
+                    }
+                    None => {
+                        let middle = self.view().map_or((0.0, 0.0), |v| {
+                            v.screen_to_world(f64::from(v.viewport.w) / 2.0, f64::from(v.viewport.h) / 2.0)
+                        });
+                        (None, middle, 0.0)
+                    }
+                };
+                let mut style = self.editor().next_style();
+                style.color = self.ink_hex().to_owned();
+                let mut text = crate::doc::Text {
+                    id: String::new(),
+                    layer: String::new(),
+                    x: inset,
+                    y: inset,
+                    w: 0.0,
+                    h: 0.0,
+                    rotation: 0.0,
+                    mode: if spec.w.is_some() {
+                        crate::doc::TextMode::Frame
+                    } else {
+                        crate::doc::TextMode::Artistic
+                    },
+                    text: String::new(),
+                    style,
+                };
+                spec.apply(&mut text);
+                text.style.checked().map_err(anyhow::Error::msg)?;
+                text.x += corner.0;
+                text.y += corner.1;
+                if text.mode == crate::doc::TextMode::Frame {
+                    if text.w <= 0.0 {
+                        text.w = TEXT_FRAME_W;
+                    }
+                    // A frame with no height is as tall as what it holds.
+                    if spec.h.is_none() {
+                        let laid = crate::typeset::lay(&text.text, &text.style, text.mode, text.w, f64::MAX, &self.fonts);
+                        text.h = laid.line_h * laid.rows.len() as f64;
+                    }
+                }
+                let placed = self.with_text(|e, d, f| e.place_text(d, f, text, born.as_deref()));
+                self.apply(Change::Scene);
+                Ok(placed)
+            }
+            Request::SetText { id, spec } => {
+                let change = self
+                    .with_text(|e, d, f| e.change_text(d, f, &id, |t| spec.apply(t)))
+                    .map_err(anyhow::Error::msg)?;
+                self.apply(change);
+                let layer = self
+                    .doc()
+                    .elements
+                    .iter()
+                    .find(|el| el.id() == id)
+                    .map(|el| el.layer().to_owned())
+                    .unwrap_or_default();
+                Ok((id, layer))
+            }
+            _ => anyhow::bail!("not a text op"),
         }
     }
 
@@ -4748,7 +4844,10 @@ impl App {
             | Request::MergeVisible
             | Request::Flatten
             | Request::SelectLayers { .. }
-            | Request::OpenLayers { .. } => {}
+            | Request::OpenLayers { .. }
+            | Request::Texts
+            | Request::AddText { .. }
+            | Request::SetText { .. } => {}
         }
     }
 }

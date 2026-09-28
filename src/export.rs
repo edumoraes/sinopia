@@ -132,6 +132,36 @@ pub fn frames(doc: &Document) -> Vec<Card> {
     out
 }
 
+/// One text, as the command line is told about it: the text itself —
+/// what it says, where it stands, how it is set — the name its layer
+/// goes by, and the frame it stands in, by that frame's id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextCard {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<String>,
+    #[serde(flatten)]
+    pub text: crate::doc::Text,
+}
+
+/// Every text on show, in paint order, read through `painted()` as the
+/// frames are: a text on a layer the person hid is not listed, since what
+/// the command line can see and what the window shows are one answer.
+pub fn texts(doc: &Document) -> Vec<TextCard> {
+    doc.painted()
+        .filter_map(|p| {
+            let Element::Text(t) = p.element else {
+                return None;
+            };
+            Some(TextCard {
+                name: doc.layer(&t.layer).map(|l| l.name.clone()).unwrap_or_default(),
+                frame: p.within.map(|f| f.id.clone()),
+                text: t.clone(),
+            })
+        })
+        .collect()
+}
+
 /// A document holding only what the scope covers, in paint order, with
 /// the layers those elements stand on and nothing else — the groups they
 /// stand in included, so a page keeps the shape it had on the board. It is

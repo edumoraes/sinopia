@@ -282,6 +282,12 @@ impl Editor {
         self.text_mode
     }
 
+    /// How the next text is set — what the bar shows with nothing to
+    /// look at, and what a text the command line adds starts from.
+    pub fn next_style(&self) -> TextStyle {
+        self.text_style.clone()
+    }
+
     /// A tool's key: the tool — or, for the Text tool already in hand,
     /// the other kind of text, as Affinity's two text tools share `T`.
     pub fn choose_tool(&mut self, tool: Tool, doc: &mut Document) {
@@ -816,6 +822,64 @@ impl Editor {
         }
         self.selection.clear();
         Change::Scene
+    }
+
+    /// A text made whole somewhere else — the command line's — put on the
+    /// board: a text layer of its own in `born`'s stack, a fresh id, its
+    /// box fitted to its letters and its layer named after it. Answers
+    /// the text's id and its layer's.
+    pub fn place_text(&mut self, doc: &mut Document, fonts: &Fonts, mut text: Text, born: Option<&str>) -> (String, String) {
+        let _ = self.end_typing(doc);
+        text.id = new_id();
+        let laid = Laid::of(&text, fonts);
+        refit(&mut text, &laid);
+        let layer = self.fresh_layer(doc, Kind::Text, born);
+        if let (Some(l), Some(name)) = (doc.layer_mut(&layer), name_of(&text.text)) {
+            l.name = name;
+        }
+        text.layer = layer.clone();
+        let id = text.id.clone();
+        doc.elements.push(Element::Text(text));
+        self.selection = vec![id.clone()];
+        (id, layer)
+    }
+
+    /// Changes text `id` as `change` says, fits it again and names its
+    /// layer after what it now says, as typing into it would. Refused for
+    /// a text that is not there, or whose layer a lock keeps.
+    pub fn change_text(
+        &mut self,
+        doc: &mut Document,
+        fonts: &Fonts,
+        id: &str,
+        change: impl FnOnce(&mut Text),
+    ) -> Result<Change, String> {
+        let Some(text) = text_of(doc, id) else {
+            return Err(format!("no text {id:?} on the board that is open"));
+        };
+        if doc.locked(&text.layer) {
+            return Err(format!("{:?} is locked, and a lock keeps what it holds", text.layer));
+        }
+        if self.typing.as_ref().is_some_and(|t| t.id == id) {
+            let _ = self.end_typing(doc);
+        }
+        let Some(text) = text_mut(doc, id) else {
+            return Err(format!("no text {id:?} on the board that is open"));
+        };
+        // Made on a copy and checked before it lands: a change the board
+        // cannot set leaves the text as it was.
+        let mut next = text.clone();
+        change(&mut next);
+        next.style.checked()?;
+        if next == *text {
+            return Ok(Change::None);
+        }
+        let laid = Laid::of(&next, fonts);
+        refit(&mut next, &laid);
+        let was = std::mem::replace(text, next);
+        let (layer, now) = (text.layer.clone(), text.text.clone());
+        rename_after(doc, &layer, &was.text, &now);
+        Ok(Change::Scene)
     }
 
     /// The texts the bar is looking at: the one being typed, or every
@@ -1661,5 +1725,59 @@ mod tests {
         assert!((t.w - good.w).abs() < 1e-9 && (t.h - good.h).abs() < 1e-9);
         assert!((t.x - good.x).abs() < 1e-9 && (t.y - good.y).abs() < 1e-9, "from its anchor");
         assert!(!fit_texts(&mut doc, &fonts()), "a fitted text stays where it is");
+    }
+
+    #[test]
+    fn a_text_placed_from_outside_lands_on_a_layer_of_its_own_fitted_and_named() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        let text = Text {
+            id: "ignored".into(),
+            layer: String::new(),
+            x: 10.0,
+            y: 20.0,
+            w: 1.0,
+            h: 1.0,
+            rotation: 0.0,
+            mode: TextMode::Artistic,
+            text: "From the command line".into(),
+            style: TextStyle::default(),
+        };
+        let (id, layer) = e.place_text(&mut doc, &fonts(), text, None);
+        let t = only(&doc);
+        assert_eq!((t.id.as_str(), t.layer.as_str()), (id.as_str(), layer.as_str()));
+        assert_ne!(t.id, "ignored", "an id is minted, never trusted");
+        assert!(t.w > 100.0, "fitted to what it says");
+        assert_eq!((t.x, t.y), (10.0, 20.0));
+        assert_eq!(doc.layer(&layer).unwrap().name, "From the command line");
+        assert_eq!(doc.layer(&layer).unwrap().kind, Kind::Text);
+    }
+
+    #[test]
+    fn a_text_changed_from_outside_is_fitted_and_its_layer_renamed_with_it() {
+        let (mut e, mut doc) = with_text("before");
+        let id = only(&doc).id.clone();
+        let w = only(&doc).w;
+        let change = e.change_text(&mut doc, &fonts(), &id, |t| {
+            t.text = "after, and longer".into();
+            t.style.bold = true;
+        });
+        assert_eq!(change, Ok(Change::Scene));
+        let t = only(&doc);
+        assert!(t.w > w);
+        assert_eq!(doc.layer(&t.layer).unwrap().name, "after, and longer");
+        assert!(e.change_text(&mut doc, &fonts(), "nobody", |_| {}).is_err());
+        let layer = only(&doc).layer.clone();
+        doc.layer_mut(&layer).unwrap().locked = true;
+        let refused = e.change_text(&mut doc, &fonts(), &id, |t| t.text = "no".into());
+        assert!(refused.unwrap_err().contains("locked"));
+        assert_eq!(only(&doc).text, "after, and longer");
+        doc.layer_mut(&layer).unwrap().locked = false;
+        let bad = e.change_text(&mut doc, &fonts(), &id, |t| {
+            t.text = "half".into();
+            t.style.size = -1.0;
+        });
+        assert!(bad.is_err());
+        assert_eq!(only(&doc).text, "after, and longer", "nothing of a refused change lands");
     }
 }
