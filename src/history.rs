@@ -44,6 +44,9 @@ pub struct Entry {
     /// Roughly what this costs to keep, so the ceiling can be counted
     /// without walking the board again.
     weight: usize,
+    /// The typing session that wrote it, if one did: the next keystroke
+    /// of the same session is folded into it rather than stacked on it.
+    session: Option<u64>,
 }
 
 impl Entry {
@@ -52,6 +55,7 @@ impl Entry {
             doc: doc.clone(),
             spot,
             weight: weight(doc),
+            session: None,
         }
     }
 
@@ -110,14 +114,44 @@ impl History {
     /// A board that really changed pushes an entry and drops the future,
     /// because there is no longer a way forward from here.
     pub fn keep(&mut self, doc: &Document, spot: Spot) {
+        self.keep_as(doc, spot, None);
+    }
+
+    /// [`History::keep`], for a change a typing session made. Text is
+    /// typed a character at a time and every character comes to rest,
+    /// but nobody undoes a word a letter at a time: a keystroke of the
+    /// session that wrote the present step is folded into it, so the
+    /// whole of what was typed is one step. The session is `None` for
+    /// every other change, which is never folded; and a keystroke after
+    /// an undo is a step of its own, since the one it would fold into
+    /// is not the present any more.
+    pub fn keep_as(&mut self, doc: &Document, spot: Spot, session: Option<u64>) {
         if self.present_mut().doc.same_board(doc) {
             self.mark(spot);
             return;
         }
+        let folds = session.is_some()
+            && self.future.is_empty()
+            && self.past.len() > 1
+            && self.present_mut().session == session;
         for gone in self.future.drain(..) {
             self.weight -= gone.weight;
         }
-        let entry = Entry::of(doc, spot);
+        if folds {
+            let present = self.present_mut();
+            let was = present.weight;
+            *present = Entry {
+                session,
+                ..Entry::of(doc, spot)
+            };
+            let now = present.weight;
+            self.weight = self.weight - was + now;
+            return self.trim();
+        }
+        let entry = Entry {
+            session,
+            ..Entry::of(doc, spot)
+        };
         self.weight += entry.weight;
         self.past.push(entry);
         self.trim();
@@ -536,6 +570,56 @@ mod tests {
         h.keep(&heavy(40), spot(&[]));
         let counted: usize = h.past.iter().chain(&h.future).map(|e| e.weight).sum();
         assert_eq!(h.weight, counted, "the future it dropped is not still paid for");
+    }
+
+    #[test]
+    fn what_one_typing_session_types_is_one_step() {
+        let before = board();
+        let mut h = History::new(&before, spot(&[]));
+        for n in 1..=4 {
+            h.keep_as(&with_layers(n), spot(&[]), Some(7));
+        }
+        assert_eq!(h.past.len(), 2, "four keystrokes, one step");
+        assert!(present(&h).doc.same_board(&with_layers(4)), "the step is the last of them");
+        let (doc, _) = step(&mut h, true);
+        assert!(doc.same_board(&before), "and one undo takes them all back");
+    }
+
+    #[test]
+    fn another_session_or_no_session_is_a_step_of_its_own() {
+        let mut h = History::new(&board(), spot(&[]));
+        h.keep_as(&with_layers(1), spot(&[]), Some(1));
+        h.keep_as(&with_layers(2), spot(&[]), Some(2));
+        assert_eq!(h.past.len(), 3);
+        h.keep_as(&with_layers(3), spot(&[]), None);
+        h.keep_as(&with_layers(4), spot(&[]), None);
+        assert_eq!(h.past.len(), 5, "a change outside a session is never folded");
+        h.keep_as(&with_layers(5), spot(&[]), Some(2));
+        assert_eq!(h.past.len(), 6, "a session is folded only into its own last step");
+    }
+
+    #[test]
+    fn folding_a_keystroke_in_drops_the_way_forward() {
+        let mut h = History::new(&board(), spot(&[]));
+        h.keep_as(&with_layers(1), spot(&[]), Some(3));
+        h.keep_as(&with_layers(2), spot(&[]), Some(3));
+        h.undo();
+        assert!(h.can_redo());
+        // Typing on after an undo is a new step, not the old one amended.
+        h.keep_as(&with_layers(3), spot(&[]), Some(3));
+        assert!(!h.can_redo());
+        assert_eq!(h.past.len(), 2);
+        let (doc, _) = step(&mut h, true);
+        assert!(doc.same_board(&board()));
+    }
+
+    #[test]
+    fn a_folded_step_is_weighed_as_what_it_now_holds() {
+        let mut h = History::new(&board(), spot(&[]));
+        h.keep_as(&with_layers(1), spot(&[]), Some(4));
+        h.keep_as(&with_layers(9), spot(&[]), Some(4));
+        let total: usize = h.past.iter().chain(&h.future).map(|e| e.weight).sum();
+        assert_eq!(h.weight, total);
     }
 }
 
