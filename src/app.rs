@@ -256,6 +256,9 @@ struct App {
     /// `Ctrl+V` on the board found no layers and no image, only words:
     /// what arrives is a text of its own, where the pointer is.
     pasting_words: bool,
+    /// What has been typed into the font menu, and when last: a name is
+    /// looked for as it is typed, and a pause starts it over.
+    menu_typed: (String, Instant),
     /// The last press on the canvas, where, and how many in a row it
     /// made: two are a double click, three a triple.
     last_press: Option<(Instant, (f64, f64), u32)>,
@@ -2930,6 +2933,42 @@ impl App {
         self.redraw();
     }
 
+    /// A key while the font menu stands: `Esc` puts it away, `Enter`
+    /// takes the family lit, the arrows walk the lines, and letters look
+    /// for a family by its name — each tried on the text as it is lit.
+    fn font_menu_key(&mut self, key: &Key, text: Option<&str>) {
+        let Some(opened) = self.menu.as_ref() else { return };
+        let (n, hover) = (opened.items.len(), opened.hover);
+        let target = match key {
+            Key::Named(NamedKey::Escape) => return self.close_menu(None),
+            Key::Named(NamedKey::Enter) => return self.close_menu(hover),
+            Key::Named(NamedKey::ArrowDown) => Some(hover.map_or(0, |h| (h + 1).min(n.saturating_sub(1)))),
+            Key::Named(NamedKey::ArrowUp) => Some(hover.map_or(0, |h| h.saturating_sub(1))),
+            Key::Named(NamedKey::Space) | Key::Character(_) => {
+                let typed = match key {
+                    Key::Character(c) => text.unwrap_or(c).to_owned(),
+                    _ => " ".to_owned(),
+                };
+                let (was, at) = &self.menu_typed;
+                let mut name = if at.elapsed() < DOUBLE_CLICK * 2 { was.clone() } else { String::new() };
+                name.push_str(&typed);
+                self.menu_typed = (name.clone(), Instant::now());
+                menu::find(&opened.items, &name)
+            }
+            _ => None,
+        };
+        let Some(i) = target else { return };
+        let scroll = self
+            .view()
+            .and_then(|view| self.menu_laid(&view))
+            .zip(self.menu.as_ref())
+            .map(|(laid, opened)| laid.scroll_showing(&opened.items, i));
+        if let (Some(opened), Some(scroll)) = (self.menu.as_mut(), scroll) {
+            opened.scroll = scroll;
+        }
+        self.hover_menu(Some(i));
+    }
+
     /// `Ctrl` with a letter while a text is being typed: the text's own
     /// commands, and the window's for the rest.
     fn typing_command(&mut self, c: &str, shift: bool) -> bool {
@@ -4166,6 +4205,12 @@ impl App {
                 self.sync_search();
                 self.redraw();
             }
+            // The font menu takes the keyboard while it stands, text being
+            // typed or not: the arrows walk it, Enter takes a family, and
+            // a name typed is looked for.
+            _ if pressed && self.menu.as_ref().is_some_and(|m| matches!(m.purpose, Purpose::Font { .. })) => {
+                self.font_menu_key(key, text);
+            }
             // A text being typed takes the keyboard whole, as a field does:
             // a letter is written, not a tool taken up.
             _ if pressed && self.editor().typing().is_some() => {
@@ -5148,6 +5193,7 @@ pub fn run(
         typed_at: Instant::now(),
         caret_drawn: std::cell::Cell::new(None),
         pasting_words: false,
+        menu_typed: (String::new(), Instant::now()),
         last_press: None,
         glyphs: crate::glyphs::Glyphs::default(),
         letters_slot: 0,

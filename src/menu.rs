@@ -82,6 +82,16 @@ impl Item {
     }
 }
 
+/// The first line that can be taken whose label starts with `typed`,
+/// whatever the case: what typing a name into an open menu lands on, as
+/// every list of fonts answers it.
+pub fn find(items: &[Item], typed: &str) -> Option<usize> {
+    let typed = typed.to_lowercase();
+    items
+        .iter()
+        .position(|i| i.enabled && i.label.to_lowercase().starts_with(&typed))
+}
+
 /// A menu laid out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Menu {
@@ -174,6 +184,29 @@ impl Menu {
     /// The scroll in use, and how far it can go.
     pub fn scroll(&self) -> f32 {
         self.scroll
+    }
+
+    /// Where the menu has to be scrolled for line `k` to be in sight: as
+    /// little as it takes from where it is, and not at all when it
+    /// already is.
+    pub fn scroll_showing(&self, items: &[Item], k: usize) -> f32 {
+        let s = self.scale;
+        let mut top = 0.0;
+        for item in &items[..k.min(items.len())] {
+            top += if item.rule { (ITEM + RULE) * s } else { ITEM * s };
+        }
+        if items.get(k).is_some_and(|i| i.rule) {
+            top += RULE * s;
+        }
+        let band = self.rect.h - 2.0 * PADDING * s;
+        let next = if top < self.scroll {
+            top
+        } else if top + ITEM * s > self.scroll + band {
+            top + ITEM * s - band
+        } else {
+            self.scroll
+        };
+        next.clamp(0.0, self.max_scroll())
     }
 
     pub fn max_scroll(&self) -> f32 {
@@ -434,5 +467,33 @@ mod tests {
             prims.iter().any(|q| q.kind == KIND_IMAGE && q.color == theme.muted),
             "what cannot be taken is muted"
         );
+    }
+
+    #[test]
+    fn typing_a_name_finds_the_first_line_it_starts() {
+        let list: Vec<Item> = ["Adwaita Sans", "iA Writer Duo", "Noto Sans", "Noto Serif", "Off"]
+            .iter()
+            .map(|l| Item::new(l))
+            .collect();
+        let mut off = list.clone();
+        off[4] = Item::new("Off").enabled(false);
+        assert_eq!(find(&list, "no"), Some(2));
+        assert_eq!(find(&list, "NOTO SE"), Some(3));
+        assert_eq!(find(&list, "ia"), Some(1), "whatever the case");
+        assert_eq!(find(&list, "zz"), None);
+        assert_eq!(find(&off, "off"), None, "a line that cannot be taken is not found");
+    }
+
+    #[test]
+    fn a_line_is_brought_into_sight_by_as_little_scroll_as_it_takes() {
+        let a = atlas();
+        let many = items(60);
+        let m = Menu::layout(VP, 1.0, button(100.0, 40.0), &a, &many, 0.0);
+        assert_eq!(m.scroll_showing(&many, 0), 0.0, "already in sight");
+        let far = m.scroll_showing(&many, 59);
+        assert_eq!(far, m.max_scroll(), "the last line, at the bottom");
+        let again = Menu::layout(VP, 1.0, button(100.0, 40.0), &a, &many, far);
+        assert_eq!(again.rows.last().unwrap().1, 59);
+        assert_eq!(again.scroll_showing(&many, 58), far, "a line in sight asks nothing");
     }
 }
