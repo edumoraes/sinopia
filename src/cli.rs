@@ -3,11 +3,12 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
-use crate::doc::{BlendMode, Tag};
+use crate::doc::{Align, BlendMode, Tag, TextMode, Valign};
 use crate::editor::Listed;
-use crate::ipc::proto::Request;
+use crate::export::TextCard;
+use crate::ipc::proto::{Request, TextSpec};
 use crate::tree::{Arrange, Place};
 
 #[derive(Debug, Parser)]
@@ -69,6 +70,97 @@ pub enum Command {
         #[command(subcommand)]
         verb: LayerVerb,
     },
+    /// Put words on the board that is open, and change them (needs a live board)
+    Text {
+        #[command(subcommand)]
+        verb: TextVerb,
+    },
+}
+
+/// What can be done with the board's text. A text is named by its id,
+/// its layer's id, or the name its layer goes by; a frame by its id or
+/// the name on its card. Every change is one step the board can undo.
+#[derive(Debug, Clone, PartialEq, Subcommand)]
+pub enum TextVerb {
+    /// List the texts on show, as JSON
+    List,
+    /// Put a text on the board: artistic text, or a text frame with --width
+    Add {
+        /// What it says; a newline in it breaks a line
+        text: String,
+        /// Into this frame, its place counted from the frame's corner
+        #[arg(long, value_name = "FRAME")]
+        frame: Option<String>,
+        /// Where its top-left corner stands (default: the middle of the view, or in from the frame's corner)
+        #[arg(long, value_name = "X,Y", value_parser = point, allow_hyphen_values = true)]
+        at: Option<(f64, f64)>,
+        /// Make it a text frame this wide, its words wrapping at it
+        #[arg(long, value_name = "W")]
+        width: Option<f64>,
+        /// The frame's height (default: as tall as its lines)
+        #[arg(long, value_name = "H")]
+        height: Option<f64>,
+        #[command(flatten)]
+        style: StyleArgs,
+    },
+    /// Change a text: what it says, where it stands, how it is set
+    Set {
+        /// The text, by its id, its layer's id or its layer's name
+        text: String,
+        /// What it says from now on
+        #[arg(long = "to", value_name = "WORDS")]
+        says: Option<String>,
+        /// Artistic text, or a text frame
+        #[arg(long, value_parser = text_mode)]
+        kind: Option<TextMode>,
+        /// Where its top-left corner stands on the board
+        #[arg(long, value_name = "X,Y", value_parser = point, allow_hyphen_values = true)]
+        at: Option<(f64, f64)>,
+        #[arg(long, value_name = "W")]
+        width: Option<f64>,
+        #[arg(long, value_name = "H")]
+        height: Option<f64>,
+        #[command(flatten)]
+        style: StyleArgs,
+    },
+}
+
+/// How a text is set, each where it is given. A toggle given alone is on;
+/// `--bold false` turns it off.
+#[derive(Debug, Clone, Default, PartialEq, Args)]
+pub struct StyleArgs {
+    /// The family, as fontconfig names it
+    #[arg(long)]
+    pub font: Option<String>,
+    /// How tall the em is, in world units
+    #[arg(long)]
+    pub size: Option<f64>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub bold: Option<bool>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub italic: Option<bool>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub underline: Option<bool>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
+    pub strike: Option<bool>,
+    /// left, center, right or justify
+    #[arg(long, value_parser = align)]
+    pub align: Option<Align>,
+    /// Where a frame stands its lines: top, middle or bottom
+    #[arg(long, value_parser = valign)]
+    pub valign: Option<Valign>,
+    /// Baseline to baseline, as a share of the size
+    #[arg(long)]
+    pub leading: Option<f64>,
+    /// Letter spacing, in thousandths of an em
+    #[arg(long, allow_hyphen_values = true)]
+    pub tracking: Option<f64>,
+    /// The ink, #rgb or #rrggbb
+    #[arg(long)]
+    pub color: Option<String>,
+    /// Turned by this many degrees, clockwise
+    #[arg(long, allow_hyphen_values = true)]
+    pub rotation: Option<f64>,
 }
 
 /// What can be done to the layers, each named by its id or by a name
@@ -221,6 +313,34 @@ fn percent(s: &str) -> Result<f64, String> {
     }
 }
 
+/// `X,Y` as two numbers.
+fn point(s: &str) -> Result<(f64, f64), String> {
+    let (x, y) = s.split_once(',').ok_or_else(|| format!("{s:?} is not X,Y"))?;
+    let num = |v: &str| v.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    match (num(x), num(y)) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        _ => Err(format!("{s:?} is not two numbers")),
+    }
+}
+
+/// One of a closed set, by the name the board writes it under.
+fn named<T: serde::de::DeserializeOwned>(s: &str, what: &str, all: &str) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(s.to_lowercase()))
+        .map_err(|_| format!("{s:?} is not {what}; one of: {all}"))
+}
+
+fn text_mode(s: &str) -> Result<TextMode, String> {
+    named(s, "a kind of text", "artistic, frame")
+}
+
+fn align(s: &str) -> Result<Align, String> {
+    named(s, "an alignment", "left, center, right, justify")
+}
+
+fn valign(s: &str) -> Result<Valign, String> {
+    named(s, "a vertical alignment", "top, middle, bottom")
+}
+
 /// A name as a person types it: any case, dashes or none.
 fn plain(s: &str) -> String {
     s.chars()
@@ -362,6 +482,99 @@ pub fn layer_request(verb: &LayerVerb, id: impl Fn(&str) -> anyhow::Result<Strin
     })
 }
 
+/// The text `asked` names in a listing: a text's id, then a layer's id,
+/// then a name only one text's layer goes by.
+pub fn resolve_text(listing: &[TextCard], asked: &str) -> anyhow::Result<String> {
+    if let Some(card) = listing
+        .iter()
+        .find(|c| c.text.id == asked)
+        .or_else(|| listing.iter().find(|c| c.text.layer == asked))
+    {
+        return Ok(card.text.id.clone());
+    }
+    let by_name: Vec<&TextCard> = listing.iter().filter(|c| c.name == asked).collect();
+    match by_name.as_slice() {
+        [one] => Ok(one.text.id.clone()),
+        [] => anyhow::bail!("no text {asked:?} on show on the board that is open; `sinopia text list` lists them"),
+        many => anyhow::bail!(
+            "{} texts go by {asked:?} — name one by its id: {}",
+            many.len(),
+            many.iter().map(|c| c.text.id.as_str()).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// The request a text verb asks, a frame named turned into its id by
+/// `frame` and a text into its own by `text`.
+pub fn text_request(
+    verb: &TextVerb,
+    frame: impl Fn(&str) -> anyhow::Result<String>,
+    text: impl Fn(&str) -> anyhow::Result<String>,
+) -> anyhow::Result<Request> {
+    let styled = |style: &StyleArgs, spec: TextSpec| TextSpec {
+        font: style.font.clone(),
+        size: style.size,
+        bold: style.bold,
+        italic: style.italic,
+        underline: style.underline,
+        strike: style.strike,
+        align: style.align,
+        valign: style.valign,
+        leading: style.leading,
+        tracking: style.tracking,
+        color: style.color.clone(),
+        rotation: style.rotation,
+        ..spec
+    };
+    Ok(match verb {
+        TextVerb::List => Request::Texts,
+        TextVerb::Add {
+            text: words,
+            frame: into,
+            at,
+            width,
+            height,
+            style,
+        } => Request::AddText {
+            frame: into.as_deref().map(&frame).transpose()?,
+            spec: styled(
+                style,
+                TextSpec {
+                    text: Some(words.clone()),
+                    x: at.map(|p| p.0),
+                    y: at.map(|p| p.1),
+                    w: *width,
+                    h: *height,
+                    ..TextSpec::default()
+                },
+            ),
+        },
+        TextVerb::Set {
+            text: which,
+            says,
+            kind,
+            at,
+            width,
+            height,
+            style,
+        } => Request::SetText {
+            id: text(which)?,
+            spec: styled(
+                style,
+                TextSpec {
+                    text: says.clone(),
+                    mode: *kind,
+                    x: at.map(|p| p.0),
+                    y: at.map(|p| p.1),
+                    w: *width,
+                    h: *height,
+                    ..TextSpec::default()
+                },
+            ),
+        },
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Subcommand)]
 pub enum Verb {
     /// List the frames of the board that is open
@@ -411,6 +624,8 @@ pub enum Action {
     /// Something done to the open board's layers, named as they were
     /// typed: `main` turns the names into ids against the live board.
     Layer(LayerVerb),
+    /// Something done with the open board's text, on the same terms.
+    Text(TextVerb),
 }
 
 impl Cli {
@@ -442,6 +657,7 @@ impl Cli {
         let verb = match &self.command {
             Some(Command::Agent { .. }) => "agent",
             Some(Command::Layer { .. }) => "layer",
+            Some(Command::Text { .. }) => "text",
             None => return Ok(self),
         };
         match flag {
@@ -468,6 +684,7 @@ impl Cli {
                 };
             }
             Some(Command::Layer { verb }) => return Action::Layer(verb.clone()),
+            Some(Command::Text { verb }) => return Action::Text(verb.clone()),
             None => {}
         }
         if self.new {
@@ -786,5 +1003,103 @@ mod tests {
         // A name that is not there stops the request before it is sent.
         let refused = layer_request(&layer(&["remove", "Moon"]), |n| anyhow::bail!("no layer {n:?}"));
         assert!(refused.is_err());
+    }
+
+    fn text(args: &[&str]) -> TextVerb {
+        match parse(&[&["text"][..], args].concat()).unwrap().action() {
+            Action::Text(verb) => verb,
+            other => panic!("{args:?} is a text verb, not {other:?}"),
+        }
+    }
+
+    /// A text verb's request, frames and texts named as `f:` and `t:`
+    /// plus what was typed.
+    fn texted(verb: &TextVerb) -> Request {
+        text_request(verb, |f| Ok(format!("f:{f}")), |t| Ok(format!("t:{t}"))).unwrap()
+    }
+
+    #[test]
+    fn the_text_verbs_ask_what_they_say() {
+        assert_eq!(texted(&text(&["list"])), Request::Texts);
+        assert_eq!(
+            texted(&text(&["add", "Hello\nthere"])),
+            Request::AddText {
+                frame: None,
+                spec: TextSpec {
+                    text: Some("Hello\nthere".into()),
+                    ..TextSpec::default()
+                },
+            }
+        );
+        let full = text(&[
+            "add", "Label", "--frame", "Auth Flow", "--at", "10,-4.5", "--width", "200", "--font", "Noto Serif",
+            "--size", "18", "--bold", "--italic", "false", "--align", "center", "--color", "#ff8800",
+        ]);
+        assert_eq!(
+            texted(&full),
+            Request::AddText {
+                frame: Some("f:Auth Flow".into()),
+                spec: TextSpec {
+                    text: Some("Label".into()),
+                    x: Some(10.0),
+                    y: Some(-4.5),
+                    w: Some(200.0),
+                    font: Some("Noto Serif".into()),
+                    size: Some(18.0),
+                    bold: Some(true),
+                    italic: Some(false),
+                    align: Some(Align::Center),
+                    color: Some("#ff8800".into()),
+                    ..TextSpec::default()
+                },
+            }
+        );
+        assert_eq!(
+            texted(&text(&["set", "Title", "--to", "New words", "--kind", "frame", "--underline", "--rotation", "15"])),
+            Request::SetText {
+                id: "t:Title".into(),
+                spec: TextSpec {
+                    text: Some("New words".into()),
+                    mode: Some(TextMode::Frame),
+                    underline: Some(true),
+                    rotation: Some(15.0),
+                    ..TextSpec::default()
+                },
+            }
+        );
+        assert!(parse(&["text", "add"]).is_err(), "a text says something");
+        assert!(parse(&["text", "add", "x", "--align", "middle"]).is_err());
+        assert!(parse(&["text", "add", "x", "--at", "10"]).is_err());
+        assert!(parse(&["--new", "text", "list"]).is_err(), "a flag and a verb are two sentences");
+    }
+
+    fn card(id: &str, layer: &str, name: &str) -> TextCard {
+        TextCard {
+            name: name.into(),
+            frame: None,
+            text: crate::doc::Text {
+                id: id.into(),
+                layer: layer.into(),
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                rotation: 0.0,
+                mode: TextMode::Artistic,
+                text: name.into(),
+                style: crate::doc::TextStyle::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_text_is_named_by_its_id_its_layer_or_a_name_only_it_goes_by() {
+        let listing = [card("T1", "L1", "Title"), card("T2", "L2", "Note"), card("T3", "L3", "Note")];
+        assert_eq!(resolve_text(&listing, "T2").unwrap(), "T2");
+        assert_eq!(resolve_text(&listing, "L1").unwrap(), "T1");
+        assert_eq!(resolve_text(&listing, "Title").unwrap(), "T1");
+        let two = resolve_text(&listing, "Note").unwrap_err().to_string();
+        assert!(two.contains("T2") && two.contains("T3"), "{two}");
+        assert!(resolve_text(&listing, "Nobody").is_err());
     }
 }
