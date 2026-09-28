@@ -256,6 +256,13 @@ pub fn transform(el: &mut Element, m: &Affine) {
             let size = (t.style.size * k).clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE);
             let k = size / t.style.size;
             t.style.size = size;
+            // Every stretch set at a size of its own scales with the rest,
+            // within what a text may be set at.
+            for run in &mut t.runs {
+                if let Some(s) = &mut run.style.size {
+                    *s = (*s * k).clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE);
+                }
+            }
             (t.w, t.h) = (t.w * k, t.h * k);
             t.x = mapped.center[0] - t.w / 2.0;
             t.y = mapped.center[1] - t.h / 2.0;
@@ -1335,5 +1342,26 @@ mod tests {
             assert_eq!(t.style.size, 20.0, "a turn scales nothing");
             assert!((t.w - 100.0).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn scaling_artistic_text_scales_the_stretches_set_apart_in_it() {
+        let mut el = text(crate::doc::TextMode::Artistic);
+        if let Element::Text(t) = &mut el {
+            t.runs = vec![crate::doc::Run {
+                start: 0,
+                end: 2,
+                style: crate::doc::RunStyle {
+                    size: Some(30.0),
+                    ..Default::default()
+                },
+            }];
+        }
+        let f = frame(&el).unwrap();
+        let m = resize_map(&f, Corner::BottomRight, [200.0, 80.0], UNIFORM);
+        transform(&mut el, &m);
+        let t = text_of(&el);
+        assert!((t.style.size - 40.0).abs() < 1e-9);
+        assert_eq!(t.runs[0].style.size, Some(60.0), "twice the size, as the rest");
     }
 }
