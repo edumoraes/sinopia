@@ -1042,7 +1042,10 @@ impl App {
     }
 
     /// Adds a tab and makes it the one in front.
-    fn open_project(&mut self, project: Project) {
+    fn open_project(&mut self, mut project: Project) {
+        // Artistic text measures its box in the faces this machine has: a
+        // board written on another is fitted before anything reads it.
+        crate::editor::fit_texts(&mut project.doc, &self.fonts);
         let mut editor = Editor::new();
         editor.set_surface(&self.theme.panel_hex);
         let history = History::new(&project.doc, editor.at());
@@ -2570,7 +2573,10 @@ impl App {
     /// change like any other, so it is one undo step and a draft owes
     /// the disk a save for it.
     fn add_frame(&mut self, path: &Path) -> anyhow::Result<(String, String)> {
-        let fragment = read_fragment(path)?;
+        let mut fragment = read_fragment(path)?;
+        // An agent sets text it cannot measure: its artistic boxes are
+        // fitted here, before the board picks the spot by them.
+        crate::editor::fit_texts(&mut fragment, &self.fonts);
         // Worked out before anything is committed: the bytes below go
         // into the store on the way in, and a fragment refused after
         // that would leave images there that nothing on the board names.

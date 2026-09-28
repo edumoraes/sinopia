@@ -244,6 +244,29 @@ fn refit(t: &mut Text, laid: &Laid) {
     t.h = h;
 }
 
+/// Fits every artistic text of `doc` to what its lines measure in the
+/// faces this machine has — a board written elsewhere, a fragment an
+/// agent wrote, a text the command line added: its box is what the
+/// pointer, a selection and a frame's claim read, and it has to be the
+/// one the letters are drawn in. True when any moved.
+pub fn fit_texts(doc: &mut Document, fonts: &Fonts) -> bool {
+    let mut moved = false;
+    for el in &mut doc.elements {
+        let Element::Text(t) = el else { continue };
+        if t.mode != TextMode::Artistic {
+            continue;
+        }
+        let laid = Laid::of(t, fonts);
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        if close(t.w, laid.w) && close(t.h, laid.h) {
+            continue;
+        }
+        refit(t, &laid);
+        moved = true;
+    }
+    moved
+}
+
 /// Whether one of the two changes asks for a save.
 fn both(a: Change, b: Change) -> Change {
     match (a, b) {
@@ -1622,5 +1645,21 @@ mod tests {
         assert!(e.typing().is_none(), "a single press with the Select tool types into nothing");
         e.text_press(&view(), at(first.x + 2.0, first.y + 2.0), &mut doc, &f, 2, INK);
         assert_eq!(e.typing().map(|t| t.id.clone()), Some(first.id), "a double click does");
+    }
+
+    #[test]
+    fn a_text_whose_box_came_from_elsewhere_is_fitted_to_its_letters() {
+        let (_, mut doc) = with_text("fit me");
+        let id = only(&doc).id.clone();
+        let good = only(&doc).clone();
+        if let Some(t) = text_mut(&mut doc, &id) {
+            t.w = 5.0;
+            t.h = 400.0;
+        }
+        assert!(fit_texts(&mut doc, &fonts()));
+        let t = only(&doc);
+        assert!((t.w - good.w).abs() < 1e-9 && (t.h - good.h).abs() < 1e-9);
+        assert!((t.x - good.x).abs() < 1e-9 && (t.y - good.y).abs() < 1e-9, "from its anchor");
+        assert!(!fit_texts(&mut doc, &fonts()), "a fitted text stays where it is");
     }
 }
