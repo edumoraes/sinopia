@@ -3,7 +3,7 @@
 //! handles drive. Pure — `editor` decides when, this decides what.
 
 use crate::curve::{self, Cubic};
-use crate::doc::{Document, Element};
+use crate::doc::{Document, Element, MAX_TEXT_SIZE, MIN_TEXT_SIZE, TextMode};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::{Prim, ScreenRect, View, with_alpha};
 use crate::theme::Theme;
@@ -237,9 +237,29 @@ pub fn transform(el: &mut Element, m: &Affine) {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
         }
+        // A frame's box is mapped and its lines reflow in it. Artistic
+        // text is its letters: it is scaled evenly, by the middle of
+        // what the map does to its two sides, so a stretch grows the
+        // letters rather than distorting them — and never past the sizes
+        // a text may be set at — and stands centred where the map put
+        // it, turned as the map turned it.
         Element::Text(t) => {
-            (t.x, t.y, t.w, t.h, t.rotation) =
-                box_fields(box_frame(t.x, t.y, t.w, t.h, t.rotation).transformed(m));
+            let mapped = box_frame(t.x, t.y, t.w, t.h, t.rotation).transformed(m);
+            let (x, y, w, h, rotation) = box_fields(mapped);
+            if t.mode == TextMode::Frame {
+                (t.x, t.y, t.w, t.h, t.rotation) = (x, y, w, h, rotation);
+                return;
+            }
+            let stretch = |new: f64, old: f64| if old > 0.0 { new / old } else { 1.0 };
+            let k = (stretch(w, t.w) * stretch(h, t.h)).sqrt();
+            let k = if k.is_finite() { k } else { 1.0 };
+            let size = (t.style.size * k).clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE);
+            let k = size / t.style.size;
+            t.style.size = size;
+            (t.w, t.h) = (t.w * k, t.h * k);
+            t.x = mapped.center[0] - t.w / 2.0;
+            t.y = mapped.center[1] - t.h / 2.0;
+            t.rotation = rotation;
         }
         // A frame does not turn: its box is mapped and whatever
         // rotation the map carried is spent on nothing.
@@ -1220,5 +1240,99 @@ mod tests {
             panic!("not a frame");
         };
         assert_eq!((fr.x, fr.y, fr.w, fr.h), (10.0, 20.0, 100.0, 100.0));
+    }
+
+    fn text(mode: crate::doc::TextMode) -> Element {
+        Element::Text(crate::doc::Text {
+            id: "t".into(),
+            layer: String::new(),
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 40.0,
+            rotation: 0.0,
+            mode,
+            text: "words".into(),
+            style: crate::doc::TextStyle::with_size(20.0, "#000"),
+        })
+    }
+
+    fn text_of(el: &Element) -> &crate::doc::Text {
+        let Element::Text(t) = el else { panic!() };
+        t
+    }
+
+    #[test]
+    fn a_text_is_its_box_and_is_hit_anywhere_in_it() {
+        let el = text(crate::doc::TextMode::Artistic);
+        let f = frame(&el).unwrap();
+        assert_eq!(f.center, [50.0, 20.0]);
+        assert_eq!(f.half, [50.0, 20.0]);
+        assert!(hits(&el, [90.0, 35.0], 0.0), "between the letters too");
+        assert!(!hits(&el, [120.0, 35.0], 0.0));
+    }
+
+    #[test]
+    fn resizing_artistic_text_scales_its_letters() {
+        let mut el = text(crate::doc::TextMode::Artistic);
+        let f = frame(&el).unwrap();
+        let m = resize_map(&f, Corner::BottomRight, [200.0, 80.0], UNIFORM);
+        transform(&mut el, &m);
+        let t = text_of(&el);
+        assert!((t.style.size - 40.0).abs() < 1e-9, "{}", t.style.size);
+        assert_eq!((t.x, t.y), (0.0, 0.0));
+        assert!((t.w - 200.0).abs() < 1e-9 && (t.h - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_stretch_of_artistic_text_scales_it_evenly_about_where_it_went() {
+        let mut el = text(crate::doc::TextMode::Artistic);
+        let f = frame(&el).unwrap();
+        // Twice as wide, as tall as it was: the letters grow by the
+        // middle of the two, and the box stays centred where the map put
+        // it rather than stretching.
+        let m = resize_map(&f, Corner::BottomRight, [200.0, 40.0], FREE);
+        transform(&mut el, &m);
+        let t = text_of(&el);
+        let k = 2.0f64.sqrt();
+        assert!((t.style.size - 20.0 * k).abs() < 1e-9);
+        assert!((t.w - 100.0 * k).abs() < 1e-9 && (t.h - 40.0 * k).abs() < 1e-9);
+        assert!((t.x + t.w / 2.0 - 100.0).abs() < 1e-9);
+        assert!((t.y + t.h / 2.0 - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_text_is_never_scaled_past_what_a_text_may_be() {
+        let mut el = text(crate::doc::TextMode::Artistic);
+        let f = frame(&el).unwrap();
+        let m = resize_map(&f, Corner::BottomRight, [0.001, 0.0004], UNIFORM);
+        transform(&mut el, &m);
+        let t = text_of(&el);
+        assert_eq!(t.style.size, crate::doc::MIN_TEXT_SIZE);
+        assert!(t.style.checked().is_ok());
+    }
+
+    #[test]
+    fn resizing_a_text_frame_reflows_it_and_leaves_the_letters_alone() {
+        let mut el = text(crate::doc::TextMode::Frame);
+        let f = frame(&el).unwrap();
+        let m = resize_map(&f, Corner::BottomRight, [300.0, 60.0], FREE);
+        transform(&mut el, &m);
+        let t = text_of(&el);
+        assert_eq!(t.style.size, 20.0);
+        assert_eq!((t.x, t.y, t.w, t.h), (0.0, 0.0, 300.0, 60.0));
+    }
+
+    #[test]
+    fn a_text_turns_like_a_box() {
+        for mode in [crate::doc::TextMode::Artistic, crate::doc::TextMode::Frame] {
+            let mut el = text(mode);
+            let f = frame(&el).unwrap();
+            transform(&mut el, &rotate_map(&f, QUARTER));
+            let t = text_of(&el);
+            assert!((t.rotation - 90.0).abs() < 1e-9);
+            assert_eq!(t.style.size, 20.0, "a turn scales nothing");
+            assert!((t.w - 100.0).abs() < 1e-9);
+        }
     }
 }
