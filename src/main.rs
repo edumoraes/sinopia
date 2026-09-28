@@ -25,6 +25,7 @@ mod history;
 mod ipc;
 mod layers;
 mod menu;
+mod menubar;
 mod merge;
 mod omarchy;
 mod palette;
