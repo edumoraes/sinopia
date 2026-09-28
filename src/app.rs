@@ -484,6 +484,11 @@ impl App {
     /// home only if the write lands. A Save As that fails must not leave
     /// a project claiming a file it never reached.
     fn save_project_at(&mut self, index: usize, origin: Origin) -> bool {
+        if matches!(origin, Origin::Untitled) || index >= self.open.len() {
+            return false;
+        }
+        // The preview goes first, so the entry the save writes names it.
+        self.keep_preview(index);
         let Some(project) = self.open.get(index).map(|o| &o.project) else {
             return false;
         };
@@ -744,6 +749,32 @@ impl App {
             self.retitle();
         }
         self.owed = Some(Instant::now() + SAFETY_DELAY);
+    }
+
+    /// Takes the picture the recents show of tab `index` — the whole board
+    /// as it shows, small — and hands it to the store, or takes the old
+    /// one away when there is nothing on show. A preview is a courtesy to
+    /// the list, never a condition of the save: one that fails is logged
+    /// and the save goes on.
+    fn keep_preview(&mut self, index: usize) {
+        let Some(doc) = self.open.get(index).map(|o| o.project.doc.clone()) else {
+            return;
+        };
+        let png = match export::preview(&doc) {
+            None => None,
+            Some((view, w, h)) => {
+                match self.render_sub(&doc, &view, w, h).and_then(|rgba| bitmap::encode(&rgba, w, h)) {
+                    Ok(png) => Some(png),
+                    Err(e) => {
+                        log::warn!("taking the preview of {:?}: {e:#}", doc.title);
+                        return;
+                    }
+                }
+            }
+        };
+        if let Err(e) = self.store.set_thumb(&doc.id, png.as_deref()) {
+            log::warn!("keeping the preview of {:?}: {e:#}", doc.title);
+        }
     }
 
     /// Writes every dirty draft where the store keeps it, and clears the
