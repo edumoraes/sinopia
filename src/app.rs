@@ -250,6 +250,9 @@ struct App {
     /// When the text being typed last heard from the hand: the caret
     /// blinks from there, and shows solid while the hand is at it.
     typed_at: Instant,
+    /// Whether the last frame drew the caret: the loop redraws for the
+    /// blink only when that is about to change.
+    caret_drawn: std::cell::Cell<Option<bool>>,
     /// The last press on the canvas, where, and how many in a row it
     /// made: two are a double click, three a triple.
     last_press: Option<(Instant, (f64, f64), u32)>,
@@ -3168,10 +3171,9 @@ impl App {
         }
         // What the text being typed shows over it: its box, what is
         // selected, and the caret while it is on.
-        frame.extend(
-            self.editor()
-                .typing_prims(self.doc(), view, &self.theme, self.caret_on()),
-        );
+        let caret = self.caret_on();
+        self.caret_drawn.set(self.editor().typing().map(|_| caret));
+        frame.extend(self.editor().typing_prims(self.doc(), view, &self.theme, caret));
         // The area a press with the Text tool is dragging out.
         if let Some((from, to)) = self.editor().placing() {
             let a = view.world_to_screen(from[0], from[1]);
@@ -4590,11 +4592,13 @@ impl ApplicationHandler<UserEvent> for App {
         // The caret of a text being typed blinks: the loop wakes when it
         // is next due to turn, whatever else it is waiting for.
         if let Some(blink) = self.next_blink() {
+            if self.caret_drawn.get() != Some(self.caret_on())
+                && let Some(w) = &self.window
+            {
+                w.request_redraw();
+            }
             if self.owed.is_none() {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(blink));
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
                 return;
             }
         }
@@ -5091,6 +5095,7 @@ pub fn run(
         text_bar_open: false,
         text_grab: None,
         typed_at: Instant::now(),
+        caret_drawn: std::cell::Cell::new(None),
         last_press: None,
         glyphs: crate::glyphs::Glyphs::default(),
         letters_slot: 0,
