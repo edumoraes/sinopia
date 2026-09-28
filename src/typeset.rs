@@ -94,14 +94,13 @@ impl Laid {
     }
 
     /// The furthest a caret goes along row `k`: its end — or, where the
-    /// line wrapped after a space that hangs past the edge, the place
-    /// before that space, since past it is the next line's start.
+    /// line wrapped, the place before its last character, since past it
+    /// is the next line's start: before the space that hangs past the
+    /// edge, or before the last letter of a word broken across it.
     pub fn last(&self, k: usize) -> usize {
         let row = &self.rows[k];
-        let hangs = !row.hard
-            && row.end > row.start
-            && self.chars.get(row.end - 1).is_some_and(|c| c.is_whitespace());
-        if hangs { row.end - 1 } else { row.end }
+        let wraps = !row.hard && row.end > row.start;
+        if wraps { row.end - 1 } else { row.end }
     }
 
     /// The place on row `k` nearest `x` across the box.
@@ -713,5 +712,21 @@ mod tests {
         let laid = artistic("a b\nc", &style());
         let drawn: String = laid.glyphs().map(|(c, _, _)| c).collect();
         assert_eq!(drawn, "abc");
+    }
+
+    #[test]
+    fn the_caret_crosses_a_line_broken_mid_word() {
+        let f = fonts();
+        let s = "mmmmmmmmmmmm";
+        let laid = framed(s, &style(), measure(&f, "mmmm"), 500.0);
+        assert_eq!(texts(s, &laid), ["mmmm", "mmmm", "mmmm"]);
+        let goal = laid.caret(12).0;
+        let up = laid.up(12, goal);
+        assert_eq!(laid.row_of(up), 1, "up from the last row lands on the one above");
+        let up = laid.up(up, goal);
+        assert_eq!(laid.row_of(up), 0);
+        assert_eq!(laid.row_of(laid.end(1)), 0, "End stays on the row it was asked on");
+        let edge = laid.index_at(laid.rows[0].stops[4] + 1.0, laid.rows[0].top + 1.0);
+        assert_eq!(laid.row_of(edge), 0, "a click at a row's right edge stays on it");
     }
 }
