@@ -36,6 +36,8 @@ mod props;
 mod scene;
 mod select;
 mod send;
+mod shape;
+mod shapebar;
 mod skills;
 mod slots;
 mod spans;

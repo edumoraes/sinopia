@@ -255,6 +255,13 @@ impl Document {
             Kind::Text => "Text",
             Kind::Raster | Kind::Vector => "Layer",
         };
+        self.next_name(owner, word)
+    }
+
+    /// The name a new layer called by `word` takes in `owner`'s stack: one
+    /// past the highest number already carried under that word anywhere
+    /// in the same tree — what a shape's layer is named by its model.
+    pub(crate) fn next_name(&self, owner: Option<&str>, word: &str) -> String {
         // The tree it is counted in: a frame's own stack when the new
         // layer goes inside one, the board's otherwise — which a frame's
         // stack is not part of, since it lives on the frame.

@@ -13,10 +13,12 @@ use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, La
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::merge::{Merge, Run};
 use crate::scene::View;
-use crate::select::{self, Handle};
+use crate::select::{self, End, Handle};
 use crate::tree::{self, Arrange, Filter, Place};
 
+mod shaping;
 mod typing;
+pub use shaping::{Restyle, ShapeLook, figure_for_key};
 pub use typing::{Look, Move, TEXT_MAX, TextKey, Typing, fit_texts, step_size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -27,18 +29,20 @@ pub enum Tool {
     Pencil,
     Brush,
     Frame,
+    Shape,
     Text,
     Zoom,
 }
 
 impl Tool {
     /// Dock order.
-    pub const ALL: [Tool; 7] = [
+    pub const ALL: [Tool; 8] = [
         Tool::Select,
         Tool::Hand,
         Tool::Pencil,
         Tool::Brush,
         Tool::Frame,
+        Tool::Shape,
         Tool::Text,
         Tool::Zoom,
     ];
@@ -50,6 +54,8 @@ impl Tool {
             Tool::Pencil => 'p',
             Tool::Brush => 'b',
             Tool::Frame => 'f',
+            // Photoshop's, whose shapes all share it.
+            Tool::Shape => 'u',
             Tool::Text => 't',
             Tool::Zoom => 'z',
         }
@@ -174,6 +180,12 @@ enum Drag {
         origin: Point,
         frame: Frame,
         map: Affine,
+        snapshot: Snapshot,
+    },
+    /// One end of a lone line being dragged; the snapshot is the line as
+    /// it was at the press.
+    End {
+        end: End,
         snapshot: Snapshot,
     },
     /// Rubber band between two screen points; `base` is what Shift keeps
@@ -318,6 +330,8 @@ pub struct Editor {
     space: bool,
     ctrl: bool,
     shift: bool,
+    /// Draws a shape from its middle rather than its corner.
+    alt: bool,
     /// What the pen last said, or a mouse's own. Physical, like the
     /// held keys: it belongs to the hand, not to the board, and a tab
     /// switch does not hand it on.
@@ -361,6 +375,12 @@ pub struct Editor {
     text_style: crate::doc::TextStyle,
     /// How many typing sessions this editor has opened: each one's id.
     sessions: u64,
+    /// The figure the Shape tool draws, and how the next one is drawn.
+    figure: crate::shape::Figure,
+    shape_style: shaping::ShapeStyle,
+    /// The area the Shape tool is dragging out: where the press was and
+    /// where the pointer is, in world units.
+    shaping: Option<(Point, Point)>,
     /// The session the last change belongs to, until `app` has written
     /// it down.
     folding: Option<u64>,
@@ -510,10 +530,18 @@ impl Editor {
     /// handle of the selection back to Select, where it means "resize from
     /// the center". The rotation rings keep zooming: a turn has no use for
     /// Ctrl.
+    ///
+    /// With the Shape tool in hand every handle answers as it would with
+    /// the Select tool, as Affinity's shape tools let it: a shape just
+    /// drawn is resized and turned without the tool being put down.
     pub fn pointer_tool(&self, doc: &Document, view: &View, screen: (f64, f64)) -> Tool {
         let tool = self.active_tool();
-        let over_resize = matches!(self.hover(doc, view, screen), Some(Handle::Resize(_)));
+        let handle = self.hover(doc, view, screen);
+        let over_resize = matches!(handle, Some(Handle::Resize(_)));
         if tool == Tool::Zoom && self.ctrl && over_resize {
+            return Tool::Select;
+        }
+        if tool == Tool::Shape && handle.is_some() {
             return Tool::Select;
         }
         tool
@@ -530,6 +558,22 @@ impl Editor {
     /// Shift makes clicks and the marquee add to the selection.
     pub fn hold_shift(&mut self, down: bool) {
         self.shift = down;
+    }
+
+    /// Alt draws a shape from its middle.
+    pub fn hold_alt(&mut self, down: bool) {
+        self.alt = down;
+    }
+
+    /// A tool's key: the tool — or, for the tool already in hand, its
+    /// next kind: the other kind of text, as Affinity's two text tools
+    /// share `T`, and the next model, as Photoshop's shapes share `U`.
+    pub fn choose_tool(&mut self, tool: Tool, doc: &mut Document) {
+        match tool {
+            Tool::Text if self.tool == Tool::Text => self.switch_text_kind(),
+            Tool::Shape if self.tool == Tool::Shape => self.next_figure(),
+            _ => self.set_tool(tool, doc),
+        }
     }
 
     /// The selected elements, by id. The shell reads them to answer a
@@ -568,10 +612,27 @@ impl Editor {
         matches!(self.drag, Some(Drag::Move { moved: true, .. }))
     }
 
-    /// The selection handle under `screen`, for the cursor.
+    /// The selection handle under `screen`, for the cursor: a lone
+    /// line's ends, or the frame's corners and rings.
     pub fn hover(&self, doc: &Document, view: &View, screen: (f64, f64)) -> Option<Handle> {
+        if let Some(line) = self.lone_line(doc) {
+            return select::line_handle_at(line, view, screen);
+        }
         let frame = self.selection_frame(doc)?;
         self.handle_at(doc, &frame, view, screen)
+    }
+
+    /// The line selected, when it is the whole of the selection: it wears
+    /// its two ends as its handles rather than a frame, as a line does in
+    /// every drawing tool.
+    pub fn lone_line<'a>(&self, doc: &'a Document) -> Option<&'a crate::doc::Line> {
+        let [id] = self.selection.as_slice() else {
+            return None;
+        };
+        doc.elements.iter().find_map(|el| match el {
+            Element::Line(l) if l.id == *id => Some(l),
+            _ => None,
+        })
     }
 
     /// The handle under `screen`, less the ones the selection cannot
@@ -1485,7 +1546,7 @@ impl Editor {
     }
 
     pub fn is_drawing(&self) -> bool {
-        self.stroke.is_some() || self.framing.is_some()
+        self.stroke.is_some() || self.framing.is_some() || self.shaping.is_some()
     }
 
     /// Where the hand is standing now.
@@ -1520,6 +1581,7 @@ impl Editor {
     pub fn busy(&self) -> bool {
         self.stroke.is_some()
             || self.framing.is_some()
+            || self.shaping.is_some()
             || self.placing.is_some()
             || self.nav.is_some()
             || self.drag.is_some()
@@ -1547,6 +1609,7 @@ impl Editor {
             || self.nav.is_some()
             || self.drag.is_some()
             || self.framing.is_some()
+            || self.shaping.is_some()
             || self.placing.is_some()
         {
             return Change::None;
@@ -1573,6 +1636,10 @@ impl Editor {
             }
             (Button::Left, Tool::Frame) => {
                 self.framing = Some(([world.0, world.1], [world.0, world.1]));
+                Change::Selection
+            }
+            (Button::Left, Tool::Shape) => {
+                self.shaping = Some(([world.0, world.1], [world.0, world.1]));
                 Change::Selection
             }
             (Button::Left, Tool::Zoom) => {
@@ -1614,25 +1681,26 @@ impl Editor {
     /// the base.
     fn select_press(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
-        if let Some(frame) = self.selection_frame(doc)
-            && let Some(handle) = self.handle_at(doc, &frame, view, screen)
-        {
+        if let Some(handle) = self.hover(doc, view, screen) {
             let snapshot = self.snapshot(doc);
             let map = Affine::IDENTITY;
-            self.drag = Some(match handle {
-                Handle::Resize(corner) => Drag::Resize {
+            let frame = self.selection_frame(doc);
+            self.drag = match (handle, frame) {
+                (Handle::End(end), _) => Some(Drag::End { end, snapshot }),
+                (Handle::Resize(corner), Some(frame)) => Some(Drag::Resize {
                     corner,
                     frame,
                     map,
                     snapshot,
-                },
-                Handle::Rotate(_) => Drag::Rotate {
+                }),
+                (Handle::Rotate(_), Some(frame)) => Some(Drag::Rotate {
                     origin: world,
                     frame,
                     map,
                     snapshot,
-                },
-            });
+                }),
+                _ => None,
+            };
             return Change::None;
         }
         let slop = HIT_SLOP_PX * view.scale / view.px_per_world();
@@ -1829,7 +1897,7 @@ impl Editor {
         if self.drags_through_text() {
             return self.select_through_text(view, screen, doc);
         }
-        if let Some((_, to)) = &mut self.framing {
+        if let Some((_, to)) = self.framing.as_mut().or(self.shaping.as_mut()) {
             let world = view.screen_to_world(screen.0, screen.1);
             *to = [world.0, world.1];
             return Change::Selection;
@@ -1928,6 +1996,34 @@ impl Editor {
                 }
                 *map = select::rotate_map(frame, delta);
                 apply(doc, snapshot, map);
+                Change::Scene
+            }
+            Some(Drag::End { end, snapshot }) => {
+                let Some((i, Element::Line(was))) = snapshot.first() else {
+                    return Change::None;
+                };
+                let mut line = was.clone();
+                let fixed = match end {
+                    End::From => line.to,
+                    End::To => line.from,
+                };
+                let mut at = world;
+                // Turned about the end that stays, in the rotation ring's
+                // own steps, as a line is drawn under Shift.
+                if shift {
+                    let d = [at[0] - fixed[0], at[1] - fixed[1]];
+                    let step = ROTATE_SNAP_DEG.to_radians();
+                    let angle = (d[1].atan2(d[0]) / step).round() * step;
+                    let length = d[0].hypot(d[1]);
+                    at = [fixed[0] + length * angle.cos(), fixed[1] + length * angle.sin()];
+                }
+                match end {
+                    End::From => line.from = at,
+                    End::To => line.to = at,
+                }
+                if let Some(slot) = doc.elements.get_mut(*i) {
+                    *slot = Element::Line(line);
+                }
                 Change::Scene
             }
             Some(Drag::Marquee {
@@ -2078,6 +2174,11 @@ impl Editor {
             return self.lay_frame(doc, view, from, to);
         }
         if button == Button::Left
+            && let Some((from, to)) = self.shaping.take()
+        {
+            return self.lay_figure(doc, view, from, to, ink);
+        }
+        if button == Button::Left
             && let Some((from, to, ink)) = self.placing.take()
         {
             return self.open_text(doc, view, from, to, &ink);
@@ -2151,7 +2252,7 @@ impl Editor {
                     self.rehome_moved(doc);
                     Change::Scene
                 }
-                Drag::Resize { .. } | Drag::Rotate { .. } => Change::Scene,
+                Drag::Resize { .. } | Drag::Rotate { .. } | Drag::End { .. } => Change::Scene,
             };
         }
         match self.nav {
@@ -2218,13 +2319,15 @@ impl Editor {
     /// selection stays.
     pub fn cancel(&mut self, doc: &mut Document) -> bool {
         let had_stroke = self.stroke.take().is_some();
-        let had_area = self.framing.take().is_some() | self.placing.take().is_some();
+        let had_area =
+            self.framing.take().is_some() | self.shaping.take().is_some() | self.placing.take().is_some();
         let had_nav = self.nav.take().is_some();
         let had_drag = match self.drag.take() {
             Some(
                 Drag::Move { snapshot, .. }
                 | Drag::Resize { snapshot, .. }
-                | Drag::Rotate { snapshot, .. },
+                | Drag::Rotate { snapshot, .. }
+                | Drag::End { snapshot, .. },
             ) => {
                 for (i, el) in snapshot {
                     if let Some(slot) = doc.elements.get_mut(i) {
@@ -3504,6 +3607,7 @@ mod tests {
         assert_eq!(Tool::from_hotkey('h'), Some(Tool::Hand));
         assert_eq!(Tool::from_hotkey('z'), Some(Tool::Zoom));
         assert_eq!(Tool::from_hotkey('b'), Some(Tool::Brush));
+        assert_eq!(Tool::from_hotkey('u'), Some(Tool::Shape), "Photoshop's key for its shapes");
         assert_eq!(Tool::from_hotkey('x'), None);
         for t in Tool::ALL {
             assert_eq!(Tool::from_hotkey(t.hotkey()), Some(t));
@@ -3511,7 +3615,7 @@ mod tests {
     }
 
     #[test]
-    fn dock_order_is_select_hand_pencil_brush_frame_text_zoom() {
+    fn dock_order_is_select_hand_pencil_brush_frame_shape_text_zoom() {
         assert_eq!(
             Tool::ALL,
             [
@@ -3520,6 +3624,7 @@ mod tests {
                 Tool::Pencil,
                 Tool::Brush,
                 Tool::Frame,
+                Tool::Shape,
                 Tool::Text,
                 Tool::Zoom
             ]

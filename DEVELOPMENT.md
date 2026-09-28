@@ -11,10 +11,10 @@ a **draft**: the real architecture emerges from development.
 
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames, text,
-export to the agent, the CLI an agent asks the board through, and the
+shapes and arrows, export to the agent, the CLI an agent asks the board through, and the
 packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1242 tests, and the plugin's
+- `cargo build` clean, `cargo test` with 1345 tests, and the plugin's
   own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,
@@ -280,9 +280,10 @@ packaging that distributes it (item 7):
   again. The board picks where it lands, to the right of everything,
   because an agent cannot see the board it is drawing on; the frame's
   size is the agent's. What it can draw is what the canvas already
-  draws — rects, ink paths, and images whose bytes ride in `blobs/`
-  beside the json — so a label today is a picture the agent rendered,
-  the canvas having no text of its own yet. It lands as one undo step:
+  draws — shapes and arrows, texts, rects, ink paths, and images whose
+  bytes ride in `blobs/` beside the json — so a diagram an agent writes
+  is boxes, arrows and labels the person can select and set from the
+  same bars as their own. It lands as one undo step:
   `Ctrl+Z` takes an agent's frame back off. All three need the board to
   be **open** — it is the live document, unsaved work included, and the
   tab in front where several are — and
@@ -381,10 +382,10 @@ packaging that distributes it (item 7):
   degrees since it was created; paths still bake transforms into their
   curves, the field only turns their box and anchors the snap.
 - Tool dock centered at the bottom — Select `V`, Hand `H`, Pencil `P`,
-  Brush `B`, Frame `F`, Zoom `Z` — with six original RGBA illustrations
-  cut from one 80 px-per-cell sheet: matte retro-industrial controls in
-  warm ivory, charcoal and restrained orange/green. The former line icons
-  remain the load-failure fallback. `Esc` cancels the stroke, gesture or
+  Brush `B`, Frame `F`, Shape `U`, Text `T`, Zoom `Z` — with eight
+  original RGBA illustrations cut from one 80 px-per-cell sheet: matte
+  retro-industrial controls in warm ivory, charcoal and restrained
+  orange/green. The former line icons remain the load-failure fallback. `Esc` cancels the stroke, gesture or
   drag in progress.
 - Pan: Hand tool, Space held or the middle button drag the canvas; the
   wheel and two-finger scroll pan (Shift: horizontally); a three-finger
@@ -482,6 +483,32 @@ packaging that distributes it (item 7):
   and only the ones on the window, so text stays sharp through a zoom.
   Words pasted on the board, with nothing else on the clipboard, land as
   a text at the pointer.
+- **Shapes** (`U`), as the design tools and the boards draw them: one
+  tool and eight figures — rectangle, ellipse, triangle, diamond,
+  polygon, star, line and arrow — picked on the tool's own bar or by `U`
+  again, and `R`, `O`, `L`, `A` take the tool up with theirs. A drag lays
+  the figure over the area it crossed, `Shift` keeping it square — a
+  circle, a regular polygon, a line at 15° steps — and `Alt` drawing it
+  from its middle; a click lays it at its default size. What is being
+  dragged out shows as the figure itself, and it lands on a vector layer
+  of its own named after it ("Rectangle 1"), in the frame the press
+  landed in, selected — its handles answering with the tool still in
+  hand. A closed shape is fitted to its box and drawn exactly as a
+  distance field at every zoom, its stroke laid inside its edge so it
+  paints its box and nothing past it; it is hit on its figure when it is
+  filled and on its stroke alone when it is hollow, so a box drawn round
+  other things is not in the way of them. It moves, resizes, turns and
+  flips — a triangle flipped points down. A line runs from one end to the
+  other, round-capped, with a head at either end, open or filled; a lone
+  line selected wears its two ends as handles. The **shape bar** stands
+  where the text's does: the figures, the fill and the stroke — the
+  dock's inks or none, each tried on the shapes as the pointer passes —
+  the width, a rectangle's radius, a polygon's sides, a star's points and
+  inner radius, a line's heads. It looks at the shapes selected, or at
+  how the next one is drawn, and a figure picked turns what is selected
+  into it within its kind. An ink clicked in the dock is the stroke of
+  the shapes selected. `board.md` counts them by name, and a fragment an
+  agent grafts may carry them.
 - Versioned JSON document (schema 1) + XDG persistence (0700/0600, atomic
   save). Project files chosen through the portal keep the umask instead.
 - IPC protocol §5 (closed schema) + single instance via socket.
@@ -531,7 +558,7 @@ packaging that distributes it (item 7):
   menu rows carry their own letters, and a selection nobody is shown is
   one nobody meant.
 
-Not yet: a per-character fallback face, shaping past kerning pairs, shapes, export,
+Not yet: a per-character fallback face, shaping past kerning pairs, export,
 layer opacity and renaming, frames that nest or turn or come
 in more than the one basic kind, and the six sliders that stay
 muted — three randomness amounts whose scale the sets contradict, and
@@ -597,7 +624,15 @@ anywhere.
 
 | Input | Effect |
 |---|---|
-| `V` / `H` / `P` / `B` / `F` / `T` / `Z` | Select / Hand / Pencil / Brush / Frame / Text / Zoom tool (also clickable in the dock) |
+| `V` / `H` / `P` / `B` / `F` / `U` / `T` / `Z` | Select / Hand / Pencil / Brush / Frame / Shape / Text / Zoom tool (also clickable in the dock) |
+| `U` with the Shape tool in hand | The next figure: rectangle, ellipse, triangle, diamond, polygon, star, line, arrow |
+| `R` / `O` / `L` / `A` | The Shape tool with the rectangle / the ellipse / a line / an arrow |
+| Left drag (Shape) | Lay the figure over the area dragged (a line from the press to the pointer) |
+| `Shift` / `Alt` while dragging (Shape) | Square — a circle, a regular polygon, a line at 15° steps / from the middle |
+| Click (Shape) | The figure at its default size, centred on the click |
+| Drag an end of a lone line selected | Move that end (`Shift`: 15° steps about the other) |
+| Shape bar: figure / fill / stroke / sliders / heads | Switch it / the inks and none, tried as the pointer passes / width, radius, sides, points, inner / a line's heads |
+| Click an ink with shapes selected | Their stroke |
 | `T` with the Text tool in hand | Switch between artistic and frame text |
 | Click (Text) | Artistic text at the point, or a frame to type in |
 | Left drag (Text) | Artistic text as tall as the drag, or a text frame of its area |
@@ -712,7 +747,7 @@ XDG_DATA_HOME=/tmp/sinopia-smoke cargo run -- \
 ```
 src/main.rs      CLI dispatch → forward to the live instance, or become it
 src/cli.rs       flags (clap), mutually exclusive actions
-src/doc.rs       document §6.1 (pure data, serde): layers and frames, rect, path, image, text
+src/doc.rs       document §6.1 (pure data, serde): layers and frames, rect, path, image, text, shape, line
 src/store.rs     ~/.local/share/sinopia: boards/, blobs/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
@@ -720,7 +755,7 @@ src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
 src/brush.rs     the brush library: sets, presets, a brush's body, its properties, the tip a stroke carries, the pointer's ring (pure, tested)
 tools/import-skbrushes.py  Sketchbook `.skbrushes` -> assets/brushes/ (parameters + icon sheet)
 assets/brushes/  library.json (17 sets, 211 brushes) and icons.png (211 cells), built into the binary
-assets/dock/     seven RGBA tool illustrations and their 7 x 1 icon sheet, built into the binary
+assets/dock/     eight RGBA tool illustrations and their 8 x 1 icon sheet, built into the binary
 assets/agents/   the five agents' own marks and the sheet of them, built into the binary
 tools/agent-logos.sh  the marks -> assets/agents/logos.png
 src/scene.rs     View (camera + viewport + scale), document → SDF prims, frames, groups and passes (pure, tested)
@@ -734,11 +769,14 @@ src/tree.rs      the layer tree: stacks by the layer holding them, rows, the fil
 src/merge.rs     which siblings merge, whether exactly, and merging them either way (pure, tested)
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer and the pick, the layer commands (pure, tested)
 src/editor/typing.rs  the Text tool and a text being typed into: placing, the session, keys, the pointer, its undo, the style where the bar looks (pure, tested)
+src/editor/shaping.rs the Shape tool: the drag, Shift and Alt, the click, the layer named after the figure, where the shape bar looks and what it changes (pure, tested)
+src/shape.rs     the figures as geometry: corners fitted to a box, distances to a rounded box, an ellipse and a polygon, a line's strokes and heads (pure, tested)
 src/fonts.rs     faces by family and style: the bundled four, the machine's through fontconfig (pure but the two subprocesses, tested)
 src/typeset.rs   a text set: every letter in its own style, lines, alignment, justification, leading, tracking, kerning, and every caret place (pure, tested)
 src/spans.rs     a text's runs: resolved, laid over a stretch, following an edit, tidy (pure, tested)
 src/glyphs.rs    the board's glyph sheet: letters rasterized at the size seen, packed, the region owed the GPU (pure, tested)
 src/textbar.rs   the text properties bar, centred: kind, family, size, B I U S, alignment, and the paragraph it drops (pure, tested)
+src/shapebar.rs  the shape properties bar, centred: the eight figures, the fill and stroke wells and their menus, width, radius, sides, points, inner, heads (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, illustrated icons + line fallback (pure, tested)
 src/layers.rs    layers panel on the right: the tree's rows, the bar, the filter, the foot, the drop, the menus' lines (pure, tested)
 src/menu.rs      a menu: lines, checks, rules, dots, the keys at a line's end, a scroll area (pure, tested)
@@ -772,10 +810,11 @@ native-packages.yaml  fills the AUR recipes in from a release and publishes them
 ```
 
 Frame data flow: grid + document (its texts' letters from the glyph
-sheet) + live stroke + selection overlay + the text being typed + brush
-ring + dock + brush strip + brush library + properties bar or text bar +
-layers panel (and its thumbnail sheet) + tab strip + a menu →
-`scene`/`select`/`editor`/`brush`/`slots`/`palette`/`props`/`textbar`/`layers`/`tabs`
+sheet) + live stroke + the figure being dragged out + selection overlay
++ the text being typed + brush ring + dock + brush strip + brush library
++ properties bar, text bar or shape bar + layers panel (and its
+thumbnail sheet) + tab strip + a menu →
+`scene`/`select`/`editor`/`brush`/`slots`/`palette`/`props`/`textbar`/`shapebar`/`layers`/`tabs`
 prims, gathered in a `scene::Frame` whose groups mark
 the strokes composited as one shape and whose sheets the layers, groups
 and frames composited as one, at their strength and in their mode →

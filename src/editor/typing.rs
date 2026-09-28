@@ -272,17 +272,13 @@ impl Editor {
         self.text_style.clone()
     }
 
-    /// A tool's key: the tool — or, for the Text tool already in hand,
-    /// the other kind of text, as Affinity's two text tools share `T`.
-    pub fn choose_tool(&mut self, tool: Tool, doc: &mut Document) {
-        if tool == Tool::Text && self.tool == Tool::Text {
-            self.text_mode = match self.text_mode {
-                TextMode::Artistic => TextMode::Frame,
-                TextMode::Frame => TextMode::Artistic,
-            };
-            return;
-        }
-        self.set_tool(tool, doc);
+    /// The other kind of text from now on: what the Text tool's key does
+    /// with the tool already in hand.
+    pub(super) fn switch_text_kind(&mut self) {
+        self.text_mode = match self.text_mode {
+            TextMode::Artistic => TextMode::Frame,
+            TextMode::Frame => TextMode::Artistic,
+        };
     }
 
     /// The text being typed into, if one is.

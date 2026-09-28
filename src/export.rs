@@ -12,6 +12,7 @@ use crate::doc::{Document, Element, Kind, Layer};
 use crate::geom::Frame;
 use crate::scene::{View, Viewport};
 use crate::select;
+use crate::shape::Figure;
 
 /// What is being exported.
 #[derive(Debug, Clone, PartialEq)]
@@ -323,6 +324,14 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
     out.push_str(&format!("- area: {w:.0} × {h:.0} world units\n"));
     out.push_str(&format!("- layers: {}\n", doc.layers.len()));
     let (mut rects, mut paths, mut paints, mut images, mut frames, mut texts) = (0, 0, 0, 0, 0, 0);
+    // A shape is counted as what it is, and a line by whether it points:
+    // "2 rectangles, 3 arrows" is what the picture shows.
+    let mut figures = [0; Figure::ALL.len()];
+    let mut figure = |f: Figure| {
+        if let Some(i) = Figure::ALL.iter().position(|g| *g == f) {
+            figures[i] += 1;
+        }
+    };
     for el in &doc.elements {
         match el {
             Element::Rect(_) => rects += 1,
@@ -331,16 +340,25 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
             Element::Image(_) => images += 1,
             Element::Frame(_) => frames += 1,
             Element::Text(_) => texts += 1,
+            Element::Shape(s) => figure(Figure::of(s.model)),
+            Element::Line(l) => figure(Figure::of_line(l)),
         }
     }
-    for (n, word) in [
-        (frames, "frame"),
-        (texts, "text"),
-        (rects, "rect"),
-        (paths, "path"),
-        (paints, "paint layer"),
-        (images, "image"),
-    ] {
+    let named: Vec<(usize, String)> = Figure::ALL
+        .iter()
+        .zip(figures)
+        .map(|(f, n)| (n, f.name().to_lowercase()))
+        .collect();
+    let counts = [(frames, "frame".to_owned()), (texts, "text".to_owned())]
+        .into_iter()
+        .chain(named)
+        .chain([
+            (rects, "rect".to_owned()),
+            (paths, "path".to_owned()),
+            (paints, "paint layer".to_owned()),
+            (images, "image".to_owned()),
+        ]);
+    for (n, word) in counts {
         if n > 0 {
             let s = if n == 1 { "" } else { "s" };
             out.push_str(&format!("- {n} {word}{s}\n"));
@@ -894,6 +912,60 @@ mod tests {
         let md = inventory(&sub_document(&doc, &scope), &b);
         assert!(md.contains("100 × 50"), "the box it covers, in world units");
         assert!(md.contains("1 rect"));
+    }
+
+    #[test]
+    fn the_inventory_counts_shapes_by_model_and_lines_by_whether_they_point() {
+        use crate::doc::{Head, Line, Model, Shape};
+        let mut doc = board();
+        let layer = doc.layers[0].id.clone();
+        let shape = |id: &str, model: Model| {
+            Element::Shape(Shape {
+                id: id.into(),
+                layer: layer.clone(),
+                model,
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+                rotation: 0.0,
+                flip: false,
+                fill: None,
+                stroke: Some("#000000".into()),
+                width: 2.0,
+                radius: 0.0,
+                sides: 5,
+                inner: 0.5,
+            })
+        };
+        let line = |id: &str, end: Head| {
+            Element::Line(Line {
+                id: id.into(),
+                layer: layer.clone(),
+                from: [0.0, 0.0],
+                to: [10.0, 0.0],
+                stroke: "#000000".into(),
+                width: 2.0,
+                start: Head::None,
+                end,
+            })
+        };
+        doc.elements.extend([
+            shape("r1", Model::Rectangle),
+            shape("r2", Model::Rectangle),
+            shape("s1", Model::Star),
+            line("l1", Head::None),
+            line("a1", Head::Arrow),
+            line("a2", Head::Triangle),
+        ]);
+        let ids: Vec<String> = ["r1", "r2", "s1", "l1", "a1", "a2"].map(String::from).to_vec();
+        let scope = Scope::Selection(ids);
+        let b = bounds(&doc, &scope).unwrap();
+        let md = inventory(&sub_document(&doc, &scope), &b);
+        for line in ["- 2 rectangles\n", "- 1 star\n", "- 1 line\n", "- 2 arrows\n"] {
+            assert!(md.contains(line), "{line:?} in {md}");
+        }
+        assert!(!md.contains("shape"), "a shape is said as what it is: {md}");
     }
 
     #[test]

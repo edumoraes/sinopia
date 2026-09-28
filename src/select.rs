@@ -3,7 +3,7 @@
 //! handles drive. Pure — `editor` decides when, this decides what.
 
 use crate::curve::{self, Cubic};
-use crate::doc::{Document, Element, MAX_TEXT_SIZE, MIN_TEXT_SIZE, TextMode};
+use crate::doc::{Document, Element, Line, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Shape, TextMode};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::{Prim, ScreenRect, View, with_alpha};
 use crate::theme::Theme;
@@ -31,6 +31,16 @@ pub enum Handle {
     Resize(Corner),
     /// Sits outside a corner; turns the selection about its center.
     Rotate(Corner),
+    /// One end of a lone line selected, which wears its ends in place of
+    /// a frame: dragging it moves that end and nothing else.
+    End(End),
+}
+
+/// Which end of a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    From,
+    To,
 }
 
 /// The oriented box an element occupies, in world units: a rect's own box
@@ -40,6 +50,8 @@ pub enum Handle {
 pub fn frame(el: &Element) -> Option<Frame> {
     match el {
         Element::Rect(r) => Some(box_frame(r.x, r.y, r.w, r.h, r.rotation)),
+        Element::Shape(s) => Some(box_frame(s.x, s.y, s.w, s.h, s.rotation)),
+        Element::Line(l) => Some(line_frame(l)),
         Element::Image(i) => Some(box_frame(i.x, i.y, i.w, i.h, i.rotation)),
         Element::Path(p) => ink_frame([(p.curves.as_slice(), p.width)], p.rotation),
         Element::Paint(p) => ink_frame(
@@ -50,6 +62,18 @@ pub fn frame(el: &Element) -> Option<Frame> {
         // frame is an axis-aligned box in the shader.
         Element::Frame(f) => Some(box_frame(f.x, f.y, f.w, f.h, 0.0)),
         Element::Text(t) => Some(box_frame(t.x, t.y, t.w, t.h, t.rotation)),
+    }
+}
+
+/// The box a line's ink takes: along it from end to end and past each by
+/// its round cap, turned as it runs; across it, as wide as it is or as its
+/// widest head opens.
+fn line_frame(l: &Line) -> Frame {
+    let d = [l.to[0] - l.from[0], l.to[1] - l.from[1]];
+    Frame {
+        center: [(l.from[0] + l.to[0]) / 2.0, (l.from[1] + l.to[1]) / 2.0],
+        half: [d[0].hypot(d[1]) / 2.0 + l.width / 2.0, crate::shape::line_reach(l)],
+        angle: d[1].atan2(d[0]),
     }
 }
 
@@ -120,6 +144,8 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
     match el {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
         Element::Rect(_) | Element::Image(_) | Element::Text(_) => true,
+        Element::Shape(s) => shape_hit(s, &f, p, slop),
+        Element::Line(l) => crate::shape::line_distance(l, p) <= slop,
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
         // A frame is an area with a surface, not an outline. It is
         // painted before what it holds, so a walk from the top finds
@@ -131,6 +157,18 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
             .strokes
             .iter()
             .any(|s| ink_hit(&s.curves, s.width, p, slop)),
+    }
+}
+
+/// Whether `p` is on what shape `s` shows, framed by `f`: anywhere in its
+/// figure when it is filled, and on its stroke alone when it is hollow —
+/// the stroke laid inside the edge, `width` deep. A hollow shape drawn
+/// round other things is not in the way of the pointer reaching them.
+fn shape_hit(s: &Shape, f: &Frame, p: Point, slop: f64) -> bool {
+    let d = crate::shape::distance(s, f.to_local(p));
+    match s.fill {
+        Some(_) => d <= slop,
+        None => d <= slop && d >= -(s.width + slop),
     }
 }
 
@@ -236,6 +274,20 @@ pub fn transform(el: &mut Element, m: &Affine) {
         Element::Image(i) => {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
+        }
+        // A line's ends are what it is, and map exactly.
+        Element::Line(l) => {
+            l.from = m.apply(l.from);
+            l.to = m.apply(l.to);
+        }
+        // A box that only turns cannot mirror: a map that does is the
+        // box's turn and the model flipped inside it.
+        Element::Shape(s) => {
+            (s.x, s.y, s.w, s.h, s.rotation) =
+                box_fields(box_frame(s.x, s.y, s.w, s.h, s.rotation).transformed(m));
+            if m.a * m.d - m.b * m.c < 0.0 {
+                s.flip = !s.flip;
+            }
         }
         // A frame's box is mapped and its lines reflow in it. Artistic
         // text is its letters: it is scaled evenly, by the middle of
@@ -387,13 +439,53 @@ pub fn handle_at(f: &Frame, view: &View, screen: (f64, f64)) -> Option<Handle> {
         .into_iter()
         .find(|(h, p)| {
             let size = match h {
-                Handle::Resize(_) => HANDLE_PX,
+                Handle::Resize(_) | Handle::End(_) => HANDLE_PX,
                 Handle::Rotate(_) => ROTATE_HANDLE_PX,
             };
             let reach = f64::from(size / 2.0 + HANDLE_SLOP_PX) * view.scale;
             (p[0] - screen.0).abs() <= reach && (p[1] - screen.1).abs() <= reach
         })
         .map(|(h, _)| h)
+}
+
+/// A lone line's handles: its two ends, where they are on screen.
+pub fn line_handles(l: &Line, view: &View) -> [(Handle, Point); 2] {
+    let at = |p: Point| {
+        let (x, y) = view.world_to_screen(p[0], p[1]);
+        [x, y]
+    };
+    [(Handle::End(End::From), at(l.from)), (Handle::End(End::To), at(l.to))]
+}
+
+/// The end of a lone line under `screen` (physical px), if any — the
+/// nearer, where the two are close enough to share the pointer.
+pub fn line_handle_at(l: &Line, view: &View, screen: (f64, f64)) -> Option<Handle> {
+    let reach = f64::from(HANDLE_PX / 2.0 + HANDLE_SLOP_PX) * view.scale;
+    line_handles(l, view)
+        .into_iter()
+        .filter(|(_, p)| (p[0] - screen.0).abs() <= reach && (p[1] - screen.1).abs() <= reach)
+        .min_by(|(_, a), (_, b)| {
+            let d = |p: &Point| (p[0] - screen.0).hypot(p[1] - screen.1);
+            d(a).total_cmp(&d(b))
+        })
+        .map(|(h, _)| h)
+}
+
+/// A lone line selected: a hairline along it, and on each end a round
+/// mark bordered as a resize handle is — the two things there are to
+/// drag it by.
+pub fn end_prims(l: &Line, view: &View, theme: &Theme) -> Vec<Prim> {
+    let s = view.scale as f32;
+    let [(_, a), (_, b)] = line_handles(l, view);
+    let at = |p: Point| (p[0] as f32, p[1] as f32);
+    let mut out = vec![Prim::segment(at(a), at(b), OUTLINE_PX / 2.0 * s, theme.selection)];
+    for p in [a, b] {
+        let (x, y) = at(p);
+        let radius = HANDLE_PX / 2.0 * s;
+        out.push(Prim::circle(x, y, radius, theme.selection));
+        out.push(Prim::circle(x, y, radius - HANDLE_BORDER_PX * s, theme.handle));
+    }
+    out
 }
 
 /// Selection overlay: the outline through the corners, a bordered square
@@ -438,6 +530,8 @@ pub fn prims(f: &Frame, view: &View, theme: &Theme) -> Vec<Prim> {
                 out.push(Prim::circle(x, y, radius, theme.selection));
                 out.push(Prim::circle(x, y, radius - RING_PX * s, theme.handle));
             }
+            // A frame's handles are its corners and its rings.
+            Handle::End(_) => {}
         }
     }
     out
@@ -1363,5 +1457,216 @@ mod tests {
         let t = text_of(&el);
         assert!((t.style.size - 40.0).abs() < 1e-9);
         assert_eq!(t.runs[0].style.size, Some(60.0), "twice the size, as the rest");
+    }
+
+    /// A `model` over (0,0)–(100,60), stroked 4 wide, filled or not.
+    fn shape(model: crate::doc::Model, filled: bool) -> Element {
+        Element::Shape(crate::doc::Shape {
+            id: "s".into(),
+            layer: String::new(),
+            model,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 60.0,
+            rotation: 0.0,
+            flip: false,
+            fill: filled.then(|| "#e5484d".into()),
+            stroke: Some("#000000".into()),
+            width: 4.0,
+            radius: 0.0,
+            sides: 5,
+            inner: crate::doc::DEFAULT_INNER,
+        })
+    }
+
+    fn shape_of(el: &Element) -> &crate::doc::Shape {
+        match el {
+            Element::Shape(s) => s,
+            other => panic!("expected a shape, got {other:?}"),
+        }
+    }
+
+    use crate::doc::Model;
+
+    #[test]
+    fn a_shape_is_its_box_turned_about_its_centre() {
+        let mut el = shape(Model::Star, true);
+        if let Element::Shape(s) = &mut el {
+            s.rotation = 90.0;
+        }
+        let f = frame(&el).unwrap();
+        assert_eq!((f.center, f.half), ([50.0, 30.0], [50.0, 30.0]));
+        assert!((f.angle - QUARTER).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_filled_shape_is_hit_on_its_figure_and_not_beside_it() {
+        let d = doc(vec![shape(Model::Ellipse, true)]);
+        assert_eq!(element_at(&d, [50.0, 30.0], 0.0), Some("s"));
+        assert_eq!(element_at(&d, [3.0, 3.0], 1.0), None, "the box's corner is past the ellipse");
+        assert_eq!(element_at(&d, [101.0, 30.0], 2.0), Some("s"), "within slop of the edge");
+        assert_eq!(element_at(&d, [105.0, 30.0], 2.0), None);
+    }
+
+    #[test]
+    fn a_hollow_shape_is_hit_on_its_stroke_alone() {
+        let d = doc(vec![shape(Model::Rectangle, false)]);
+        assert_eq!(element_at(&d, [50.0, 30.0], 2.0), None, "the middle of it is empty");
+        assert_eq!(element_at(&d, [2.0, 30.0], 0.0), Some("s"), "on the stroke, inside the edge");
+        assert_eq!(element_at(&d, [-1.0, 30.0], 2.0), Some("s"), "within slop outside it");
+        assert_eq!(element_at(&d, [5.5, 30.0], 2.0), Some("s"), "within slop inside the stroke");
+        assert_eq!(element_at(&d, [9.0, 30.0], 2.0), None);
+    }
+
+    #[test]
+    fn a_turned_shape_is_hit_where_it_was_turned_to() {
+        // A triangle in a 100 by 60 box, a quarter turn: its apex points
+        // right, out of the box's centre, and its base stands on the left.
+        let mut el = shape(Model::Triangle, true);
+        let f = frame(&el).unwrap();
+        transform(&mut el, &rotate_map(&f, QUARTER));
+        let d = doc(vec![el]);
+        assert_eq!(element_at(&d, [78.0, 30.0], 0.0), Some("s"), "the apex");
+        assert_eq!(element_at(&d, [78.0, 5.0], 0.0), None, "beside it");
+        assert_eq!(element_at(&d, [22.0, 76.0], 0.0), Some("s"), "the base's end");
+    }
+
+    #[test]
+    fn a_shape_moves_turns_and_stretches_as_its_box_does() {
+        let mut el = shape(Model::Diamond, true);
+        let f = frame(&el).unwrap();
+        transform(&mut el, &resize_map(&f, Corner::BottomRight, [200.0, 90.0], FREE));
+        let s = shape_of(&el);
+        assert_eq!((s.x, s.y, s.w, s.h), (0.0, 0.0, 200.0, 90.0));
+        transform(&mut el, &Affine::translate(10.0, -5.0));
+        let s = shape_of(&el);
+        assert_eq!((s.x, s.y, s.width), (10.0, -5.0, 4.0), "the stroke keeps its width");
+    }
+
+    #[test]
+    fn a_flip_mirrors_a_shape_rather_than_turning_it() {
+        // Near the box's top left a triangle is empty and near its bottom
+        // left it is not — until it is flipped top to bottom. Flipped side
+        // to side it stands as it stood.
+        let (top, bottom) = ([12.0, 8.0], [12.0, 56.0]);
+        let under = |el: &Element, p: Point| element_at(&doc(vec![el.clone()]), p, 0.0).is_some();
+        let upright = shape(Model::Triangle, true);
+        assert!(!under(&upright, top) && under(&upright, bottom));
+
+        let f = frame(&upright).unwrap();
+        let mut flipped = upright.clone();
+        transform(&mut flipped, &Affine::scale(1.0, -1.0).about(f.center));
+        assert!(shape_of(&flipped).flip);
+        assert!(under(&flipped, top) && !under(&flipped, bottom), "top to bottom");
+
+        let mut mirrored = upright.clone();
+        transform(&mut mirrored, &Affine::scale(-1.0, 1.0).about(f.center));
+        assert!(!under(&mirrored, top) && under(&mirrored, bottom), "side to side");
+
+        // Twice over is where it started.
+        transform(&mut flipped, &Affine::scale(1.0, -1.0).about(f.center));
+        assert!(!shape_of(&flipped).flip);
+    }
+
+    fn line(from: Point, to: Point, width: f64) -> Element {
+        Element::Line(crate::doc::Line {
+            id: "l".into(),
+            layer: String::new(),
+            from,
+            to,
+            stroke: "#000000".into(),
+            width,
+            start: crate::doc::Head::None,
+            end: crate::doc::Head::None,
+        })
+    }
+
+    fn line_of(el: &Element) -> &crate::doc::Line {
+        match el {
+            Element::Line(l) => l,
+            other => panic!("expected a line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_line_is_framed_along_itself_and_past_its_ends_by_its_caps() {
+        let f = frame(&line([0.0, 0.0], [30.0, 40.0], 4.0)).unwrap();
+        assert_close(f.center, [15.0, 20.0]);
+        assert!((f.half[0] - 27.0).abs() < 1e-9, "half of 50, and a cap of 2: {:?}", f.half);
+        assert!((f.half[1] - 2.0).abs() < 1e-9, "{:?}", f.half);
+        assert!((f.angle - 40f64.atan2(30.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_line_is_hit_on_its_ink_alone() {
+        let d = doc(vec![line([0.0, 0.0], [100.0, 100.0], 6.0)]);
+        assert_eq!(element_at(&d, [50.0, 52.0], 0.0), Some("l"), "within its width");
+        // 4.2 off the line, 3 of ink and 2 of slop.
+        assert_eq!(element_at(&d, [50.0, 56.0], 2.0), Some("l"), "and the slop past it");
+        assert_eq!(element_at(&d, [50.0, 62.0], 2.0), None);
+        assert_eq!(element_at(&d, [-3.0, -1.0], 1.0), Some("l"), "round its end");
+    }
+
+    #[test]
+    fn a_line_moves_turns_and_flips_by_its_two_ends() {
+        let mut el = line([10.0, 0.0], [30.0, 0.0], 2.0);
+        transform(&mut el, &Affine::rotate(QUARTER));
+        let l = line_of(&el);
+        assert_close(l.from, [0.0, 10.0]);
+        assert_close(l.to, [0.0, 30.0]);
+        transform(&mut el, &Affine::scale(-2.0, 1.0));
+        let l = line_of(&el);
+        assert_close(l.from, [0.0, 10.0]);
+        assert_eq!(l.width, 2.0, "a stretch leaves the ink as wide as it was");
+        let mut el = line([0.0, 0.0], [10.0, 10.0], 2.0);
+        transform(&mut el, &Affine::scale(3.0, 1.0));
+        assert_close(line_of(&el).to, [30.0, 10.0]);
+    }
+
+    #[test]
+    fn a_line_is_framed_and_hit_as_wide_as_its_heads() {
+        let mut el = line([0.0, 0.0], [100.0, 0.0], 2.0);
+        if let Element::Line(l) = &mut el {
+            l.end = crate::doc::Head::Triangle;
+        }
+        let f = frame(&el).unwrap();
+        let reach = crate::shape::line_reach(line_of(&el));
+        assert!(reach > 1.0);
+        assert!((f.half[1] - reach).abs() < 1e-9, "{:?}", f.half);
+        let d = doc(vec![el]);
+        assert_eq!(element_at(&d, [95.0, 2.5], 0.0), Some("l"), "on its head, off its shaft");
+        assert_eq!(element_at(&d, [40.0, 2.5], 0.0), None, "the shaft is as wide as it is");
+    }
+
+    #[test]
+    fn a_lone_lines_handles_are_its_two_ends() {
+        let el = line([-100.0, 0.0], [100.0, 40.0], 2.0);
+        let l = line_of(&el);
+        let v = view();
+        let at = |p: Point| v.world_to_screen(p[0], p[1]);
+        assert_eq!(line_handle_at(l, &v, at(l.from)), Some(Handle::End(End::From)));
+        let near_to = at(l.to);
+        assert_eq!(line_handle_at(l, &v, (near_to.0 + 5.0, near_to.1 - 5.0)), Some(Handle::End(End::To)));
+        assert_eq!(line_handle_at(l, &v, at([0.0, 20.0])), None, "its middle is the line itself");
+    }
+
+    #[test]
+    fn a_lone_line_is_drawn_selected_as_a_hairline_with_its_ends_marked() {
+        let el = line([0.0, 0.0], [100.0, 0.0], 8.0);
+        let prims = end_prims(line_of(&el), &view(), &Theme::light());
+        let segments: Vec<&Prim> = prims.iter().filter(|p| p.kind == KIND_SEGMENT).collect();
+        assert_eq!(segments.len(), 1, "a hairline along it");
+        let marks: Vec<&Prim> = prims.iter().filter(|p| p.kind == KIND_BOX).collect();
+        assert_eq!(marks.len(), 4, "a bordered mark on each end");
+        let v = view();
+        for end in [[0.0, 0.0], [100.0, 0.0]] {
+            let (x, y) = v.world_to_screen(end[0], end[1]);
+            assert!(
+                marks.iter().any(|m| (m.geom[0] + m.geom[2] / 2.0 - x as f32).abs() < 1e-3
+                    && (m.geom[1] + m.geom[3] / 2.0 - y as f32).abs() < 1e-3),
+                "a mark centred on {end:?}"
+            );
+        }
     }
 }

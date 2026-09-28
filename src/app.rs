@@ -61,6 +61,7 @@ use crate::tabs::{self, TabHit, Tabs};
 use crate::tree::Place;
 use crate::text::{self, Atlas, Font};
 use crate::textbar::{self, TextBar};
+use crate::shapebar::{self, ShapeBar};
 use crate::theme::{INKS, Theme};
 
 /// The longest step the panel's easing takes in one frame. A window
@@ -249,6 +250,9 @@ struct App {
     /// is, since every step of it restyles the text.
     text_bar_open: bool,
     text_grab: Option<textbar::Slider>,
+    /// The shape bar's slider being dragged: the board is not at rest
+    /// while one is, since every step of it restyles the shapes.
+    shape_grab: Option<shapebar::Slider>,
     /// When the text being typed last heard from the hand: the caret
     /// blinks from there, and shows solid while the hand is at it.
     typed_at: Instant,
@@ -477,6 +481,17 @@ enum Purpose {
     /// is looking at was set in — put back unless a line is taken, since
     /// the lines are tried on the text as the pointer passes over them.
     Font { families: Vec<String>, was: crate::editor::Look },
+    /// A shape bar's well — the stroke's or the fill's — the paint on
+    /// each line, and what every shape the bar is looking at wore when it
+    /// opened: put back unless a line is taken, since the lines are tried
+    /// on the shapes as the pointer passes over them.
+    Paint {
+        stroke: bool,
+        paints: Vec<Option<String>>,
+        was: Vec<(String, Option<String>)>,
+    },
+    /// A line's head at one end, and the head on each line.
+    Head { end: select::End, heads: Vec<crate::doc::Head> },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -713,6 +728,7 @@ impl App {
             && !self.carry.as_ref().is_some_and(|c| c.held)
             && !self.fading
             && self.text_grab.is_none()
+            && self.shape_grab.is_none()
             && self.menu.is_none()
     }
 
@@ -1046,6 +1062,10 @@ impl App {
 
     /// Starts closing the window: each dirty tab is asked about in turn.
     fn quit(&mut self) {
+        // A menu trying something on the board puts it back first: the
+        // drafts kept on the way out are the board as it was chosen, not
+        // as the pointer last passed over a line.
+        self.close_menu(None);
         self.end_typing();
         self.quitting = true;
         self.step_quit();
@@ -1137,6 +1157,7 @@ impl App {
         let (editor, _) = self.active();
         editor.hold_ctrl(mods.control_key());
         editor.hold_shift(mods.shift_key());
+        editor.hold_alt(mods.alt_key());
         editor.hold_space(false);
         self.shared.lock().expect("lock shared").board_id = self.doc().id.clone();
         self.retitle();
@@ -1682,6 +1703,7 @@ impl App {
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
             || self.props(view).and_then(|b| b.hit(x, y)).is_some()
             || self.text_bar(view).and_then(|b| b.hit(x, y)).is_some()
+            || self.shape_bar(view).and_then(|b| b.hit(x, y)).is_some()
             || self.strip(view).and_then(|s| s.hit(x, y)).is_some()
             || self.library(view).and_then(|p| p.hit(x, y)).is_some()
             || self.dock(view).hit(x, y).is_some()
@@ -1975,6 +1997,25 @@ impl App {
                 }
             });
         }
+        // A paint is tried on the shapes the bar is looking at, and put
+        // back when the pointer leaves every line — as long as there are
+        // shapes to try it on: with none it would be the next one's, and
+        // that is only ever set by a line taken.
+        if let Some(Opened {
+            purpose: Purpose::Paint { stroke, paints, was },
+            ..
+        }) = &self.menu
+            && !was.is_empty()
+        {
+            let tried = hover.and_then(|i| paints.get(i).cloned());
+            let (stroke, was) = (*stroke, was.clone());
+            let opened: Vec<String> = was.iter().map(|(id, _)| id.clone()).collect();
+            let (editor, doc) = self.active();
+            editor.repaint(doc, &was, stroke);
+            if let Some(paint) = tried {
+                let _ = editor.paint_shapes(doc, &opened, paint, stroke);
+            }
+        }
         self.redraw();
     }
 
@@ -2004,6 +2045,30 @@ impl App {
                 Some(layers::RowLine::Paste) => self.paste(),
                 _ => {}
             }
+        }
+        if let Purpose::Paint { stroke, paints, was } = &opened.purpose {
+            let paint = take.and_then(|i| paints.get(i).cloned());
+            let stroke = *stroke;
+            // A stroke's ink taken is the ink in the hand from then on, as
+            // one clicked in the dock is.
+            if stroke
+                && let Some(Some(hex)) = &paint
+                && let Some(i) = INKS.iter().position(|k| k.eq_ignore_ascii_case(hex))
+            {
+                self.ink = i;
+            }
+            // Opened on shapes, the menu's line is theirs alone; opened on
+            // none, it is how the next one is drawn.
+            let opened: Vec<String> = was.iter().map(|(id, _)| id.clone()).collect();
+            let (editor, doc) = self.active();
+            editor.repaint(doc, was, stroke);
+            let change = match paint {
+                Some(paint) if !opened.is_empty() => editor.paint_shapes(doc, &opened, paint, stroke),
+                Some(paint) => editor.restyle_shapes(doc, paint_change(stroke, paint)),
+                None => Change::None,
+            };
+            self.apply(change);
+            return self.redraw();
         }
         if let Purpose::Font { families, was } = &opened.purpose {
             let family = take.and_then(|i| families.get(i).cloned());
@@ -2036,8 +2101,17 @@ impl App {
                 Some(layers::RowLine::Tag(tag)) => editor.set_tag(doc, &id, tag),
                 _ => Change::None,
             },
-            Purpose::Bar { .. } => Change::None,
-            Purpose::Font { .. } => Change::None,
+            Purpose::Head { end, heads } => match take.and_then(|i| heads.get(i).copied()) {
+                Some(head) => editor.restyle_shapes(
+                    doc,
+                    match end {
+                        select::End::From => crate::editor::Restyle::Start(head),
+                        select::End::To => crate::editor::Restyle::End(head),
+                    },
+                ),
+                None => Change::None,
+            },
+            Purpose::Bar { .. } | Purpose::Font { .. } | Purpose::Paint { .. } => Change::None,
         };
         self.apply(change);
         self.redraw();
@@ -2938,6 +3012,100 @@ impl App {
         self.apply(change);
     }
 
+    /// The shape's own bar: with the Shape tool in hand, and wherever a
+    /// shape or a line is selected — with any tool but the brush, whose
+    /// bar stands in the same place, and never over the text's.
+    fn shape_bar(&self, view: &View) -> Option<ShapeBar> {
+        let editor = self.editor();
+        let doc = self.doc();
+        let shown = editor.tool() == Tool::Shape || editor.shape_targeted(doc);
+        if !shown || editor.tool() == Tool::Brush || self.text_bar(view).is_some() {
+            return None;
+        }
+        Some(ShapeBar::layout(
+            view.viewport,
+            self.chrome(view),
+            self.strip_top(view),
+            editor.shape_look(doc, self.ink_hex()).figure,
+        ))
+    }
+
+    /// A click on the shape bar.
+    fn shape_bar_hit(&mut self, bar: &ShapeBar, hit: shapebar::Hit, x: f64) {
+        let change = match hit {
+            shapebar::Hit::Figure(figure) => {
+                let (editor, doc) = self.active();
+                editor.set_figure(figure, doc)
+            }
+            shapebar::Hit::Fill => return self.open_paint_menu(bar.fill, false),
+            shapebar::Hit::Stroke => return self.open_paint_menu(bar.stroke, true),
+            shapebar::Hit::Head(end) => {
+                if let Some((_, at)) = bar.heads.iter().find(|(e, _)| *e == end) {
+                    self.open_head_menu(end, *at);
+                }
+                return;
+            }
+            shapebar::Hit::Slider(slider) => {
+                self.shape_grab = Some(slider);
+                self.drag_shape_field(bar, slider, x);
+                return;
+            }
+            shapebar::Hit::Bar => Change::None,
+        };
+        self.apply(change);
+    }
+
+    /// A shape slider follows the pointer's x.
+    fn drag_shape_field(&mut self, bar: &ShapeBar, slider: shapebar::Slider, x: f64) {
+        let f = bar.fraction(slider, x);
+        let (editor, doc) = self.active();
+        let change = editor.restyle_shapes(doc, slider.at(f));
+        self.apply(change);
+    }
+
+    /// Opens the dock's inks under the fill's well or the stroke's, on
+    /// the paint the bar shows, remembering what every shape it is
+    /// looking at wore.
+    fn open_paint_menu(&mut self, at: ScreenRect, stroke: bool) {
+        let doc = self.doc();
+        let editor = self.editor();
+        let look = editor.shape_look(doc, self.ink_hex());
+        let (current, none) = match stroke {
+            true => (look.stroke.as_deref(), "No Stroke"),
+            false => (look.fill.as_deref(), "No Fill"),
+        };
+        // A line is nothing but its ink, and cannot go without it.
+        let can_none = !stroke || look.figure.model().is_some();
+        let (items, paints) = shapebar::paint_menu(current, none, can_none);
+        let was = editor.paints(doc, stroke);
+        self.menu = Some(Opened {
+            purpose: Purpose::Paint { stroke, paints, was },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
+    /// Opens the heads under a line's well at `end`, on the one it wears.
+    fn open_head_menu(&mut self, end: select::End, at: ScreenRect) {
+        let look = self.editor().shape_look(self.doc(), self.ink_hex());
+        let current = match end {
+            select::End::From => look.start,
+            select::End::To => look.end,
+        };
+        let (items, heads) = shapebar::head_menu(current);
+        self.menu = Some(Opened {
+            purpose: Purpose::Head { end, heads },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
     /// Opens the families under the text bar's button, on the one the
     /// bar is showing, remembering what every text it is looking at was
     /// set in.
@@ -3296,7 +3464,16 @@ impl App {
             edge,
             live,
         ));
-        if let Some(selection) = self.editor().selection_frame(self.doc()) {
+        // What the Shape tool is dragging out, drawn as it will land.
+        match self.editor().shaping(view, self.ink_hex()) {
+            Some(Element::Shape(shape)) => frame.extend(scene::shape_prims(&shape, view)),
+            Some(Element::Line(line)) => frame.extend(scene::line_prims(&line, view)),
+            _ => {}
+        }
+        // A lone line wears its ends; anything else, its frame.
+        if let Some(line) = self.editor().lone_line(self.doc()) {
+            frame.extend(select::end_prims(line, view, &self.theme));
+        } else if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
         }
         if let Some((a, b)) = self.editor().marquee() {
@@ -3399,6 +3576,10 @@ impl App {
                 kind: self.editor().text_kind(doc),
             };
             frame.extend(bar.prims(&showing, atlas, self.atlas_slot, &self.theme));
+        }
+        if let (Some(bar), Some(atlas)) = (self.shape_bar(view), self.atlas.as_ref()) {
+            let look = self.editor().shape_look(self.doc(), self.ink_hex());
+            frame.extend(bar.prims(&look, atlas, self.atlas_slot, &self.theme));
         }
         if let (Some(handle), Some(atlas)) = (self.handle(view), self.atlas.as_ref()) {
             frame.extend(handle.prims(atlas, self.atlas_slot, &self.theme));
@@ -3718,6 +3899,15 @@ impl App {
             }
             return self.update_cursor_icon();
         }
+        if let Some(bar) = self.shape_bar(&view)
+            && let Some(hit) = bar.hit(x, y)
+        {
+            if button == Button::Left {
+                self.shape_bar_hit(&bar, hit, x);
+                self.redraw();
+            }
+            return self.update_cursor_icon();
+        }
         if let Some(strip) = self.strip(&view)
             && let Some(hit) = strip.hit(x, y)
         {
@@ -3772,6 +3962,15 @@ impl App {
                     if self.editor().text_targeted(self.doc()) {
                         self.ink = i;
                         let change = self.with_text(|e, d, f| e.restyle(d, f, |s| s.color.clone_from(&hex)));
+                        self.apply(change);
+                        return self.update_cursor_icon();
+                    }
+                    // So do the shapes and lines selected, on their stroke:
+                    // the ink is what they are drawn in.
+                    if self.editor().shape_targeted(self.doc()) {
+                        self.ink = i;
+                        let (editor, doc) = self.active();
+                        let change = editor.restyle_shapes(doc, crate::editor::Restyle::Stroke(Some(hex)));
                         self.apply(change);
                         return self.update_cursor_icon();
                     }
@@ -3861,6 +4060,12 @@ impl App {
         // The text's slider let go of is where the text rests: one step
         // back undoes the whole drag.
         if button == Button::Left && self.text_grab.take().is_some() {
+            self.remember();
+            self.redraw();
+            return self.update_cursor_icon();
+        }
+        // So is the shape's.
+        if button == Button::Left && self.shape_grab.take().is_some() {
             self.remember();
             self.redraw();
             return self.update_cursor_icon();
@@ -4025,6 +4230,16 @@ impl App {
                 && let Some(bar) = self.text_bar(&view)
             {
                 self.drag_text_field(&bar, slider, x);
+            }
+            self.redraw();
+            return self.update_cursor_icon();
+        }
+        // And the shape bar's.
+        if let Some(slider) = self.shape_grab {
+            if let Some(view) = self.view()
+                && let Some(bar) = self.shape_bar(&view)
+            {
+                self.drag_shape_field(&bar, slider, x);
             }
             self.redraw();
             return self.update_cursor_icon();
@@ -4460,7 +4675,10 @@ impl App {
         // strength, as in Photoshop: `1` is 10% and `0` is all of it. The
         // brush keeps the digits for its own opacity.
         if !shift
-            && matches!(self.editor().tool(), Tool::Select | Tool::Hand | Tool::Frame | Tool::Zoom)
+            && matches!(
+                self.editor().tool(),
+                Tool::Select | Tool::Hand | Tool::Frame | Tool::Shape | Tool::Zoom
+            )
             && let Some(d) = c.to_digit(10)
         {
             let strength = if d == 0 { 1.0 } else { f64::from(d) / 10.0 };
@@ -4478,6 +4696,11 @@ impl App {
             let (editor, doc) = self.active();
             editor.choose_tool(tool, doc);
             self.redraw();
+        } else if let Some(figure) = crate::editor::figure_for_key(c) {
+            self.end_typing();
+            let (editor, doc) = self.active();
+            editor.choose_figure(figure, doc);
+            self.redraw();
         } else if self.brush_key(c) {
             self.redraw();
         }
@@ -4489,6 +4712,12 @@ impl App {
         let (editor, _) = self.active();
         editor.hold_ctrl(state.control_key());
         editor.hold_shift(state.shift_key());
+        editor.hold_alt(state.alt_key());
+        // Shift and Alt reshape the shape being dragged out as they go
+        // down, not at the next move of the pointer.
+        if editor.is_drawing() {
+            self.redraw();
+        }
         self.update_cursor_icon();
     }
 
@@ -4540,6 +4769,10 @@ impl App {
         // press's doing, not the drag's.
         self.drag = None;
         self.fading = false;
+        // A slider let go of this way is let go of: where it was dragged
+        // to is where the board rests.
+        self.text_grab = None;
+        self.shape_grab = None;
         self.close_menu(None);
         // A card the pointer was carrying goes back where it came from:
         // nothing moves until a drop, and losing the window is not one.
@@ -4557,6 +4790,7 @@ impl App {
         editor.hold_space(false);
         editor.hold_ctrl(false);
         editor.hold_shift(false);
+        editor.hold_alt(false);
         let cancelled = editor.cancel(doc);
         // Losing the window is as much a resting point as letting go of
         // the button: a card dropped this way left a stack behind, and
@@ -4624,10 +4858,10 @@ impl App {
                     CursorIcon::NwseResize
                 }
                 (Tool::Select, Some(Handle::Resize(_))) => CursorIcon::NeswResize,
-                (Tool::Select, Some(Handle::Rotate(_))) => CursorIcon::Crosshair,
+                (Tool::Select, Some(Handle::Rotate(_) | Handle::End(_))) => CursorIcon::Crosshair,
                 (Tool::Select, None) => CursorIcon::Default,
                 (Tool::Hand, _) => CursorIcon::Grab,
-                (Tool::Pencil | Tool::Brush | Tool::Frame, _) => CursorIcon::Crosshair,
+                (Tool::Pencil | Tool::Brush | Tool::Frame | Tool::Shape, _) => CursorIcon::Crosshair,
                 (Tool::Text, _) => CursorIcon::Text,
                 (Tool::Zoom, _) => CursorIcon::ZoomIn,
             }
@@ -5017,6 +5251,15 @@ impl App {
 }
 
 /// Puts back the blend modes `was` says every layer had.
+/// What a paint menu's line asks of the shapes: their stroke, or their
+/// fill.
+fn paint_change(stroke: bool, paint: Option<String>) -> crate::editor::Restyle {
+    match stroke {
+        true => crate::editor::Restyle::Stroke(paint),
+        false => crate::editor::Restyle::Fill(paint),
+    }
+}
+
 fn restore_blends(doc: &mut Document, was: &[(String, BlendMode)]) {
     for (id, mode) in was {
         if let Some(l) = doc.layer_mut(id) {
@@ -5254,6 +5497,7 @@ pub fn run(
         fonts: crate::fonts::machine(),
         text_bar_open: false,
         text_grab: None,
+        shape_grab: None,
         typed_at: Instant::now(),
         caret_drawn: std::cell::Cell::new(None),
         pasting_words: false,

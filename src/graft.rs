@@ -214,6 +214,8 @@ pub(crate) fn placed(el: &Element) -> bool {
         Element::Image(i) => [i.x, i.y, i.w, i.h, i.rotation].iter().all(ok),
         Element::Frame(f) => [f.x, f.y, f.w, f.h].iter().all(ok),
         Element::Text(t) => [t.x, t.y, t.w, t.h, t.rotation, t.style.size].iter().all(ok),
+        Element::Shape(s) => [s.x, s.y, s.w, s.h, s.rotation].iter().all(ok),
+        Element::Line(l) => l.from.iter().chain(&l.to).all(ok),
     }
 }
 
@@ -617,5 +619,85 @@ mod tests {
         assert_eq!((text.x - frame.x, text.y - frame.y), (10.0, 5.0), "where it stood in the frame");
         assert_eq!(b.layer(&text.layer).unwrap().kind, Kind::Text);
         assert!(Document::from_json(&b.to_json().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn shapes_and_lines_in_the_frame_are_grafted_with_it_moved_as_the_frame_is() {
+        use crate::doc::{Head, Line, Model, Shape};
+        let mut b = board();
+        let mut frag = fragment();
+        if let Element::Frame(f) = &mut frag.elements[0] {
+            f.layers.push(Layer {
+                id: "sl".into(),
+                ..Layer::of("Rectangle 1", Kind::Vector)
+            });
+            f.layers.push(Layer {
+                id: "al".into(),
+                ..Layer::of("Arrow 1", Kind::Vector)
+            });
+        }
+        frag.elements.push(Element::Shape(Shape {
+            id: "s1".into(),
+            layer: "sl".into(),
+            model: Model::Rectangle,
+            x: 10.0,
+            y: 5.0,
+            w: 30.0,
+            h: 20.0,
+            rotation: 0.0,
+            flip: false,
+            fill: Some("#ffffff".into()),
+            stroke: Some("#000000".into()),
+            width: 2.0,
+            radius: 4.0,
+            sides: 5,
+            inner: 0.5,
+        }));
+        frag.elements.push(Element::Line(Line {
+            id: "a1".into(),
+            layer: "al".into(),
+            from: [40.0, 15.0],
+            to: [90.0, 15.0],
+            stroke: "#000000".into(),
+            width: 2.0,
+            start: Head::None,
+            end: Head::Arrow,
+        }));
+        plant(&mut b, &frag).unwrap();
+        let frame = b.elements.iter().find_map(|e| match e {
+            Element::Frame(f) => Some(f.clone()),
+            _ => None,
+        });
+        let frame = frame.unwrap();
+        let shape = b.elements.iter().find_map(|e| match e {
+            Element::Shape(s) => Some(s.clone()),
+            _ => None,
+        });
+        let line = b.elements.iter().find_map(|e| match e {
+            Element::Line(l) => Some(l.clone()),
+            _ => None,
+        });
+        let (shape, line) = (shape.unwrap(), line.unwrap());
+        assert_ne!((shape.id.as_str(), line.id.as_str()), ("s1", "a1"), "minted anew");
+        assert_eq!((shape.x - frame.x, shape.y - frame.y), (10.0, 5.0), "where it stood in the frame");
+        assert_eq!([line.from[0] - frame.x, line.to[0] - frame.x], [40.0, 90.0]);
+        assert_eq!(line.end, Head::Arrow);
+        assert_eq!(b.context(&shape.layer), Some(frame.layer.as_str()));
+        assert!(Document::from_json(&b.to_json().unwrap()).is_ok());
+    }
+
+    /// What the skill teaches an agent to write is what the board takes:
+    /// its example fragment, read out of the skill itself, grafts.
+    #[test]
+    fn the_fragment_the_skill_teaches_grafts() {
+        let skill = include_str!("../skills/sinopia/SKILL.md");
+        let open = "```json\n{\n  \"schema\"";
+        let start = skill.find(open).expect("the skill shows a fragment") + "```json\n".len();
+        let end = start + skill[start..].find("```").expect("and closes it");
+        let fragment = Document::from_json(&skill[start..end]).expect("the skill's fragment parses");
+        let mut b = board();
+        plant(&mut b, &fragment).expect("and grafts");
+        assert!(b.elements.iter().any(|e| matches!(e, Element::Shape(_))), "a box");
+        assert!(b.elements.iter().any(|e| matches!(e, Element::Line(_))), "an arrow");
     }
 }

@@ -101,15 +101,16 @@ contents relative to the frame's own box.
     { "type": "frame", "id": "F1", "layer": "L1",
       "x": 0, "y": 0, "w": 400, "h": 240,
       "background": "#ffffff",
-      "layers": [ { "id": "L2", "name": "Layer 1" } ] },
+      "layers": [ { "id": "L2", "name": "Rectangle 1", "kind": "vector" },
+                  { "id": "L3", "name": "Arrow 1", "kind": "vector" } ] },
 
-    { "type": "rect", "id": "R1", "layer": "L2",
-      "x": 40, "y": 40, "w": 140, "h": 60,
-      "fill": "#dbe7ff", "stroke": "#2b4c8c" },
+    { "type": "shape", "id": "S1", "layer": "L2", "model": "rectangle",
+      "x": 40, "y": 40, "w": 140, "h": 60, "radius": 8,
+      "fill": "#dbe7ff", "stroke": "#2b4c8c", "width": 2 },
 
-    { "type": "path", "id": "P1", "layer": "L2",
-      "curves": [ [[180,70],[210,70],[220,120],[250,140]] ],
-      "stroke": "#333333", "width": 3 }
+    { "type": "line", "id": "A1", "layer": "L3",
+      "from": [180, 70], "to": [300, 150],
+      "stroke": "#333333", "width": 3, "end": "arrow" }
   ]
 }
 ```
@@ -128,10 +129,35 @@ Rules that make it parse:
 
 | element | fields | notes |
 | --- | --- | --- |
-| `rect` | `x y w h`, `fill`, `stroke`, `rotation` | colours are `#rgb` or `#rrggbb` |
-| `path` | `curves`, `stroke`, `width` | ink: lines, arrows, curves |
+| `shape` | `model`, `x y w h`, `fill`, `stroke`, `width`, and what the model has of its own | a box, an ellipse, a star… as the Shape tool draws them |
+| `line` | `from`, `to`, `stroke`, `width`, `start`, `end` | a straight line, an arrow with a head at either end |
 | `text` | `x y w h`, `text`, `size`, `color`, and the style below | words, on a layer of `"kind": "text"` |
+| `path` | `curves`, `stroke`, `width` | ink: freehand curves |
 | `image` | `x y w h`, `blob`, `rotation` | a picture you rendered yourself |
+| `rect` | `x y w h`, `fill`, `stroke`, `rotation` | the plain box of older pages; prefer `shape` |
+
+Colours are `#rgb` or `#rrggbb` everywhere.
+
+### Shapes and lines
+
+A `shape` is one of the models the person's Shape tool draws, fitted to its
+box — its outline touches all four sides of `x y w h`: `"model"` is
+`rectangle`, `ellipse`, `triangle` (point up), `diamond`, `polygon` or
+`star`. `fill` and `stroke` are each optional (leave `fill` out for an
+outline), `width` is the stroke's, in world units, laid **inside** the edge,
+so the shape paints its box and nothing past it. What a model has of its
+own: `radius` rounds a rectangle's corners; `sides` is a polygon's sides or
+a star's points (3–60, default 5); `inner` is how far in a star is cut, a
+fraction of its outer radius (0.05–0.95, default 0.382). `rotation` turns it about its
+centre in degrees, and `"flip": true` stands it upside down in its box.
+
+A `line` runs `from` one end `to` the other. `start` and `end` are its heads:
+`"arrow"` (open), `"triangle"` (filled), or left out for none — so an arrow
+is a line with `"end": "arrow"`. It needs its `stroke`.
+
+Give each shape and each line a layer of its own of `"kind": "vector"`,
+named after it, as the board keeps them; the person then finds them in the
+layers panel as they find their own, and sets them from the same bar.
 
 A `path`'s `curves` is a list of cubic Béziers, each `[start, c1, c2, end]`.
 For a straight line put the controls at the thirds:
@@ -189,7 +215,7 @@ vertical alignment and leading are the whole text's.
   "runs": [ { "start": 10, "end": 16, "bold": true, "color": "#c0392b" } ] }
 ```
 
-So a diagram that reads itself is boxes (`rect`), arrows (`path`) and
+So a diagram that reads itself is boxes (`shape`), arrows (`line`) and
 their labels (`text`), all in one fragment. Render a picture only for
 what is not words.
 
@@ -270,6 +296,7 @@ asked.
 | `no layer "X" on the board that is open` | `sinopia layer list`, and name it by id |
 | `N layers go by "X"` | name the one you mean by its id |
 | `text "X" stands on layer "Y", which is not a text layer` | give each text its own layer of `"kind": "text"` |
+| `shape "X" has N sides, and a figure has 3 to 60` / `is cut in to …` | `sides` 3–60; `inner` 0.05–0.95 |
 | `no text "X" on show on the board that is open` | `sinopia text list`, and name it by its id |
 | `field color must be #rgb or #rrggbb` | write colours as hex |
 | `"X" is locked, and a lock keeps …` | the person locked it: ask before unlocking |
