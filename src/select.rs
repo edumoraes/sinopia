@@ -49,6 +49,7 @@ pub fn frame(el: &Element) -> Option<Frame> {
         // An area, and one that does not turn: the cut that makes a
         // frame is an axis-aligned box in the shader.
         Element::Frame(f) => Some(box_frame(f.x, f.y, f.w, f.h, 0.0)),
+        Element::Text(t) => Some(box_frame(t.x, t.y, t.w, t.h, t.rotation)),
     }
 }
 
@@ -118,7 +119,7 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
     }
     match el {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
-        Element::Rect(_) | Element::Image(_) => true,
+        Element::Rect(_) | Element::Image(_) | Element::Text(_) => true,
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
         // A frame is an area with a surface, not an outline. It is
         // painted before what it holds, so a walk from the top finds
@@ -235,6 +236,10 @@ pub fn transform(el: &mut Element, m: &Affine) {
         Element::Image(i) => {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
+        }
+        Element::Text(t) => {
+            (t.x, t.y, t.w, t.h, t.rotation) =
+                box_fields(box_frame(t.x, t.y, t.w, t.h, t.rotation).transformed(m));
         }
         // A frame does not turn: its box is mapped and whatever
         // rotation the map carried is spent on nothing.

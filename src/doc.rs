@@ -44,6 +44,9 @@ pub enum Kind {
     /// Layers held together: a group holds a stack of its own and never
     /// an element, and groups nest.
     Group,
+    /// The layer a text is the object of: it holds that text and nothing
+    /// else, the way a vector layer holds the one object it was made for.
+    Text,
 }
 
 impl Kind {
@@ -330,6 +333,7 @@ pub enum Element {
     Paint(Paint),
     Image(Image),
     Frame(Frame),
+    Text(Text),
 }
 
 impl Element {
@@ -340,6 +344,7 @@ impl Element {
             Element::Paint(p) => &p.id,
             Element::Image(i) => &i.id,
             Element::Frame(f) => &f.id,
+            Element::Text(t) => &t.id,
         }
     }
 
@@ -351,6 +356,7 @@ impl Element {
             Element::Paint(p) => &p.layer,
             Element::Image(i) => &i.layer,
             Element::Frame(f) => &f.layer,
+            Element::Text(t) => &t.layer,
         }
     }
 
@@ -364,6 +370,7 @@ impl Element {
             Element::Paint(p) => &mut p.id,
             Element::Image(i) => &mut i.id,
             Element::Frame(f) => &mut f.id,
+            Element::Text(t) => &mut t.id,
         };
         id.clone_into(at);
     }
@@ -375,6 +382,7 @@ impl Element {
             Element::Paint(p) => &mut p.layer,
             Element::Image(i) => &mut i.layer,
             Element::Frame(f) => &mut f.layer,
+            Element::Text(t) => &mut t.layer,
         };
         id.clone_into(layer);
     }
@@ -1014,6 +1022,254 @@ impl TryFrom<StrokeOnDisk> for Stroke {
     }
 }
 
+/// How a text takes up room — Affinity's two kinds. **Artistic** text
+/// is set at a point: its lines are as long as what is typed on them,
+/// its box is what they measure, and resizing it scales the letters.
+/// **Frame** text lives in a box that is its own size: its lines wrap at
+/// the box's width, resizing the box reflows them, and what does not fit
+/// under its height is not shown. Artistic is the default, and absent on
+/// disk.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextMode {
+    #[default]
+    Artistic,
+    Frame,
+}
+
+impl TextMode {
+    fn is_artistic(&self) -> bool {
+        *self == TextMode::Artistic
+    }
+}
+
+/// Where each line stands across the text's width. Justified lines are
+/// stretched to the full width, every one but the last of a paragraph.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Align {
+    #[default]
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+impl Align {
+    fn is_left(&self) -> bool {
+        *self == Align::Left
+    }
+}
+
+/// Where a frame text's lines stand in its height. Artistic text is as
+/// tall as its lines, so it has nowhere else to put them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Valign {
+    #[default]
+    Top,
+    Middle,
+    Bottom,
+}
+
+impl Valign {
+    fn is_top(&self) -> bool {
+        *self == Valign::Top
+    }
+}
+
+/// The family a text is set in when nothing says otherwise: the face
+/// the binary carries, in all four styles, so a board that names it
+/// opens looking the same on every machine.
+pub const DEFAULT_FONT: &str = "Liberation Sans";
+
+/// How far apart two lines of a text stand, as a share of its size, when
+/// nothing says otherwise: the 120% every design tool calls automatic.
+pub const DEFAULT_LEADING: f64 = 1.2;
+
+/// The sizes a text may be set at, in world units: from a hair to a
+/// banner. A size is how tall the em is, as a font's point size is.
+pub const MIN_TEXT_SIZE: f64 = 0.5;
+pub const MAX_TEXT_SIZE: f64 = 5000.0;
+
+/// How far apart lines may stand, as a share of the size.
+pub const MIN_LEADING: f64 = 0.5;
+pub const MAX_LEADING: f64 = 10.0;
+
+/// How much letter spacing may add or take away, in thousandths of an
+/// em — the unit Affinity and every Adobe tool state tracking in.
+pub const MIN_TRACKING: f64 = -1000.0;
+pub const MAX_TRACKING: f64 = 10000.0;
+
+/// How a text is set: its face, its size, and how its lines stand. One
+/// style runs through the whole of a text. Every field past `size` and
+/// `color` is absent on disk at its default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextStyle {
+    /// The family, by the name fontconfig knows it by. A family this
+    /// machine does not have is set in [`DEFAULT_FONT`] instead, and the
+    /// name is kept, so the board still says what it asked for.
+    #[serde(default = "default_font", skip_serializing_if = "is_default_font")]
+    pub font: String,
+    /// How tall the em is, in world units.
+    pub size: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bold: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub italic: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub underline: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strike: bool,
+    #[serde(default, skip_serializing_if = "Align::is_left")]
+    pub align: Align,
+    #[serde(default, skip_serializing_if = "Valign::is_top")]
+    pub valign: Valign,
+    /// Baseline to baseline, as a share of the size.
+    #[serde(default = "default_leading", skip_serializing_if = "is_default_leading")]
+    pub leading: f64,
+    /// Added after every character, in thousandths of an em.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tracking: f64,
+    /// The ink, an unvalidated hex as a rect's `fill` is.
+    pub color: String,
+}
+
+fn default_font() -> String {
+    DEFAULT_FONT.to_owned()
+}
+
+fn is_default_font(f: &String) -> bool {
+    f == DEFAULT_FONT
+}
+
+fn default_leading() -> f64 {
+    DEFAULT_LEADING
+}
+
+fn is_default_leading(v: &f64) -> bool {
+    *v == DEFAULT_LEADING
+}
+
+impl TextStyle {
+    /// The default style at `size`, in `color`.
+    pub fn with_size(size: f64, color: &str) -> TextStyle {
+        TextStyle {
+            font: default_font(),
+            size,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            align: Align::Left,
+            valign: Valign::Top,
+            leading: DEFAULT_LEADING,
+            tracking: 0.0,
+            color: color.to_owned(),
+        }
+    }
+
+    /// Whether the board can set text this way — whatever wrote it.
+    pub fn checked(&self) -> Result<(), String> {
+        if self.font.trim().is_empty() {
+            return Err("a text names no font".into());
+        }
+        if !(self.size.is_finite() && (MIN_TEXT_SIZE..=MAX_TEXT_SIZE).contains(&self.size)) {
+            return Err(format!(
+                "a text is set at {}, and a size is {MIN_TEXT_SIZE} to {MAX_TEXT_SIZE}",
+                self.size
+            ));
+        }
+        if !(self.leading.is_finite() && (MIN_LEADING..=MAX_LEADING).contains(&self.leading)) {
+            return Err(format!(
+                "a text's lines stand {} apart, and leading is {MIN_LEADING} to {MAX_LEADING}",
+                self.leading
+            ));
+        }
+        if !(self.tracking.is_finite() && (MIN_TRACKING..=MAX_TRACKING).contains(&self.tracking)) {
+            return Err(format!(
+                "a text is tracked by {}, and tracking is {MIN_TRACKING} to {MAX_TRACKING}",
+                self.tracking
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Words on the board. `x, y, w, h` is the box before rotation, in world
+/// units, turned about its centre by `rotation` as a rect's is. For
+/// artistic text the box is what its lines measure — the editor keeps it
+/// so as the text is typed and styled, which is what lets the pointer,
+/// the selection and a frame's claim read it without a font in hand; for
+/// frame text it is the frame, and the lines wrap at its width.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "TextOnDisk")]
+pub struct Text {
+    pub id: String,
+    #[serde(default)]
+    pub layer: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
+    #[serde(default, skip_serializing_if = "TextMode::is_artistic")]
+    pub mode: TextMode,
+    /// What it says. A newline breaks a line, and is the only character
+    /// under a space that means anything here.
+    pub text: String,
+    #[serde(flatten)]
+    pub style: TextStyle,
+}
+
+/// What a `text` may look like on disk: checked on the way in, so a
+/// board cannot ask for a size nothing can draw.
+#[derive(Deserialize)]
+struct TextOnDisk {
+    id: String,
+    #[serde(default)]
+    layer: String,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    #[serde(default)]
+    rotation: f64,
+    #[serde(default)]
+    mode: TextMode,
+    text: String,
+    #[serde(flatten)]
+    style: TextStyle,
+}
+
+impl TryFrom<TextOnDisk> for Text {
+    type Error = String;
+
+    fn try_from(t: TextOnDisk) -> Result<Text, String> {
+        t.style.checked()?;
+        let finite = [t.x, t.y, t.w, t.h, t.rotation].iter().all(|v| v.is_finite());
+        if !finite || t.w < 0.0 || t.h < 0.0 {
+            return Err(format!(
+                "text {:?} has no box a board can hold: {} {} {} {}",
+                t.id, t.x, t.y, t.w, t.h
+            ));
+        }
+        Ok(Text {
+            id: t.id,
+            layer: t.layer,
+            x: t.x,
+            y: t.y,
+            w: t.w,
+            h: t.h,
+            rotation: t.rotation,
+            mode: t.mode,
+            text: t.text,
+            style: t.style,
+        })
+    }
+}
+
 /// A bitmap on the board. `x, y, w, h` is the box before rotation, in
 /// world units, and `rotation` turns it about its center exactly as a
 /// rect's does. `blob` names the original bytes in the blob store by their
@@ -1215,6 +1471,18 @@ impl Document {
                     el.id(),
                     el.layer()
                 ),
+                // A text layer is the text it carries, and a text stands
+                // on nothing else: the kind is what the panel shows it as.
+                Some(Kind::Text) if !matches!(el, Element::Text(_)) => anyhow::bail!(
+                    "element {:?} stands on layer {:?}, where only its text stands",
+                    el.id(),
+                    el.layer()
+                ),
+                Some(k) if k != Kind::Text && matches!(el, Element::Text(_)) => anyhow::bail!(
+                    "text {:?} stands on layer {:?}, which is not a text layer",
+                    el.id(),
+                    el.layer()
+                ),
                 Some(_) => {}
             }
         }
@@ -1365,7 +1633,7 @@ impl Document {
                     self.paint_stack(&frame.layers, Some(frame), locked, out);
                 }
                 Kind::Group => self.paint_stack(&layer.layers, within, locked, out),
-                Kind::Raster | Kind::Vector => {
+                Kind::Raster | Kind::Vector | Kind::Text => {
                     out.extend(self.on_layer(&layer.id, within, locked));
                 }
             }
@@ -3199,5 +3467,116 @@ mod tests {
                 "{what} is part of the board and has to tell two apart"
             );
         }
+    }
+
+    /// A board holding one text, on a text layer: `json` is the text's
+    /// own fields past `id`, `type` and `layer`.
+    fn with_text(fields: &str) -> anyhow::Result<Document> {
+        let json = format!(
+            r##"{{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+            "layers": [ {{ "id": "tl", "name": "Hello", "kind": "text" }} ],
+            "elements": [ {{ "id": "t1", "type": "text", "layer": "tl", {fields} }} ]
+        }}"##
+        );
+        Document::from_json(&json)
+    }
+
+    const PLAIN: &str = r##""x": 10, "y": 20, "w": 50, "h": 30, "text": "Hello", "size": 24, "color": "#000000""##;
+
+    #[test]
+    fn a_plain_text_writes_nothing_it_does_not_need() {
+        let doc = with_text(PLAIN).unwrap();
+        let Element::Text(t) = &doc.elements[0] else {
+            panic!("expected a text, got {:?}", doc.elements[0]);
+        };
+        assert_eq!(t.text, "Hello");
+        assert_eq!(t.mode, TextMode::Artistic);
+        assert_eq!(t.style, TextStyle::with_size(24.0, "#000000"));
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        let el = v["elements"][0].as_object().unwrap();
+        let mut keys: Vec<&str> = el.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["color", "h", "id", "layer", "size", "text", "type", "w", "x", "y"],
+            "every default stays off disk"
+        );
+        assert_eq!(v["layers"][0]["kind"], "text");
+        assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_styled_frame_text_round_trips() {
+        let doc = with_text(
+            r##""x": 0, "y": 0, "w": 200, "h": 100, "rotation": 15, "mode": "frame",
+                "text": "one\ntwo", "font": "Noto Serif", "size": 18.5, "bold": true,
+                "italic": true, "underline": true, "strike": true, "align": "justify",
+                "valign": "bottom", "leading": 1.5, "tracking": 40, "color": "#ff0000""##,
+        )
+        .unwrap();
+        let Element::Text(t) = &doc.elements[0] else { panic!() };
+        assert_eq!(t.mode, TextMode::Frame);
+        assert_eq!(t.rotation, 15.0);
+        let s = &t.style;
+        assert_eq!(s.font, "Noto Serif");
+        assert!(s.bold && s.italic && s.underline && s.strike);
+        assert_eq!((s.align, s.valign), (Align::Justify, Valign::Bottom));
+        assert_eq!((s.leading, s.tracking), (1.5, 40.0));
+        assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_text_the_board_cannot_set_is_refused() {
+        let with = |extra: &str| {
+            with_text(&format!(
+                r##""x": 0, "y": 0, "w": 10, "h": 10, "text": "a", "color": "#000", {extra}"##
+            ))
+        };
+        for bad in [
+            r#""size": 0"#,
+            r#""size": -3"#,
+            r#""size": 1e9"#,
+            r#""size": 12, "leading": 0"#,
+            r#""size": 12, "leading": 50"#,
+            r#""size": 12, "tracking": -5000"#,
+            r#""size": 12, "tracking": 50000"#,
+            r#""size": 12, "w": -1"#,
+            r#""size": 12, "font": """#,
+        ] {
+            let err = with(bad);
+            assert!(err.is_err(), "{bad} was let in");
+        }
+        assert!(with(r#""size": 12"#).is_ok());
+    }
+
+    #[test]
+    fn a_text_stands_on_a_text_layer_and_nothing_else_does() {
+        let raster = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "l", "name": "Layer 1" } ],
+            "elements": [ { "id": "t1", "type": "text", "layer": "l", "x": 0, "y": 0,
+                "w": 1, "h": 1, "text": "a", "size": 12, "color": "#000" } ]
+        }"##;
+        let err = Document::from_json(raster).unwrap_err().to_string();
+        assert!(err.contains("text layer"), "{err}");
+        let rect = r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "tl", "name": "T", "kind": "text" } ],
+            "elements": [ { "id": "r", "type": "rect", "layer": "tl",
+                "x": 0, "y": 0, "w": 1, "h": 1, "stroke": null, "fill": null, "text": null } ]
+        }"##;
+        let err = Document::from_json(rect).unwrap_err().to_string();
+        assert!(err.contains("only its text"), "{err}");
+    }
+
+    #[test]
+    fn a_text_layer_is_born_named_for_what_it_is() {
+        let mut doc = Document::new("t");
+        assert_eq!(doc.add_layer(None, 0, Kind::Text).unwrap(), 1);
+        assert_eq!(doc.layers[1].name, "Text 1");
     }
 }

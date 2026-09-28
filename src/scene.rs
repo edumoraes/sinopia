@@ -1890,7 +1890,7 @@ impl Walk<'_> {
                     f.extend(self.ground(fr));
                     self.stack(f, &fr.layers, Some(frame_rect(fr, self.view)), live);
                 }
-                Kind::Raster | Kind::Vector => self.leaf(f, &layer.id, cut, live),
+                Kind::Raster | Kind::Vector | Kind::Text => self.leaf(f, &layer.id, cut, live),
             };
             match self.composited(layer) {
                 Some((opacity, lays, backdrop)) => frame.layer(opacity, lays, backdrop, draw),
@@ -1917,7 +1917,7 @@ impl Walk<'_> {
                 let inside = match layer.kind {
                     Kind::Group => blends(&layer.layers),
                     Kind::Frame => self.doc.frame_on(&layer.id).is_some_and(|f| blends(&f.layers)),
-                    Kind::Raster | Kind::Vector => false,
+                    Kind::Raster | Kind::Vector | Kind::Text => false,
                 };
                 (opacity < 1.0 || inside).then_some((opacity, Blend::Over, false))
             }
@@ -2076,7 +2076,7 @@ impl Walk<'_> {
             }
             // A frame on a layer that is not its own frame layer is not a
             // board the parse lets in; a frame is drawn by its layer.
-            Element::Frame(_) | Element::Path(_) | Element::Paint(_) => {}
+            Element::Frame(_) | Element::Path(_) | Element::Paint(_) | Element::Text(_) => {}
         }
         out
     }

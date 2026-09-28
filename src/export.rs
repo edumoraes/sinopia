@@ -216,7 +216,7 @@ fn pruned(doc: &Document, layers: &[Layer], needed: &[&str], elements: &[Element
                     });
                 }
             }
-            Kind::Raster | Kind::Vector => {
+            Kind::Raster | Kind::Vector | Kind::Text => {
                 if needed.contains(&l.id.as_str()) {
                     out.push(l.clone());
                 }
@@ -292,7 +292,7 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
     let (w, h) = (bounds.half[0] * 2.0, bounds.half[1] * 2.0);
     out.push_str(&format!("- area: {w:.0} × {h:.0} world units\n"));
     out.push_str(&format!("- layers: {}\n", doc.layers.len()));
-    let (mut rects, mut paths, mut paints, mut images, mut frames) = (0, 0, 0, 0, 0);
+    let (mut rects, mut paths, mut paints, mut images, mut frames, mut texts) = (0, 0, 0, 0, 0, 0);
     for el in &doc.elements {
         match el {
             Element::Rect(_) => rects += 1,
@@ -300,10 +300,12 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
             Element::Paint(_) => paints += 1,
             Element::Image(_) => images += 1,
             Element::Frame(_) => frames += 1,
+            Element::Text(_) => texts += 1,
         }
     }
     for (n, word) in [
         (frames, "frame"),
+        (texts, "text"),
         (rects, "rect"),
         (paths, "path"),
         (paints, "paint layer"),

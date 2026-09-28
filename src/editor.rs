@@ -1338,7 +1338,7 @@ impl Editor {
         if !doc.remove_layer(owner, index) {
             match doc.stack(owner).get(index).map(|l| l.kind) {
                 // A layer that holds objects stays, emptied.
-                Some(Kind::Raster | Kind::Vector) => {
+                Some(Kind::Raster | Kind::Vector | Kind::Text) => {
                     if !doc.elements.iter().any(|el| el.layer() == a) {
                         return Change::None;
                     }
@@ -2007,9 +2007,9 @@ impl Editor {
         match kind {
             Kind::Vector => curve::fit(&hand, tolerance),
             // A stroke is a pencil's or a brush's. A frame layer holds
-            // an area and a group holds layers; neither asks for curves,
-            // so either can only mean the brush's answer here.
-            Kind::Raster | Kind::Frame | Kind::Group => curve::polyline(&hand),
+            // an area, a group holds layers and a text layer words; none
+            // asks for curves, so any can only mean the brush's answer.
+            Kind::Raster | Kind::Frame | Kind::Group | Kind::Text => curve::polyline(&hand),
         }
     }
 

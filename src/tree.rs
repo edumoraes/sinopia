@@ -190,7 +190,7 @@ impl Document {
                 _ => None,
             }),
             Kind::Group => self.layer_mut(id).map(|l| &mut l.layers),
-            Kind::Raster | Kind::Vector => None,
+            Kind::Raster | Kind::Vector | Kind::Text => None,
         }
     }
 
@@ -252,6 +252,7 @@ impl Document {
         let word = match kind {
             Kind::Frame => "Frame",
             Kind::Group => "Group",
+            Kind::Text => "Text",
             Kind::Raster | Kind::Vector => "Layer",
         };
         // The tree it is counted in: a frame's own stack when the new

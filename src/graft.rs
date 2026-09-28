@@ -213,6 +213,7 @@ pub(crate) fn placed(el: &Element) -> bool {
         Element::Rect(r) => [r.x, r.y, r.w, r.h, r.rotation].iter().all(ok),
         Element::Image(i) => [i.x, i.y, i.w, i.h, i.rotation].iter().all(ok),
         Element::Frame(f) => [f.x, f.y, f.w, f.h].iter().all(ok),
+        Element::Text(t) => [t.x, t.y, t.w, t.h, t.rotation, t.style.size].iter().all(ok),
     }
 }
 

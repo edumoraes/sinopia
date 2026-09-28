@@ -1093,6 +1093,7 @@ impl Panel {
                 Kind::Vector => CURVE,
                 Kind::Group => FOLDER,
                 Kind::Frame => FRAME,
+                Kind::Text => TEXT,
             };
             let color = if on { theme.ink } else { theme.icon };
             out.extend(icon_prims(icon, *r, 24.0, ICON_BOX, ICON_STROKE, s, color));
@@ -1271,6 +1272,7 @@ impl Panel {
             (Kind::Group, false) => FOLDER,
             (Kind::Group, true) => FOLDER_OPEN,
             (Kind::Frame, _) => FRAME,
+            (Kind::Text, _) => TEXT,
         };
         let picture = showing
             .thumbs
@@ -1650,6 +1652,13 @@ const FRAME: &[&[(f32, f32)]] = &[
     &[(16.0, 3.0), (16.0, 21.0)],
     &[(3.0, 8.0), (21.0, 8.0)],
     &[(3.0, 16.0), (21.0, 16.0)],
+];
+
+/// What a text layer holds: a letter T, as every layers panel draws it.
+const TEXT: &[&[(f32, f32)]] = &[
+    &[(5.0, 7.0), (5.0, 4.5), (19.0, 4.5), (19.0, 7.0)],
+    &[(12.0, 4.5), (12.0, 19.5)],
+    &[(9.0, 19.5), (15.0, 19.5)],
 ];
 
 #[cfg(test)]
