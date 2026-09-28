@@ -499,6 +499,10 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
             let id = take_string(&mut map, "id")?;
             let spec = take_spec(&mut map)?;
             anyhow::ensure!(spec != TextSpec::default(), "set_text says nothing to change");
+            anyhow::ensure!(
+                spec.text.as_deref() != Some(""),
+                "field text is empty: a text has to say something — remove its layer to take it away"
+            );
             Request::SetText { id, spec }
         }
         other => anyhow::bail!("unknown op: {other:?}"),
@@ -698,6 +702,13 @@ fn put_spec(map: &mut Map<String, Value>, spec: &TextSpec) {
     put("color", spec.color.clone().map(Value::from));
 }
 
+/// How far from the world's origin, in world units, a text the socket
+/// places may reach, and how big its box may be: far past any board a
+/// hand draws, and short of where a box's far edge or a merge's picture
+/// of it overflows to infinity — which a board writes as `null` and
+/// never opens again.
+const WORLD: f64 = 1e9;
+
 /// A text's fields as the line gives them, every one checked as the
 /// board's own parse would: printable words with no control character
 /// but a newline, finite numbers inside what a text may be, a family
@@ -761,10 +772,10 @@ fn take_spec(map: &mut Map<String, Value>) -> anyhow::Result<TextSpec> {
     let spec = TextSpec {
         text,
         mode,
-        x: number(map, "x", None)?,
-        y: number(map, "y", None)?,
-        w: number(map, "w", Some((0.0, f64::MAX)))?,
-        h: number(map, "h", Some((0.0, f64::MAX)))?,
+        x: number(map, "x", Some((-WORLD, WORLD)))?,
+        y: number(map, "y", Some((-WORLD, WORLD)))?,
+        w: number(map, "w", Some((0.0, WORLD)))?,
+        h: number(map, "h", Some((0.0, WORLD)))?,
         rotation: number(map, "rotation", None)?,
         font: take_optional_string(map, "font")?,
         size: number(map, "size", Some((crate::doc::MIN_TEXT_SIZE, crate::doc::MAX_TEXT_SIZE)))?,
@@ -1560,6 +1571,11 @@ mod tests {
             r#"{ "v": 1, "op": "add_text", "text": "a", "shadow": true }"#,
             r#"{ "v": 1, "op": "set_text", "size": 12 }"#,
             r#"{ "v": 1, "op": "set_text", "id": "T" }"#,
+            r#"{ "v": 1, "op": "set_text", "id": "T", "text": "" }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "x": 1e308 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "y": -1e12 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "w": 1.7e308 }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "h": 1e10 }"#,
         ] {
             assert!(parse_request(line).is_err(), "line: {line}");
         }
