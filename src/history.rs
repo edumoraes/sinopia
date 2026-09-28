@@ -158,11 +158,15 @@ impl History {
         self.past.last()
     }
 
-    /// There is a state behind the present one. Private: the only
-    /// caller is [`History::undo`], and a dock that wanted to grey out
-    /// an arrow would be asking a question this cut does not have.
-    fn can_undo(&self) -> bool {
+    /// There is a state behind the present one: what the Edit menu asks
+    /// before it offers Undo.
+    pub fn can_undo(&self) -> bool {
         self.past.len() > 1
+    }
+
+    /// A step was taken back and nothing has changed since.
+    pub fn can_redo(&self) -> bool {
+        !self.future.is_empty()
     }
 
     fn present_mut(&mut self) -> &mut Entry {
@@ -407,6 +411,18 @@ mod tests {
         assert!(h.redo().is_none());
         h.keep(&with_layers(1), spot(&[]));
         assert!(h.redo().is_none(), "a step nobody took back");
+    }
+
+    #[test]
+    fn the_way_forward_is_there_only_after_a_step_back() {
+        let mut h = History::new(&board(), spot(&[]));
+        assert!(!h.can_redo());
+        h.keep(&with_layers(1), spot(&[]));
+        assert!(!h.can_redo(), "a step nobody took back");
+        h.undo();
+        assert!(h.can_redo());
+        h.redo();
+        assert!(!h.can_redo(), "back where the line ends");
     }
 
     #[test]
