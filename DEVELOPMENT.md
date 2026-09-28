@@ -10,11 +10,11 @@ a **draft**: the real architecture emerges from development.
 ## Status
 
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
-selection, navigation, pasted images, projects in tabs, frames,
+selection, navigation, pasted images, projects in tabs, frames, text,
 export to the agent, the CLI an agent asks the board through, and the
 packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1094 tests, and the plugin's
+- `cargo build` clean, `cargo test` with 1208 tests, and the plugin's
   own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,
@@ -440,10 +440,43 @@ packaging that distributes it (item 7):
   offered only where it would do something now. The keys and the lines
   are one mapping (`menubar::shortcut`), so a hint cannot disagree with
   its key; `Ctrl+N` (a new board) and `Ctrl+Q` (quit) joined them.
-- Text: a glyph atlas from a font shipped inside the binary, drawn by
-  the same pipeline as the images — one white sheet, alpha for coverage,
-  a UV cell per glyph. It dresses the tabs and the layers panel; the
-  text *tool* is still ahead.
+- The chrome's letters: a glyph atlas from a font shipped inside the
+  binary, drawn by the same pipeline as the images — one white sheet,
+  alpha for coverage, a UV cell per glyph. It dresses the tabs, the bars
+  and the layers panel.
+- **Text** (`T`), as Affinity has it: **artistic text**, a line set at a
+  point that grows as it is typed and scales as a picture does, and
+  **frame text**, a box its words wrap in and reflow in when it is
+  resized, what does not fit hidden and marked red. `T` again switches
+  the kind. A click opens artistic text centred on the point, or a frame
+  to type in; a drag sets artistic text's size, or a frame's area;
+  nothing lands until a character is typed, and a text left empty goes
+  with its layer. Typing is what every text box does: the caret, the
+  selection, `Shift` with every move, `Ctrl` a word at a time, `Home`
+  and `End` the line and with `Ctrl` the text, the arrows up and down at
+  the same x, `Enter` a new line, `Ctrl+A`, the clipboard as text, a
+  press placing the caret, a drag selecting, a double click a word and a
+  triple a paragraph, and an undo of the typing's own, a word at a time;
+  `Esc` leaves it, selected. The whole session is one step of the
+  board's history. A double click on a text with the Select tool, or
+  `Enter` on one selected, types into it. A text is a layer of its own,
+  of the new kind `text`, named after what it says until someone names
+  it; the panel shows it with a T, and a merge rasterizes it as
+  Photoshop does a type layer. One style runs through a text: the
+  family — the machine's, through fontconfig, or the bundled Liberation
+  Sans in four styles, the default and the fallback — the size, bold,
+  italic, underline, strikethrough, alignment (left, centre, right,
+  justify), a frame's vertical alignment, line spacing, letter spacing
+  and the dock's ink. The **text bar** sets them, centred under the
+  strip like the brush's (which moved there too); its family is a menu
+  that tries each face on the text as the pointer passes. `Ctrl+B`,
+  `Ctrl+I`, `Ctrl+U`, Adobe's `Ctrl+Shift+L/C/R/J` and
+  `Ctrl+Shift+<`/`>` work while typing. Letters are rasterized at the
+  size they are seen at into a glyph sheet of their own — every whole
+  pixel up to 32, then steps an eighth of an octave apart, up to 512 px —
+  and only the ones on the window, so text stays sharp through a zoom.
+  Words pasted on the board, with nothing else on the clipboard, land as
+  a text at the pointer.
 - Versioned JSON document (schema 1) + XDG persistence (0700/0600, atomic
   save). Project files chosen through the portal keep the umask instead.
 - IPC protocol §5 (closed schema) + single instance via socket.
@@ -461,6 +494,9 @@ packaging that distributes it (item 7):
 - CLI: `--new`, `--open <id>`, `--open-file <path>`, `--export <dir>`,
   `--shutdown`, `--socket <path>`, the `agent` verb — `agent
   frames`, `agent read <frame> [--to <dir>]`, `agent add <file>` — and
+  the `text` verb — `text list`, `text add <words> [--frame F] [--at
+  X,Y] [--width W]` with the style's flags, and `text set <text> [--to
+  <words>]` with the same — and
   the `layer` verb, which drives every layer of the open board: `list`,
   `add`, `remove`, `rename`, `move` (into, above, below, or along the
   stack), `show`/`hide`, `lock`/`unlock`, `opacity`, `blend`, `color`,
@@ -490,7 +526,8 @@ packaging that distributes it (item 7):
   menu rows carry their own letters, and a selection nobody is shown is
   one nobody meant.
 
-Not yet: the text tool, shapes, export,
+Not yet: styling part of a text apart from the rest of it, a
+per-character fallback face, shaping past kerning pairs, shapes, export,
 layer opacity and renaming, frames that nest or turn or come
 in more than the one basic kind, and the six sliders that stay
 muted — three randomness amounts whose scale the sets contradict, and
@@ -556,7 +593,18 @@ anywhere.
 
 | Input | Effect |
 |---|---|
-| `V` / `H` / `P` / `B` / `F` / `Z` | Select / Hand / Pencil / Brush / Frame / Zoom tool (also clickable in the dock) |
+| `V` / `H` / `P` / `B` / `F` / `T` / `Z` | Select / Hand / Pencil / Brush / Frame / Text / Zoom tool (also clickable in the dock) |
+| `T` with the Text tool in hand | Switch between artistic and frame text |
+| Click (Text) | Artistic text at the point, or a frame to type in |
+| Left drag (Text) | Artistic text as tall as the drag, or a text frame of its area |
+| Click / drag / double / triple click in a text (Text) | Caret / select / a word / a paragraph |
+| Double-click a text (Select), `Enter` on one selected | Type into it |
+| `Esc`, `Ctrl` + `Enter`, a press elsewhere | Leave the text, selected |
+| `Ctrl` + `B` / `I` / `U` (typing) | Bold / italic / underline |
+| `Ctrl` + `Shift` + `L` / `C` / `R` / `J` (typing) | Align left / centre / right / justify |
+| `Ctrl` + `Shift` + `<` / `>` (typing) | A size down / up |
+| `Ctrl` + `Z` / `Ctrl` + `Shift` + `Z` (typing) | Undo / redo the typing, a word at a time |
+| Click an ink with a text typed or selected | Colour it |
 | `Esc` | Cancel the stroke, gesture or drag in progress; then clear the selection |
 | Left drag (Brush) | Paint with the brush; the stroke is fitted to Béziers on release |
 | `Shift` + `B` | Show / hide the brush strip (and the library with it) |
@@ -600,7 +648,7 @@ anywhere.
 | `Shift` + drag a corner handle | Resize keeping the proportions |
 | `Ctrl` + drag a corner handle | Resize about the center (`Shift` too: both) |
 | Drag a ring past a corner | Rotate about the selection's center (`Shift`: 15° steps from the creation state) |
-| `Ctrl` + `V` | Paste layers copied from a board, or else an image |
+| `Ctrl` + `V` | Paste layers copied from a board, or else an image, or else words as a text |
 | `Ctrl` + `Z` | Undo: back to the state before the last change |
 | `Ctrl` + `Shift` + `Z` | Redo |
 | `Ctrl` + `S` | Save the tab; asks for a name the first time |
@@ -660,7 +708,7 @@ XDG_DATA_HOME=/tmp/sinopia-smoke cargo run -- \
 ```
 src/main.rs      CLI dispatch → forward to the live instance, or become it
 src/cli.rs       flags (clap), mutually exclusive actions
-src/doc.rs       document §6.1 (pure data, serde): layers and frames, rect, path, image
+src/doc.rs       document §6.1 (pure data, serde): layers and frames, rect, path, image, text
 src/store.rs     ~/.local/share/sinopia: boards/, blobs/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
@@ -668,7 +716,7 @@ src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
 src/brush.rs     the brush library: sets, presets, a brush's body, its properties, the tip a stroke carries, the pointer's ring (pure, tested)
 tools/import-skbrushes.py  Sketchbook `.skbrushes` -> assets/brushes/ (parameters + icon sheet)
 assets/brushes/  library.json (17 sets, 211 brushes) and icons.png (211 cells), built into the binary
-assets/dock/     six RGBA tool illustrations and their 6 x 1 icon sheet, built into the binary
+assets/dock/     seven RGBA tool illustrations and their 7 x 1 icon sheet, built into the binary
 assets/agents/   the five agents' own marks and the sheet of them, built into the binary
 tools/agent-logos.sh  the marks -> assets/agents/logos.png
 src/scene.rs     View (camera + viewport + scale), document → SDF prims, frames, groups and passes (pure, tested)
@@ -681,13 +729,18 @@ contrib/omarchy/sinopia  a theme-set / font-set hook, installed by hand
 src/tree.rs      the layer tree: stacks by the layer holding them, rows, the filter, moves, groups, copies, clip and paste (pure, tested)
 src/merge.rs     which siblings merge, whether exactly, and merging them either way (pure, tested)
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer and the pick, the layer commands (pure, tested)
+src/editor/typing.rs  the Text tool and a text being typed into: placing, the session, keys, the pointer, its undo, the style where the bar looks (pure, tested)
+src/fonts.rs     faces by family and style: the bundled four, the machine's through fontconfig (pure but the two subprocesses, tested)
+src/typeset.rs   a text set: lines, alignment, justification, leading, tracking, kerning, and every caret place (pure, tested)
+src/glyphs.rs    the board's glyph sheet: letters rasterized at the size seen, packed, the region owed the GPU (pure, tested)
+src/textbar.rs   the text properties bar, centred: kind, family, size, B I U S, alignment, and the paragraph it drops (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, illustrated icons + line fallback (pure, tested)
 src/layers.rs    layers panel on the right: the tree's rows, the bar, the filter, the foot, the drop, the menus' lines (pure, tested)
 src/menu.rs      a menu: lines, checks, rules, dots, the keys at a line's end, a scroll area (pure, tested)
 src/thumbs.rs    the sheet the panel's thumbnails are drawn on (pure, tested)
 src/slots.rs     brush strip on the left: the brush in the hand, the two buttons, the ten seats (pure, tested)
 src/palette.rs   brush library beside it: the shelves, the grid of icons, the scroll (pure, tested)
-src/props.rs     brush properties bar under the strip: the basic pair, and the Advanced layout it drops (pure, tested)
+src/props.rs     brush properties bar, centred under the strip: the basic pair, and the Advanced layout it drops (pure, tested)
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, word wrap, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
@@ -703,7 +756,7 @@ src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop b
 src/tablet.rs    the tablet's pen (zwp_tablet_v2) → event loop bridge; its frame is tested
 src/clipboard.rs selection reads and writes (wl_data_device) → event loop bridge
 src/dialogs.rs   open/save-as/confirm over xdg-desktop-portal → event loop bridge
-assets/fonts/    Liberation Sans (SIL OFL 1.1), compiled into the binary
+assets/fonts/    Liberation Sans in four styles (SIL OFL 1.1), compiled into the binary
 plugin/          the Omarchy bar widget (QML): manifest, BarWidget, its README and licence —
                  mirrored to edumoraes/sinopia-plugin at each release (PACKAGING.md)
 skills/sinopia/  the skill an agent installs to read and write frames: SKILL.md and an installer
@@ -713,10 +766,11 @@ packaging/       what a release ships: install.sh (the layout every package inst
 native-packages.yaml  fills the AUR recipes in from a release and publishes them (PACKAGING.md)
 ```
 
-Frame data flow: grid + document + live stroke + selection overlay +
-brush ring + dock + brush strip + brush library + properties bar +
+Frame data flow: grid + document (its texts' letters from the glyph
+sheet) + live stroke + selection overlay + the text being typed + brush
+ring + dock + brush strip + brush library + properties bar or text bar +
 layers panel (and its thumbnail sheet) + tab strip + a menu →
-`scene`/`select`/`brush`/`slots`/`palette`/`props`/`layers`/`tabs`
+`scene`/`select`/`editor`/`brush`/`slots`/`palette`/`props`/`textbar`/`layers`/`tabs`
 prims, gathered in a `scene::Frame` whose groups mark
 the strokes composited as one shape and whose sheets the layers, groups
 and frames composited as one, at their strength and in their mode →
