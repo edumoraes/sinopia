@@ -542,7 +542,12 @@ is saved when a gesture ends. The tablet's pen comes the same way:
 hands the loop the tool's movement and the touch of its tip, which enter
 the same funnel as the mouse's. Binding the protocol is what stops the
 compositor emulating a pointer for the pen, so the bridge has to carry
-the movement too, not only the parts a mouse has no words for.
+the movement too, not only the parts a mouse has no words for. A guest
+borrows a display it does not own, and letting it go destroys every
+proxy it made on that display, so the loop ends each guest itself — woken
+through a pipe, joined — from `exiting`, while winit still holds the
+display open; waiting for a sink to report the loop gone let the guests
+go after the display did, and the board crashed on the way out.
 
 Select (`V`) landed: click, Shift+click and a marquee pick elements (the
 marquee takes whatever it overlaps). The selection frame — a lone

@@ -20,6 +20,7 @@ mod fonts;
 mod geom;
 mod gestures;
 mod gfx;
+mod guest;
 mod glyphs;
 mod graft;
 mod grid;
