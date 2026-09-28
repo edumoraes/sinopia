@@ -15,12 +15,13 @@
 
 use crate::doc::Head;
 use crate::editor::{Restyle, ShapeLook};
+use crate::menu::Item;
 use crate::props::{self, HEIGHT, MARGIN};
 use crate::scene::{self, Prim, Rgba, ScreenRect, Viewport};
 use crate::select::End;
 use crate::shape::{Figure, MAX_INNER, MIN_INNER};
 use crate::text::Atlas;
-use crate::theme::Theme;
+use crate::theme::{INK_NAMES, INKS, Theme};
 
 // Logical px.
 const PADDING: f32 = 10.0;
@@ -426,6 +427,40 @@ impl ShapeBar {
     }
 }
 
+/// The lines a well's menu offers, and the paint each one is: none —
+/// called `none`, and offered only where `can_none` says the paint may go
+/// — then every ink of the dock's, under a rule and each with its dot. The
+/// one `current` names is checked.
+pub fn paint_menu(current: Option<&str>, none: &str, can_none: bool) -> (Vec<Item>, Vec<Option<String>>) {
+    let mut items = vec![Item::new(none).checked(current.is_none()).enabled(can_none)];
+    let mut paints = vec![None];
+    for (i, (hex, name)) in INKS.iter().zip(INK_NAMES).enumerate() {
+        let item = Item::new(name)
+            .dot(scene::parse_color(hex))
+            .checked(current.is_some_and(|c| c.eq_ignore_ascii_case(hex)));
+        items.push(if i == 0 { item.ruled() } else { item });
+        paints.push(Some((*hex).to_owned()));
+    }
+    (items, paints)
+}
+
+/// The lines a head's menu offers, and the head each one is.
+pub fn head_menu(current: Head) -> (Vec<Item>, Vec<Head>) {
+    let heads = vec![Head::None, Head::Arrow, Head::Triangle];
+    let items = heads
+        .iter()
+        .map(|h| {
+            let name = match h {
+                Head::None => "None",
+                Head::Arrow => "Arrow",
+                Head::Triangle => "Triangle",
+            };
+            Item::new(name).checked(*h == current)
+        })
+        .collect();
+    (items, heads)
+}
+
 /// The slash across a well holding no colour: the red every design tool
 /// strikes "none" through with. Fixed, as the dock's inks are.
 const NONE: Rgba = [0.9, 0.1, 0.1, 1.0];
@@ -738,5 +773,33 @@ mod tests {
         let two = ShapeBar::layout(Viewport { w: 2800, h: 1600 }, 2.0, TOP, Figure::Star);
         assert_eq!(two.rect.w, one.rect.w * 2.0);
         assert_eq!(two.fill.w, one.fill.w * 2.0);
+    }
+
+    #[test]
+    fn the_paint_menu_is_none_then_every_ink_with_its_dot() {
+        use crate::theme::{INK_NAMES, INKS};
+        let (items, paints) = paint_menu(Some(INKS[2]), "No Fill", true);
+        assert_eq!(items.len(), INKS.len() + 1);
+        assert_eq!(paints[0], None);
+        assert_eq!(items[0].label, "No Fill");
+        for (i, hex) in INKS.iter().enumerate() {
+            assert_eq!(paints[i + 1].as_deref(), Some(*hex));
+            assert_eq!(items[i + 1].label, INK_NAMES[i]);
+            assert_eq!(items[i + 1].dot, Some(scene::parse_color(hex)));
+        }
+        let checked: Vec<usize> = items.iter().enumerate().filter(|(_, i)| i.checked).map(|(k, _)| k).collect();
+        assert_eq!(checked, [3], "the ink it wears");
+        assert!(items[1].rule, "a rule between none and the inks");
+        let (items, _) = paint_menu(None, "No Stroke", false);
+        assert!(!items[0].enabled, "a line cannot go without its ink");
+    }
+
+    #[test]
+    fn the_head_menu_offers_every_head() {
+        let (items, heads) = head_menu(Head::Triangle);
+        assert_eq!(heads, [Head::None, Head::Arrow, Head::Triangle]);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["None", "Arrow", "Triangle"]);
+        assert!(items[2].checked && !items[0].checked);
     }
 }

@@ -70,6 +70,9 @@ pub const INKS: [&str; 7] = [
     "#000000", "#ffffff", "#e5484d", "#f5a524", "#30a46c", "#3b82f6", "#8e4ec6",
 ];
 
+/// What each of [`INKS`] is called, where a menu writes it out.
+pub const INK_NAMES: [&str; 7] = ["Black", "White", "Red", "Amber", "Green", "Blue", "Violet"];
+
 /// Where the two neutrals sit in [`INKS`].
 const BLACK_INK: usize = 0;
 const WHITE_INK: usize = 1;
@@ -318,6 +321,13 @@ mod tests {
 
     /// Every ink is written into a document, so every one of them has to
     /// parse — and the two neutrals have to be exactly the neutrals.
+    #[test]
+    fn every_ink_has_a_name_a_menu_can_write() {
+        assert_eq!(INK_NAMES.len(), INKS.len());
+        assert_eq!((INK_NAMES[BLACK_INK], INK_NAMES[WHITE_INK]), ("Black", "White"));
+        assert!(INK_NAMES.iter().all(|n| !n.is_empty()));
+    }
+
     #[test]
     fn the_inks_are_a_fixed_list_and_the_neutrals_lead_it() {
         assert_eq!(INKS[BLACK_INK], "#000000");

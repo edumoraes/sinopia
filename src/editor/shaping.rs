@@ -221,6 +221,14 @@ impl Editor {
                 Restyle::Start(h) => style.start = h,
                 Restyle::End(h) => style.end = h,
             }
+            // A head asked of the next line makes it an arrow, and an
+            // arrow left with none is a line: the figure is what it wears.
+            let bare = style.start == Head::None && style.end == Head::None;
+            match (self.figure, bare) {
+                (Figure::Line, false) => self.figure = Figure::Arrow,
+                (Figure::Arrow, true) => self.figure = Figure::Line,
+                _ => {}
+            }
             return Change::Selection;
         }
         let mut changed = false;
@@ -230,12 +238,44 @@ impl Editor {
         if changed { Change::Scene } else { Change::Selection }
     }
 
+    /// What every shape or line the bar is looking at wears as its fill —
+    /// or its stroke — by its id: what a menu trying colours on them puts
+    /// back when the pointer leaves it. A line has no fill to keep.
+    pub fn paints(&self, doc: &Document, stroke: bool) -> Vec<(String, Option<String>)> {
+        let targets = self.shape_targets(doc);
+        doc.elements
+            .iter()
+            .filter(|el| targets.iter().any(|t| t == el.id()))
+            .filter_map(|el| match (el, stroke) {
+                (Element::Shape(s), false) => Some((s.id.clone(), s.fill.clone())),
+                (Element::Shape(s), true) => Some((s.id.clone(), s.stroke.clone())),
+                (Element::Line(l), true) => Some((l.id.clone(), Some(l.stroke.clone()))),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Puts back what [`Editor::paints`] kept.
+    pub fn repaint(&self, doc: &mut Document, was: &[(String, Option<String>)], stroke: bool) {
+        for (id, paint) in was {
+            let Some(el) = doc.elements.iter_mut().find(|el| el.id() == id.as_str()) else {
+                continue;
+            };
+            let change = if stroke {
+                Restyle::Stroke(paint.clone())
+            } else {
+                Restyle::Fill(paint.clone())
+            };
+            change.onto(el);
+        }
+    }
+
     /// The bar's figure: the tool draws it from now on, and what is
     /// selected becomes it within its kind — a shape another model, a
     /// line an arrow or a bare line again. A shape is not made a line,
     /// nor a line a shape.
     pub fn set_figure(&mut self, figure: Figure, doc: &mut Document) -> Change {
-        self.figure = figure;
+        self.take_figure(figure);
         let targets = self.shape_targets(doc);
         let mut changed = false;
         for el in doc.elements.iter_mut().filter(|el| targets.iter().any(|t| t == el.id())) {
@@ -265,14 +305,25 @@ impl Editor {
     /// Takes the Shape tool up with `figure` in hand.
     pub fn choose_figure(&mut self, figure: Figure, doc: &mut Document) {
         self.set_tool(Tool::Shape, doc);
-        self.figure = figure;
+        self.take_figure(figure);
     }
 
     /// The next figure along, and round to the first after the last:
     /// what the tool's key does with the tool already in hand.
     pub(super) fn next_figure(&mut self) {
         let at = Figure::ALL.iter().position(|f| *f == self.figure).unwrap_or(0);
-        self.figure = Figure::ALL[(at + 1) % Figure::ALL.len()];
+        self.take_figure(Figure::ALL[(at + 1) % Figure::ALL.len()]);
+    }
+
+    /// `figure` is what the tool draws from now on. An arrow is never
+    /// drawn bare: one taken up with no head left in the style grows the
+    /// open one at its end again.
+    fn take_figure(&mut self, figure: Figure) {
+        self.figure = figure;
+        let style = &mut self.shape_style;
+        if figure == Figure::Arrow && style.start == Head::None && style.end == Head::None {
+            style.end = Head::Arrow;
+        }
     }
 
     /// What the drag in progress would lay — a shape or a line — stroked
@@ -906,5 +957,52 @@ mod tests {
         assert!(only(&doc).inner < 1.0);
         assert_eq!(e.restyle_shapes(&mut doc, Restyle::Width(0.0)), Change::None, "no width is no stroke");
         assert_eq!(e.restyle_shapes(&mut doc, Restyle::Radius(f64::NAN)), Change::None);
+    }
+
+    #[test]
+    fn what_each_one_wears_is_kept_to_be_put_back() {
+        let (mut e, mut doc) = two_selected();
+        let _ = e.restyle_shapes(&mut doc, Restyle::Fill(Some("#e5484d".into())));
+        let fills = e.paints(&doc, false);
+        let strokes = e.paints(&doc, true);
+        assert_eq!(fills.len(), 1, "a line has no fill to keep");
+        assert_eq!(fills[0].1.as_deref(), Some("#e5484d"));
+        assert_eq!(strokes.len(), 2);
+        // Tried as the pointer passes a menu's lines, then put back.
+        let _ = e.restyle_shapes(&mut doc, Restyle::Fill(None));
+        let _ = e.restyle_shapes(&mut doc, Restyle::Stroke(Some("#3b82f6".into())));
+        e.repaint(&mut doc, &fills, false);
+        e.repaint(&mut doc, &strokes, true);
+        assert_eq!(only(&doc).fill.as_deref(), Some("#e5484d"));
+        assert_eq!(only(&doc).stroke.as_deref(), Some(INK));
+        assert_eq!(only_line(&doc).stroke, INK);
+    }
+
+    #[test]
+    fn a_head_asked_of_the_next_line_makes_it_an_arrow_and_back() {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Line, &mut doc);
+        let _ = e.restyle_shapes(&mut doc, Restyle::Start(Head::Triangle));
+        assert_eq!(e.figure, Figure::Arrow);
+        assert_eq!(e.shape_look(&doc, INK).start, Head::Triangle);
+        let _ = e.restyle_shapes(&mut doc, Restyle::Start(Head::None));
+        let _ = e.restyle_shapes(&mut doc, Restyle::End(Head::None));
+        assert_eq!(e.figure, Figure::Line, "no head left: a line again");
+    }
+
+    #[test]
+    fn an_arrow_picked_with_no_head_left_in_the_style_grows_one_at_its_end() {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Arrow, &mut doc);
+        let _ = e.restyle_shapes(&mut doc, Restyle::End(Head::None));
+        assert_eq!(e.figure, Figure::Line);
+        let _ = e.set_figure(Figure::Arrow, &mut doc);
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 0.0));
+        assert_eq!(only_line(&doc).end, Head::Arrow, "an arrow is never drawn bare");
+        // Nor when the key picks it.
+        assert!(e.escape(&mut doc), "the arrow just drawn let go of");
+        let _ = e.restyle_shapes(&mut doc, Restyle::End(Head::None));
+        e.choose_figure(Figure::Arrow, &mut doc);
+        assert_eq!(e.shape_look(&doc, INK).end, Head::Arrow);
     }
 }
