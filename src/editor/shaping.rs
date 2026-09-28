@@ -11,12 +11,12 @@
 
 use super::{CLICK_SLOP_PX, Change, Editor, ROTATE_SNAP_DEG, Tool};
 use crate::doc::{
-    DEFAULT_INNER, DEFAULT_SHAPE_WIDTH, DEFAULT_SIDES, Document, Element, Head, Kind, Line, MAX_SIDES,
-    MIN_SIDES, Shape, new_id,
+    DEFAULT_INNER, DEFAULT_SHAPE_WIDTH, DEFAULT_SIDES, Document, Element, Head, Kind, Line, MAX_INNER,
+    MAX_SIDES, MIN_INNER, MIN_SIDES, Shape, new_id,
 };
 use crate::geom::Point;
 use crate::scene::View;
-use crate::shape::{Figure, MAX_INNER, MIN_INNER};
+use crate::shape::Figure;
 
 /// How many world units a click lays a figure: a shape this many a side,
 /// Figma's own, and a line this long.

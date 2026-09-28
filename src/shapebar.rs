@@ -13,13 +13,13 @@
 //!
 //! Pure — `app` asks where a click landed and what to draw.
 
-use crate::doc::Head;
+use crate::doc::{Head, MAX_INNER, MIN_INNER};
 use crate::editor::{Restyle, ShapeLook};
 use crate::menu::Item;
 use crate::props::{self, HEIGHT, MARGIN};
 use crate::scene::{self, Prim, Rgba, ScreenRect, Viewport};
 use crate::select::End;
-use crate::shape::{Figure, MAX_INNER, MIN_INNER};
+use crate::shape::Figure;
 use crate::text::Atlas;
 use crate::theme::{INK_NAMES, INKS, Theme};
 

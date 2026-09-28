@@ -1479,6 +1479,13 @@ impl Model {
 pub const MIN_SIDES: u32 = 3;
 pub const MAX_SIDES: u32 = 60;
 
+/// How far in a star may be cut, as a fraction of its outer radius: past
+/// either end it is a polygon of twice its points, or a burst of lines —
+/// and a fraction a hair short of 1 is 1 to the shader's `f32`, which
+/// would draw a polygon where the pointer finds a star.
+pub const MIN_INNER: f64 = 0.05;
+pub const MAX_INNER: f64 = 0.95;
+
 /// How wide a shape's stroke is until something says otherwise: the
 /// pencil's own width.
 pub const DEFAULT_SHAPE_WIDTH: f64 = 2.0;
@@ -1606,9 +1613,9 @@ impl TryFrom<ShapeOnDisk> for Shape {
                 s.id, s.sides
             ));
         }
-        if !(s.inner > 0.0 && s.inner < 1.0) {
+        if !(MIN_INNER..=MAX_INNER).contains(&s.inner) {
             return Err(format!(
-                "shape {:?} is cut in to {} of its radius, which is not a fraction of it",
+                "shape {:?} is cut in to {} of its radius, and a star is cut in to {MIN_INNER} to {MAX_INNER} of it",
                 s.id, s.inner
             ));
         }
@@ -4106,6 +4113,8 @@ mod tests {
             r#""model": "star", "inner": 0"#,
             r#""model": "star", "inner": 1"#,
             r#""model": "star", "inner": -0.5"#,
+            r#""model": "star", "inner": 0.99999999"#,
+            r#""model": "star", "inner": 0.04"#,
             r#""model": "rectangle", "radius": -1"#,
             r#""model": "rectangle", "width": 0"#,
             r#""model": "rectangle", "width": -2"#,
@@ -4115,6 +4124,7 @@ mod tests {
             assert!(with(bad).is_err(), "{bad} was let in");
         }
         assert!(with(r#""model": "star", "sides": 60, "inner": 0.05"#).is_ok());
+        assert!(with(r#""model": "star", "inner": 0.95"#).is_ok());
         assert!(with(r#""model": "polygon", "sides": 3"#).is_ok());
     }
 

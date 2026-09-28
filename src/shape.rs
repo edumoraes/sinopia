@@ -87,11 +87,6 @@ impl Figure {
     }
 }
 
-/// How far in a star may be cut, as a fraction of its outer radius: past
-/// either end it is a polygon of twice its points, or a burst of lines.
-pub const MIN_INNER: f64 = 0.05;
-pub const MAX_INNER: f64 = 0.95;
-
 /// Where a polygon model's corners stand. Every one of them is walked
 /// from straight up, clockwise, evenly round a circle of radius 1 — every
 /// other one on a circle of `inner` for a star — and then fitted to the

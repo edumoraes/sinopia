@@ -148,7 +148,7 @@ outline), `width` is the stroke's, in world units, laid **inside** the edge,
 so the shape paints its box and nothing past it. What a model has of its
 own: `radius` rounds a rectangle's corners; `sides` is a polygon's sides or
 a star's points (3–60, default 5); `inner` is how far in a star is cut, a
-fraction of its outer radius (default 0.382). `rotation` turns it about its
+fraction of its outer radius (0.05–0.95, default 0.382). `rotation` turns it about its
 centre in degrees, and `"flip": true` stands it upside down in its box.
 
 A `line` runs `from` one end `to` the other. `start` and `end` are its heads:
@@ -296,7 +296,7 @@ asked.
 | `no layer "X" on the board that is open` | `sinopia layer list`, and name it by id |
 | `N layers go by "X"` | name the one you mean by its id |
 | `text "X" stands on layer "Y", which is not a text layer` | give each text its own layer of `"kind": "text"` |
-| `shape "X" has N sides, and a figure has 3 to 60` / `is cut in to …` | `sides` 3–60; `inner` a fraction strictly between 0 and 1 |
+| `shape "X" has N sides, and a figure has 3 to 60` / `is cut in to …` | `sides` 3–60; `inner` 0.05–0.95 |
 | `no text "X" on show on the board that is open` | `sinopia text list`, and name it by its id |
 | `field color must be #rgb or #rrggbb` | write colours as hex |
 | `"X" is locked, and a lock keeps …` | the person locked it: ask before unlocking |
