@@ -2176,7 +2176,11 @@ impl Walk<'_> {
             }
             // A frame on a layer that is not its own frame layer is not a
             // board the parse lets in; a frame is drawn by its layer.
-            Element::Frame(_) | Element::Path(_) | Element::Paint(_) | Element::Text(_) => {}
+            Element::Frame(_)
+            | Element::Path(_)
+            | Element::Paint(_)
+            | Element::Text(_)
+            | Element::Shape(_) => {}
         }
         out
     }

@@ -324,7 +324,8 @@ pub struct Camera {
 }
 
 /// Scene elements (§6.1). Types enter as their tools exist: `rect` from the
-/// scaffold, `path` with the pencil, `image` with the clipboard.
+/// scaffold, `path` with the pencil, `image` with the clipboard, `shape`
+/// with the Shape tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Element {
@@ -334,6 +335,7 @@ pub enum Element {
     Image(Image),
     Frame(Frame),
     Text(Text),
+    Shape(Shape),
 }
 
 impl Element {
@@ -345,6 +347,7 @@ impl Element {
             Element::Image(i) => &i.id,
             Element::Frame(f) => &f.id,
             Element::Text(t) => &t.id,
+            Element::Shape(s) => &s.id,
         }
     }
 
@@ -357,6 +360,7 @@ impl Element {
             Element::Image(i) => &i.layer,
             Element::Frame(f) => &f.layer,
             Element::Text(t) => &t.layer,
+            Element::Shape(s) => &s.layer,
         }
     }
 
@@ -371,6 +375,7 @@ impl Element {
             Element::Image(i) => &mut i.id,
             Element::Frame(f) => &mut f.id,
             Element::Text(t) => &mut t.id,
+            Element::Shape(s) => &mut s.id,
         };
         id.clone_into(at);
     }
@@ -383,6 +388,7 @@ impl Element {
             Element::Image(i) => &mut i.layer,
             Element::Frame(f) => &mut f.layer,
             Element::Text(t) => &mut t.layer,
+            Element::Shape(s) => &mut s.layer,
         };
         id.clone_into(layer);
     }
@@ -1428,6 +1434,171 @@ impl TryFrom<ImageOnDisk> for Image {
             h: i.h,
             rotation: i.rotation,
             blob: i.blob,
+        })
+    }
+}
+
+/// Which of the Shape tool's closed models a shape is. Every one of them
+/// is fitted to its shape's box, its outline touching all four sides —
+/// which is what lets the selection, the pointer and a frame's claim read
+/// the box and nothing else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Model {
+    #[default]
+    Rectangle,
+    Ellipse,
+    Triangle,
+    Diamond,
+    Polygon,
+    Star,
+}
+
+/// The fewest sides a polygon — or points a star — may have, and the
+/// most: fewer than three is not a figure, and past sixty it is a circle
+/// that costs more to draw. Figma's own ceiling.
+pub const MIN_SIDES: u32 = 3;
+pub const MAX_SIDES: u32 = 60;
+
+/// How wide a shape's stroke is until something says otherwise: the
+/// pencil's own width.
+pub const DEFAULT_SHAPE_WIDTH: f64 = 2.0;
+/// A polygon's sides and a star's points until something says otherwise.
+pub const DEFAULT_SIDES: u32 = 5;
+/// How far in a star is cut until something says otherwise, as a
+/// fraction of its outer radius: the five-pointed star everybody draws,
+/// whose inner points stand where its outer ones' lines cross.
+pub const DEFAULT_INNER: f64 = 0.382;
+
+/// A closed figure the Shape tool draws: `model` fitted to the box `x, y,
+/// w, h`, turned about its centre by `rotation` as a rect's is. `fill`
+/// and `stroke` are hexes, unvalidated as a rect's are, and either may be
+/// absent; the stroke is `width` world units wide and laid inside the
+/// edge, so what a shape paints is its box and nothing past it.
+///
+/// `radius` rounds a rectangle's corners, `sides` is a polygon's sides
+/// and a star's points, and `inner` is how far in a star is cut, as a
+/// fraction of its outer radius. Each is kept whatever the model — so a
+/// shape switched to another model and back loses nothing — and each is
+/// absent on disk at its default, as a rotation of zero is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "ShapeOnDisk")]
+pub struct Shape {
+    pub id: String,
+    #[serde(default)]
+    pub layer: String,
+    pub model: Model,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rotation: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<String>,
+    pub width: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub radius: f64,
+    #[serde(default = "default_sides", skip_serializing_if = "is_default_sides")]
+    pub sides: u32,
+    #[serde(default = "default_inner", skip_serializing_if = "is_default_inner")]
+    pub inner: f64,
+}
+
+fn default_sides() -> u32 {
+    DEFAULT_SIDES
+}
+
+fn is_default_sides(v: &u32) -> bool {
+    *v == DEFAULT_SIDES
+}
+
+fn default_inner() -> f64 {
+    DEFAULT_INNER
+}
+
+fn is_default_inner(v: &f64) -> bool {
+    *v == DEFAULT_INNER
+}
+
+fn default_shape_width() -> f64 {
+    DEFAULT_SHAPE_WIDTH
+}
+
+/// What a `shape` may look like on disk: checked on the way in, so a
+/// board cannot ask for a figure nothing can draw.
+#[derive(Deserialize)]
+struct ShapeOnDisk {
+    id: String,
+    #[serde(default)]
+    layer: String,
+    model: Model,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    #[serde(default)]
+    rotation: f64,
+    #[serde(default)]
+    fill: Option<String>,
+    #[serde(default)]
+    stroke: Option<String>,
+    #[serde(default = "default_shape_width")]
+    width: f64,
+    #[serde(default)]
+    radius: f64,
+    #[serde(default = "default_sides")]
+    sides: u32,
+    #[serde(default = "default_inner")]
+    inner: f64,
+}
+
+impl TryFrom<ShapeOnDisk> for Shape {
+    type Error = String;
+
+    fn try_from(s: ShapeOnDisk) -> Result<Shape, String> {
+        let finite = [s.x, s.y, s.w, s.h, s.rotation].iter().all(|v| v.is_finite());
+        if !finite || s.w < 0.0 || s.h < 0.0 {
+            return Err(format!(
+                "shape {:?} has no box a board can hold: {} {} {} {}",
+                s.id, s.x, s.y, s.w, s.h
+            ));
+        }
+        if !(s.width.is_finite() && s.width > 0.0) {
+            return Err(format!("shape {:?} has a stroke {} wide", s.id, s.width));
+        }
+        if !(s.radius.is_finite() && s.radius >= 0.0) {
+            return Err(format!("shape {:?} has corners of radius {}", s.id, s.radius));
+        }
+        if !(MIN_SIDES..=MAX_SIDES).contains(&s.sides) {
+            return Err(format!(
+                "shape {:?} has {} sides, and a figure has {MIN_SIDES} to {MAX_SIDES}",
+                s.id, s.sides
+            ));
+        }
+        if !(s.inner > 0.0 && s.inner < 1.0) {
+            return Err(format!(
+                "shape {:?} is cut in to {} of its radius, which is not a fraction of it",
+                s.id, s.inner
+            ));
+        }
+        Ok(Shape {
+            id: s.id,
+            layer: s.layer,
+            model: s.model,
+            x: s.x,
+            y: s.y,
+            w: s.w,
+            h: s.h,
+            rotation: s.rotation,
+            fill: s.fill,
+            stroke: s.stroke,
+            width: s.width,
+            radius: s.radius,
+            sides: s.sides,
+            inner: s.inner,
         })
     }
 }
@@ -3730,5 +3901,129 @@ mod tests {
             assert!(with(bad).is_err(), "{bad} was let in");
         }
         assert!(with(r#"{ "start": 0, "end": 2, "bold": true }, { "start": 2, "end": 5, "italic": true }"#).is_ok());
+    }
+
+    /// A board holding one shape, on a vector layer: `fields` is the
+    /// shape's own past `id`, `type` and `layer`.
+    fn with_shape(fields: &str) -> anyhow::Result<Document> {
+        let json = format!(
+            r##"{{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+            "layers": [ {{ "id": "vl", "name": "Rectangle 1", "kind": "vector" }} ],
+            "elements": [ {{ "id": "s1", "type": "shape", "layer": "vl", {fields} }} ]
+        }}"##
+        );
+        Document::from_json(&json)
+    }
+
+    fn only_shape(doc: &Document) -> &Shape {
+        match &doc.elements[0] {
+            Element::Shape(s) => s,
+            other => panic!("expected a shape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plain_shape_writes_nothing_it_does_not_need() {
+        let doc = with_shape(
+            r##""model": "rectangle", "x": 10, "y": 20, "w": 120, "h": 80, "stroke": "#000000", "width": 2"##,
+        )
+        .unwrap();
+        let s = only_shape(&doc);
+        assert_eq!(s.model, Model::Rectangle);
+        assert_eq!((s.x, s.y, s.w, s.h, s.rotation), (10.0, 20.0, 120.0, 80.0, 0.0));
+        assert_eq!((s.fill.as_deref(), s.stroke.as_deref()), (None, Some("#000000")));
+        assert_eq!((s.width, s.radius), (2.0, 0.0));
+        assert_eq!((s.sides, s.inner), (DEFAULT_SIDES, DEFAULT_INNER));
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        let el = v["elements"][0].as_object().unwrap();
+        let mut keys: Vec<&str> = el.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["h", "id", "layer", "model", "stroke", "type", "w", "width", "x", "y"],
+            "every default stays off disk"
+        );
+        assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc);
+    }
+
+    #[test]
+    fn every_model_round_trips_with_all_it_can_say() {
+        for (word, model) in [
+            ("rectangle", Model::Rectangle),
+            ("ellipse", Model::Ellipse),
+            ("triangle", Model::Triangle),
+            ("diamond", Model::Diamond),
+            ("polygon", Model::Polygon),
+            ("star", Model::Star),
+        ] {
+            let doc = with_shape(&format!(
+                r##""model": "{word}", "x": -5, "y": 7.5, "w": 30, "h": 40, "rotation": 30,
+                    "fill": "#f5a524", "stroke": "#3b82f6", "width": 4.5, "radius": 6,
+                    "sides": 7, "inner": 0.25"##
+            ))
+            .unwrap();
+            let s = only_shape(&doc);
+            assert_eq!(s.model, model, "{word}");
+            assert_eq!((s.rotation, s.width, s.radius, s.sides, s.inner), (30.0, 4.5, 6.0, 7, 0.25));
+            assert_eq!(s.fill.as_deref(), Some("#f5a524"));
+            assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_shape_without_a_width_is_drawn_at_the_pencils() {
+        let doc = with_shape(r##""model": "ellipse", "x": 0, "y": 0, "w": 10, "h": 10, "fill": "#e5484d""##).unwrap();
+        let s = only_shape(&doc);
+        assert_eq!(s.width, DEFAULT_SHAPE_WIDTH);
+        assert_eq!(s.stroke, None, "a shape may be all fill");
+        assert!(doc.to_json().unwrap().contains("\"width\""), "the width is always written");
+    }
+
+    #[test]
+    fn a_shape_the_board_cannot_draw_is_refused() {
+        let with = |extra: &str| {
+            with_shape(&format!(
+                r##""x": 0, "y": 0, "w": 10, "h": 10, "stroke": "#000", {extra}"##
+            ))
+        };
+        for bad in [
+            r#""model": "hexagon""#,
+            r#""model": "polygon", "sides": 2"#,
+            r#""model": "star", "sides": 61"#,
+            r#""model": "star", "inner": 0"#,
+            r#""model": "star", "inner": 1"#,
+            r#""model": "star", "inner": -0.5"#,
+            r#""model": "rectangle", "radius": -1"#,
+            r#""model": "rectangle", "width": 0"#,
+            r#""model": "rectangle", "width": -2"#,
+            r#""model": "rectangle", "w": -1"#,
+            r#""model": "rectangle", "h": -1"#,
+        ] {
+            assert!(with(bad).is_err(), "{bad} was let in");
+        }
+        assert!(with(r#""model": "star", "sides": 60, "inner": 0.05"#).is_ok());
+        assert!(with(r#""model": "polygon", "sides": 3"#).is_ok());
+    }
+
+    #[test]
+    fn a_shape_stands_where_an_object_may() {
+        let on = |kind: &str| {
+            let json = format!(
+                r##"{{
+                "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+                "layers": [ {{ "id": "l", "name": "L", "kind": "{kind}" }} ],
+                "elements": [ {{ "id": "s", "type": "shape", "layer": "l", "model": "ellipse",
+                    "x": 0, "y": 0, "w": 1, "h": 1, "stroke": "#000" }} ]
+            }}"##
+            );
+            Document::from_json(&json)
+        };
+        assert!(on("vector").is_ok());
+        assert!(on("raster").is_ok());
+        assert!(on("text").is_err());
+        assert!(on("group").is_err());
     }
 }

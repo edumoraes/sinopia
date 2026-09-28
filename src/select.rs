@@ -40,6 +40,7 @@ pub enum Handle {
 pub fn frame(el: &Element) -> Option<Frame> {
     match el {
         Element::Rect(r) => Some(box_frame(r.x, r.y, r.w, r.h, r.rotation)),
+        Element::Shape(s) => Some(box_frame(s.x, s.y, s.w, s.h, s.rotation)),
         Element::Image(i) => Some(box_frame(i.x, i.y, i.w, i.h, i.rotation)),
         Element::Path(p) => ink_frame([(p.curves.as_slice(), p.width)], p.rotation),
         Element::Paint(p) => ink_frame(
@@ -119,7 +120,7 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
     }
     match el {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
-        Element::Rect(_) | Element::Image(_) | Element::Text(_) => true,
+        Element::Rect(_) | Element::Image(_) | Element::Text(_) | Element::Shape(_) => true,
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
         // A frame is an area with a surface, not an outline. It is
         // painted before what it holds, so a walk from the top finds
@@ -236,6 +237,10 @@ pub fn transform(el: &mut Element, m: &Affine) {
         Element::Image(i) => {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
+        }
+        Element::Shape(s) => {
+            (s.x, s.y, s.w, s.h, s.rotation) =
+                box_fields(box_frame(s.x, s.y, s.w, s.h, s.rotation).transformed(m));
         }
         // A frame's box is mapped and its lines reflow in it. Artistic
         // text is its letters: it is scaled evenly, by the middle of

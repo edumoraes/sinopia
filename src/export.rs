@@ -323,6 +323,7 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
     out.push_str(&format!("- area: {w:.0} × {h:.0} world units\n"));
     out.push_str(&format!("- layers: {}\n", doc.layers.len()));
     let (mut rects, mut paths, mut paints, mut images, mut frames, mut texts) = (0, 0, 0, 0, 0, 0);
+    let mut shapes = 0;
     for el in &doc.elements {
         match el {
             Element::Rect(_) => rects += 1,
@@ -331,11 +332,13 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
             Element::Image(_) => images += 1,
             Element::Frame(_) => frames += 1,
             Element::Text(_) => texts += 1,
+            Element::Shape(_) => shapes += 1,
         }
     }
     for (n, word) in [
         (frames, "frame"),
         (texts, "text"),
+        (shapes, "shape"),
         (rects, "rect"),
         (paths, "path"),
         (paints, "paint layer"),
