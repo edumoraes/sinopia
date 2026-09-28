@@ -109,8 +109,6 @@ pub struct Typing {
     /// The text's id — minted at the press for a new one, so the session
     /// names it before it is on the board.
     pub id: String,
-    /// Tells this session's steps from every other's.
-    pub session: u64,
     /// A new text, until its first character lands: on no layer, in no
     /// document. `None` once it is on the board.
     pending: Option<Text>,
@@ -128,32 +126,6 @@ pub struct Typing {
     last: Option<(Edit, bool)>,
     /// A drag through the text, and the span its press took.
     dragging: Option<(Unit, usize, usize)>,
-}
-
-impl Typing {
-    /// The caret's place, in characters.
-    pub fn caret(&self) -> usize {
-        self.field.caret()
-    }
-
-    /// The selection as places `start..end`, when there is one.
-    pub fn selection(&self) -> Option<(usize, usize)> {
-        self.field.selection()
-    }
-
-    pub fn value(&self) -> &str {
-        self.field.value()
-    }
-
-    /// Whether the text is not on the board yet.
-    pub fn is_pending(&self) -> bool {
-        self.pending.is_some()
-    }
-
-    /// The lines the text is set in, as it stands.
-    pub fn laid(&self) -> &Laid {
-        &self.laid
-    }
 }
 
 /// The sizes `Ctrl+Shift+>` and `<` step through: Adobe's own list,
@@ -277,11 +249,6 @@ fn both(a: Change, b: Change) -> Change {
 }
 
 impl Editor {
-    /// The kind of text the tool makes.
-    pub fn text_mode(&self) -> TextMode {
-        self.text_mode
-    }
-
     /// How the next text is set — what the bar shows with nothing to
     /// look at, and what a text the command line adds starts from.
     pub fn next_style(&self) -> TextStyle {
@@ -528,7 +495,6 @@ impl Editor {
         let laid = Laid::of(&text, fonts);
         self.typing = Some(Typing {
             id: text.id.clone(),
-            session,
             field: Field::lines(&text.text).limited(TEXT_MAX),
             laid,
             pending: (!placed).then_some(text),
@@ -560,7 +526,7 @@ impl Editor {
             Change::None
         };
         let layer = text.layer.clone();
-        self.open_with(text, None, doc, fonts);
+        let _ = self.open_with(text, None, doc, fonts);
         self.reveal(doc, &layer);
         self.layer = Some(layer);
         self.picked.clear();
@@ -1111,10 +1077,10 @@ fn rename_after(doc: &mut Document, layer: &str, was: &str, now: &str) {
         .name
         .strip_prefix("Text ")
         .is_some_and(|n| n.parse::<u32>().is_ok());
-    if born || name_of(was).as_deref() == Some(l.name.as_str()) {
-        if let Some(name) = name_of(now) {
-            l.name = name;
-        }
+    if (born || name_of(was).as_deref() == Some(l.name.as_str()))
+        && let Some(name) = name_of(now)
+    {
+        l.name = name;
     }
 }
 
@@ -1169,8 +1135,8 @@ mod tests {
     fn drag(e: &mut Editor, doc: &mut Document, from: (f64, f64), to: (f64, f64)) -> Change {
         let f = fonts();
         let a = e.text_press(&view(), at(from.0, from.1), doc, &f, 1, INK);
-        e.moved(&view(), at((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0), doc);
-        e.moved(&view(), at(to.0, to.1), doc);
+        let _ = e.moved(&view(), at((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0), doc);
+        let _ = e.moved(&view(), at(to.0, to.1), doc);
         let b = e.release(Button::Left, &view(), at(to.0, to.1), doc, INK);
         both(a, b)
     }
@@ -1200,7 +1166,7 @@ mod tests {
     }
 
     fn value(e: &Editor) -> &str {
-        e.typing().expect("typing").value()
+        e.typing().expect("typing").field.value()
     }
 
     /// A board with one artistic text saying `s` at the origin, typed
@@ -1208,9 +1174,9 @@ mod tests {
     fn with_text(s: &str) -> (Editor, Document) {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, s);
-        e.end_typing(&mut doc);
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, s);
+        let _ = e.end_typing(&mut doc);
         (e, doc)
     }
 
@@ -1221,14 +1187,14 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
         e.choose_tool(Tool::Text, &mut doc);
-        assert_eq!((e.tool(), e.text_mode()), (Tool::Text, TextMode::Artistic));
+        assert_eq!((e.tool(), e.text_mode), (Tool::Text, TextMode::Artistic));
         e.choose_tool(Tool::Text, &mut doc);
-        assert_eq!((e.tool(), e.text_mode()), (Tool::Text, TextMode::Frame));
+        assert_eq!((e.tool(), e.text_mode), (Tool::Text, TextMode::Frame));
         e.choose_tool(Tool::Select, &mut doc);
         e.choose_tool(Tool::Text, &mut doc);
-        assert_eq!(e.text_mode(), TextMode::Frame, "taking it up again keeps the kind");
+        assert_eq!(e.text_mode, TextMode::Frame, "taking it up again keeps the kind");
         e.choose_tool(Tool::Text, &mut doc);
-        assert_eq!(e.text_mode(), TextMode::Artistic);
+        assert_eq!(e.text_mode, TextMode::Artistic);
     }
 
     #[test]
@@ -1236,9 +1202,9 @@ mod tests {
         let mut e = texting();
         let mut doc = Document::new("t");
         let layers = doc.layers.len();
-        click(&mut e, &mut doc, 10.0, 20.0);
+        let _ = click(&mut e, &mut doc, 10.0, 20.0);
         let t = e.typing().expect("a text to type into");
-        assert!(t.is_pending());
+        assert!(t.pending.is_some());
         assert_eq!(doc.layers.len(), layers, "no layer yet");
         assert!(texts(&doc).is_empty());
 
@@ -1262,14 +1228,14 @@ mod tests {
         let mut e = texting();
         let mut doc = Document::new("t");
         let before = doc.clone();
-        click(&mut e, &mut doc, 0.0, 0.0);
-        e.end_typing(&mut doc);
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = e.end_typing(&mut doc);
         assert!(e.typing().is_none());
         assert_eq!(doc, before);
 
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, "x");
-        key(&mut e, &mut doc, TextKey::Backspace);
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "x");
+        let _ = key(&mut e, &mut doc, TextKey::Backspace);
         assert_eq!(e.end_typing(&mut doc), Change::Scene);
         assert!(texts(&doc).is_empty());
         assert!(doc.same_board(&before), "its layer went with it");
@@ -1279,7 +1245,7 @@ mod tests {
     fn leaving_a_text_selects_it_and_names_its_layer_after_what_it_says() {
         let (e, doc) = with_text("Hello there\nsecond line");
         let t = only(&doc);
-        assert_eq!(e.selection(), [t.id.clone()]);
+        assert_eq!(e.selection(), std::slice::from_ref(&t.id));
         assert_eq!(doc.layer(&t.layer).unwrap().name, "Hello there");
         assert_eq!(name_of("   \n  a long title that goes on and on and on past forty"), Some("a long title that goes on and on and on …".into()));
         assert_eq!(name_of(" \n "), None);
@@ -1289,11 +1255,11 @@ mod tests {
     fn a_name_given_by_hand_is_kept_whatever_is_typed() {
         let (mut e, mut doc) = with_text("draft");
         let layer = only(&doc).layer.clone();
-        e.rename_layer(&mut doc, &layer, "Title");
+        let _ = e.rename_layer(&mut doc, &layer, "Title");
         let id = only(&doc).id.clone();
-        e.edit_text(&id, &mut doc, &fonts(), None);
-        typed(&mut e, &mut doc, "final");
-        e.end_typing(&mut doc);
+        let _ = e.edit_text(&id, &mut doc, &fonts(), None);
+        let _ = typed(&mut e, &mut doc, "final");
+        let _ = e.end_typing(&mut doc);
         assert_eq!(doc.layer(&layer).unwrap().name, "Title");
         assert_eq!(only(&doc).text, "final", "Enter's select-all was typed over");
     }
@@ -1302,8 +1268,8 @@ mod tests {
     fn a_drag_with_artistic_text_sets_its_size() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        drag(&mut e, &mut doc, (0.0, 0.0), (30.0, 60.0));
-        typed(&mut e, &mut doc, "Big");
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (30.0, 60.0));
+        let _ = typed(&mut e, &mut doc, "Big");
         let t = only(&doc);
         assert_eq!(t.style.size, 60.0);
         assert_eq!((t.x, t.y), (0.0, 0.0));
@@ -1315,8 +1281,8 @@ mod tests {
         let mut e = texting();
         let mut doc = Document::new("t");
         e.choose_tool(Tool::Text, &mut doc);
-        drag(&mut e, &mut doc, (100.0, 80.0), (20.0, 10.0));
-        typed(&mut e, &mut doc, "words that wrap in the frame");
+        let _ = drag(&mut e, &mut doc, (100.0, 80.0), (20.0, 10.0));
+        let _ = typed(&mut e, &mut doc, "words that wrap in the frame");
         let t = only(&doc);
         assert_eq!(t.mode, TextMode::Frame);
         assert_eq!((t.x, t.y, t.w, t.h), (20.0, 10.0, 80.0, 70.0));
@@ -1327,8 +1293,8 @@ mod tests {
         let mut e = texting();
         let mut doc = Document::new("t");
         e.choose_tool(Tool::Text, &mut doc);
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, "a");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "a");
         let t = only(&doc);
         assert_eq!(t.mode, TextMode::Frame);
         assert_eq!(t.w, FRAME_W);
@@ -1339,30 +1305,30 @@ mod tests {
     fn keys_walk_and_edit_the_text() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, "one two");
-        key(&mut e, &mut doc, TextKey::Go(Move::WordLeft, false));
-        assert_eq!(e.typing().unwrap().caret(), 4);
-        key(&mut e, &mut doc, TextKey::Go(Move::Right, true));
-        key(&mut e, &mut doc, TextKey::Go(Move::Right, true));
-        assert_eq!(e.typing().unwrap().selection(), Some((4, 6)));
-        typed(&mut e, &mut doc, "T");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "one two");
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::WordLeft, false));
+        assert_eq!(e.typing().unwrap().field.caret(), 4);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Right, true));
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Right, true));
+        assert_eq!(e.typing().unwrap().field.selection(), Some((4, 6)));
+        let _ = typed(&mut e, &mut doc, "T");
         assert_eq!(value(&e), "one To");
-        key(&mut e, &mut doc, TextKey::Go(Move::Home, false));
-        key(&mut e, &mut doc, TextKey::Delete);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Home, false));
+        let _ = key(&mut e, &mut doc, TextKey::Delete);
         assert_eq!(value(&e), "ne To");
-        key(&mut e, &mut doc, TextKey::Go(Move::End, false));
-        key(&mut e, &mut doc, TextKey::Backspace);
-        key(&mut e, &mut doc, TextKey::Newline);
-        typed(&mut e, &mut doc, "next");
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::End, false));
+        let _ = key(&mut e, &mut doc, TextKey::Backspace);
+        let _ = key(&mut e, &mut doc, TextKey::Newline);
+        let _ = typed(&mut e, &mut doc, "next");
         assert_eq!(value(&e), "ne T\nnext");
-        key(&mut e, &mut doc, TextKey::WordBackspace);
+        let _ = key(&mut e, &mut doc, TextKey::WordBackspace);
         assert_eq!(value(&e), "ne T\n");
-        key(&mut e, &mut doc, TextKey::Go(Move::Home, false));
-        key(&mut e, &mut doc, TextKey::WordDelete);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Home, false));
+        let _ = key(&mut e, &mut doc, TextKey::WordDelete);
         assert_eq!(value(&e), " T\n");
-        key(&mut e, &mut doc, TextKey::SelectAll);
-        assert_eq!(e.typing().unwrap().selection(), Some((0, 3)));
+        let _ = key(&mut e, &mut doc, TextKey::SelectAll);
+        assert_eq!(e.typing().unwrap().field.selection(), Some((0, 3)));
         assert_eq!(only(&doc).text, " T\n", "the board has it all along");
     }
 
@@ -1370,42 +1336,42 @@ mod tests {
     fn up_and_down_keep_to_the_column_they_started_in() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, "abcdef\nab\nabcdef");
-        key(&mut e, &mut doc, TextKey::Go(Move::Home, false));
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "abcdef\nab\nabcdef");
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Home, false));
         for _ in 0..4 {
-            key(&mut e, &mut doc, TextKey::Go(Move::Right, false));
+            let _ = key(&mut e, &mut doc, TextKey::Go(Move::Right, false));
         }
-        key(&mut e, &mut doc, TextKey::Go(Move::Down, false));
-        assert_eq!(e.typing().unwrap().caret(), 9, "the short line's end");
-        key(&mut e, &mut doc, TextKey::Go(Move::Down, false));
-        assert_eq!(e.typing().unwrap().caret(), 14, "back at the column it left");
-        key(&mut e, &mut doc, TextKey::Go(Move::LineHome, true));
-        assert_eq!(e.typing().unwrap().selection(), Some((10, 14)));
-        key(&mut e, &mut doc, TextKey::Go(Move::LineEnd, false));
-        assert_eq!(e.typing().unwrap().caret(), 16);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Down, false));
+        assert_eq!(e.typing().unwrap().field.caret(), 9, "the short line's end");
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Down, false));
+        assert_eq!(e.typing().unwrap().field.caret(), 14, "back at the column it left");
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::LineHome, true));
+        assert_eq!(e.typing().unwrap().field.selection(), Some((10, 14)));
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::LineEnd, false));
+        assert_eq!(e.typing().unwrap().field.caret(), 16);
     }
 
     #[test]
     fn undo_while_typing_takes_back_a_word_at_a_time() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
         for c in "hello world".chars() {
-            typed(&mut e, &mut doc, &c.to_string());
+            let _ = typed(&mut e, &mut doc, &c.to_string());
         }
-        key(&mut e, &mut doc, TextKey::Undo);
+        let _ = key(&mut e, &mut doc, TextKey::Undo);
         assert_eq!(value(&e), "hello ");
         assert_eq!(only(&doc).text, "hello ");
-        key(&mut e, &mut doc, TextKey::Undo);
+        let _ = key(&mut e, &mut doc, TextKey::Undo);
         assert_eq!(value(&e), "");
-        key(&mut e, &mut doc, TextKey::Redo);
+        let _ = key(&mut e, &mut doc, TextKey::Redo);
         assert_eq!(value(&e), "hello ");
-        key(&mut e, &mut doc, TextKey::Backspace);
-        key(&mut e, &mut doc, TextKey::Backspace);
-        key(&mut e, &mut doc, TextKey::Undo);
+        let _ = key(&mut e, &mut doc, TextKey::Backspace);
+        let _ = key(&mut e, &mut doc, TextKey::Backspace);
+        let _ = key(&mut e, &mut doc, TextKey::Undo);
         assert_eq!(value(&e), "hello ", "a run of deletes is one step");
-        key(&mut e, &mut doc, TextKey::Redo);
+        let _ = key(&mut e, &mut doc, TextKey::Redo);
         assert_eq!(value(&e), "hell");
     }
 
@@ -1413,15 +1379,15 @@ mod tests {
     fn the_clipboard_takes_and_gives_text() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, "cut me");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "cut me");
         assert_eq!(e.copied_text(), None, "nothing selected, nothing copied");
-        key(&mut e, &mut doc, TextKey::Go(Move::WordLeft, true));
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::WordLeft, true));
         assert_eq!(e.copied_text().as_deref(), Some("me"));
         let (cut, change) = e.cut_text(&mut doc, &fonts());
         assert_eq!((cut.as_deref(), change), (Some("me"), Change::Scene));
         assert_eq!(value(&e), "cut ");
-        e.paste_text("a\r\nb\tc\u{1b}", &mut doc, &fonts());
+        let _ = e.paste_text("a\r\nb\tc\u{1b}", &mut doc, &fonts());
         assert_eq!(value(&e), "cut a\nb    c");
     }
 
@@ -1429,19 +1395,19 @@ mod tests {
     fn artistic_text_grows_away_from_where_it_is_anchored() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 50.0, 50.0);
-        typed(&mut e, &mut doc, "a");
+        let _ = click(&mut e, &mut doc, 50.0, 50.0);
+        let _ = typed(&mut e, &mut doc, "a");
         let (x0, w0) = (only(&doc).x, only(&doc).w);
-        typed(&mut e, &mut doc, "bcd");
+        let _ = typed(&mut e, &mut doc, "bcd");
         let t = only(&doc);
         assert_eq!(t.x, x0, "left: the left edge stays");
         assert!(t.w > w0);
-        e.restyle(&mut doc, &fonts(), |s| s.align = Align::Right);
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.align = Align::Right);
         let right = only(&doc).x + only(&doc).w;
-        typed(&mut e, &mut doc, "efg");
+        let _ = typed(&mut e, &mut doc, "efg");
         let t = only(&doc).clone();
         assert!((t.x + t.w - right).abs() < 1e-9, "right: the right edge stays");
-        typed(&mut e, &mut doc, "\nnext line");
+        let _ = typed(&mut e, &mut doc, "\nnext line");
         assert!(only(&doc).h > t.h, "a line more is taller");
     }
 
@@ -1454,9 +1420,9 @@ mod tests {
         }
         let corner = |t: &Text| frame_of(t).to_world([-t.w / 2.0, -t.h / 2.0]);
         let before = corner(only(&doc));
-        e.edit_text(&id, &mut doc, &fonts(), None);
-        key(&mut e, &mut doc, TextKey::Go(Move::End, false));
-        typed(&mut e, &mut doc, "longer and longer");
+        let _ = e.edit_text(&id, &mut doc, &fonts(), None);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::End, false));
+        let _ = typed(&mut e, &mut doc, "longer and longer");
         let after = corner(only(&doc));
         assert!((after[0] - before[0]).abs() < 1e-9 && (after[1] - before[1]).abs() < 1e-9, "{before:?} {after:?}");
     }
@@ -1467,12 +1433,12 @@ mod tests {
         let t = only(&doc).clone();
         let laid = Laid::of(&t, &fonts());
         let (x, top, _) = laid.caret(6);
-        click(&mut e, &mut doc, t.x + x, t.y + top + 2.0);
+        let _ = click(&mut e, &mut doc, t.x + x, t.y + top + 2.0);
         let typing = e.typing().expect("typing into it");
         assert_eq!(typing.id, t.id);
-        assert_eq!(typing.caret(), 6);
+        assert_eq!(typing.field.caret(), 6);
         assert!(e.selection().is_empty(), "no handles while it is typed into");
-        typed(&mut e, &mut doc, "big ");
+        let _ = typed(&mut e, &mut doc, "big ");
         assert_eq!(only(&doc).text, "hello big world");
     }
 
@@ -1483,11 +1449,11 @@ mod tests {
         let laid = Laid::of(&t, &fonts());
         let (x, top, _) = laid.caret(5);
         let (px, py) = (t.x + x + 1.0, t.y + top + 2.0);
-        click(&mut e, &mut doc, px, py);
-        clicks(&mut e, &mut doc, px, py, 2);
-        assert_eq!(e.typing().unwrap().selection(), Some((4, 7)));
-        clicks(&mut e, &mut doc, px, py, 3);
-        assert_eq!(e.typing().unwrap().selection(), Some((0, 7)));
+        let _ = click(&mut e, &mut doc, px, py);
+        let _ = clicks(&mut e, &mut doc, px, py, 2);
+        assert_eq!(e.typing().unwrap().field.selection(), Some((4, 7)));
+        let _ = clicks(&mut e, &mut doc, px, py, 3);
+        assert_eq!(e.typing().unwrap().field.selection(), Some((0, 7)));
     }
 
     #[test]
@@ -1498,9 +1464,9 @@ mod tests {
         let y = t.y + laid.rows[0].top + 3.0;
         let from = (t.x + laid.caret(7).0, y);
         let to = (t.x + laid.caret(11).0, y);
-        click(&mut e, &mut doc, from.0, from.1);
-        drag(&mut e, &mut doc, from, to);
-        assert_eq!(e.typing().unwrap().selection(), Some((7, 11)));
+        let _ = click(&mut e, &mut doc, from.0, from.1);
+        let _ = drag(&mut e, &mut doc, from, to);
+        assert_eq!(e.typing().unwrap().field.selection(), Some((7, 11)));
         assert!(!e.busy(), "selecting is not a change in progress");
     }
 
@@ -1508,13 +1474,13 @@ mod tests {
     fn a_press_away_from_the_text_leaves_it_and_starts_another() {
         let (mut e, mut doc) = with_text("first");
         let first = only(&doc).id.clone();
-        click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
         assert_eq!(e.typing().unwrap().id, first);
-        click(&mut e, &mut doc, 300.0, 300.0);
+        let _ = click(&mut e, &mut doc, 300.0, 300.0);
         let t = e.typing().expect("a new one");
         assert_ne!(t.id, first);
-        assert!(t.is_pending());
-        typed(&mut e, &mut doc, "second");
+        assert!(t.pending.is_some());
+        let _ = typed(&mut e, &mut doc, "second");
         assert_eq!(texts(&doc).len(), 2);
     }
 
@@ -1525,9 +1491,9 @@ mod tests {
         if let Some(l) = doc.layer_mut(&layer) {
             l.locked = true;
         }
-        click(&mut e, &mut doc, 2.0, 2.0);
+        let _ = click(&mut e, &mut doc, 2.0, 2.0);
         let t = e.typing().expect("a new text instead");
-        assert!(t.is_pending());
+        assert!(t.pending.is_some());
     }
 
     #[test]
@@ -1535,13 +1501,13 @@ mod tests {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
         e.set_tool(Tool::Frame, &mut doc);
-        e.press(Button::Left, &view(), at(0.0, 0.0), &mut doc, &crate::brush::Tip::PENCIL);
-        e.moved(&view(), at(200.0, 200.0), &mut doc);
-        e.release(Button::Left, &view(), at(200.0, 200.0), &mut doc, INK);
+        let _ = e.press(Button::Left, &view(), at(0.0, 0.0), &mut doc, &crate::brush::Tip::PENCIL);
+        let _ = e.moved(&view(), at(200.0, 200.0), &mut doc);
+        let _ = e.release(Button::Left, &view(), at(200.0, 200.0), &mut doc, INK);
         let frame_layer = doc.layers.last().unwrap().id.clone();
         e.set_tool(Tool::Text, &mut doc);
-        click(&mut e, &mut doc, 50.0, 50.0);
-        typed(&mut e, &mut doc, "inside");
+        let _ = click(&mut e, &mut doc, 50.0, 50.0);
+        let _ = typed(&mut e, &mut doc, "inside");
         let t = only(&doc);
         assert_eq!(doc.context(&t.layer), Some(frame_layer.as_str()));
     }
@@ -1550,16 +1516,15 @@ mod tests {
     fn every_session_is_its_own_and_its_ending_folds_into_it() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
-        let first = e.typing().unwrap().session;
-        assert_eq!(e.fold(), Some(first));
-        typed(&mut e, &mut doc, "a");
-        e.end_typing(&mut doc);
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let first = e.fold().expect("a session");
+        let _ = typed(&mut e, &mut doc, "a");
+        let _ = e.end_typing(&mut doc);
         assert_eq!(e.fold(), Some(first), "leaving is the session's last change");
         e.let_go_of_fold();
         assert_eq!(e.fold(), None);
-        click(&mut e, &mut doc, 200.0, 0.0);
-        assert_ne!(e.typing().unwrap().session, first);
+        let _ = click(&mut e, &mut doc, 200.0, 0.0);
+        assert_ne!(e.fold(), Some(first));
     }
 
     #[test]
@@ -1570,7 +1535,7 @@ mod tests {
         assert!(only(&doc).style.bold);
         assert!(!e.text_style(&Document::new("x")).bold, "the next text is not bold");
         let w = only(&doc).w;
-        e.restyle(&mut doc, &fonts(), |s| s.size = 48.0);
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.size = 48.0);
         assert!(only(&doc).w > w * 1.5, "artistic text fits its new size");
         e.escape(&mut doc);
         assert!(!e.text_targeted(&doc));
@@ -1583,26 +1548,26 @@ mod tests {
     fn the_bar_turns_a_text_into_the_other_kind() {
         let (mut e, mut doc) = with_text("one two three");
         let w = only(&doc).w;
-        e.set_text_kind(TextMode::Frame, &mut doc, &fonts());
+        let _ = e.set_text_kind(TextMode::Frame, &mut doc, &fonts());
         assert_eq!(only(&doc).mode, TextMode::Frame);
         let id = only(&doc).id.clone();
         if let Some(t) = text_mut(&mut doc, &id) {
             t.w = 10.0;
         }
-        e.set_text_kind(TextMode::Artistic, &mut doc, &fonts());
+        let _ = e.set_text_kind(TextMode::Artistic, &mut doc, &fonts());
         let t = only(&doc);
         assert_eq!(t.mode, TextMode::Artistic);
         assert!((t.w - w).abs() < 1e-9, "one line again, as wide as it measures");
-        assert_eq!(e.text_mode(), TextMode::Artistic, "the tool's own kind is left alone");
+        assert_eq!(e.text_mode, TextMode::Artistic, "the tool's own kind is left alone");
     }
 
     #[test]
     fn a_size_set_from_the_bar_stays_a_size_a_text_may_have() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        e.restyle(&mut doc, &fonts(), |s| s.size = 1e9);
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.size = 1e9);
         assert_eq!(e.text_style(&doc).size, MAX_TEXT_SIZE);
-        e.restyle(&mut doc, &fonts(), |s| s.size = 0.0);
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.size = 0.0);
         assert_eq!(e.text_style(&doc).size, MIN_TEXT_SIZE);
     }
 
@@ -1610,7 +1575,7 @@ mod tests {
     fn enter_on_a_selected_text_types_into_all_of_it() {
         let (mut e, mut doc) = with_text("replace me");
         assert_eq!(e.edit_selected_text(&mut doc, &fonts()), Change::Selection);
-        assert_eq!(e.typing().unwrap().selection(), Some((0, 10)));
+        assert_eq!(e.typing().unwrap().field.selection(), Some((0, 10)));
         let mut other = Editor::new();
         assert_eq!(other.edit_selected_text(&mut doc, &fonts()), Change::None, "nothing selected");
     }
@@ -1619,8 +1584,8 @@ mod tests {
     fn switching_tools_leaves_the_text() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, "kept");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "kept");
         e.set_tool(Tool::Select, &mut doc);
         assert!(e.typing().is_none());
         assert_eq!(only(&doc).text, "kept");
@@ -1632,14 +1597,14 @@ mod tests {
         let mut doc = Document::new("t");
         let theme = Theme::light();
         assert!(e.typing_prims(&doc, &view(), &theme, true).is_empty());
-        click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
         let pending = e.typing_prims(&doc, &view(), &theme, true);
         assert!(!pending.is_empty(), "the caret of a text not yet typed");
-        typed(&mut e, &mut doc, "ab");
+        let _ = typed(&mut e, &mut doc, "ab");
         let caret_on = e.typing_prims(&doc, &view(), &theme, true).len();
         let caret_off = e.typing_prims(&doc, &view(), &theme, false).len();
         assert_eq!(caret_on, caret_off + 1);
-        key(&mut e, &mut doc, TextKey::SelectAll);
+        let _ = key(&mut e, &mut doc, TextKey::SelectAll);
         assert!(e.typing_prims(&doc, &view(), &theme, false).len() > caret_off);
     }
 
@@ -1648,12 +1613,12 @@ mod tests {
         let mut e = texting();
         let mut doc = Document::new("t");
         e.choose_tool(Tool::Text, &mut doc);
-        drag(&mut e, &mut doc, (0.0, 0.0), (60.0, 30.0));
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (60.0, 30.0));
         let theme = Theme::light();
-        typed(&mut e, &mut doc, "a");
+        let _ = typed(&mut e, &mut doc, "a");
         let fits = e.typing_prims(&doc, &view(), &theme, false);
         assert!(fits.iter().all(|p| p.color != OVERFLOW));
-        typed(&mut e, &mut doc, "\nb\nc\nd");
+        let _ = typed(&mut e, &mut doc, "\nb\nc\nd");
         let over = e.typing_prims(&doc, &view(), &theme, false);
         assert!(over.iter().any(|p| p.color == OVERFLOW));
     }
@@ -1662,8 +1627,8 @@ mod tests {
     fn a_layer_for_a_new_text_is_a_text_layer_named_for_it_while_it_is_typed() {
         let mut e = texting();
         let mut doc = Document::new("t");
-        click(&mut e, &mut doc, 0.0, 0.0);
-        typed(&mut e, &mut doc, "Live name");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "Live name");
         let t = only(&doc);
         let layer: &Layer = doc.layer(&t.layer).unwrap();
         assert_eq!(layer.name, "Live name");
@@ -1687,8 +1652,8 @@ mod tests {
         let was = e.text_fonts(&doc);
         assert_eq!(was, [(only(&doc).id.clone(), DEFAULT_FONT.to_owned())]);
         let w = only(&doc).w;
-        e.restyle(&mut doc, &fonts(), |s| s.font = "Elsewhere".into());
-        e.restyle(&mut doc, &fonts(), |s| s.size = 60.0);
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.font = "Elsewhere".into());
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.size = 60.0);
         e.put_fonts_back(&mut doc, &fonts(), &was);
         assert_eq!(only(&doc).style.font, DEFAULT_FONT);
         assert!(only(&doc).w > w, "only the family goes back");
@@ -1697,17 +1662,17 @@ mod tests {
     #[test]
     fn with_another_tool_a_press_on_another_text_only_leaves_the_one_typed() {
         let (mut e, mut doc) = with_text("first");
-        click(&mut e, &mut doc, 300.0, 0.0);
-        typed(&mut e, &mut doc, "second");
-        e.end_typing(&mut doc);
+        let _ = click(&mut e, &mut doc, 300.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "second");
+        let _ = e.end_typing(&mut doc);
         let first = texts(&doc)[0].clone();
         e.set_tool(Tool::Select, &mut doc);
         let second = texts(&doc)[1].id.clone();
-        e.edit_text(&second, &mut doc, &fonts(), None);
+        let _ = e.edit_text(&second, &mut doc, &fonts(), None);
         let f = fonts();
-        e.text_press(&view(), at(first.x + 2.0, first.y + 2.0), &mut doc, &f, 1, INK);
+        let _ = e.text_press(&view(), at(first.x + 2.0, first.y + 2.0), &mut doc, &f, 1, INK);
         assert!(e.typing().is_none(), "a single press with the Select tool types into nothing");
-        e.text_press(&view(), at(first.x + 2.0, first.y + 2.0), &mut doc, &f, 2, INK);
+        let _ = e.text_press(&view(), at(first.x + 2.0, first.y + 2.0), &mut doc, &f, 2, INK);
         assert_eq!(e.typing().map(|t| t.id.clone()), Some(first.id), "a double click does");
     }
 

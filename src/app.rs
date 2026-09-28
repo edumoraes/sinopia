@@ -730,7 +730,7 @@ impl App {
         let spot = editor.at();
         match settled {
             true => {
-                history.keep_as(&project.doc, spot, editor.fold());
+                history.keep(&project.doc, spot, editor.fold());
                 editor.let_go_of_fold();
             }
             false => history.mark(spot),

@@ -3054,8 +3054,8 @@ mod tests {
         }));
         let v = view();
         let mut e = tool(Tool::Select);
-        click(&mut e, &v, &mut doc, at(&v, 50.0, 20.0));
-        drag(&mut e, &v, &mut doc, at(&v, 100.0, 40.0), at(&v, 300.0, 60.0));
+        let _ = click(&mut e, &v, &mut doc, at(&v, 50.0, 20.0));
+        let _ = drag(&mut e, &v, &mut doc, at(&v, 100.0, 40.0), at(&v, 300.0, 60.0));
         let Element::Text(t) = &doc.elements[0] else { panic!() };
         assert!((t.w / t.h - 100.0 / 40.0).abs() < 1e-9, "{} x {}", t.w, t.h);
     }

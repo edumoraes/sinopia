@@ -88,11 +88,6 @@ impl Face {
     pub fn rasterize(&self, ch: char, px: f32) -> (fontdue::Metrics, Vec<u8>) {
         self.font.rasterize(ch, px)
     }
-
-    /// Whether the face draws `ch` at all rather than its missing box.
-    pub fn has(&self, ch: char) -> bool {
-        self.font.lookup_glyph_index(ch) != 0
-    }
 }
 
 /// Where a family's file is on this machine, for a style: what fontconfig
@@ -258,7 +253,6 @@ mod tests {
         // Bold is wider; italic leans, which the raster shows.
         assert!(bold.advance('m', 20.0) > regular.advance('m', 20.0));
         assert_ne!(italic.rasterize('l', 40.0).1, regular.rasterize('l', 40.0).1);
-        assert!(both.has('a'));
     }
 
     #[test]

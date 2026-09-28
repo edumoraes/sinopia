@@ -127,12 +127,6 @@ impl Toggle {
         }
     }
 
-    /// Turns it the other way.
-    pub fn flip(self, style: &mut TextStyle) {
-        let on = self.on(style);
-        self.set(style, !on);
-    }
-
     /// Turns it on or off: what a press on the bar does to every text it
     /// is looking at, all of them the same way.
     pub fn set(self, style: &mut TextStyle, on: bool) {
@@ -708,11 +702,11 @@ mod tests {
     }
 
     #[test]
-    fn a_toggle_flips_and_says_where_it_stands() {
+    fn a_toggle_turns_and_says_where_it_stands() {
         let mut st = style();
         for t in Toggle::ALL {
             assert!(!t.on(&st));
-            t.flip(&mut st);
+            t.set(&mut st, true);
             assert!(t.on(&st));
         }
         assert!(st.bold && st.italic && st.underline && st.strike);
