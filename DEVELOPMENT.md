@@ -14,7 +14,7 @@ selection, navigation, pasted images, projects in tabs, frames,
 export to the agent, the CLI an agent asks the board through, and the
 packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1076 tests, and the plugin's
+- `cargo build` clean, `cargo test` with 1094 tests, and the plugin's
   own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,
@@ -429,6 +429,17 @@ packaging that distributes it (item 7):
   document JSON;
   images stay in the store's `blobs/`, so a file carried to another
   machine shows placeholders.
+- The application menu: File, Edit, View and Layer at the left end of
+  the tab strip, the tabs starting after them. A title opens its menu
+  under it and shuts it again; while one is open, passing over another
+  title opens that one. Every line is something the board already did —
+  New, Open, Save, Save As, Export to Agent, Close and Quit; Undo, Redo,
+  Cut, Copy, Paste and Delete; the layers panel and the brush library;
+  the layer commands a row's menu has, plus a new layer or group and the
+  four arrangements — written with the keys that do the same, and
+  offered only where it would do something now. The keys and the lines
+  are one mapping (`menubar::shortcut`), so a hint cannot disagree with
+  its key; `Ctrl+N` (a new board) and `Ctrl+Q` (quit) joined them.
 - Text: a glyph atlas from a font shipped inside the binary, drawn by
   the same pipeline as the images — one white sheet, alpha for coverage,
   a UV cell per glyph. It dresses the tabs and the layers panel; the

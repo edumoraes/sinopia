@@ -1276,6 +1276,13 @@ impl Editor {
         self.clone().run(&mut doc, command) != Change::None
     }
 
+    /// Whether `Del` would take something away, asked the way [`Editor::can`]
+    /// asks: on copies.
+    pub fn can_delete(&self, doc: &Document) -> bool {
+        let mut doc = doc.clone();
+        self.clone().delete(&mut doc) != Change::None
+    }
+
     /// Tags layer `id` with `tag` — and every picked layer with it, when
     /// it is one of them, as a menu on a picked row speaks for the pick.
     /// A lock does not keep a tag off: it is about the layer, and not
@@ -2977,6 +2984,18 @@ mod tests {
 
     fn click(e: &mut Editor, v: &View, doc: &mut Document, at: (f64, f64)) -> Change {
         drag(e, v, doc, at, at)
+    }
+
+    #[test]
+    fn delete_is_offered_only_where_del_would_take_something() {
+        let mut e = Editor::new();
+        let mut doc = board();
+        let v = view();
+        assert!(!e.can_delete(&doc), "nothing selected");
+        let _ = click(&mut e, &v, &mut doc, (70.0, 70.0));
+        assert!(e.can_delete(&doc));
+        assert_eq!(doc.elements.len(), 2, "asking takes nothing away");
+        assert_eq!(e.selection(), ["b"]);
     }
 
     #[test]

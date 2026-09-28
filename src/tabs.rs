@@ -62,18 +62,22 @@ pub struct Tabs {
     pub strip: ScreenRect,
     pub tabs: Vec<TabBox>,
     pub new: ScreenRect,
+    /// Where the row starts: what stands left of it is not the strip's.
+    left: f32,
     active: usize,
     scale: f32,
 }
 
 impl Tabs {
-    /// `labels` is one `(text, dirty)` per open project, in tab order.
+    /// `labels` is one `(text, dirty)` per open project, in tab order;
+    /// the row starts `left` physical px in, past the application menu.
     pub fn layout(
         viewport: Viewport,
         scale: f64,
         atlas: &Atlas,
         labels: &[(String, bool)],
         active: usize,
+        left: f32,
     ) -> Tabs {
         let s = scale as f32;
         let strip = ScreenRect {
@@ -83,7 +87,7 @@ impl Tabs {
             h: (HEIGHT * s).round(),
         };
         let new_w = NEW * s;
-        let room = (strip.w - new_w).max(0.0);
+        let room = (strip.w - left - new_w).max(0.0);
         let n = labels.len().max(1) as f32;
         let tab_w = (room / n).clamp(MIN_TAB * s, MAX_TAB * s);
 
@@ -105,7 +109,7 @@ impl Tabs {
             .enumerate()
             .map(|(i, (text, dirty))| {
                 let rect = ScreenRect {
-                    x: (strip.x + i as f32 * tab_w - shift).round(),
+                    x: (left + i as f32 * tab_w - shift).round(),
                     y: strip.y,
                     w: tab_w.round(),
                     h: strip.h,
@@ -115,7 +119,7 @@ impl Tabs {
             .collect();
 
         let new = ScreenRect {
-            x: (strip.x + (total - shift).min(room)).round(),
+            x: (left + (total - shift).min(room)).round(),
             y: strip.y,
             w: new_w,
             h: strip.h,
@@ -124,6 +128,7 @@ impl Tabs {
             strip,
             tabs,
             new,
+            left,
             active: active.min(labels.len().saturating_sub(1)),
             scale: s,
         }
@@ -135,6 +140,9 @@ impl Tabs {
         }
         if self.new.contains(x, y) {
             return Some(TabHit::New);
+        }
+        if x < f64::from(self.left) {
+            return Some(TabHit::Strip);
         }
         for (i, tab) in self.tabs.iter().enumerate() {
             if !tab.rect.contains(x, y) {
@@ -170,6 +178,14 @@ impl Tabs {
             ),
         ];
 
+        // What a tab draws stops where the row starts: one slid left to
+        // keep the active tab in view goes under nothing.
+        let row = ScreenRect {
+            x: self.left,
+            w: (self.strip.w - self.left).max(0.0),
+            ..self.strip
+        };
+        let first = out.len();
         for (i, tab) in self.tabs.iter().enumerate() {
             let active = i == self.active;
             if active {
@@ -206,6 +222,9 @@ impl Tabs {
         }
 
         out.extend(plus(self.new, NEW_ARM * s, NEW_STROKE * s, theme.icon));
+        for p in &mut out[first..] {
+            *p = p.clipped(row);
+        }
         out
     }
 
@@ -312,7 +331,7 @@ mod tests {
 
     fn tabs_of(names: &[&str]) -> Tabs {
         let a = atlas();
-        Tabs::layout(viewport(1200), 1.0, &a, &labels(names), 0)
+        Tabs::layout(viewport(1200), 1.0, &a, &labels(names), 0, 0.0)
     }
 
     #[test]
@@ -363,7 +382,7 @@ mod tests {
     fn the_active_tab_stays_in_view_when_there_are_too_many() {
         let names: Vec<&str> = vec!["board"; 60];
         let a = atlas();
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&names), 59);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&names), 59, 0.0);
         let last = t.tabs[59].rect;
         assert!(last.x >= t.strip.x, "{last:?}");
         assert!(last.x + last.w <= t.strip.x + t.strip.w, "{last:?}");
@@ -373,7 +392,7 @@ mod tests {
     fn the_first_tab_needs_no_shift() {
         let names: Vec<&str> = vec!["board"; 60];
         let a = atlas();
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&names), 0);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&names), 0, 0.0);
         assert_eq!(t.tabs[0].rect.x, 0.0);
     }
 
@@ -413,6 +432,51 @@ mod tests {
     }
 
     #[test]
+    fn the_row_starts_where_it_is_told_and_the_strip_still_spans_the_window() {
+        // The application menu stands at the strip's left end.
+        let a = atlas();
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&["a", "b"]), 0, 180.0);
+        assert_eq!(t.strip.x, 0.0);
+        assert_eq!(t.strip.w, 1200.0);
+        assert_eq!(t.tabs[0].rect.x, 180.0);
+        let last = t.tabs.last().unwrap().rect;
+        assert_eq!(t.new.x, last.x + last.w);
+    }
+
+    #[test]
+    fn a_row_that_slides_keeps_the_active_tab_clear_of_what_stands_left_of_it() {
+        let names: Vec<&str> = vec!["board"; 60];
+        let a = atlas();
+        for active in [0, 30, 59] {
+            let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&names), active, 180.0);
+            let tab = t.tabs[active].rect;
+            assert!(tab.x >= 180.0, "{active}: {tab:?}");
+            assert!(tab.x + tab.w <= t.strip.x + t.strip.w, "{active}: {tab:?}");
+            assert!(t.new.x + t.new.w <= t.strip.w, "{active}");
+        }
+    }
+
+    #[test]
+    fn a_tab_slid_under_what_stands_left_of_the_row_is_not_there_to_click() {
+        let names: Vec<&str> = vec!["board"; 60];
+        let a = atlas();
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&names), 59, 180.0);
+        assert_eq!(t.hit(100.0, 10.0), Some(TabHit::Strip));
+    }
+
+    #[test]
+    fn a_tab_slid_left_is_cut_where_the_row_starts() {
+        let names: Vec<&str> = vec!["board"; 60];
+        let a = atlas();
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&names), 59, 180.0);
+        // The strip's own ground and its seam span the window; everything
+        // a tab draws stops at the row's left edge.
+        for p in t.prims(&a, 0, &Theme::light()).iter().skip(2) {
+            assert!(p.clip[0] >= 180.0, "{:?}", p.clip);
+        }
+    }
+
+    #[test]
     fn a_click_below_the_strip_belongs_to_the_canvas() {
         let t = tabs_of(&["alpha"]);
         assert_eq!(t.hit(100.0, HEIGHT as f64 + 1.0), None);
@@ -422,7 +486,7 @@ mod tests {
     fn a_long_name_is_cut_to_fit_its_tab() {
         let a = atlas();
         let long = "a board with a name far too long for any tab";
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&[long]), 0);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&[long]), 0, 0.0);
         let shown = &t.tabs[0].label;
         assert!(shown.ends_with('…'), "{shown:?}");
         assert!(shown.chars().count() < long.chars().count());
@@ -439,7 +503,7 @@ mod tests {
         let a = atlas();
         // Enough tabs to squeeze every one down to the floor.
         let many: Vec<(String, bool)> = (0..40).map(|i| ("board".to_owned(), i == 3)).collect();
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &many, 0);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &many, 0, 0.0);
         assert_eq!(t.tabs[0].rect.w, MIN_TAB);
         for tab in &t.tabs {
             assert_eq!(tab.label, "");
@@ -460,7 +524,7 @@ mod tests {
     fn the_dot_shows_only_for_unsaved_work() {
         let a = atlas();
         let mixed = vec![("saved".to_owned(), false), ("edited".to_owned(), true)];
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &mixed, 0);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &mixed, 0, 0.0);
         assert!(t.tabs[0].dot.is_none());
         assert!(t.tabs[1].dot.is_some());
     }
@@ -469,7 +533,7 @@ mod tests {
     fn the_dot_pushes_the_label_along() {
         let a = atlas();
         let pair = vec![("board".to_owned(), false), ("board".to_owned(), true)];
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &pair, 0);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &pair, 0, 0.0);
         let clean_x = t.tabs[0].label_x - t.tabs[0].rect.x;
         let dirty_x = t.tabs[1].label_x - t.tabs[1].rect.x;
         assert!(dirty_x > clean_x, "{dirty_x} vs {clean_x}");
@@ -478,7 +542,7 @@ mod tests {
     #[test]
     fn every_mark_stays_inside_its_tab() {
         let a = atlas();
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &[("notes".to_owned(), true)], 0);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &[("notes".to_owned(), true)], 0, 0.0);
         let tab = &t.tabs[0];
         assert!(tab.rect.contains_rect(&tab.close.unwrap()));
         assert!(tab.rect.contains_rect(&tab.dot.unwrap()));
@@ -489,7 +553,7 @@ mod tests {
     #[test]
     fn the_scale_factor_carries_through() {
         let a = Atlas::build(&Font::bundled(), Tabs::label_px(LABEL, 2.0));
-        let t = Tabs::layout(viewport(2400), 2.0, &a, &labels(&["notes"]), 0);
+        let t = Tabs::layout(viewport(2400), 2.0, &a, &labels(&["notes"]), 0, 0.0);
         assert_eq!(t.strip.h, HEIGHT * 2.0);
         assert_eq!(t.tabs[0].rect.w, MAX_TAB * 2.0);
         assert_eq!(t.new.w, NEW * 2.0);
@@ -504,7 +568,7 @@ mod tests {
     #[test]
     fn nothing_is_drawn_outside_the_strip() {
         let a = atlas();
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&["notes", "auth"]), 1);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&["notes", "auth"]), 1, 0.0);
         for p in t.prims(&a, 0, &Theme::light()) {
             // A box carries origin and size; a segment carries its two
             // ends. Both have to stay off the canvas below.
@@ -521,7 +585,7 @@ mod tests {
     fn the_active_tab_is_the_only_one_wearing_the_highlight() {
         let a = atlas();
         let theme = Theme::light();
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&["a", "b", "c"]), 1);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &labels(&["a", "b", "c"]), 1, 0.0);
         let highlights = t
             .prims(&a, 0, &theme)
             .into_iter()
@@ -535,7 +599,7 @@ mod tests {
         let a = atlas();
         let theme = Theme::light();
         let one = vec![("board".to_owned(), true)];
-        let t = Tabs::layout(viewport(1200), 1.0, &a, &one, 0);
+        let t = Tabs::layout(viewport(1200), 1.0, &a, &one, 0, 0.0);
         assert!(
             t.prims(&a, 0, &theme)
                 .iter()
