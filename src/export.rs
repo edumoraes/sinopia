@@ -68,7 +68,7 @@ pub fn owner(doc: &Document, scope: &Scope) -> Option<(String, String)> {
     }
 }
 
-/// The folder under `docs/boards/` a scope's page is written to. An owned
+/// The folder under `.sinopia/` a scope's page is written to. An owned
 /// scope is written under its owner's name — so a frame or a layer sent
 /// again updates its own page, whichever door it left by — and under its
 /// id where the name slugs away to nothing, as every non-Latin name does.
@@ -230,7 +230,7 @@ fn pruned(doc: &Document, layers: &[Layer], needed: &[&str], elements: &[Element
 /// hyphens, and nothing but `[a-z0-9-]` left. It is the whole of the
 /// defence around the typed folder field — `../../etc` holds no
 /// character the rule admits, so what comes out is one directory under
-/// `docs/boards/` whatever went in. The person names the folder; the
+/// `.sinopia/` whatever went in. The person names the folder; the
 /// shape of the path is not theirs to name.
 pub fn slug(name: &str) -> String {
     let mut out = String::new();
@@ -248,7 +248,7 @@ pub fn slug(name: &str) -> String {
 pub const UNNAMED: &str = "board";
 
 /// A slug of `base` that nothing in `taken` already holds, counting up
-/// from 2 as a file manager does. `taken` is what `docs/boards/` already
+/// from 2 as a file manager does. `taken` is what `.sinopia/` already
 /// holds — the listing is the shell's; picking is not.
 pub fn free_name(base: &str, taken: &[String]) -> String {
     let stem = match slug(base) {
@@ -317,8 +317,10 @@ pub fn inventory(doc: &Document, bounds: &Frame) -> String {
     out
 }
 
-/// Where a board's pages live inside a project.
-pub const BOARDS_DIR: &str = "docs/boards";
+/// Where a board's pages live inside a project: a directory of the
+/// board's own, hidden, so the project's `docs/` stays the project's and
+/// one line of `.gitignore` keeps the pages out of its history.
+pub const BOARDS_DIR: &str = ".sinopia";
 
 /// The §8.2 check on a destination. It is a directory, it is not one of
 /// the places nothing may be written into, and it is reached through
@@ -348,7 +350,7 @@ pub fn allowed(dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(real)
 }
 
-/// Writes the page: `<dir>/docs/boards/<slug>/board.{png,json,md}`, plus
+/// Writes the page: `<dir>/.sinopia/<slug>/board.{png,json,md}`, plus
 /// a copy of every blob the json names, so what the agent reads stands
 /// on its own. Fixed names, `0600` files inside `0700` directories,
 /// atomic writes — the store's own terms (§9.3). Answers the files
@@ -389,8 +391,8 @@ fn make_dir(dir: &Path) -> anyhow::Result<()> {
     let mut at = dir.to_path_buf();
     // Only the part this export made is ours to lock down: the project's
     // own directory keeps whatever mode the project gave it. That is the
-    // page's own folder and `boards/` above it — `docs/` is the caller's,
-    // and a third step would take it.
+    // page's own folder and `.sinopia/` above it — the directory above
+    // that is the project, and a third step would take it.
     for _ in 0..2 {
         std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("chmod 0700 {at:?}"))?;
@@ -456,6 +458,25 @@ pub fn fit_view(bounds: &Frame, max_w: u32, max_h: u32, ceiling: f64) -> (View, 
         scale: 1.0,
     };
     (view, w, h)
+}
+
+/// The box a project's preview is fitted into, in px: what the recents
+/// draw it at, twice over for a screen at scale 2.
+pub const PREVIEW_W: u32 = 256;
+pub const PREVIEW_H: u32 = 160;
+
+/// The camera and the size a preview of the whole board is taken with —
+/// the picture the recents show beside its name. It is of what the board
+/// shows, so what is hidden neither appears nor stretches the box, and a
+/// board with nothing on show has none.
+pub fn preview(doc: &Document) -> Option<(View, u32, u32)> {
+    let corners: Vec<[f64; 2]> = doc
+        .painted()
+        .filter_map(|p| select::frame(p.element))
+        .flat_map(|f| f.corners())
+        .collect();
+    let bounds = Frame::around(&corners)?;
+    Some(fit_view(&bounds, PREVIEW_W, PREVIEW_H, EXPORT_SCALE))
 }
 
 #[cfg(test)]
@@ -832,7 +853,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let doc = sub_document(&board(), &Scope::Frame("f1".into()));
         let files = write(dir.path(), "auth-flow", b"PNG", &doc, "# md\n", &[]).unwrap();
-        let root = dir.path().join("docs/boards/auth-flow");
+        let root = dir.path().join(".sinopia/auth-flow");
         assert!(root.join("board.png").exists());
         assert!(root.join("board.json").exists());
         assert!(root.join("board.md").exists());
@@ -846,7 +867,7 @@ mod tests {
         let doc = sub_document(&board(), &Scope::Frame("f1".into()));
         write(dir.path(), "auth-flow", b"PNG", &doc, "# md\n", &[]).unwrap();
         let json =
-            std::fs::read_to_string(dir.path().join("docs/boards/auth-flow/board.json")).unwrap();
+            std::fs::read_to_string(dir.path().join(".sinopia/auth-flow/board.json")).unwrap();
         assert!(Document::from_json(&json).is_ok());
     }
 
@@ -856,7 +877,7 @@ mod tests {
         let doc = sub_document(&board(), &Scope::Frame("f1".into()));
         let blobs = vec![("abc123".to_owned(), b"bytes".to_vec())];
         let files = write(dir.path(), "auth-flow", b"PNG", &doc, "# md\n", &blobs).unwrap();
-        assert!(dir.path().join("docs/boards/auth-flow/blobs/abc123").exists());
+        assert!(dir.path().join(".sinopia/auth-flow/blobs/abc123").exists());
         assert_eq!(files.len(), 4);
     }
 
@@ -866,7 +887,7 @@ mod tests {
         let doc = sub_document(&board(), &Scope::Frame("f1".into()));
         write(dir.path(), "auth-flow", b"one", &doc, "# a\n", &[]).unwrap();
         write(dir.path(), "auth-flow", b"two", &doc, "# b\n", &[]).unwrap();
-        let png = std::fs::read(dir.path().join("docs/boards/auth-flow/board.png")).unwrap();
+        let png = std::fs::read(dir.path().join(".sinopia/auth-flow/board.png")).unwrap();
         assert_eq!(png, b"two");
     }
 
@@ -876,7 +897,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let doc = sub_document(&board(), &Scope::Frame("f1".into()));
         write(dir.path(), "auth-flow", b"PNG", &doc, "# md\n", &[]).unwrap();
-        let root = dir.path().join("docs/boards/auth-flow");
+        let root = dir.path().join(".sinopia/auth-flow");
         let f = std::fs::metadata(root.join("board.png")).unwrap();
         assert_eq!(f.permissions().mode() & 0o777, 0o600);
         let d = std::fs::metadata(&root).unwrap();
@@ -887,20 +908,33 @@ mod tests {
     fn the_export_locks_down_what_it_made_and_not_the_project_around_it() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
-        // A project whose `docs/` is world-readable on purpose — a static
-        // site, a CI job, another user. The export walks through it and
-        // must leave it exactly as it found it.
-        let docs = dir.path().join("docs");
-        std::fs::create_dir_all(&docs).unwrap();
-        std::fs::set_permissions(&docs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A project that is world-readable on purpose — a static site, a
+        // CI job, another user. The export walks into it and must leave
+        // it exactly as it found it.
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o755)).unwrap();
         let doc = sub_document(&board(), &Scope::Frame("f1".into()));
-        write(dir.path(), "auth-flow", b"PNG", &doc, "# md\n", &[]).unwrap();
+        write(&project, "auth-flow", b"PNG", &doc, "# md\n", &[]).unwrap();
         let mode = |p: &std::path::Path| {
             std::fs::metadata(p).unwrap().permissions().mode() & 0o777
         };
-        assert_eq!(mode(&docs.join("boards/auth-flow")), 0o700, "the page is ours");
-        assert_eq!(mode(&docs.join("boards")), 0o700, "and the folder it sits in");
-        assert_eq!(mode(&docs), 0o755, "`docs/` is the project's, and stays as it was");
+        assert_eq!(mode(&project.join(".sinopia/auth-flow")), 0o700, "the page is ours");
+        assert_eq!(mode(&project.join(".sinopia")), 0o700, "and the folder it sits in");
+        assert_eq!(mode(&project), 0o755, "the project is its own, and stays as it was");
+    }
+
+    #[test]
+    fn nothing_is_written_under_docs() {
+        // `docs/` is the project's to arrange. A page is the board's, and
+        // it goes in a directory of the board's own that the project can
+        // ignore with one line.
+        let dir = tempfile::tempdir().unwrap();
+        let doc = sub_document(&board(), &Scope::Frame("f1".into()));
+        let files = write(dir.path(), "auth-flow", b"PNG", &doc, "# md\n", &[]).unwrap();
+        assert!(!dir.path().join("docs").exists());
+        let root = dir.path().join(".sinopia");
+        assert!(files.iter().all(|f| f.starts_with(&root)), "{files:?}");
     }
 
     #[test]
@@ -990,5 +1024,49 @@ mod tests {
         let b = Frame::spanning([5.0, 5.0], [5.0, 5.0]);
         let (_, w, h) = view_for(&b, 4096);
         assert!(w >= 1 && h >= 1);
+    }
+
+    #[test]
+    fn an_empty_board_has_no_preview() {
+        // Nothing to picture: the recents show the kind's glyph rather
+        // than a blank card of the board's ground.
+        assert!(preview(&Document::new("empty")).is_none());
+    }
+
+    #[test]
+    fn a_preview_fits_the_box_and_keeps_the_board_s_shape() {
+        let (view, w, h) = preview(&board()).expect("a board with ink has a preview");
+        assert!(w <= PREVIEW_W && h <= PREVIEW_H, "{w}×{h}");
+        assert!(w == PREVIEW_W || h == PREVIEW_H, "as large as fits: {w}×{h}");
+        assert_eq!((view.viewport.w, view.viewport.h), (w, h));
+    }
+
+    #[test]
+    fn a_preview_is_of_the_whole_board_and_not_one_frame() {
+        // The frame spans 0..100 and the loose rect sits at 500..510, so
+        // the middle of the two is well past the frame.
+        let (view, _, _) = preview(&board()).unwrap();
+        assert!((view.camera.x - 255.0).abs() < 1e-9, "{}", view.camera.x);
+        assert!((view.camera.y - 255.0).abs() < 1e-9, "{}", view.camera.y);
+    }
+
+    #[test]
+    fn what_is_hidden_is_not_in_the_preview() {
+        // A preview is what the board shows, so a layer the person put
+        // away neither appears in it nor stretches the box it is taken of.
+        let mut doc = board();
+        doc.layers[0].visible = false;
+        let (view, _, _) = preview(&doc).unwrap();
+        assert!((view.camera.x - 50.0).abs() < 1e-9, "{}", view.camera.x);
+        assert!((view.camera.y - 25.0).abs() < 1e-9, "{}", view.camera.y);
+    }
+
+    #[test]
+    fn a_board_whose_only_ink_is_hidden_has_no_preview() {
+        let mut doc = Document::new("plan");
+        doc.elements
+            .push(Element::Rect(rect("r", &doc.layers[0].id.clone(), 0.0, 0.0, 10.0, 10.0)));
+        doc.layers[0].visible = false;
+        assert!(preview(&doc).is_none());
     }
 }

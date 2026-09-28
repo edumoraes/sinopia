@@ -713,12 +713,12 @@ mod tests {
     #[test]
     fn the_prompt_puts_the_line_first_and_the_paths_under_it() {
         let files = vec![
-            "docs/boards/auth/board.png".to_owned(),
-            "docs/boards/auth/board.json".to_owned(),
+            ".sinopia/auth/board.png".to_owned(),
+            ".sinopia/auth/board.json".to_owned(),
         ];
         let p = prompt("implement this flow", &files);
         assert!(p.starts_with("implement this flow\n"));
-        assert!(p.contains("\n  docs/boards/auth/board.png\n"));
+        assert!(p.contains("\n  .sinopia/auth/board.png\n"));
         assert!(p.contains("Diagram exported from the board:"));
     }
 
@@ -727,16 +727,16 @@ mod tests {
         // The agent is running in the directory the files were written
         // into, so an absolute path would say where the person's home
         // is for no reason.
-        let files = vec!["docs/boards/a/board.png".to_owned()];
+        let files = vec![".sinopia/a/board.png".to_owned()];
         assert!(!prompt("go", &files).contains("/home/"));
     }
 
     #[test]
     fn a_relative_path_is_what_the_files_reduce_to() {
         let files = [std::path::PathBuf::from(
-            "/home/e/Work/a/docs/boards/x/board.png",
+            "/home/e/Work/a/.sinopia/x/board.png",
         )];
         let rel = relative(&files, std::path::Path::new("/home/e/Work/a"));
-        assert_eq!(rel, ["docs/boards/x/board.png"]);
+        assert_eq!(rel, [".sinopia/x/board.png"]);
     }
 }

@@ -38,6 +38,22 @@ pub fn decode(bytes: &[u8]) -> anyhow::Result<Bitmap> {
     })
 }
 
+/// Encodes tightly packed RGBA8 as PNG: the one way a picture the board
+/// drew leaves it as a file — a page's, a merge's, a project's preview.
+pub fn encode(rgba: &[u8], w: u32, h: u32) -> anyhow::Result<Vec<u8>> {
+    use image::ImageEncoder as _;
+    anyhow::ensure!(
+        rgba.len() as u64 == u64::from(w) * u64::from(h) * 4,
+        "{} bytes of texels are not a {w}x{h} picture",
+        rgba.len()
+    );
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(rgba, w, h, image::ExtendedColorType::Rgba8)
+        .context("encoding the picture")?;
+    Ok(png)
+}
+
 /// What the header says the image measures, refused past the ceiling.
 /// It is the question [`decode`] asks before it allocates, and the whole
 /// of the question where the pixels are not wanted — checking bytes that
@@ -204,5 +220,18 @@ mod tests {
         let (w, h) = fit_size((100, 50), (0.0, 0.0));
         assert!(w > 0.0 && h > 0.0, "{w} x {h}");
         assert!((w / h - 2.0).abs() < 1e-9, "aspect kept: {w} x {h}");
+    }
+
+    #[test]
+    fn what_is_encoded_decodes_to_the_same_texels() {
+        let rgba: Vec<u8> = (0..2 * 3 * 4).map(|i| (i * 7) as u8).collect();
+        let png = encode(&rgba, 2, 3).unwrap();
+        assert!(png.starts_with(b"\x89PNG"), "a PNG, by its signature");
+        assert_eq!(decode(&png).unwrap(), Bitmap { w: 2, h: 3, rgba });
+    }
+
+    #[test]
+    fn texels_that_do_not_fill_the_size_are_refused() {
+        assert!(encode(&[0; 4], 2, 2).is_err());
     }
 }

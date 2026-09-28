@@ -14,7 +14,8 @@ selection, navigation, pasted images, projects in tabs, frames,
 export to the agent, the CLI an agent asks the board through, and the
 packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1063 tests.
+- `cargo build` clean, `cargo test` with 1076 tests, and the plugin's
+  own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,
   `sinopia` and `sinopia-git` — which are built and installed on a
@@ -236,7 +237,7 @@ packaging that distributes it (item 7):
   the pane and its path; a `/proc` walk finds the ones under neither
   and, having no way to talk to them, writes them muted. The page lands
   in that agent's own working directory as three files under
-  `docs/boards/<name>/` — `board.png`, the picture; `board.json`, the
+  `.sinopia/<name>/` — `board.png`, the picture; `board.json`, the
   same objects in the board's own schema; and `board.md`, an inventory
   under a preface saying it is a diagram and not an order — and the
   dialog shows that same picture at its foot before it goes, drawn
@@ -436,11 +437,16 @@ packaging that distributes it (item 7):
   save). Project files chosen through the portal keep the umask instead.
 - IPC protocol §5 (closed schema) + single instance via socket.
 - Recent projects: `index.json` lists both kinds, newest first — a draft
-  by id, a named file by path — and is the one file the plugin reads. A
+  by id, a named file by path — and is what the plugin reads, with the
+  preview each entry names. A
   project moving home stops being two entries; one file stays one entry
   whatever wrote it. Reaching for a file that has gone is the only thing
   that drops one, so a project on a drive nobody has mounted keeps its
-  place.
+  place. Every save — a draft kept, a file written — pictures the whole
+  board as it shows into `thumbs/<id>.png`, at most 256×160, through the
+  offscreen path a page is drawn by, and the entry names it in `thumb`;
+  a board with nothing on show has none. A preview that fails is logged
+  and the save still counts.
 - CLI: `--new`, `--open <id>`, `--open-file <path>`, `--export <dir>`,
   `--shutdown`, `--socket <path>`, the `agent` verb — `agent
   frames`, `agent read <frame> [--to <dir>]`, `agent add <file>` — and
@@ -454,13 +460,16 @@ packaging that distributes it (item 7):
   non-zero on a refusal, saying why.
 - Omarchy plugin (`plugin/`, §10.2): a bar widget whose popout holds the
   two ways in — `n` for a new board, `o` for the recent projects, newest
-  first, opened by `Enter` or a click. The list shows twenty and marks
-  which kind each is; typing filters the whole index, so the fortieth
+  first, opened by `Enter` or a click. The list shows twenty, each with a
+  picture of its board as it was last saved and a mark saying which kind
+  it is; typing filters the whole index, so the fortieth
   project is a word away rather than a scroll. A file whose path is not
   there right now is dimmed and says so rather than being dropped. It is
   a shell and
-  nothing more: it reads `index.json`, which is the one file it is
-  allowed to read, drops any entry naming an id the engine would refuse,
+  nothing more: it reads `index.json` and the previews it names — from
+  `thumbs/<id>.png` only, built from an id it has checked and never from
+  a path the index hands over — drops any entry naming an id the engine
+  would refuse,
   and launches the binary detached, so the board owns its own window and
   killing it cannot take the shell down. The engine is looked for on the
   `PATH`, in `~/.local/bin`, at an `enginePath` set in `shell.json`, and
@@ -471,7 +480,7 @@ packaging that distributes it (item 7):
   one nobody meant.
 
 Not yet: the text tool, shapes, export,
-thumbnails, layer opacity and renaming, frames that nest or turn or come
+layer opacity and renaming, frames that nest or turn or come
 in more than the one basic kind, and the six sliders that stay
 muted — three randomness amounts whose scale the sets contradict, and
 the whole of Paint, which asks the canvas to read back the ink it has
@@ -624,6 +633,8 @@ cargo run                      # most recent board (or a new one)
 cargo run -- --new             # new board
 cargo run -- --theme           # re-read the desktop's theme (needs a live board)
 cargo test                     # full suite
+QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/plugin
+                               # the plugin's reading of the index
 ```
 
 Smoke test (opens the window, renders 3 frames, exits):

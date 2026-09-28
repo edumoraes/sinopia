@@ -5,7 +5,7 @@ the local-first whiteboard: a bar icon whose popout holds the two ways into
 the board — `n` for a new one, `o` for the recent projects.
 
 It is a shell, not a second engine. It reads the engine's `index.json` and
-nothing else, speaks intent through the engine's own command line, and
+the previews it names, and nothing else, speaks intent through the engine's own command line, and
 launches the board detached, so the board owns its own window and killing it
 cannot take the shell down.
 
@@ -55,8 +55,9 @@ removed, and the boards stay in `~/.local/share/sinopia` after that.
 
 ## The recents
 
-Both kinds of project stand in one list, newest first, each marked with the
-glyph of the door it came through: a **draft**, which the store keeps and
+Both kinds of project stand in one list, newest first, each with a picture
+of its board as it was last saved and marked with the glyph of the door it
+came through: a **draft**, which the store keeps and
 which opens by id (`--open`), or a **file** the person named, which opens by
 path (`--open-file`). Two flags rather than one, because the engine's schema
 is closed and will not guess which a string is.
@@ -126,3 +127,11 @@ Through the link an edit does not reload on its own: the shell watches
 `omarchy-shell shell rescanPlugins` only refreshes the list of plugins.
 `omarchy restart shell` is what loads the edit; QML errors land in
 `journalctl --user -t omarchy-shell`.
+
+What the widget makes of the index lives in `recents.js`, a pure library
+with a suite of its own in the Sinopia repository's `tests/plugin/`, run by
+Qt 6's test runner without a shell:
+
+```sh
+QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/plugin
+```

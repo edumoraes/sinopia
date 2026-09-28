@@ -3,15 +3,17 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "recents.js" as Recents
 
 // Sinopia on the bar: an icon whose popout holds the two ways into the
 // board — a new one, or one of the recent projects.
 //
 // The plugin speaks intent and nothing else (§3). It does not interpret a
-// document: it reads `index.json`, which is the one file it is allowed to
-// read (§6), and every gesture leaves through the CLI that mirrors the
-// socket (§5). The child is launched detached, so it owns its own window
-// (§4.1) and killing it cannot take the shell down with it (§11).
+// document: it reads `index.json` and the previews it names, which are
+// the files it is allowed to read (§6), and every gesture leaves through
+// the CLI that mirrors the socket (§5). The child is launched detached,
+// so it owns its own window (§4.1) and killing it cannot take the shell
+// down with it (§11).
 //
 // Ui/Panel hands over the whole popout contract: open, close, toggle,
 // opened, switchPanel, setting and the IpcHandler.
@@ -50,6 +52,10 @@ Panel {
   // just the rows on show.
   property string filter: ""
 
+  // Where the engine keeps its data: the index and, beside it, the
+  // previews it takes of each project.
+  readonly property string dataDir: Quickshell.env("HOME") + "/.local/share/sinopia"
+
   // The engine, resolved when the popout opens (§10.1). "" while nobody
   // has answered; `searched` separates that from "it is not installed".
   property string enginePath: ""
@@ -86,46 +92,11 @@ Panel {
 
   // ------------------------------------------------------------- the index
 
-  // Mirrors `validate_id` in the engine's own store: a row naming an id
-  // it would refuse could never be opened, so it is not shown.
-  function validId(id) {
-    var s = String(id || "")
-    return s.length > 0 && s.length <= 64 && /^[A-Za-z0-9_-]+$/.test(s)
-  }
-
-  // A file is called by its own name, as the tab calls it: the title
-  // travelled inside the JSON, the name is what the person chose.
-  function fileName(path) {
-    var parts = String(path).split("/")
-    var last = parts[parts.length - 1] || ""
-    var dot = last.lastIndexOf(".")
-    return (dot > 0 ? last.slice(0, dot) : last) || "untitled"
-  }
-
+  // The reading itself is recents.js's, where it is tested; a text that
+  // will not parse leaves the last good list up.
   function absorb(raw) {
-    var list = []
-    try {
-      var d = JSON.parse(String(raw || ""))
-      var entries = (d && d.boards) || []
-      for (var i = 0; i < entries.length; i++) {
-        var e = entries[i]
-        if (!e || !root.validId(e.id)) {
-          continue
-        }
-        var path = typeof e.path === "string" && e.path !== "" ? e.path : ""
-        var title = String(e.title || "").replace(/\s+/g, " ").trim()
-        list.push({
-          "id": String(e.id),
-          "path": path,
-          "name": path !== "" ? root.fileName(path) : (title !== "" ? title : "untitled"),
-          "titled": path !== "" || title !== "",
-          "updated": Number(e.updated_at) || 0
-        })
-      }
-      list.sort(function (a, b) { return b.updated - a.updated })
-    } catch (err) {
-      // A half-written index — the engine writes atomically, but a reader
-      // can still meet a truncated read — leaves the last good list up.
+    var list = Recents.parse(raw)
+    if (list === null) {
       return
     }
     root.projects = list
@@ -156,7 +127,7 @@ Panel {
 
   FileView {
     id: index
-    path: Quickshell.env("HOME") + "/.local/share/sinopia/index.json"
+    path: root.dataDir + "/index.json"
     watchChanges: true
     printErrors: false          // no projects yet is a state, not an error
     onLoaded: root.absorb(text())
@@ -269,7 +240,7 @@ Panel {
     }
     if (p.path !== "") {
       root.launch(["--open-file", p.path])
-    } else if (root.validId(p.id)) {
+    } else if (Recents.validId(p.id)) {
       root.launch(["--open", p.id])
     }
   }
@@ -677,12 +648,14 @@ Panel {
     }
   }
 
-  // A project row: the mark saying which kind it is, the name, and how
-  // long ago it was written. A draft is called by its title and a file by
-  // its own name, exactly as the tab calls each. Everything here came out
-  // of `index.json`, so it is drawn as plain text and elided — the index
-  // is the surface between two processes, and it is read as data, never
-  // as markup (§6).
+  // A project row: a picture of the board as it was last saved, its name,
+  // and under it the mark saying which kind it is and how long ago it was
+  // written. A draft is called by its title and a file by its own name,
+  // exactly as the tab calls each. Everything here came out of
+  // `index.json`, so it is drawn as plain text and elided, and the
+  // picture is read from the one place the id alone names — the index is
+  // the surface between two processes, and it is read as data, never as
+  // markup or as a path (§6).
   component ProjectRow: CursorSurface {
     id: projectRow
     required property var project
@@ -693,7 +666,7 @@ Panel {
 
     hasCursor: root.cursorLive && root.screen === "open" && root.cursor === rowIndex
     foreground: root.foreground
-    implicitHeight: projectLabels.implicitHeight + Style.spacing.rowPaddingX
+    implicitHeight: Math.max(preview.height, projectText.implicitHeight) + Style.spacing.rowPaddingX
     // A file that is not there is still worth showing — an unmounted
     // drive is not a deletion — but it is not worth promising.
     opacity: gone ? 0.45 : 1.0
@@ -718,41 +691,72 @@ Panel {
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.spacing.controlGap
 
-      Text {
-        id: mark
+      // The board as it shows, fitted whole into a tile of the preview's
+      // own shape. A board with nothing on it has no picture, and an
+      // empty tile says exactly that.
+      Rectangle {
+        id: preview
         anchors.verticalCenter: parent.verticalCenter
-        // The same two glyphs the menu uses, so the row says which door
-        // it came through: a file the person named, or a draft the store
-        // is keeping for them.
-        text: projectRow.isFile ? "󰉖" : "󰝒"
-        color: root.foreground
-        opacity: 0.55
-        font.family: Style.font.family
-        font.pixelSize: Style.font.iconSmall
+        width: Style.space(64)
+        height: Style.space(40)
+        radius: Style.cornerRadius > 0 ? Style.cornerRadius : Style.space(4)
+        color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+        clip: true
+
+        Image {
+          anchors.fill: parent
+          source: Recents.thumbSource(root.dataDir, projectRow.project)
+          visible: status === Image.Ready
+          fillMode: Image.PreserveAspectFit
+          asynchronous: true
+          cache: false
+          smooth: true
+          mipmap: true
+        }
       }
 
-      Text {
+      Column {
+        id: projectText
         anchors.verticalCenter: parent.verticalCenter
-        width: Math.max(0, projectLabels.width - projectLabels.spacing * 2
-          - mark.implicitWidth - stamp.implicitWidth)
-        textFormat: Text.PlainText
-        text: projectRow.project.name
-        color: root.foreground
-        opacity: projectRow.project.titled ? 1.0 : 0.7
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
-        elide: Text.ElideRight
-      }
+        width: Math.max(0, projectLabels.width - projectLabels.spacing - preview.width)
+        spacing: Style.space(2)
 
-      Text {
-        id: stamp
-        anchors.verticalCenter: parent.verticalCenter
-        textFormat: Text.PlainText
-        text: projectRow.gone ? "not there" : root.whenText(projectRow.project.updated)
-        color: root.foreground
-        opacity: 0.6
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: projectRow.project.name
+          color: root.foreground
+          opacity: projectRow.project.titled ? 1.0 : 0.7
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+
+        Row {
+          spacing: Style.space(6)
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            // The same two glyphs the menu uses, so the row says which
+            // door it came through: a file the person named, or a draft
+            // the store is keeping for them.
+            text: projectRow.isFile ? "󰉖" : "󰝒"
+            color: root.foreground
+            opacity: 0.55
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            textFormat: Text.PlainText
+            text: projectRow.gone ? "not there" : root.whenText(projectRow.project.updated)
+            color: root.foreground
+            opacity: 0.6
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+        }
       }
     }
   }

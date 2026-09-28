@@ -3,9 +3,9 @@
 //! On-disk layout:
 //! ```text
 //! <root>/            0700
-//!   index.json       0600  — the only file the plugin reads
+//!   index.json       0600  — what the plugin reads, with the previews
 //!   boards/<id>.json 0600  — document
-//!   thumbs/<id>.png  0600  — preview (later phase)
+//!   thumbs/<id>.png  0600  — the recents' preview of a project
 //!   blobs/<sha256>   0600  — images (later phase)
 //! ```
 //! Writes are always atomic: tmp in the same directory + rename.
@@ -113,7 +113,7 @@ impl Store {
             id: doc.id.clone(),
             title: doc.title.clone(),
             updated_at,
-            thumb: None,
+            thumb: self.thumb_of(&doc.id),
             path: None,
         })
     }
@@ -138,9 +138,40 @@ impl Store {
             id: doc.id.clone(),
             title: doc.title.clone(),
             updated_at,
-            thumb: None,
+            thumb: self.thumb_of(&doc.id),
             path: Some(path.to_path_buf()),
         })
+    }
+
+    /// Keeps `png` as the preview of project `id` beside its entry in the
+    /// recents, or takes the preview away when there is nothing to show.
+    /// Keyed by the document's id for a draft and a named file alike, so
+    /// the plugin never has to build a path from anything but an id it
+    /// has already checked. The entry names it on the next save.
+    pub fn set_thumb(&self, id: &str, png: Option<&[u8]>) -> anyhow::Result<()> {
+        validate_id(id)?;
+        let path = self.thumb_path(id);
+        match png {
+            Some(bytes) => write_private_atomic(&path, bytes),
+            None => match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(e).with_context(|| format!("removing {path:?}"))
+                }
+                _ => Ok(()),
+            },
+        }
+    }
+
+    /// What an entry says of its preview: the path under the root, while
+    /// there is one.
+    fn thumb_of(&self, id: &str) -> Option<String> {
+        self.thumb_path(id)
+            .is_file()
+            .then(|| format!("thumbs/{id}.png"))
+    }
+
+    fn thumb_path(&self, id: &str) -> PathBuf {
+        self.root.join("thumbs").join(format!("{id}.png"))
     }
 
     /// Drops what `id` names from the recents. What a project whose file
@@ -637,6 +668,68 @@ mod tests {
         assert_eq!(index[0].title, "v2");
         assert_eq!(index[0].updated_at, 200);
         assert_eq!(index[0].thumb, None);
+    }
+
+    #[test]
+    fn a_thumbnail_is_kept_privately_under_thumbs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let doc = doc_with_title("t");
+        store.set_thumb(&doc.id, Some(b"PNG")).unwrap();
+        let at = store.root().join("thumbs").join(format!("{}.png", doc.id));
+        assert_eq!(std::fs::read(&at).unwrap(), b"PNG");
+        assert_eq!(mode_of(&at), 0o600);
+    }
+
+    #[test]
+    fn a_thumbnail_with_nothing_to_show_is_taken_away() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let doc = doc_with_title("t");
+        store.set_thumb(&doc.id, Some(b"PNG")).unwrap();
+        store.set_thumb(&doc.id, None).unwrap();
+        assert!(!store.root().join("thumbs").join(format!("{}.png", doc.id)).exists());
+        // And taking away one that was never there is not an error.
+        store.set_thumb(&doc.id, None).unwrap();
+    }
+
+    #[test]
+    fn a_thumbnail_s_id_is_checked_before_it_is_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        assert!(store.set_thumb("../escape", Some(b"PNG")).is_err());
+        assert!(store.set_thumb("../escape", None).is_err());
+        assert!(!tmp.path().join("d/escape.png").exists());
+    }
+
+    #[test]
+    fn the_index_names_a_draft_s_thumbnail_once_there_is_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let doc = doc_with_title("t");
+        store.save_at(&doc, 100).unwrap();
+        assert_eq!(store.index().unwrap()[0].thumb, None, "none taken yet");
+
+        store.set_thumb(&doc.id, Some(b"PNG")).unwrap();
+        store.save_at(&doc, 200).unwrap();
+        let thumb = format!("thumbs/{}.png", doc.id);
+        assert_eq!(store.index().unwrap()[0].thumb.as_deref(), Some(thumb.as_str()));
+
+        store.set_thumb(&doc.id, None).unwrap();
+        store.save_at(&doc, 300).unwrap();
+        assert_eq!(store.index().unwrap()[0].thumb, None, "and none once it is gone");
+    }
+
+    #[test]
+    fn the_index_names_a_file_s_thumbnail_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path().join("d")).unwrap();
+        let doc = doc_with_title("t");
+        let path = tmp.path().join("plan.sinopia");
+        store.set_thumb(&doc.id, Some(b"PNG")).unwrap();
+        store.remember_file_at(&doc, &path, 100).unwrap();
+        let thumb = format!("thumbs/{}.png", doc.id);
+        assert_eq!(store.index().unwrap()[0].thumb.as_deref(), Some(thumb.as_str()));
     }
 
     #[test]

@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use anyhow::Context as _;
-use image::ImageEncoder as _;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -485,6 +484,11 @@ impl App {
     /// home only if the write lands. A Save As that fails must not leave
     /// a project claiming a file it never reached.
     fn save_project_at(&mut self, index: usize, origin: Origin) -> bool {
+        if matches!(origin, Origin::Untitled) || index >= self.open.len() {
+            return false;
+        }
+        // The preview goes first, so the entry the save writes names it.
+        self.keep_preview(index);
         let Some(project) = self.open.get(index).map(|o| &o.project) else {
             return false;
         };
@@ -745,6 +749,32 @@ impl App {
             self.retitle();
         }
         self.owed = Some(Instant::now() + SAFETY_DELAY);
+    }
+
+    /// Takes the picture the recents show of tab `index` — the whole board
+    /// as it shows, small — and hands it to the store, or takes the old
+    /// one away when there is nothing on show. A preview is a courtesy to
+    /// the list, never a condition of the save: one that fails is logged
+    /// and the save goes on.
+    fn keep_preview(&mut self, index: usize) {
+        let Some(doc) = self.open.get(index).map(|o| o.project.doc.clone()) else {
+            return;
+        };
+        let png = match export::preview(&doc) {
+            None => None,
+            Some((view, w, h)) => {
+                match self.render_sub(&doc, &view, w, h).and_then(|rgba| bitmap::encode(&rgba, w, h)) {
+                    Ok(png) => Some(png),
+                    Err(e) => {
+                        log::warn!("taking the preview of {:?}: {e:#}", doc.title);
+                        return;
+                    }
+                }
+            }
+        };
+        if let Err(e) = self.store.set_thumb(&doc.id, png.as_deref()) {
+            log::warn!("keeping the preview of {:?}: {e:#}", doc.title);
+        }
     }
 
     /// Writes every dirty draft where the store keeps it, and clears the
@@ -1272,8 +1302,7 @@ impl App {
         let mut rgba = self.render_onto(&sub, &view, w, h, [0.0; 4])?;
         let srgb = self.gfx.as_ref().is_some_and(Gfx::is_srgb);
         bitmap::unpremultiply(&mut rgba, srgb);
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)?;
+        let png = bitmap::encode(&rgba, w, h)?;
         let blob = self.store.write_blob(&png)?;
         let gfx = self.gfx.as_mut().context("there is no window to draw with")?;
         gfx.upload_image(&blob, &Bitmap { w, h, rgba })?;
@@ -1964,13 +1993,7 @@ impl App {
         let most = self.gfx.as_ref().map_or(1, Gfx::max_dimension);
         let (view, w, h) = export::view_for(&bounds, most);
         let rgba = self.render_sub(&sub, &view, w, h)?;
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png).write_image(
-            &rgba,
-            w,
-            h,
-            image::ExtendedColorType::Rgba8,
-        )?;
+        let png = bitmap::encode(&rgba, w, h)?;
         export::write(dir, slug, &png, &sub, &md, &blobs)
     }
 
@@ -4155,7 +4178,7 @@ fn read_fragment(path: &Path) -> anyhow::Result<Document> {
     Document::from_json(&text).with_context(|| format!("parsing {path:?}"))
 }
 
-/// The pages `docs/boards/` in `cwd` already holds. A directory that is
+/// The pages `.sinopia/` in `cwd` already holds. A directory that is
 /// not there holds nothing, which is the answer, not an error.
 fn taken_names(cwd: &str) -> Vec<String> {
     let at = std::path::Path::new(cwd).join(export::BOARDS_DIR);
