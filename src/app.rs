@@ -1529,11 +1529,33 @@ impl App {
         ))
     }
 
-    /// Where the left-hand panels hang from: the properties bar when the
-    /// brush is in hand, the tab strip otherwise.
+    /// Where the left-hand panels hang from: the tab strip, since the
+    /// properties bar stands in the middle — unless the window is so
+    /// narrow that the bar reaches over them, when they hang under it.
     fn above(&self, view: &View) -> f32 {
-        self.props(view)
-            .map_or_else(|| self.strip_top(view), |b| b.rect.y + b.rect.h)
+        let top = self.strip_top(view);
+        let Some(bar) = self.props(view) else {
+            return top;
+        };
+        let s = self.chrome(view);
+        let strip = Strip::layout(view.viewport, s, top).rect;
+        let mut right = strip.x + strip.w;
+        if self.library_shown {
+            let library = Palette::layout(
+                view.viewport,
+                s,
+                top,
+                right + palette::MARGIN * s as f32,
+                self.brushes.sets(),
+                self.palette_scroll,
+            );
+            right = library.rect.x + library.rect.w;
+        }
+        if bar.rect.x < right {
+            bar.rect.y + bar.rect.h
+        } else {
+            top
+        }
     }
 
     /// Whether `screen` is over the strip, the handle, either panel or

@@ -1,11 +1,12 @@
-//! Brush Properties: the bar above the canvas, and what it opens into.
+//! Brush Properties: the bar over the middle of the canvas, and what it
+//! opens into.
 //!
 //! Sketchbook keeps a brush's body in a panel with a Basic tab and an
-//! Advanced one. Here it is a bar under the tab strip — the brush's name
-//! and the pair it is usually judged by, Size and Opacity — with a
-//! chevron that drops the Advanced layout underneath: Pressure, Stamp,
-//! Nib, Randomness and Paint, every section's sliders under its own
-//! heading.
+//! Advanced one. Here it is a bar under the tab strip, centred as the
+//! text's own bar is — the brush's name and the pair it is usually
+//! judged by, Size and Opacity — with a chevron that drops the Advanced
+//! layout underneath: Pressure, Stamp, Nib, Randomness and Paint, every
+//! section's sliders under its own heading.
 //! Closed and open never show the same slider twice; opening trades the
 //! basic pair for the whole body.
 //!
@@ -120,18 +121,26 @@ pub struct Props {
     scale: f32,
 }
 
+/// Where a bar `w` physical px wide stands across the window: in the
+/// middle of it, over the canvas the tool works on — Affinity's context
+/// toolbar, not a panel docked to one side — and never nearer the left
+/// edge than [`MARGIN`], so a window too narrow for it shows its start.
+pub fn centred(viewport: Viewport, w: f32, s: f32) -> f32 {
+    ((viewport.w as f32 - w) / 2.0).round().max((MARGIN * s).round())
+}
+
 impl Props {
     /// `top` is where the tab strip ends, in physical px.
-    pub fn layout(_viewport: Viewport, scale: f64, top: f32, open: bool) -> Props {
+    pub fn layout(viewport: Viewport, scale: f64, top: f32, open: bool) -> Props {
         let s = scale as f32;
-        let x = (MARGIN * s).round();
-        let y = (top + MARGIN * s).round();
         // The same width either way: the line must not jump when the
         // chevron drops what is under it.
         let closed_w =
             PADDING + NAME_W + GAP + MARK + GAP + 2.0 * FIELD_W + GAP + TOGGLE + PADDING;
         let open_w = PADDING + 2.0 * FIELD_W + COL_GAP + PADDING;
         let w = closed_w.max(open_w) * s;
+        let x = centred(viewport, w, s);
+        let y = (top + MARGIN * s).round();
         let bar = ScreenRect {
             x,
             y,
@@ -439,9 +448,10 @@ mod tests {
     }
 
     #[test]
-    fn the_bar_floats_under_the_strip_at_the_left() {
+    fn the_bar_floats_under_the_strip_in_the_middle() {
         let p = Props::layout(VP, 1.0, TOP, false);
-        assert_eq!(p.bar.x, MARGIN);
+        let middle = p.bar.x + p.bar.w / 2.0;
+        assert!((middle - VP.w as f32 / 2.0).abs() <= 0.5, "{middle}");
         assert_eq!(p.bar.y, TOP + MARGIN);
         assert_eq!(p.bar.h, HEIGHT);
         assert_eq!(p.rect, p.bar, "closed, the bar is the whole of it");
@@ -642,8 +652,9 @@ mod tests {
 
     #[test]
     fn layout_scales_with_the_display() {
+        let one = Props::layout(VP, 1.0, TOP, true);
         let p = Props::layout(VP, 2.0, TOP, true);
-        assert_eq!(p.bar.x, MARGIN * 2.0);
+        assert_eq!(p.bar.w, one.bar.w * 2.0);
         assert_eq!(p.bar.h, HEIGHT * 2.0);
         assert_eq!(p.fields[0].track.h, TRACK_H * 2.0);
     }
@@ -651,6 +662,7 @@ mod tests {
     #[test]
     fn a_window_too_narrow_for_the_bar_still_lays_it_out() {
         let p = Props::layout(Viewport { w: 320, h: 800 }, 1.0, TOP, true);
+        assert_eq!(p.bar.x, MARGIN, "it keeps its margin rather than run off the left");
         assert!(!p.fields.is_empty());
         assert!(p.rect.w > 0.0 && p.rect.h > 0.0);
     }
