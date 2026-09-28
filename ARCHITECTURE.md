@@ -60,7 +60,7 @@ Sinopia solves “board the agent eats”.
  └──────────────────────┘                           └───────────┬─────────────┘
         same process                                            │
         as the bar                                     ~/.local/share/sinopia/
-                                                       ~/Work/<proj>/docs/boards/
+                                                       ~/Work/<proj>/.sinopia/
 ```
 
 Three pieces, three lifecycles:
@@ -588,7 +588,7 @@ This is the feature that justifies not being “yet another Omaboard”.
 Agents on Omarchy run in the project's cwd (launching from `$HOME` lands in `~/Work`). They read files. A PNG alone loses structure. The trio:
 
 ```
-<dir>/docs/boards/<slug>/
+<dir>/.sinopia/<slug>/
   board.png     # bbox + margin, high DPI
   board.json    # same schema as the document (without the UI camera if you like)
   board.md      # generated inventory
@@ -765,7 +765,7 @@ shortcut or click
   → app creates the window, loads the JSON, ev: ready
   → user draws (100% in the child)
   → autosave debounced 300–500 ms into the document
-  → Super+E / Export button → trio in docs/boards/<slug>/
+  → Super+E / Export button → trio in .sinopia/<slug>/
   → close the window or op: shutdown
        → flush
        → exit 0
@@ -797,9 +797,9 @@ Future promotion to `kind: service` (resident child, the overlay only raises the
 
 - Connectors with snap.
 - Highlighter.
-- Multi-page / several boards in the same project (`docs/boards/<slug>/`).
+- Multi-page / several boards in the same project (`.sinopia/<slug>/`).
 - Smarter cwd heuristic (list of `claude`/`opencode`/`codex` pids).
-- Tiny skill for agents: “if `docs/boards/**/board.md` exists, read it before implementing”.
+- Tiny skill for agents: “if `.sinopia/**/board.md` exists, read it before implementing”.
 
 **2.0 — collab (later)**
 

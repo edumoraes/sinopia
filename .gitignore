@@ -4,6 +4,8 @@
 __pycache__/
 
 # Where a board leaves for an agent. What lands here is a copy, not a source.
+.sinopia/
+# Where it left before it had a directory of its own.
 docs/boards/
 
 # A release packed by hand, by packaging/archive.sh.

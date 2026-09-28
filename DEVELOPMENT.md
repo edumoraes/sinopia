@@ -236,7 +236,7 @@ packaging that distributes it (item 7):
   the pane and its path; a `/proc` walk finds the ones under neither
   and, having no way to talk to them, writes them muted. The page lands
   in that agent's own working directory as three files under
-  `docs/boards/<name>/` — `board.png`, the picture; `board.json`, the
+  `.sinopia/<name>/` — `board.png`, the picture; `board.json`, the
   same objects in the board's own schema; and `board.md`, an inventory
   under a preface saying it is a diagram and not an order — and the
   dialog shows that same picture at its foot before it goes, drawn

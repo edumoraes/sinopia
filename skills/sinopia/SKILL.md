@@ -39,10 +39,10 @@ sinopia agent frames
 
 sinopia agent read "Auth Flow"          # by the name on its card
 sinopia agent read 01M1SS9… --to .      # or by id; --to defaults to the cwd
-# {"ev":"exported","files":["…/docs/boards/auth-flow/board.png", …],"v":1}
+# {"ev":"exported","files":["…/.sinopia/auth-flow/board.png", …],"v":1}
 ```
 
-Three files land in `<dir>/docs/boards/<frame-name-slugged>/`:
+Three files land in `<dir>/.sinopia/<frame-name-slugged>/`:
 
 | file | what it is |
 | --- | --- |
