@@ -477,6 +477,10 @@ pub struct Gfx {
     shapes: Option<u32>,
     /// The agents' makers' marks, one cell each, for the export dialog.
     agent_logos: Option<u32>,
+    /// The board's glyph sheet: its texture kept, so a glyph that lands
+    /// in it is a region written in place rather than the whole sheet
+    /// uploaded again.
+    letters: Option<(u32, wgpu::Texture)>,
     /// The export dialog's picture of what is leaving: a slot of its own,
     /// replaced in place each time the picture is taken again.
     picture: Option<u32>,
@@ -733,6 +737,7 @@ impl Gfx {
             shapes: None,
             agent_logos: None,
             picture: None,
+            letters: None,
             thumbs: None,
             atlas: None,
             scratch: None,
@@ -875,6 +880,71 @@ impl Gfx {
         };
         self.atlas = Some(slot);
         Ok(slot)
+    }
+
+    /// The board's glyph sheet's slot, the texture made the first time
+    /// it is asked for — empty, as a new texture is.
+    pub fn letters_slot(&mut self) -> u32 {
+        if let Some((slot, _)) = &self.letters {
+            return *slot;
+        }
+        let side = crate::glyphs::SIDE;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("letters"),
+            size: wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: texture_format(self.config.format),
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.textures
+            .push(bind_group(&self.device, &self.tex_bgl, &self.sampler, &view));
+        let slot = (self.textures.len() - 1) as u32;
+        self.letters = Some((slot, texture));
+        slot
+    }
+
+    /// Writes what the glyph sheet owes the texture: the region glyphs
+    /// have landed in since it was last asked, or the whole sheet after
+    /// it started over. Called before anything is drawn that may carry
+    /// text, since a glyph placed while the frame was built is not on the
+    /// texture until this runs.
+    pub fn sync_letters(&mut self, glyphs: &crate::glyphs::Glyphs) {
+        let Some((x, y, w, h)) = glyphs.take_dirty() else {
+            return;
+        };
+        self.letters_slot();
+        let Some((_, texture)) = &self.letters else { return };
+        let sheet = glyphs.bitmap();
+        if sheet.rgba.is_empty() {
+            return;
+        }
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &sheet.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: u64::from((y * sheet.w + x) * 4),
+                bytes_per_row: Some(4 * sheet.w),
+                rows_per_image: Some(sheet.h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Uploads the brush icon sheet and answers its slot, or the slot it
