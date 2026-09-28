@@ -12,12 +12,12 @@ tool:
 nfpm:
   name: sinopia
   maintainer: Eduardo de Moraes <edumoraesdg@gmail.com>
-  homepage: https://github.com/edumoraes/omawhite
+  homepage: https://github.com/edumoraes/sinopia
   description: Local-first whiteboard for Omarchy with export for the agent
   license: MIT
 targets: {}
 release:
-  repository: edumoraes/omawhite
+  repository: edumoraes/sinopia
   checksums: checksums.txt
 assets:
   AMD64:

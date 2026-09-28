@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Local-first whiteboard for Omarchy with export for the agent"
 license = "MIT"
-repository = "https://github.com/edumoraes/omawhite"
+repository = "https://github.com/edumoraes/sinopia"
 
 [dependencies]
 anyhow = "1.0.104"

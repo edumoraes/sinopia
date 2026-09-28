@@ -144,9 +144,9 @@ gh repo create edumoraes/sinopia-plugin --public \
 ssh-keygen -t ed25519 -N '' -C sinopia-plugin-mirror -f plugin-mirror
 gh repo deploy-key add plugin-mirror.pub --repo edumoraes/sinopia-plugin \
   --allow-write --title "sinopia releases"
-gh secret set PLUGIN_DEPLOY_KEY --repo edumoraes/omawhite < plugin-mirror
+gh secret set PLUGIN_DEPLOY_KEY --repo edumoraes/sinopia < plugin-mirror
 rm plugin-mirror plugin-mirror.pub
-gh variable set PUBLISH_PLUGIN --repo edumoraes/omawhite --body true
+gh variable set PUBLISH_PLUGIN --repo edumoraes/sinopia --body true
 ```
 
 The deploy key writes to the mirror and to nothing else. Set up before a

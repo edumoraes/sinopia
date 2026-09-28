@@ -29,11 +29,10 @@ checkout — and the running instance stay untouched.
 | plugin mirror | `edumoraes/omawhite-plugin` | `edumoraes/sinopia-plugin` |
 | agent skill | `omawhite` | `sinopia` |
 | theme hook | `contrib/omarchy/omawhite` | `contrib/omarchy/sinopia` |
+| GitHub repository | `edumoraes/omawhite` | `edumoraes/sinopia` (renamed on GitHub, which redirects the old address) |
 
 ## What keeps the old name, and why
 
-- **The GitHub repository**, `edumoraes/omawhite`: it is where the code
-  lives. Renaming it is the owner's call; the URLs follow when it moves.
 - **What already exists under it** is read, never written: a data
   directory from before is moved over once, on the first start (refused
   while an instance under the old name is still running, since its unsaved

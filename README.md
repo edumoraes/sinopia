@@ -57,7 +57,7 @@ The first release has not been cut yet. Until it is, build from source with `car
 
 ## An earlier name
 
-Sinopia was built under a working name, Omawhite, and the repository's address still carries it. Boards kept under that name come along the first time Sinopia starts, and `.omawhite` files still open.
+Sinopia was built under a working name, Omawhite. Boards kept under that name come along the first time Sinopia starts, and `.omawhite` files still open.
 
 ## More
 

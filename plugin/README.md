@@ -1,6 +1,6 @@
 # Sinopia bar widget
 
-The Omarchy shell plugin for [Sinopia](https://github.com/edumoraes/omawhite),
+The Omarchy shell plugin for [Sinopia](https://github.com/edumoraes/sinopia),
 the local-first whiteboard: a bar icon whose popout holds the two ways into
 the board — `n` for a new one, `o` for the recent projects.
 
@@ -107,7 +107,7 @@ first row picked.
 
 ## Developing
 
-The widget lives in the [Sinopia repository](https://github.com/edumoraes/omawhite),
+The widget lives in the [Sinopia repository](https://github.com/edumoraes/sinopia),
 in `plugin/`, beside the engine it drives; each engine release mirrors that
 folder to [sinopia-plugin](https://github.com/edumoraes/sinopia-plugin).
 Changes go to the first, never to the mirror.

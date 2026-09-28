@@ -4,7 +4,7 @@ pkgver=@VERSION@
 pkgrel=1
 pkgdesc="Local-first whiteboard for Omarchy with export for the agent"
 arch=('x86_64')
-url="https://github.com/edumoraes/omawhite"
+url="https://github.com/edumoraes/sinopia"
 license=('MIT' 'OFL-1.1-RFN')
 install="${pkgname}.install"
 # The binary links glibc and libgcc alone. The rest it loads at startup
