@@ -6,8 +6,12 @@
 //! same distances out again, line for line, so the two cannot come to
 //! disagree about where an edge is.
 
-use crate::doc::{Model, Shape};
+use crate::doc::{MAX_SIDES, Model, Shape};
 use crate::geom::Point;
+
+/// The most corners the shader walks: a star of the most points a figure
+/// may have, each with a corner cut in beside it.
+pub const MAX_CORNERS: u32 = 2 * MAX_SIDES;
 
 /// Where a polygon model's corners stand. Every one of them is walked
 /// from straight up, clockwise, evenly round a circle of radius 1 — every

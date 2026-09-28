@@ -41,6 +41,7 @@ struct Inst {
     @location(8) falloff: f32,
     @location(9) paper: vec4<f32>,
     @location(10) weave: vec4<f32>,
+    @location(11) line: f32,
 };
 
 struct VsOut {
@@ -56,11 +57,8 @@ struct VsOut {
     @location(8) @interpolate(flat) falloff: f32,
     @location(9) @interpolate(flat) paper: vec4<f32>,
     @location(10) @interpolate(flat) weave: vec4<f32>,
+    @location(11) @interpolate(flat) line: f32,
 };
-
-const KIND_SEGMENT: u32 = 1u;
-const KIND_IMAGE: u32 = 2u;
-const KIND_GRAIN: u32 = 3u;
 
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
@@ -116,6 +114,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     out.falloff = inst.falloff;
     out.paper = inst.paper;
     out.weave = inst.weave;
+    out.line = inst.line;
     return out;
 }
 
@@ -129,6 +128,69 @@ fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     let ba = b - a;
     let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
     return length(pa - ba * h);
+}
+
+// The signed distance to the ellipse of half extents `half`: Newton's
+// method on the angle of its nearest point, started on the nearer axis
+// and kept in the quarter the point is in — `shape::ellipse`, line for
+// line, which says why ten steps.
+fn sd_ellipse(q: vec2<f32>, half: vec2<f32>) -> f32 {
+    let p = abs(q);
+    let ab = max(half, vec2<f32>(1e-3));
+    let k = ab * (p - ab);
+    var t = select(0.0, 1.5707964, k.x < k.y);
+    for (var i = 0; i < 10; i++) {
+        let u = ab * vec2<f32>(cos(t), sin(t));
+        let v = ab * vec2<f32>(-sin(t), cos(t));
+        let to = p - u;
+        let bend = dot(to, u) + dot(v, v);
+        if (abs(bend) <= 1e-6) {
+            break;
+        }
+        t = clamp(t + dot(to, v) / bend, 0.0, 1.5707964);
+    }
+    let d = length(p - ab * vec2<f32>(cos(t), sin(t)));
+    return select(-d, d, dot(p / ab, p / ab) > 1.0);
+}
+
+// Corner `k` of `count`, from straight up and clockwise — every other one
+// cut in to `fit.y` for a star — fitted to a box of half extents `half` by
+// how far the unit corners reach across (`fit.z`) and down (`fit.w`):
+// `shape::Corners`, line for line.
+fn corner(k: u32, count: u32, fit: vec4<f32>, half: vec2<f32>) -> vec2<f32> {
+    let a = -1.5707964 + 6.2831855 * f32(k) / f32(count);
+    let r = select(1.0, fit.y, fit.y < 1.0 && (k % 2u) == 1u);
+    let u = r * vec2<f32>(cos(a), sin(a));
+    return vec2<f32>(u.x / fit.z * half.x, ((u.y + 1.0) / (fit.w + 1.0) * 2.0 - 1.0) * half.y);
+}
+
+// The signed distance to the polygon or star `fit` says, fitted to a box
+// of half extents `half`: Inigo Quilez's sdPolygon over corners walked
+// here rather than read, which is what lets one instance carry them —
+// `shape::polygon`, line for line.
+fn sd_polygon(p: vec2<f32>, half: vec2<f32>, fit: vec4<f32>) -> f32 {
+    let sides = max(u32(fit.x), 3u);
+    let count = min(select(sides, 2u * sides, fit.y < 1.0), MAX_CORNERS);
+    var prev = corner(count - 1u, count, fit, half);
+    var d = dot(p - prev, p - prev);
+    var s = 1.0;
+    for (var k = 0u; k < count; k++) {
+        let v = corner(k, count, fit, half);
+        let e = prev - v;
+        let w = p - v;
+        let b = w - e * clamp(dot(w, e) / max(dot(e, e), 1e-12), 0.0, 1.0);
+        d = min(d, dot(b, b));
+        // Each comparison on a line of its own: `a < b, c > d` inside
+        // one call reads to WGSL as a template's argument list.
+        let above = p.y >= v.y;
+        let below = p.y < prev.y;
+        let left = e.x * w.y > e.y * w.x;
+        if ((above && below && left) || (!above && !below && !left)) {
+            s = -s;
+        }
+        prev = v;
+    }
+    return s * sqrt(d);
 }
 
 // Straight alpha: what the window is blended with.
@@ -166,7 +228,21 @@ fn shade(in: VsOut) -> vec4<f32> {
         let c = cos(in.angle);
         let s = sin(in.angle);
         let local = vec2<f32>(c * p.x + s * p.y, c * p.y - s * p.x);
-        d = sd_box(local, half, r);
+        if (in.kind == KIND_ELLIPSE) {
+            d = sd_ellipse(local, half);
+        } else if (in.kind == KIND_POLYGON) {
+            d = sd_polygon(local, half, in.uv);
+        } else {
+            d = sd_box(local, half, r);
+        }
+        // A ring is the band `line` deep inside the edge: the stroke of a
+        // shape. Below zero the figure is shrunk by that much instead —
+        // the fill under a stroke, ending halfway into it.
+        if (in.line > 0.0) {
+            d = abs(d + in.line * 0.5) - in.line * 0.5;
+        } else if (in.line < 0.0) {
+            d = d - in.line;
+        }
         if (in.kind == KIND_IMAGE || in.kind == KIND_GRAIN) {
             // The box's own axes are already the texture's: the corner at
             // -half is (0, 0). An image maps onto the whole sheet, a
@@ -400,8 +476,38 @@ fn fs_blend(in: VsOut) -> @location(0) vec4<f32> {
 /// The shader, with a constant for every blend mode: its number is where
 /// it stands in [`BlendMode::ALL`], the same number a composite carries,
 /// so the two cannot come to disagree.
+/// One prim, as the shader reads it: every field of [`Prim`] in order,
+/// at the location the shader's `Inst` names it by.
+const INSTANCE: [wgpu::VertexAttribute; 12] = wgpu::vertex_attr_array![
+    0 => Float32x4, // geom
+    1 => Float32x4, // color
+    2 => Float32,   // radius
+    3 => Float32,   // feather
+    4 => Uint32,    // kind
+    5 => Float32,   // angle
+    6 => Float32x4, // uv
+    7 => Float32x4, // clip
+    8 => Float32,   // falloff
+    9 => Float32x4, // paper
+    10 => Float32x4, // weave
+    11 => Float32,  // line
+    // `slot` stays on the CPU: it picks the bind group.
+];
+
 fn shader() -> String {
     let mut out = String::from(SHADER);
+    // What a prim is, and the most corners a polygon walks: numbers the
+    // scene decides, written in from where it decides them.
+    for (name, kind) in [
+        ("SEGMENT", scene::KIND_SEGMENT),
+        ("IMAGE", scene::KIND_IMAGE),
+        ("GRAIN", scene::KIND_GRAIN),
+        ("ELLIPSE", scene::KIND_ELLIPSE),
+        ("POLYGON", scene::KIND_POLYGON),
+    ] {
+        out.push_str(&format!("const KIND_{name}: u32 = {kind}u;\n"));
+    }
+    out.push_str(&format!("const MAX_CORNERS: u32 = {}u;\n", crate::shape::MAX_CORNERS));
     for mode in BlendMode::ALL {
         out.push_str(&format!(
             "const MODE_{}: u32 = {}u;\n",
@@ -1513,20 +1619,7 @@ fn pipeline(
             buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Prim>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &wgpu::vertex_attr_array![
-                    0 => Float32x4, // geom
-                    1 => Float32x4, // color
-                    2 => Float32,   // radius
-                    3 => Float32,   // feather
-                    4 => Uint32,    // kind
-                    5 => Float32,   // angle
-                    6 => Float32x4, // uv
-                    7 => Float32x4, // clip
-                    8 => Float32,   // falloff
-                    9 => Float32x4, // paper
-                    10 => Float32x4, // weave
-                    // `slot` stays on the CPU: it picks the bind group.
-                ],
+                attributes: &INSTANCE,
             })],
         },
         primitive: wgpu::PrimitiveState::default(),
@@ -1660,6 +1753,49 @@ mod tests {
                 module.entry_points.iter().any(|e| e.name == entry),
                 "{entry} is in it"
             );
+        }
+    }
+
+    #[test]
+    fn every_kind_is_a_constant_of_the_shader_under_its_own_number() {
+        let source = shader();
+        for (name, kind) in [
+            ("SEGMENT", scene::KIND_SEGMENT),
+            ("IMAGE", scene::KIND_IMAGE),
+            ("GRAIN", scene::KIND_GRAIN),
+            ("ELLIPSE", scene::KIND_ELLIPSE),
+            ("POLYGON", scene::KIND_POLYGON),
+        ] {
+            let line = format!("const KIND_{name}: u32 = {kind}u;");
+            assert!(source.contains(&line), "{line}");
+        }
+        let corners = format!("const MAX_CORNERS: u32 = {}u;", crate::shape::MAX_CORNERS);
+        assert!(source.contains(&corners), "{corners}");
+    }
+
+    /// The shader reads an instance where the attributes say its fields
+    /// are, and those have to be where the prim keeps them.
+    #[test]
+    fn the_instance_attributes_sit_where_the_prim_keeps_its_fields() {
+        use std::mem::offset_of;
+        let fields = [
+            offset_of!(Prim, geom),
+            offset_of!(Prim, color),
+            offset_of!(Prim, radius),
+            offset_of!(Prim, feather),
+            offset_of!(Prim, kind),
+            offset_of!(Prim, angle),
+            offset_of!(Prim, uv),
+            offset_of!(Prim, clip),
+            offset_of!(Prim, falloff),
+            offset_of!(Prim, paper),
+            offset_of!(Prim, weave),
+            offset_of!(Prim, line),
+        ];
+        assert_eq!(INSTANCE.len(), fields.len());
+        for (k, (attribute, field)) in INSTANCE.iter().zip(fields).enumerate() {
+            assert_eq!(attribute.shader_location, k as u32);
+            assert_eq!(attribute.offset, field as u64, "location {k}");
         }
     }
 

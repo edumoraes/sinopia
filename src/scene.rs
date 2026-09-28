@@ -18,7 +18,8 @@ use crate::brush::Tip;
 use crate::fonts::Fonts;
 use crate::glyphs::Glyphs;
 use crate::curve::{self, Cubic};
-use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Kind, Layer, Paper, Pressure, Stamp};
+use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Kind, Layer, Model, Paper, Pressure, Shape, Stamp};
+use crate::shape::Corners;
 
 /// Viewport in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,6 +265,11 @@ pub const KIND_IMAGE: u32 = 2;
 /// A box whose own coverage is eaten into by the texture in its slot:
 /// a round nib wearing a grain, which is not the same as being one.
 pub const KIND_GRAIN: u32 = 3;
+/// A box whose field is the ellipse inscribed in it.
+pub const KIND_ELLIPSE: u32 = 4;
+/// A box whose field is a polygon or a star fitted to it, its corners
+/// walked in the shader from what [`Prim::polygon`] puts in `uv`.
+pub const KIND_POLYGON: u32 = 5;
 
 /// Which texture slot the renderer has uploaded for each blob hash. An
 /// image the renderer has not caught up with yet is missing from the map.
@@ -474,6 +480,11 @@ pub struct Prim {
     /// world zero falls in tiles, and how deep it bites. A depth of
     /// zero is no paper, which is what everything but a dab carries.
     pub weave: [f32; 4],
+    /// A box, an ellipse or a polygon drawn as a ring: its stroke alone,
+    /// a band this many px deep laid inside its edge. Zero fills it, and
+    /// below zero fills it shrunk by that much — a fill ending halfway
+    /// into the stroke laid over it.
+    pub line: f32,
     /// [`KIND_IMAGE`] only: which texture to sample. Read on the CPU, to
     /// pick the bind group — the shader never sees it.
     pub slot: u32,
@@ -516,6 +527,7 @@ impl Prim {
             falloff: PLAIN_RAMP,
             paper: NO_PAPER,
             weave: NO_PAPER,
+            line: 0.0,
             slot: 0,
         }
     }
@@ -705,6 +717,47 @@ impl Prim {
         }
     }
 
+    /// The ellipse inscribed in box `r`, turned by `angle` radians about
+    /// the box's centre.
+    pub fn ellipse(r: ScreenRect, angle: f32, color: Rgba) -> Prim {
+        Prim {
+            kind: KIND_ELLIPSE,
+            angle,
+            ..Prim::rect(r, color)
+        }
+    }
+
+    /// The polygon `corners` walks, fitted to box `r` and turned by `angle`
+    /// radians about its centre. What the shader needs to walk them rides
+    /// in `uv`, which only a prim that samples reads otherwise: the sides,
+    /// how far in a star's corners are cut, and how far the unit corners
+    /// reach across and down — see [`Corners`].
+    pub fn polygon(r: ScreenRect, angle: f32, corners: &Corners, color: Rgba) -> Prim {
+        Prim {
+            kind: KIND_POLYGON,
+            angle,
+            uv: [
+                corners.sides as f32,
+                corners.inner as f32,
+                corners.reach as f32,
+                corners.drop as f32,
+            ],
+            ..Prim::rect(r, color)
+        }
+    }
+
+    /// The same box, ellipse or polygon drawn as its stroke alone: a band
+    /// `width` px deep inside its edge.
+    pub fn ring(self, width: f32) -> Prim {
+        Prim { line: width, ..self }
+    }
+
+    /// The same box, ellipse or polygon shrunk by `by` px all round: what
+    /// a fill is, under a stroke `2 * by` deep.
+    pub fn inset(self, by: f32) -> Prim {
+        Prim { line: -by, ..self }
+    }
+
     pub fn circle(cx: f32, cy: f32, radius: f32, color: Rgba) -> Prim {
         let r = ScreenRect {
             x: cx - radius,
@@ -739,6 +792,7 @@ impl Prim {
             falloff: PLAIN_RAMP,
             paper: NO_PAPER,
             weave: NO_PAPER,
+            line: 0.0,
             slot: 0,
         }
     }
@@ -1865,6 +1919,46 @@ const STRIKE_AT: f64 = -0.265;
 /// How thick either rule is, as a share of the size.
 const RULE: f64 = 0.07;
 
+/// A shape: its fill, then its stroke over the fill's edge — each one
+/// prim, a distance field the shader draws exactly at any zoom, turned
+/// about the box's centre. The stroke is laid inside the edge and never
+/// thinner than a pixel, as a pencil line is not; the fill under it ends
+/// halfway into it, since two edges ramping over the same pixel leave
+/// the lower one's colour showing round the upper one's. A flipped model
+/// is the same model turned half round in its box, since every one is
+/// its own mirror image side to side. A shape with neither fill nor
+/// stroke draws nothing, and the selection still frames it.
+pub fn shape_prims(s: &Shape, view: &View) -> Vec<Prim> {
+    let k = view.px_per_world();
+    let (x, y) = view.world_to_screen(s.x, s.y);
+    let r = ScreenRect {
+        x: x as f32,
+        y: y as f32,
+        w: (s.w * k) as f32,
+        h: (s.h * k) as f32,
+    };
+    let half_round = if s.flip { std::f64::consts::PI } else { 0.0 };
+    let angle = (s.rotation.to_radians() + half_round) as f32;
+    let figure = |color: Rgba| match Corners::of(s.model, s.sides, s.inner) {
+        Some(c) => Prim::polygon(r, angle, &c, color),
+        None if s.model == Model::Ellipse => Prim::ellipse(r, angle, color),
+        None => Prim {
+            angle,
+            radius: (s.radius * k) as f32,
+            ..Prim::rect(r, color)
+        },
+    };
+    let line = s.stroke.as_ref().map(|_| ((s.width * k) as f32).max(1.0));
+    let mut out = Vec::new();
+    if let Some(fill) = &s.fill {
+        out.push(figure(parse_color(fill)).inset(line.unwrap_or(0.0) / 2.0));
+    }
+    if let (Some(stroke), Some(line)) = (&s.stroke, line) {
+        out.push(figure(parse_color(stroke)).ring(line));
+    }
+    out
+}
+
 /// A text: every letter a glyph of the board's sheet, rasterized at the
 /// rung nearest the size it is seen at and scaled the rest of the way,
 /// then turned with the text's box about its centre; the rules under and
@@ -2099,6 +2193,7 @@ impl Walk<'_> {
                     frame.stroke(cut_all(prims, cut), &tip);
                 }
                 Element::Text(t) => frame.extend(cut_all(text_prims(t, self.view, self.letters), cut)),
+                Element::Shape(s) => frame.extend(cut_all(shape_prims(s, self.view), cut)),
                 other => frame.extend(cut_all(self.boxed(other), cut)),
             }
         }
@@ -2275,7 +2370,7 @@ mod tests {
         // clipped prim still measures as the whole thing.
         assert_eq!(cut.bounds(), plain.bounds());
         // The instance layout the shader is fed mirrors the struct.
-        assert_eq!(std::mem::size_of::<Prim>(), 120);
+        assert_eq!(std::mem::size_of::<Prim>(), 124);
     }
 
     #[test]
@@ -4893,5 +4988,130 @@ mod tests {
         let rules: Vec<&Prim> = f.prims.iter().filter(|p| p.kind == KIND_BOX).collect();
         assert_eq!(rules.len(), 1, "only the stretch underlined");
         assert_eq!(rules[0].color, parse_color("#00ff00"));
+    }
+
+    /// A `model` over (10,20)–(110,80), filled red and stroked black, 4
+    /// wide.
+    fn a_shape(model: crate::doc::Model) -> crate::doc::Shape {
+        crate::doc::Shape {
+            id: "s".into(),
+            layer: String::new(),
+            model,
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 60.0,
+            rotation: 0.0,
+            flip: false,
+            fill: Some("#ff0000".into()),
+            stroke: Some("#000000".into()),
+            width: 4.0,
+            radius: 0.0,
+            sides: 5,
+            inner: 0.4,
+        }
+    }
+
+    const RED: Rgba = [1.0, 0.0, 0.0, 1.0];
+    const BLACK: Rgba = [0.0, 0.0, 0.0, 1.0];
+
+    #[test]
+    fn a_shape_is_its_fill_and_its_stroke_a_ring_laid_over_it() {
+        let v = view(0.0, 0.0, 2.0);
+        let got = shape_prims(&a_shape(crate::doc::Model::Ellipse), &v);
+        assert_eq!(got.len(), 2);
+        let (fill, ring) = (got[0], got[1]);
+        // The box as the view shows it: (10, 20) is 20 and 40 px from the
+        // middle, and every side twice as long.
+        assert_eq!(fill.geom, [70.0, 90.0, 200.0, 120.0]);
+        assert_eq!((fill.kind, fill.color), (KIND_ELLIPSE, RED));
+        assert_eq!((ring.kind, ring.color), (KIND_ELLIPSE, BLACK));
+        assert_eq!(ring.geom, fill.geom);
+        assert_eq!(ring.line, 8.0, "four world units deep at zoom 2");
+    }
+
+    #[test]
+    fn a_fill_under_a_stroke_stops_halfway_into_it() {
+        // Where the two edges fall on one pixel the fill's own edge would
+        // show round the stroke's, in the fill's colour: it ends in the
+        // middle of the stroke instead, where the stroke covers it whole.
+        let v = view(0.0, 0.0, 1.0);
+        let s = a_shape(crate::doc::Model::Rectangle);
+        let got = shape_prims(&s, &v);
+        assert_eq!((got[0].line, got[1].line), (-2.0, 4.0));
+        let alone = crate::doc::Shape { stroke: None, ..s };
+        assert_eq!(shape_prims(&alone, &v)[0].line, 0.0, "with no stroke it fills its box");
+    }
+
+    #[test]
+    fn a_polygon_carries_its_corners_to_the_shader() {
+        use crate::doc::Model;
+        let v = view(0.0, 0.0, 1.0);
+        let star = shape_prims(&a_shape(Model::Star), &v)[0];
+        let c = crate::shape::Corners::of(Model::Star, 5, 0.4).unwrap();
+        assert_eq!(star.kind, KIND_POLYGON);
+        assert_eq!(star.uv, [5.0, 0.4, c.reach as f32, c.drop as f32]);
+        let triangle = shape_prims(&a_shape(Model::Triangle), &v)[0];
+        assert_eq!(triangle.uv[..2], [3.0, 1.0], "three corners, none cut in");
+        let diamond = shape_prims(&a_shape(Model::Diamond), &v)[0];
+        assert_eq!(diamond.uv, [4.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_rectangles_corners_round_as_far_as_the_view_shows_them() {
+        let v = view(0.0, 0.0, 3.0);
+        let mut s = a_shape(crate::doc::Model::Rectangle);
+        s.radius = 5.0;
+        let got = shape_prims(&s, &v);
+        assert!(got.iter().all(|p| p.kind == KIND_BOX && p.radius == 15.0), "{got:?}");
+        assert_eq!(got[1].line, 12.0);
+    }
+
+    #[test]
+    fn a_shape_turns_and_a_flipped_one_is_turned_half_round() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut s = a_shape(crate::doc::Model::Triangle);
+        s.rotation = 30.0;
+        let turned = shape_prims(&s, &v)[0].angle;
+        assert!((turned - 30f32.to_radians()).abs() < 1e-6, "{turned}");
+        s.flip = true;
+        let flipped = shape_prims(&s, &v)[0].angle;
+        assert!((flipped - 210f32.to_radians()).abs() < 1e-5, "{flipped}");
+    }
+
+    #[test]
+    fn a_hairline_is_never_thinner_than_a_pixel() {
+        let v = view(0.0, 0.0, 0.1);
+        let mut s = a_shape(crate::doc::Model::Rectangle);
+        s.width = 1.0;
+        assert_eq!(shape_prims(&s, &v)[1].line, 1.0);
+    }
+
+    #[test]
+    fn a_shape_with_no_fill_or_no_stroke_leaves_that_prim_out() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut s = a_shape(crate::doc::Model::Star);
+        s.fill = None;
+        let got = shape_prims(&s, &v);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].line > 0.0, "the stroke alone");
+        s.stroke = None;
+        assert!(shape_prims(&s, &v).is_empty(), "neither: nothing, though it can still be selected");
+    }
+
+    #[test]
+    fn a_shape_on_the_board_is_drawn_in_its_place() {
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(
+            vec![
+                rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff")),
+                Element::Shape(a_shape(crate::doc::Model::Polygon)),
+            ],
+            &v,
+        );
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].kind, KIND_BOX, "the rect, first in its layer");
+        assert_eq!((got[1].kind, got[2].kind), (KIND_POLYGON, KIND_POLYGON));
     }
 }
