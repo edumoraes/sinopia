@@ -12,7 +12,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 clap = { version = "4.6.6", features = ["derive"] }
 env_logger = "0.11.11"
 fontdue = { version = "0.9.4", features = ["std"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "tiff"] }
 libc = "0.2.189"
 log = "0.4.34"
 pollster = "1.0.1"
@@ -27,6 +27,7 @@ wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
 wgpu = "30.0.1"
 winit = "0.30.13"
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 # The same naga wgpu compiles the shader with: the suite parses and

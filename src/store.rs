@@ -437,7 +437,7 @@ fn validate_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
@@ -452,7 +452,7 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Atomic write at 0600: what everything under the root gets (§9.3).
-fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     write_atomic(path, bytes, Some(0o600))
 }
 
