@@ -400,6 +400,36 @@ never composes transforms); its `rotation` only records how far it has
 been turned, so its box turns with it and rotation snapping counts from
 the creation state.
 
+Landed — `shape` and `line` (the Shape tool), where the MVP list had
+`ellipse`, `arrow` and `line` as types of their own:
+
+```json
+{ "id": "el_06", "type": "shape", "layer": "01J…", "model": "star",
+  "x": 0, "y": 0, "w": 120, "h": 120, "rotation": 15, "flip": true,
+  "fill": "#f5a524", "stroke": "#000000", "width": 2,
+  "radius": 0, "sides": 5, "inner": 0.382 }
+{ "id": "el_07", "type": "line", "layer": "01J…",
+  "from": [0, 0], "to": [200, 80], "stroke": "#000000", "width": 2,
+  "start": "arrow", "end": "triangle" }
+```
+
+A `shape` is one of six closed models — `rectangle`, `ellipse`,
+`triangle`, `diamond`, `polygon`, `star` — fitted to its box: its outline
+touches all four sides, so the box is the whole of what it occupies and
+the selection, the pointer and a frame's claim read nothing else. It
+turns as a rect does, and `flip` stands the model upside down in its box,
+which is what a mirror leaves behind on a box that can only turn.
+`stroke` and `fill` are each optional hexes; `width` is the stroke's, in
+world units, laid inside the edge. `radius` (a rectangle's corners),
+`sides` (a polygon's, or a star's points, 3–60) and `inner` (how far in a
+star is cut, a fraction of its radius) are kept whatever the model, so a
+shape switched to another and back loses nothing, and each is off disk at
+its default, as `rotation` and `flip` are. A `line` has no box of its
+own: `from` and `to` are what a map moves, exactly, and `start` and `end`
+are its heads — `arrow` (open), `triangle` (filled), or absent for none;
+an arrow is a line with a head. One figure to a vector layer, as a pencil
+line is. `rect` stays what it was, for the boards and pages that carry it.
+
 Why plain JSON now, and not Automerge already:
 
 - Fewer dependencies, debugging with `$EDITOR`, git diff if the user commits the export.
@@ -569,6 +599,17 @@ compositing pass. The `zwp_tablet_v2` bridge landed and the pen draws;
 pressure waits on a stroke that can hold more than one width.
 
 Omaboard-style snap and connectors: phase 1.1. In the MVP an arrow is geometry, not a live binding.
+
+Landed — the shapes, and the table above caught up with: one Shape tool
+(`U`, Photoshop's key for its shapes, `U` again stepping through them)
+draws eight figures, and `R`, `O`, `L`, `A` take it up with the
+rectangle, the ellipse, a line or an arrow — so the four rows above are
+one tool, not four. A drag lays the figure over the area it crossed
+(`Shift` square, `Alt` from its middle), a click lays it at a default
+size, and the figure lands on a vector layer of its own, selected, its
+handles answering with the tool still in hand. The shape's own bar sets
+the figure, the fill and the stroke from the dock's inks, the width, and
+what each figure has of its own.
 
 ### 7.3 Window vs overlay
 

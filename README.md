@@ -16,7 +16,7 @@ Sinopia keeps that sketch close to the work. It opens on a shortcut beside your 
 
 ## What you can do
 
-**Draw.** An infinite board with a pencil that follows your hand and the 211 brushes from Sketchbook, nibs and papers included. A pen tablet's pressure and tilt shape the line. Paste screenshots and images straight onto the board.
+**Draw.** An infinite board with a pencil that follows your hand and the 211 brushes from Sketchbook, nibs and papers included. A pen tablet's pressure and tilt shape the line. Boxes, ellipses, triangles, stars, lines and arrows come from one shape tool, and words from a text tool, each set from a bar of its own. Paste screenshots and images straight onto the board.
 
 **Arrange.** Layers and groups, as in any drawing app, with blend modes, opacity, locks and colour tags. Frames mark out an area of the board and give it a name. Several boards live in tabs, and undo walks back through every change.
 
