@@ -25,7 +25,7 @@ checkout — and the running instance stay untouched.
 | Wayland app id, desktop entry, icon | `omawhite` | `sinopia` |
 | AUR packages | `omawhite`, `-bin`, `-git` | `sinopia`, `-bin`, `-git` |
 | release archives | `omawhite-v…` | `sinopia-v…` |
-| plugin id | `edu.omawhite` | `edu.sinopia` |
+| plugin id | `edu.omawhite` | `edumoraes.sinopia` |
 | plugin mirror | `edumoraes/omawhite-plugin` | `edumoraes/sinopia-plugin` |
 | agent skill | `omawhite` | `sinopia` |
 | theme hook | `contrib/omarchy/omawhite` | `contrib/omarchy/sinopia` |
@@ -78,7 +78,7 @@ Not done by the PR — the environment is the person's:
 - close the running `omawhite`, install `sinopia` (`~/.local/bin`), start
   it once to bring `~/.local/share/omawhite` over;
 - the bar plugin: re-point `~/.config/omarchy/plugins/edu.omawhite` as
-  `edu.sinopia` and enable that id;
+  `edumoraes.sinopia` and enable that id;
 - the skill: remove `skills/omawhite` from Claude Code, Codex and
   OpenCode, run `skills/sinopia/install.sh`;
 - a theme hook installed under the old name, if any.

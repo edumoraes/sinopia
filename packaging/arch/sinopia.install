@@ -8,8 +8,8 @@ The rest is opt-in, for each person who wants it:
 
   The bar widget, on the Omarchy shell
     mkdir -p ~/.config/omarchy/plugins
-    ln -s /usr/share/sinopia/plugin ~/.config/omarchy/plugins/edu.sinopia
-    omarchy plugin enable edu.sinopia right
+    ln -s /usr/share/sinopia/plugin ~/.config/omarchy/plugins/edumoraes.sinopia
+    omarchy plugin enable edumoraes.sinopia right
 
   A theme change reaching a board left open on another monitor
     omarchy hook install theme-set /usr/share/sinopia/omarchy/sinopia

@@ -17,8 +17,8 @@ import qs.Ui
 // opened, switchPanel, setting and the IpcHandler.
 Panel {
   id: root
-  moduleName: "edu.sinopia"
-  ipcTarget: "edu.sinopia"
+  moduleName: "edumoraes.sinopia"
+  ipcTarget: "edumoraes.sinopia"
 
   // How many rows the list shows at once. The index keeps everything, so
   // what falls past this is reached by typing rather than by scrolling

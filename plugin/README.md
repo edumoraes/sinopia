@@ -25,7 +25,7 @@ Then add the widget to the bar:
 omarchy plugin add https://github.com/edumoraes/sinopia-plugin.git --enable
 ```
 
-`omarchy plugin update edu.sinopia` brings it up to date. sinopia-plugin
+`omarchy plugin update edumoraes.sinopia` brings it up to date. sinopia-plugin
 moves only when an engine release does, so the widget it hands out is never
 ahead of the engine the AUR hands out.
 
@@ -36,8 +36,8 @@ the shell does not watch through a link:
 
 ```sh
 mkdir -p ~/.config/omarchy/plugins
-ln -s /usr/share/sinopia/plugin ~/.config/omarchy/plugins/edu.sinopia
-omarchy plugin enable edu.sinopia right
+ln -s /usr/share/sinopia/plugin ~/.config/omarchy/plugins/edumoraes.sinopia
+omarchy plugin enable edumoraes.sinopia right
 ```
 
 One or the other: both are the same plugin id, and `omarchy plugin add`
@@ -46,7 +46,7 @@ refuses an id that is already installed.
 ## Remove
 
 ```sh
-omarchy plugin remove edu.sinopia
+omarchy plugin remove edumoraes.sinopia
 ```
 
 That takes the widget off the bar and out of the plugins folder — a clone is
@@ -102,7 +102,7 @@ and until they do the letters are the way in, since a selection nobody is
 shown is one nobody meant. The list is a chooser and so arrives with its
 first row picked.
 
-`omarchy-shell edu.sinopia toggle` opens it from a keybinding — the
+`omarchy-shell edumoraes.sinopia toggle` opens it from a keybinding — the
 `ipcTarget` comes with `Ui/Panel`.
 
 ## Developing
@@ -116,9 +116,9 @@ From the root of a checkout, link the folder itself — the shell refuses a
 symlink *inside* a plugin folder, but the folder may be one:
 
 ```sh
-ln -s "$PWD/plugin" ~/.config/omarchy/plugins/edu.sinopia
+ln -s "$PWD/plugin" ~/.config/omarchy/plugins/edumoraes.sinopia
 omarchy plugin validate plugin
-omarchy plugin enable edu.sinopia right
+omarchy plugin enable edumoraes.sinopia right
 ```
 
 Through the link an edit does not reload on its own: the shell watches

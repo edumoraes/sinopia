@@ -167,7 +167,7 @@ with the mirror's new HEAD. `omarchy plugin add` and `update` clone HEAD
 either way, so nobody waits on it for the release itself.
 
 The plugin id becomes permanent with the listing — the marketplace never
-frees one — so it is settled before submitting. Today it is `edu.sinopia`,
+frees one — so it is settled before submitting: it is `edumoraes.sinopia`,
 named in the manifest, in `BarWidget.qml` (its `moduleName`, and the
 `ipcTarget` a keybinding calls), in the plugin's README and in the packages'
 install message.
