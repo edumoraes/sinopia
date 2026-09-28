@@ -8,6 +8,10 @@
 
 use crate::editor::Command;
 use crate::menu::Item;
+use crate::scene::{Prim, ScreenRect};
+use crate::tabs;
+use crate::text::Atlas;
+use crate::theme::Theme;
 use crate::tree::Arrange;
 
 /// A menu on the bar.
@@ -29,6 +33,96 @@ impl Title {
             Title::View => "View",
             Title::Layer => "Layer",
         }
+    }
+}
+
+// Logical px.
+/// Between a title's label and either edge of its box.
+const PAD: f32 = 9.0;
+/// Before the first title, so it does not sit against the window's edge.
+const LEAD: f32 = 4.0;
+/// After the last one, before the tabs.
+const TRAIL: f32 = 6.0;
+const RADIUS: f32 = 7.0;
+
+/// The bar: the titles standing at the left end of the tab strip, in
+/// physical px. The tabs start where it ends.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bar {
+    pub rect: ScreenRect,
+    pub titles: Vec<(ScreenRect, Title)>,
+    scale: f32,
+}
+
+impl Bar {
+    /// Laid out at the strip's left end, each title as wide as its label
+    /// and a pad either side.
+    pub fn layout(scale: f64, atlas: &Atlas) -> Bar {
+        let s = scale as f32;
+        let h = (tabs::HEIGHT * s).round();
+        let mut x = (LEAD * s).round();
+        let titles = Title::ALL
+            .iter()
+            .map(|&title| {
+                let w = (atlas.measure(title.label()) + 2.0 * PAD * s).round();
+                let rect = ScreenRect { x, y: 0.0, w, h };
+                x += w;
+                (rect, title)
+            })
+            .collect();
+        Bar {
+            rect: ScreenRect {
+                x: 0.0,
+                y: 0.0,
+                w: x + (TRAIL * s).round(),
+                h,
+            },
+            titles,
+            scale: s,
+        }
+    }
+
+    /// Where the tab row starts.
+    pub fn end(&self) -> f32 {
+        self.rect.x + self.rect.w
+    }
+
+    /// The title under `(x, y)`.
+    pub fn hit(&self, x: f64, y: f64) -> Option<Title> {
+        self.titles
+            .iter()
+            .find(|(r, _)| r.contains(x, y))
+            .map(|(_, t)| *t)
+    }
+
+    /// The titles, the one whose menu is `open` lit as the active tab is.
+    pub fn prims(&self, atlas: &Atlas, slot: u32, theme: &Theme, open: Option<Title>) -> Vec<Prim> {
+        let s = self.scale;
+        let mut out = Vec::new();
+        for (rect, title) in &self.titles {
+            let lit = open == Some(*title);
+            if lit {
+                out.push(Prim::rounded(
+                    rect.inset(2.0 * s),
+                    theme.corner(RADIUS, s),
+                    theme.active_bg,
+                ));
+            }
+            let baseline = atlas.baseline_in(*rect);
+            let ink = if lit { theme.ink } else { theme.icon };
+            for g in atlas.layout(title.label(), rect.x + PAD * s, baseline) {
+                out.push(Prim::glyph(g.rect, g.uv, slot, ink));
+            }
+        }
+        // The seam between the menu and the tabs, as between two tabs.
+        let x = self.end() - (TRAIL * s / 2.0).round();
+        out.push(Prim::segment(
+            (x, self.rect.y + 8.0 * s),
+            (x, self.rect.y + self.rect.h - 8.0 * s),
+            theme.edge(s) / 2.0,
+            theme.border,
+        ));
+        out
     }
 }
 
@@ -247,6 +341,77 @@ pub fn items(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::Tabs;
+    use crate::text::Font;
+
+    fn atlas() -> Atlas {
+        Atlas::build(&Font::bundled(), Tabs::label_px(tabs::LABEL, 1.0))
+    }
+
+    #[test]
+    fn the_titles_stand_in_order_at_the_strips_left_end() {
+        let a = atlas();
+        let bar = Bar::layout(1.0, &a);
+        let order: Vec<Title> = bar.titles.iter().map(|(_, t)| *t).collect();
+        assert_eq!(order, Title::ALL);
+        assert_eq!(bar.rect.x, 0.0);
+        assert_eq!(bar.rect.y, 0.0);
+        assert_eq!(bar.rect.h, tabs::HEIGHT);
+        for pair in bar.titles.windows(2) {
+            let (left, right) = (pair[0].0, pair[1].0);
+            assert_eq!(left.x + left.w, right.x, "side by side, no gap");
+        }
+        for (rect, title) in &bar.titles {
+            assert!(rect.w > a.measure(title.label()), "{title:?} has room for its label");
+            assert_eq!(rect.h, bar.rect.h);
+        }
+        let last = bar.titles.last().unwrap().0;
+        assert!(bar.end() >= last.x + last.w);
+        assert_eq!(bar.end(), bar.rect.x + bar.rect.w);
+    }
+
+    #[test]
+    fn a_title_is_hit_across_its_whole_box_and_nothing_past_the_bar() {
+        let a = atlas();
+        let bar = Bar::layout(1.0, &a);
+        for (rect, title) in &bar.titles {
+            let (x, y) = rect.center();
+            assert_eq!(bar.hit(x as f64, y as f64), Some(*title));
+            assert_eq!(bar.hit(f64::from(rect.x) + 1.0, 1.0), Some(*title));
+        }
+        assert_eq!(bar.hit(f64::from(bar.end()) + 5.0, 10.0), None);
+        assert_eq!(bar.hit(10.0, f64::from(tabs::HEIGHT) + 1.0), None, "the canvas");
+    }
+
+    #[test]
+    fn the_bar_scales_with_the_chrome() {
+        let one = Bar::layout(1.0, &atlas());
+        let two = Bar::layout(2.0, &Atlas::build(&Font::bundled(), Tabs::label_px(tabs::LABEL, 2.0)));
+        assert_eq!(two.rect.h, one.rect.h * 2.0);
+        assert!((two.end() - 2.0 * one.end()).abs() < 8.0, "{} {}", one.end(), two.end());
+    }
+
+    #[test]
+    fn the_open_title_is_lit_and_every_label_is_lettered() {
+        let a = atlas();
+        let bar = Bar::layout(1.0, &a);
+        let theme = Theme::light();
+        let lit = |open| {
+            bar.prims(&a, 3, &theme, open)
+                .iter()
+                .filter(|p| p.color == theme.active_bg)
+                .count()
+        };
+        assert_eq!(lit(None), 0);
+        assert_eq!(lit(Some(Title::Edit)), 1);
+        let glyphs = bar
+            .prims(&a, 3, &theme, None)
+            .iter()
+            .filter(|p| p.kind == crate::scene::KIND_IMAGE && p.slot == 3)
+            .count();
+        let letters: usize = Title::ALL.iter().map(|t| t.label().len()).sum();
+        assert_eq!(glyphs, letters);
+    }
 
     fn state() -> State {
         State {
