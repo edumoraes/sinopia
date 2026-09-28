@@ -1062,6 +1062,10 @@ impl App {
 
     /// Starts closing the window: each dirty tab is asked about in turn.
     fn quit(&mut self) {
+        // A menu trying something on the board puts it back first: the
+        // drafts kept on the way out are the board as it was chosen, not
+        // as the pointer last passed over a line.
+        self.close_menu(None);
         self.end_typing();
         self.quitting = true;
         self.step_quit();
@@ -4765,6 +4769,10 @@ impl App {
         // press's doing, not the drag's.
         self.drag = None;
         self.fading = false;
+        // A slider let go of this way is let go of: where it was dragged
+        // to is where the board rests.
+        self.text_grab = None;
+        self.shape_grab = None;
         self.close_menu(None);
         // A card the pointer was carrying goes back where it came from:
         // nothing moves until a drop, and losing the window is not one.
