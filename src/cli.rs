@@ -1088,6 +1088,7 @@ mod tests {
                 mode: TextMode::Artistic,
                 text: name.into(),
                 style: crate::doc::TextStyle::default(),
+                runs: Vec::new(),
             },
         }
     }

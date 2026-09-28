@@ -1206,6 +1206,93 @@ impl TextStyle {
     }
 }
 
+/// What a stretch of a text sets differently from the text's own style:
+/// each field, when it is there. What a paragraph is — its alignment, a
+/// frame's vertical alignment, its leading — is the text's alone.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strike: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<f64>,
+}
+
+impl RunStyle {
+    /// Whether it sets nothing at all.
+    pub fn is_empty(&self) -> bool {
+        *self == RunStyle::default()
+    }
+
+    /// `base` with what this sets laid over it.
+    pub fn over(&self, base: &TextStyle) -> TextStyle {
+        let mut s = base.clone();
+        if let Some(v) = &self.font {
+            v.clone_into(&mut s.font);
+        }
+        if let Some(v) = self.size {
+            s.size = v;
+        }
+        if let Some(v) = self.bold {
+            s.bold = v;
+        }
+        if let Some(v) = self.italic {
+            s.italic = v;
+        }
+        if let Some(v) = self.underline {
+            s.underline = v;
+        }
+        if let Some(v) = self.strike {
+            s.strike = v;
+        }
+        if let Some(v) = &self.color {
+            v.clone_into(&mut s.color);
+        }
+        if let Some(v) = self.tracking {
+            s.tracking = v;
+        }
+        s
+    }
+}
+
+/// A stretch of a text, characters `start..end`, set as `style` says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Run {
+    pub start: usize,
+    pub end: usize,
+    #[serde(flatten)]
+    pub style: RunStyle,
+}
+
+/// Whether `runs` fit a text `n` characters long: each inside it, not
+/// empty, in order and not overlapping, and every value one a text may
+/// be set at — checked as the text's own style is.
+fn runs_checked(runs: &[Run], n: usize, base: &TextStyle) -> Result<(), String> {
+    let mut after = 0;
+    for r in runs {
+        if r.start >= r.end || r.end > n {
+            return Err(format!("a run spans {}..{} of a text {n} characters long", r.start, r.end));
+        }
+        if r.start < after {
+            return Err(format!("the run at {}..{} is out of order or overlaps the one before", r.start, r.end));
+        }
+        after = r.end;
+        r.style.over(base).checked()?;
+    }
+    Ok(())
+}
+
 /// Words on the board. `x, y, w, h` is the box before rotation, in world
 /// units, turned about its centre by `rotation` as a rect's is. For
 /// artistic text the box is what its lines measure — the editor keeps it
@@ -1231,6 +1318,10 @@ pub struct Text {
     pub text: String,
     #[serde(flatten)]
     pub style: TextStyle,
+    /// Stretches set differently from `style`, in order. Absent on disk
+    /// when there is none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<Run>,
 }
 
 /// What a `text` may look like on disk: checked on the way in, so a
@@ -1251,6 +1342,8 @@ struct TextOnDisk {
     text: String,
     #[serde(flatten)]
     style: TextStyle,
+    #[serde(default)]
+    runs: Vec<Run>,
 }
 
 impl TryFrom<TextOnDisk> for Text {
@@ -1258,6 +1351,7 @@ impl TryFrom<TextOnDisk> for Text {
 
     fn try_from(t: TextOnDisk) -> Result<Text, String> {
         t.style.checked()?;
+        runs_checked(&t.runs, t.text.chars().count(), &t.style)?;
         let finite = [t.x, t.y, t.w, t.h, t.rotation].iter().all(|v| v.is_finite());
         if !finite || t.w < 0.0 || t.h < 0.0 {
             return Err(format!(
@@ -1276,6 +1370,7 @@ impl TryFrom<TextOnDisk> for Text {
             mode: t.mode,
             text: t.text,
             style: t.style,
+            runs: t.runs,
         })
     }
 }
@@ -3588,5 +3683,52 @@ mod tests {
         let mut doc = Document::new("t");
         assert_eq!(doc.add_layer(None, 0, Kind::Text).unwrap(), 1);
         assert_eq!(doc.layers[1].name, "Text 1");
+    }
+
+    #[test]
+    fn a_text_carries_its_runs_and_writes_none_when_it_has_none() {
+        let doc = with_text(
+            r##""x": 0, "y": 0, "w": 10, "h": 10, "text": "Hello world", "size": 12, "color": "#000",
+                "runs": [ { "start": 0, "end": 5, "bold": true, "color": "#ff0000" },
+                          { "start": 6, "end": 11, "size": 20, "font": "Noto Serif", "italic": true,
+                            "underline": true, "strike": false, "tracking": 50 } ]"##,
+        )
+        .unwrap();
+        let Element::Text(t) = &doc.elements[0] else { panic!() };
+        assert_eq!(t.runs.len(), 2);
+        assert_eq!((t.runs[0].start, t.runs[0].end), (0, 5));
+        assert_eq!(t.runs[0].style.bold, Some(true));
+        assert_eq!(t.runs[0].style.italic, None);
+        assert_eq!(t.runs[1].style.size, Some(20.0));
+        assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc);
+        let plain = with_text(PLAIN).unwrap();
+        assert!(!plain.to_json().unwrap().contains("runs"));
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        let run = v["elements"][0]["runs"][0].as_object().unwrap();
+        let mut keys: Vec<&str> = run.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["bold", "color", "end", "start"], "a run writes only what it sets");
+    }
+
+    #[test]
+    fn runs_a_board_cannot_hold_are_refused() {
+        let with = |runs: &str| {
+            with_text(&format!(
+                r##""x": 0, "y": 0, "w": 10, "h": 10, "text": "Hello", "size": 12, "color": "#000", "runs": [{runs}]"##
+            ))
+        };
+        for bad in [
+            r#"{ "start": 0, "end": 9, "bold": true }"#,
+            r#"{ "start": 3, "end": 3, "bold": true }"#,
+            r#"{ "start": 4, "end": 2, "bold": true }"#,
+            r#"{ "start": 0, "end": 3, "bold": true }, { "start": 2, "end": 5, "italic": true }"#,
+            r#"{ "start": 3, "end": 5, "bold": true }, { "start": 0, "end": 2, "italic": true }"#,
+            r#"{ "start": 0, "end": 2, "size": 0 }"#,
+            r#"{ "start": 0, "end": 2, "tracking": 1e9 }"#,
+            r#"{ "start": 0, "end": 2, "font": "" }"#,
+        ] {
+            assert!(with(bad).is_err(), "{bad} was let in");
+        }
+        assert!(with(r#"{ "start": 0, "end": 2, "bold": true }, { "start": 2, "end": 5, "italic": true }"#).is_ok());
     }
 }

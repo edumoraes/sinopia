@@ -1362,6 +1362,7 @@ impl App {
             mode: crate::doc::TextMode::Artistic,
             text: words.chars().take(crate::editor::TEXT_MAX).collect(),
             style,
+            runs: Vec::new(),
         };
         let born = self.doc().stack_at([x, y]).map(str::to_owned);
         self.with_text(|e, d, f| e.place_text(d, f, text, born.as_deref()));
@@ -2503,6 +2504,7 @@ impl App {
                     },
                     text: String::new(),
                     style,
+                    runs: Vec::new(),
                 };
                 spec.apply(&mut text);
                 text.style.checked().map_err(anyhow::Error::msg)?;

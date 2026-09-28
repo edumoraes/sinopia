@@ -3051,6 +3051,7 @@ mod tests {
             mode: crate::doc::TextMode::Artistic,
             text: "words".into(),
             style: crate::doc::TextStyle::with_size(20.0, "#000"),
+            runs: Vec::new(),
         }));
         let v = view();
         let mut e = tool(Tool::Select);

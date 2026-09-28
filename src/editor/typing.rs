@@ -500,6 +500,7 @@ impl Editor {
             mode: self.text_mode,
             text: String::new(),
             style,
+            runs: Vec::new(),
         };
         let born = doc.stack_at(from).map(str::to_owned);
         self.open(text, born, doc)
@@ -1748,6 +1749,7 @@ mod tests {
             mode: TextMode::Artistic,
             text: "From the command line".into(),
             style: TextStyle::default(),
+            runs: Vec::new(),
         };
         let (id, layer) = e.place_text(&mut doc, &fonts(), text, None);
         let t = only(&doc);

@@ -1254,6 +1254,7 @@ mod tests {
             mode,
             text: "words".into(),
             style: crate::doc::TextStyle::with_size(20.0, "#000"),
+            runs: Vec::new(),
         })
     }
 

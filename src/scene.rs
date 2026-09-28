@@ -4753,6 +4753,7 @@ mod tests {
             mode: crate::doc::TextMode::Artistic,
             text: s.into(),
             style: crate::doc::TextStyle::with_size(size, "#ff0000"),
+            runs: Vec::new(),
         }
     }
 

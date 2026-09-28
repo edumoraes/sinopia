@@ -1623,6 +1623,7 @@ mod tests {
             mode: TextMode::Artistic,
             text: "was".into(),
             style: crate::doc::TextStyle::default(),
+            runs: Vec::new(),
         };
         TextSpec {
             text: Some("now".into()),
