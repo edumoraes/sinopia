@@ -43,7 +43,7 @@ use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::menu;
-use crate::menubar::{self, Action};
+use crate::menubar::{self, Action, Bar, Title};
 use crate::omarchy::{self, Style};
 use crate::palette::{self, Palette};
 use crate::slots::{self, Strip};
@@ -429,6 +429,8 @@ enum Purpose {
     Tag { id: String, tags: Vec<Tag> },
     /// A row's own menu: the row, and what each line does.
     Row { id: String, lines: Vec<layers::RowLine> },
+    /// One of the application menu's: its title, and what each line does.
+    Bar { title: Title, actions: Vec<Action> },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -1426,8 +1428,21 @@ impl App {
             atlas,
             &labels,
             self.active,
-            0.0,
+            self.bar(view).map_or(0.0, |b| b.end()),
         ))
+    }
+
+    /// The application menu's titles, at the strip's left end.
+    fn bar(&self, view: &View) -> Option<Bar> {
+        Some(Bar::layout(self.chrome(view), self.atlas.as_ref()?))
+    }
+
+    /// The title whose menu is standing open, if one of the bar's is.
+    fn bar_open(&self) -> Option<Title> {
+        match self.menu.as_ref()?.purpose {
+            Purpose::Bar { title, .. } => Some(title),
+            _ => None,
+        }
     }
 
     /// The layers panel, when it is up and there is an atlas to letter
@@ -1701,6 +1716,52 @@ impl App {
         self.redraw();
     }
 
+    /// Opens the application menu `title` under its title, each line
+    /// offered only where it would do something now.
+    fn open_bar_menu(&mut self, title: Title) {
+        let Some(at) = self
+            .view()
+            .and_then(|view| self.bar(&view))
+            .and_then(|bar| bar.titles.iter().find(|(_, t)| *t == title).map(|(r, _)| *r))
+        else {
+            return;
+        };
+        let state = self.bar_state();
+        let (editor, doc) = (self.editor(), self.doc());
+        let (items, actions) = menubar::items(title, &state, |c| editor.can(doc, c));
+        self.menu = Some(Opened {
+            purpose: Purpose::Bar { title, actions },
+            items,
+            at,
+            hover: None,
+            scroll: 0.0,
+        });
+        self.redraw();
+    }
+
+    /// What the application menu needs to know of the window.
+    fn bar_state(&self) -> menubar::State {
+        let doc = self.doc();
+        let editor = self.editor();
+        let history = &self.open[self.active].history;
+        let picked: Vec<&Layer> = editor.picked(doc).into_iter().filter_map(|p| doc.layer(p)).collect();
+        menubar::State {
+            undo: history.can_undo(),
+            redo: history.can_redo(),
+            paste: match &self.clipboard {
+                Some(clipboard) => clipboard.can_paste(),
+                None => self.clip.is_some(),
+            },
+            selection: !editor.selection().is_empty(),
+            delete: editor.can_delete(doc),
+            layers: self.layers_shown,
+            library: (editor.tool() == Tool::Brush).then_some(self.palette_shown),
+            locked: !picked.is_empty() && picked.iter().all(|l| l.locked),
+            hidden: !picked.is_empty() && picked.iter().all(|l| !l.visible),
+            merge: editor.merge_name(doc),
+        }
+    }
+
     /// The filter's field takes the keyboard, its caret at `x`.
     fn search_at(&mut self, panel: &Panel, x: f64) {
         let (Some(atlas), Some(text)) = (self.atlas.as_ref(), panel.search_text()) else {
@@ -1764,6 +1825,13 @@ impl App {
     /// one step; none put back leaves the board as the menu found it.
     fn close_menu(&mut self, take: Option<usize>) {
         let Some(opened) = self.menu.take() else { return };
+        // The application menu's lines are the keys' own actions.
+        if let Purpose::Bar { actions, .. } = &opened.purpose {
+            if let Some(&action) = take.and_then(|i| actions.get(i)) {
+                self.run_action(action);
+            }
+            return self.redraw();
+        }
         // A name opens a field, and the clipboard is the window's: none
         // of them is the editor's to answer.
         if let Purpose::Row { id, lines } = &opened.purpose {
@@ -1798,6 +1866,7 @@ impl App {
                 Some(layers::RowLine::Tag(tag)) => editor.set_tag(doc, &id, tag),
                 _ => Change::None,
             },
+            Purpose::Bar { .. } => Change::None,
         };
         self.apply(change);
         self.redraw();
@@ -2739,6 +2808,9 @@ impl App {
         if let (Some(tabs), Some(atlas)) = (self.tabs(view), self.atlas.as_ref()) {
             frame.extend(tabs.prims(atlas, self.atlas_slot, &self.theme));
         }
+        if let (Some(bar), Some(atlas)) = (self.bar(view), self.atlas.as_ref()) {
+            frame.extend(bar.prims(atlas, self.atlas_slot, &self.theme, self.bar_open()));
+        }
         // A menu stands over every panel.
         if let (Some(laid), Some(opened), Some(atlas)) =
             (self.menu_laid(view), self.menu.as_ref(), self.atlas.as_ref())
@@ -2846,6 +2918,18 @@ impl App {
                     _ => {}
                 }
                 self.redraw();
+            }
+            return self.update_cursor_icon();
+        }
+        // A title of the application menu opens its menu, or shuts it
+        // when it is the one standing open — whatever menu was up before.
+        if let Some(title) = self.bar(&view).and_then(|b| b.hit(x, y)) {
+            if button == Button::Left {
+                let open = self.bar_open();
+                self.close_menu(None);
+                if open != Some(title) {
+                    self.open_bar_menu(title);
+                }
             }
             return self.update_cursor_icon();
         }
@@ -3141,6 +3225,15 @@ impl App {
             }
             self.redraw();
             return self.update_cursor_icon();
+        }
+        // With one of the application menus open, passing over another
+        // title opens that one instead, as a menu bar does.
+        if let Some(open) = self.bar_open()
+            && let Some(title) = self.view().and_then(|view| self.bar(&view)?.hit(x, y))
+            && title != open
+        {
+            self.menu = None;
+            self.open_bar_menu(title);
         }
         // Over a menu the line under the pointer is tried on the board.
         if self.menu.is_some() {
