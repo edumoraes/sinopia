@@ -42,7 +42,10 @@ function parse(raw) {
         "path": path,
         "name": path !== "" ? fileName(path) : (title !== "" ? title : "untitled"),
         "titled": path !== "" || title !== "",
-        "updated": Number(e.updated_at) || 0
+        "updated": Number(e.updated_at) || 0,
+        // Whether the engine has kept a preview. Only its own canonical
+        // place counts (§6): whatever else the index names is not read.
+        "thumb": e.thumb === "thumbs/" + e.id + ".png"
       })
     }
     list.sort(function (a, b) { return b.updated - a.updated })
@@ -50,4 +53,16 @@ function parse(raw) {
     return null
   }
   return list
+}
+
+// Where a recent's preview is read from, or "" when it has none: built
+// from the data directory and the checked id alone, never from a path the
+// index hands over. The save time rides on the URL, since the image cache
+// keys on it and a board saved again has a new picture under the same
+// name.
+function thumbSource(dataDir, p) {
+  if (!p || !p.thumb || !validId(p.id)) {
+    return ""
+  }
+  return "file://" + encodeURI(String(dataDir)) + "/thumbs/" + p.id + ".png?v=" + p.updated
 }
