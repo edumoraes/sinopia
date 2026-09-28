@@ -577,4 +577,44 @@ mod tests {
         assert!(board.elements.is_empty(), "the board is as it was");
         assert_eq!(board.layers.len(), 1, "and so is its stack");
     }
+
+    #[test]
+    fn a_text_in_the_frame_is_grafted_with_it_moved_as_the_frame_is() {
+        let mut b = board();
+        let mut frag = fragment();
+        if let Element::Frame(f) = &mut frag.elements[0] {
+            f.layers.push(Layer {
+                id: "tl".into(),
+                ..Layer::of("Title", Kind::Text)
+            });
+        }
+        frag.elements.push(Element::Text(crate::doc::Text {
+            id: "t1".into(),
+            layer: "tl".into(),
+            x: 10.0,
+            y: 5.0,
+            w: 40.0,
+            h: 20.0,
+            rotation: 0.0,
+            mode: crate::doc::TextMode::Artistic,
+            text: "Label".into(),
+            style: crate::doc::TextStyle::default(),
+        }));
+        plant(&mut b, &frag).unwrap();
+        let (frame, text) = (
+            b.elements.iter().find_map(|e| match e {
+                Element::Frame(f) => Some(f.clone()),
+                _ => None,
+            }),
+            b.elements.iter().find_map(|e| match e {
+                Element::Text(t) => Some(t.clone()),
+                _ => None,
+            }),
+        );
+        let (frame, text) = (frame.unwrap(), text.unwrap());
+        assert_ne!(text.id, "t1", "minted anew");
+        assert_eq!((text.x - frame.x, text.y - frame.y), (10.0, 5.0), "where it stood in the frame");
+        assert_eq!(b.layer(&text.layer).unwrap().kind, Kind::Text);
+        assert!(Document::from_json(&b.to_json().unwrap()).is_ok());
+    }
 }
