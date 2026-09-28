@@ -1137,6 +1137,7 @@ impl App {
         let (editor, _) = self.active();
         editor.hold_ctrl(mods.control_key());
         editor.hold_shift(mods.shift_key());
+        editor.hold_alt(mods.alt_key());
         editor.hold_space(false);
         self.shared.lock().expect("lock shared").board_id = self.doc().id.clone();
         self.retitle();
@@ -3296,6 +3297,10 @@ impl App {
             edge,
             live,
         ));
+        // The shape the Shape tool is dragging out, drawn as it will land.
+        if let Some(shape) = self.editor().shaping(view, self.ink_hex()) {
+            frame.extend(scene::shape_prims(&shape, view));
+        }
         if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
         }
@@ -4460,7 +4465,10 @@ impl App {
         // strength, as in Photoshop: `1` is 10% and `0` is all of it. The
         // brush keeps the digits for its own opacity.
         if !shift
-            && matches!(self.editor().tool(), Tool::Select | Tool::Hand | Tool::Frame | Tool::Zoom)
+            && matches!(
+                self.editor().tool(),
+                Tool::Select | Tool::Hand | Tool::Frame | Tool::Shape | Tool::Zoom
+            )
             && let Some(d) = c.to_digit(10)
         {
             let strength = if d == 0 { 1.0 } else { f64::from(d) / 10.0 };
@@ -4478,6 +4486,11 @@ impl App {
             let (editor, doc) = self.active();
             editor.choose_tool(tool, doc);
             self.redraw();
+        } else if let Some(model) = crate::editor::model_for_key(c) {
+            self.end_typing();
+            let (editor, doc) = self.active();
+            editor.choose_model(model, doc);
+            self.redraw();
         } else if self.brush_key(c) {
             self.redraw();
         }
@@ -4489,6 +4502,12 @@ impl App {
         let (editor, _) = self.active();
         editor.hold_ctrl(state.control_key());
         editor.hold_shift(state.shift_key());
+        editor.hold_alt(state.alt_key());
+        // Shift and Alt reshape the shape being dragged out as they go
+        // down, not at the next move of the pointer.
+        if editor.is_drawing() {
+            self.redraw();
+        }
         self.update_cursor_icon();
     }
 
@@ -4557,6 +4576,7 @@ impl App {
         editor.hold_space(false);
         editor.hold_ctrl(false);
         editor.hold_shift(false);
+        editor.hold_alt(false);
         let cancelled = editor.cancel(doc);
         // Losing the window is as much a resting point as letting go of
         // the button: a card dropped this way left a stack behind, and

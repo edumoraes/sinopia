@@ -1454,6 +1454,30 @@ pub enum Model {
     Star,
 }
 
+impl Model {
+    /// In the order the tool steps through them, and the bar lists them.
+    pub const ALL: [Model; 6] = [
+        Model::Rectangle,
+        Model::Ellipse,
+        Model::Triangle,
+        Model::Diamond,
+        Model::Polygon,
+        Model::Star,
+    ];
+
+    /// What it is called: the word its layer is named after.
+    pub fn name(self) -> &'static str {
+        match self {
+            Model::Rectangle => "Rectangle",
+            Model::Ellipse => "Ellipse",
+            Model::Triangle => "Triangle",
+            Model::Diamond => "Diamond",
+            Model::Polygon => "Polygon",
+            Model::Star => "Star",
+        }
+    }
+}
+
 /// The fewest sides a polygon — or points a star — may have, and the
 /// most: fewer than three is not a figure, and past sixty it is a circle
 /// that costs more to draw. Figma's own ceiling.

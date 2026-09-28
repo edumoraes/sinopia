@@ -9,14 +9,16 @@ use serde::{Deserialize, Serialize};
 use crate::bitmap;
 use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
-use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, Tag, new_id};
+use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Model, Paint, Path, Tag, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::merge::{Merge, Run};
 use crate::scene::View;
 use crate::select::{self, Handle};
 use crate::tree::{self, Arrange, Filter, Place};
 
+mod shaping;
 mod typing;
+pub use shaping::model_for_key;
 pub use typing::{Look, Move, TEXT_MAX, TextKey, Typing, fit_texts, step_size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -322,6 +324,8 @@ pub struct Editor {
     space: bool,
     ctrl: bool,
     shift: bool,
+    /// Draws a shape from its middle rather than its corner.
+    alt: bool,
     /// What the pen last said, or a mouse's own. Physical, like the
     /// held keys: it belongs to the hand, not to the board, and a tab
     /// switch does not hand it on.
@@ -365,6 +369,12 @@ pub struct Editor {
     text_style: crate::doc::TextStyle,
     /// How many typing sessions this editor has opened: each one's id.
     sessions: u64,
+    /// The model the Shape tool draws, and how the next shape is drawn.
+    model: Model,
+    shape_style: shaping::ShapeStyle,
+    /// The area the Shape tool is dragging out: where the press was and
+    /// where the pointer is, in world units.
+    shaping: Option<(Point, Point)>,
     /// The session the last change belongs to, until `app` has written
     /// it down.
     folding: Option<u64>,
@@ -514,10 +524,18 @@ impl Editor {
     /// handle of the selection back to Select, where it means "resize from
     /// the center". The rotation rings keep zooming: a turn has no use for
     /// Ctrl.
+    ///
+    /// With the Shape tool in hand every handle answers as it would with
+    /// the Select tool, as Affinity's shape tools let it: a shape just
+    /// drawn is resized and turned without the tool being put down.
     pub fn pointer_tool(&self, doc: &Document, view: &View, screen: (f64, f64)) -> Tool {
         let tool = self.active_tool();
-        let over_resize = matches!(self.hover(doc, view, screen), Some(Handle::Resize(_)));
+        let handle = self.hover(doc, view, screen);
+        let over_resize = matches!(handle, Some(Handle::Resize(_)));
         if tool == Tool::Zoom && self.ctrl && over_resize {
+            return Tool::Select;
+        }
+        if tool == Tool::Shape && handle.is_some() {
             return Tool::Select;
         }
         tool
@@ -534,6 +552,22 @@ impl Editor {
     /// Shift makes clicks and the marquee add to the selection.
     pub fn hold_shift(&mut self, down: bool) {
         self.shift = down;
+    }
+
+    /// Alt draws a shape from its middle.
+    pub fn hold_alt(&mut self, down: bool) {
+        self.alt = down;
+    }
+
+    /// A tool's key: the tool — or, for the tool already in hand, its
+    /// next kind: the other kind of text, as Affinity's two text tools
+    /// share `T`, and the next model, as Photoshop's shapes share `U`.
+    pub fn choose_tool(&mut self, tool: Tool, doc: &mut Document) {
+        match tool {
+            Tool::Text if self.tool == Tool::Text => self.switch_text_kind(),
+            Tool::Shape if self.tool == Tool::Shape => self.next_model(),
+            _ => self.set_tool(tool, doc),
+        }
     }
 
     /// The selected elements, by id. The shell reads them to answer a
@@ -1489,7 +1523,7 @@ impl Editor {
     }
 
     pub fn is_drawing(&self) -> bool {
-        self.stroke.is_some() || self.framing.is_some()
+        self.stroke.is_some() || self.framing.is_some() || self.shaping.is_some()
     }
 
     /// Where the hand is standing now.
@@ -1524,6 +1558,7 @@ impl Editor {
     pub fn busy(&self) -> bool {
         self.stroke.is_some()
             || self.framing.is_some()
+            || self.shaping.is_some()
             || self.placing.is_some()
             || self.nav.is_some()
             || self.drag.is_some()
@@ -1551,6 +1586,7 @@ impl Editor {
             || self.nav.is_some()
             || self.drag.is_some()
             || self.framing.is_some()
+            || self.shaping.is_some()
             || self.placing.is_some()
         {
             return Change::None;
@@ -1577,6 +1613,10 @@ impl Editor {
             }
             (Button::Left, Tool::Frame) => {
                 self.framing = Some(([world.0, world.1], [world.0, world.1]));
+                Change::Selection
+            }
+            (Button::Left, Tool::Shape) => {
+                self.shaping = Some(([world.0, world.1], [world.0, world.1]));
                 Change::Selection
             }
             (Button::Left, Tool::Zoom) => {
@@ -1833,7 +1873,7 @@ impl Editor {
         if self.drags_through_text() {
             return self.select_through_text(view, screen, doc);
         }
-        if let Some((_, to)) = &mut self.framing {
+        if let Some((_, to)) = self.framing.as_mut().or(self.shaping.as_mut()) {
             let world = view.screen_to_world(screen.0, screen.1);
             *to = [world.0, world.1];
             return Change::Selection;
@@ -2082,6 +2122,11 @@ impl Editor {
             return self.lay_frame(doc, view, from, to);
         }
         if button == Button::Left
+            && let Some((from, to)) = self.shaping.take()
+        {
+            return self.lay_shape(doc, view, from, to, ink);
+        }
+        if button == Button::Left
             && let Some((from, to, ink)) = self.placing.take()
         {
             return self.open_text(doc, view, from, to, &ink);
@@ -2222,7 +2267,8 @@ impl Editor {
     /// selection stays.
     pub fn cancel(&mut self, doc: &mut Document) -> bool {
         let had_stroke = self.stroke.take().is_some();
-        let had_area = self.framing.take().is_some() | self.placing.take().is_some();
+        let had_area =
+            self.framing.take().is_some() | self.shaping.take().is_some() | self.placing.take().is_some();
         let had_nav = self.nav.take().is_some();
         let had_drag = match self.drag.take() {
             Some(
