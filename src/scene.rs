@@ -1873,7 +1873,7 @@ const RULE: f64 = 0.07;
 pub fn text_prims(t: &crate::doc::Text, view: &View, letters: &Letters) -> Vec<Prim> {
     let k = view.px_per_world();
     let wanted = (t.style.size * k) as f32;
-    let Some(rung) = crate::glyphs::ladder(wanted) else {
+    let Some(rung) = crate::glyphs::ladder(wanted).map(|r| r.min(letters.glyphs.ceiling())) else {
         return Vec::new();
     };
     let laid = crate::typeset::Laid::of(t, letters.fonts);

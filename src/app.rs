@@ -230,6 +230,8 @@ struct App {
     /// are rasterized into — with the slot that sheet is uploaded to.
     fonts: crate::fonts::Fonts,
     glyphs: crate::glyphs::Glyphs,
+    /// Whether the last frame drawn started the glyph sheet over.
+    letters_restarted: std::cell::Cell<bool>,
     letters_slot: u32,
     /// The brush the palette last brought into sight. A change of hand
     /// glides the list to it; scrolling away from it does not snap back.
@@ -3129,11 +3131,23 @@ impl App {
     /// so: the glyphs that did not fit were left out of what was just
     /// drawn, and the next frame rasterizes what it needs into a clean
     /// sheet.
+    ///
+    /// A frame that fills a sheet it had just started over with needs
+    /// more letters than a sheet holds at the size they are seen at: the
+    /// sheet's ceiling comes down, so the next frame rasterizes them
+    /// smaller and they fit — rather than filling it again forever. A
+    /// frame whose letters fit with room to spare gives the ceiling back.
     fn start_letters_over(&self) -> bool {
         let full = self.glyphs.is_full();
         if full {
+            if self.letters_restarted.get() {
+                self.glyphs.squeeze();
+            }
             self.glyphs.clear();
+        } else {
+            self.glyphs.relax();
         }
+        self.letters_restarted.set(full);
         full
     }
 
@@ -5227,6 +5241,7 @@ pub fn run(
         menu_typed: (String::new(), Instant::now()),
         last_press: None,
         glyphs: crate::glyphs::Glyphs::default(),
+        letters_restarted: std::cell::Cell::new(false),
         letters_slot: 0,
         shown_brush: None,
         carry: None,

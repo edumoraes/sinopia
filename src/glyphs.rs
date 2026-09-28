@@ -90,6 +90,10 @@ pub struct Glyphs {
     shelf: Cell<Shelf>,
     dirty: Cell<Option<Region>>,
     full: Cell<bool>,
+    /// The largest rung glyphs are rasterized at for now: [`MAX_PX`],
+    /// lowered while the letters one frame needs cannot fit the sheet at
+    /// it, and raised again once they fit with room to spare.
+    ceiling: Cell<u32>,
 }
 
 impl Default for Glyphs {
@@ -117,6 +121,7 @@ impl Glyphs {
             }),
             dirty: Cell::new(None),
             full: Cell::new(false),
+            ceiling: Cell::new(MAX_PX),
         }
     }
 
@@ -158,6 +163,11 @@ impl Glyphs {
 
     /// Room for a `w` by `h` cell, or none — and the sheet marked full.
     fn place(&self, w: u32, h: u32) -> Option<(u32, u32)> {
+        // A cell no empty sheet could hold is left out, and the sheet is
+        // not called full for it: starting over would not make it fit.
+        if w + 2 * PAD > self.side || h + 2 * PAD > self.side {
+            return None;
+        }
         let mut shelf = self.shelf.get();
         if shelf.x + w + PAD > self.side {
             shelf.x = PAD;
@@ -227,6 +237,26 @@ impl Glyphs {
         self.dirty
             .set((!sheet.rgba.is_empty()).then_some((0, 0, self.side, self.side)));
         self.full.set(false);
+    }
+
+    /// The largest rung a glyph is rasterized at now.
+    pub fn ceiling(&self) -> u32 {
+        self.ceiling.get()
+    }
+
+    /// The letters one frame needs did not fit even a clean sheet: the
+    /// ceiling halves, never below the sizes drawn exactly.
+    pub fn squeeze(&self) {
+        self.ceiling.set((self.ceiling.get() / 2).max(EXACT_PX));
+    }
+
+    /// A frame's letters fit in a quarter of the sheet: the ceiling
+    /// doubles back toward [`MAX_PX`].
+    pub fn relax(&self) {
+        let used = self.shelf.get().y + self.shelf.get().row_h;
+        if used * 4 <= self.side && self.ceiling.get() < MAX_PX {
+            self.ceiling.set((self.ceiling.get() * 2).min(MAX_PX));
+        }
     }
 
     /// The sheet as it stands — empty until the first glyph lands.
@@ -327,5 +357,39 @@ mod tests {
         assert_eq!(sheet.w, 64);
         let inked = sheet.rgba.as_chunks::<4>().0.iter().find(|t| t[3] > 0);
         assert_eq!(inked.map(|t| &t[..3]), Some(&[255u8, 255, 255][..]));
+    }
+
+    #[test]
+    fn a_glyph_no_sheet_could_hold_is_left_out_without_filling_it() {
+        let fonts = Fonts::bundled();
+        let face = fonts.face(DEFAULT_FONT, false, false);
+        let g = Glyphs::with_side(32);
+        assert_eq!(g.cell(&face, 'W', 200), None);
+        assert!(!g.is_full(), "starting over would not make room for it");
+        assert!(g.cell(&face, 'i', 12).is_some());
+    }
+
+    #[test]
+    fn a_sheet_that_cannot_hold_a_frame_lowers_its_ceiling_and_raises_it_again() {
+        let g = Glyphs::default();
+        assert_eq!(g.ceiling(), MAX_PX);
+        g.squeeze();
+        assert_eq!(g.ceiling(), MAX_PX / 2);
+        for _ in 0..10 {
+            g.squeeze();
+        }
+        assert_eq!(g.ceiling(), EXACT_PX, "never below the sizes drawn exactly");
+        g.relax();
+        assert_eq!(g.ceiling(), EXACT_PX * 2, "an empty sheet has room to give back");
+        let fonts = Fonts::bundled();
+        let face = fonts.face(DEFAULT_FONT, false, false);
+        let tight = Glyphs::with_side(128);
+        tight.squeeze();
+        let was = tight.ceiling();
+        for c in "ABCDEFGHIJKLMNOP".chars() {
+            let _ = tight.cell(&face, c, 30);
+        }
+        tight.relax();
+        assert_eq!(tight.ceiling(), was, "a sheet near full keeps its ceiling down");
     }
 }
