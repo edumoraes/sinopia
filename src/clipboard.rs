@@ -37,6 +37,8 @@ use wayland_client::protocol::{
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, delegate_noop};
 use winit::window::Window;
 
+use crate::guest::{self, Guest};
+
 /// What a paste produced: the bytes, as the mime type they arrived as.
 #[derive(Debug)]
 pub struct Paste {
@@ -112,6 +114,8 @@ pub struct Clipboard {
     queue: QueueHandle<State>,
     /// The last input serial the seat handed this client.
     serial: Arc<AtomicU32>,
+    /// The thread the clipboard's queue is dispatched on.
+    guest: Guest,
 }
 
 impl Clipboard {
@@ -121,9 +125,9 @@ impl Clipboard {
         let RawDisplayHandle::Wayland(handle) = window.display_handle()?.as_raw() else {
             anyhow::bail!("not on Wayland");
         };
-        // SAFETY: the display belongs to winit's event loop, which outlives
-        // every window; the guest backend never closes it. Same contract as
-        // `gestures`.
+        // SAFETY: the display belongs to winit's event loop, which calls
+        // `end` from `exiting`, before the display is disconnected; the
+        // guest backend never closes it. Same contract as `gestures`.
         let backend = unsafe { Backend::from_foreign_display(handle.display.as_ptr() as *mut _) };
         let conn = Connection::from_backend(backend);
         let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
@@ -155,17 +159,12 @@ impl Clipboard {
             serial: serial.clone(),
         };
         let held = device.clone();
-        std::thread::Builder::new()
-            .name("clipboard".into())
-            .spawn(move || {
-                let _held = (held, keyboard, pointer);
-                loop {
-                    if let Err(e) = queue.blocking_dispatch(&mut state) {
-                        log::warn!("clipboard: {e:#}");
-                        return;
-                    }
-                }
-            })?;
+        let guest = Guest::spawn("clipboard", move |stop| {
+            let _held = (held, keyboard, pointer);
+            if let Err(e) = guest::dispatch(&mut queue, &mut state, &stop, |_| true) {
+                log::warn!("clipboard: {e:#}");
+            }
+        })?;
         log::info!("clipboard: watching the selection over wl_data_device");
         Ok(Clipboard {
             conn,
@@ -175,7 +174,17 @@ impl Clipboard {
             device,
             queue: qh,
             serial,
+            guest,
         })
+    }
+
+    /// Ends the clipboard's thread, then lets go of the connection — the
+    /// last hold on it, so every proxy the clipboard made is destroyed here,
+    /// while the display still stands.
+    pub fn end(self) {
+        let Clipboard { guest, conn, .. } = self;
+        guest.end();
+        drop(conn);
     }
 
     /// Offers `text` as the selection, for any client to paste — this

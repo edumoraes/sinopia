@@ -38,6 +38,7 @@ use crate::gestures;
 use crate::history::History;
 use crate::gfx::Gfx;
 use crate::graft;
+use crate::guest::Guest;
 use crate::grid;
 use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
@@ -306,6 +307,9 @@ struct App {
     atlas: Option<Atlas>,
     atlas_slot: u32,
     clipboard: Option<Clipboard>,
+    /// The gesture and tablet bridges, ended in `exiting` while the
+    /// display they share with the window still stands.
+    guests: Vec<Guest>,
     /// The last layers copied, for a display with no clipboard to hold
     /// them: there, `Ctrl+V` pastes this.
     clip: Option<Document>,
@@ -4896,13 +4900,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.gfx = Some(gfx);
                 let proxy = self.proxy.clone();
                 let sink = move |g| proxy.send_event(UserEvent::Gesture(g)).is_ok();
-                if let Err(e) = gestures::spawn(&window, Box::new(sink)) {
-                    log::warn!("trackpad gestures unavailable: {e:#}");
+                match gestures::spawn(&window, Box::new(sink)) {
+                    Ok(guest) => self.guests.extend(guest),
+                    Err(e) => log::warn!("trackpad gestures unavailable: {e:#}"),
                 }
                 let proxy = self.proxy.clone();
                 let sink = move |p| proxy.send_event(UserEvent::Pen(p)).is_ok();
-                if let Err(e) = tablet::spawn(&window, Box::new(sink)) {
-                    log::warn!("tablet unavailable: {e:#}");
+                match tablet::spawn(&window, Box::new(sink)) {
+                    Ok(guest) => self.guests.extend(guest),
+                    Err(e) => log::warn!("tablet unavailable: {e:#}"),
                 }
                 let proxy = self.proxy.clone();
                 let sink: clipboard::Sink = std::sync::Arc::new(move |p: Paste| {
@@ -4959,8 +4965,18 @@ impl ApplicationHandler<UserEvent> for App {
 
     /// The loop is over: whatever the last gesture changed about the
     /// brushes is kept, in case it was the one that closed the window.
+    /// The guest threads end here, the last moment the display they
+    /// borrow is sure to stand: winit disconnects it once the loop and the
+    /// window are dropped, and a guest let go of after that destroys its
+    /// proxies on a display that is gone.
     fn exiting(&mut self, _: &ActiveEventLoop) {
         self.keep_brushes();
+        if let Some(clipboard) = self.clipboard.take() {
+            clipboard.end();
+        }
+        for guest in self.guests.drain(..) {
+            guest.end();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -5526,6 +5542,7 @@ pub fn run(
         atlas: None,
         atlas_slot: 0,
         clipboard: None,
+        guests: Vec::new(),
         clip: None,
         dialog_sink: None,
         pending: None,

@@ -19,6 +19,7 @@ use wayland_protocols::wp::pointer_gestures::zv1::client::{
 use winit::window::Window;
 
 use crate::editor::Gesture;
+use crate::guest::{self, Guest, Stop};
 
 /// Delivers a gesture step to the event loop; `false` once the loop is gone.
 pub type Sink = Box<dyn Fn(Gesture) -> bool + Send>;
@@ -27,28 +28,27 @@ pub type Sink = Box<dyn Fn(Gesture) -> bool + Send>;
 /// ever handed back to libwayland.
 struct Display(usize);
 
-/// Starts the bridge for `window` on its own thread. Failures are logged,
-/// not fatal: the board works without a trackpad.
-pub fn spawn(window: &Window, sink: Sink) -> anyhow::Result<()> {
+/// Starts the bridge for `window` on its own thread, which the loop ends
+/// before the display goes. Failures are logged, not fatal: the board
+/// works without a trackpad. `None` off Wayland.
+pub fn spawn(window: &Window, sink: Sink) -> anyhow::Result<Option<Guest>> {
     let RawDisplayHandle::Wayland(handle) = window.display_handle()?.as_raw() else {
         log::info!("not on Wayland: no trackpad gestures");
-        return Ok(());
+        return Ok(None);
     };
     let display = Display(handle.display.as_ptr() as usize);
-    std::thread::Builder::new()
-        .name("gestures".into())
-        .spawn(move || {
-            if let Err(e) = run(display, sink) {
-                log::warn!("trackpad gestures unavailable: {e:#}");
-            }
-        })?;
-    Ok(())
+    let guest = Guest::spawn("gestures", move |stop| {
+        if let Err(e) = run(display, sink, &stop) {
+            log::warn!("trackpad gestures unavailable: {e:#}");
+        }
+    })?;
+    Ok(Some(guest))
 }
 
-fn run(display: Display, sink: Sink) -> anyhow::Result<()> {
-    // SAFETY: the display belongs to winit's event loop, which outlives every
-    // window; this thread stops dispatching as soon as the sink reports the
-    // loop gone, and the guest backend never closes the display.
+fn run(display: Display, sink: Sink, stop: &Stop) -> anyhow::Result<()> {
+    // SAFETY: the display belongs to winit's event loop, which ends this
+    // thread from `exiting` — joined, with everything below dropped — before
+    // the display is disconnected; the guest backend never closes it.
     let backend = unsafe { Backend::from_foreign_display(display.0 as *mut _) };
     let conn = Connection::from_backend(backend);
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
@@ -83,10 +83,7 @@ fn run(display: Display, sink: Sink) -> anyhow::Result<()> {
         alive: true,
     };
     log::info!("trackpad gestures: pinch and swipe over zwp_pointer_gestures_v1");
-    while state.alive {
-        queue.blocking_dispatch(&mut state)?;
-    }
-    Ok(())
+    guest::dispatch(&mut queue, &mut state, stop, |s| s.alive)
 }
 
 /// A seat's pointer with its gesture objects.
