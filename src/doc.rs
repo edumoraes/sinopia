@@ -1151,6 +1151,16 @@ fn is_default_leading(v: &f64) -> bool {
     *v == DEFAULT_LEADING
 }
 
+/// The size a text is set at until something says otherwise, in world
+/// units: a line that reads at a glance on a board seen whole.
+pub const DEFAULT_TEXT_SIZE: f64 = 24.0;
+
+impl Default for TextStyle {
+    fn default() -> TextStyle {
+        TextStyle::with_size(DEFAULT_TEXT_SIZE, "#000000")
+    }
+}
+
 impl TextStyle {
     /// The default style at `size`, in `color`.
     pub fn with_size(size: f64, color: &str) -> TextStyle {

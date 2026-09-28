@@ -137,6 +137,13 @@ impl History {
         for gone in self.future.drain(..) {
             self.weight -= gone.weight;
         }
+        // A session that ends where it began — a text typed and then
+        // taken away — leaves no step at all.
+        if folds && self.past[self.past.len() - 2].doc.same_board(doc) {
+            let gone = self.past.pop().expect("a present to fold into");
+            self.weight -= gone.weight;
+            return self.mark(spot);
+        }
         if folds {
             let present = self.present_mut();
             let was = present.weight;
@@ -620,6 +627,16 @@ mod tests {
         h.keep_as(&with_layers(9), spot(&[]), Some(4));
         let total: usize = h.past.iter().chain(&h.future).map(|e| e.weight).sum();
         assert_eq!(h.weight, total);
+    }
+
+    #[test]
+    fn a_session_that_ends_where_it_began_leaves_no_step() {
+        let before = board();
+        let mut h = History::new(&before, spot(&[]));
+        h.keep_as(&with_layers(1), spot(&[]), Some(5));
+        h.keep_as(&before, spot(&[]), Some(5));
+        assert!(!h.can_undo(), "typed, and taken back off: nothing happened");
+        assert_eq!(h.weight, present(&h).weight);
     }
 }
 

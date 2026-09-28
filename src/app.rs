@@ -3872,6 +3872,7 @@ impl App {
                 (Tool::Select, None) => CursorIcon::Default,
                 (Tool::Hand, _) => CursorIcon::Grab,
                 (Tool::Pencil | Tool::Brush | Tool::Frame, _) => CursorIcon::Crosshair,
+                (Tool::Text, _) => CursorIcon::Text,
                 (Tool::Zoom, _) => CursorIcon::ZoomIn,
             }
         };

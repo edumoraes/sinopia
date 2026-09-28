@@ -115,14 +115,17 @@ impl Fonts {
     /// The bundled family alone: what a machine without fontconfig has,
     /// and what the suite sets text in.
     pub fn bundled() -> Fonts {
-        let settings = fontdue::FontSettings::default();
-        let bundled = std::array::from_fn(|i| {
-            let font = fontdue::Font::from_bytes(BUNDLED[i], settings)
-                .expect("the bundled faces parse");
-            Rc::new(Face::new(font, i as u32))
-        });
+        thread_local! {
+            // Parsed once a thread: a board opens a text session with the
+            // bundled faces in hand before the machine's are asked for.
+            static FACES: [Rc<Face>; 4] = std::array::from_fn(|i| {
+                let font = fontdue::Font::from_bytes(BUNDLED[i], fontdue::FontSettings::default())
+                    .expect("the bundled faces parse");
+                Rc::new(Face::new(font, i as u32))
+            });
+        }
         Fonts {
-            bundled,
+            bundled: FACES.with(Clone::clone),
             locate: None,
             faces: RefCell::new(HashMap::new()),
             families: vec![DEFAULT_FONT.to_owned()],

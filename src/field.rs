@@ -165,6 +165,20 @@ impl Field {
         self.caret
     }
 
+    /// Where the selection was started from, when there is one.
+    pub fn anchor(&self) -> Option<usize> {
+        self.anchor
+    }
+
+    /// Puts the field back to a state it was in: what it held, where
+    /// its caret stood and where a selection was started from.
+    pub fn restore(&mut self, value: &str, caret: usize, anchor: Option<usize>) {
+        value.clone_into(&mut self.value);
+        let n = self.value.chars().count();
+        self.caret = caret.min(n);
+        self.anchor = anchor.map(|a| a.min(n));
+    }
+
     /// Which of `lines` the caret is on.
     pub fn caret_line(&self, lines: &[Line]) -> usize {
         line_of(lines, self.caret)
