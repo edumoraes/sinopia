@@ -2517,7 +2517,7 @@ impl App {
                     // A frame with no height is as tall as what it holds.
                     if spec.h.is_none() {
                         let laid = crate::typeset::lay(&text.text, &text.style, text.mode, text.w, f64::MAX, &self.fonts);
-                        text.h = laid.line_h * laid.rows.len() as f64;
+                        text.h = laid.content;
                     }
                 }
                 let placed = self.with_text(|e, d, f| e.place_text(d, f, text, born.as_deref()));
