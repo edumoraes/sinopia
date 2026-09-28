@@ -795,6 +795,7 @@ src/skills.rs    each harness's skills: where they live, which may be called, ho
 src/send.rs      the export dialog: the rows, the folder, the instruction box, the skills menu, the picture (pure, tested)
 src/gfx.rs       wgpu 30: the instanced SDF pipelines, image textures, the scratch and the sheets things are composited in, the blend modes
 src/app.rs       winit: window, input routing, socket → event loop bridge
+src/guest.rs     a guest client's thread on the window's display, ended from `exiting` while that display stands
 src/gestures.rs  trackpad pinch/swipe (zwp_pointer_gestures_v1) → event loop bridge
 src/tablet.rs    the tablet's pen (zwp_tablet_v2) → event loop bridge; its frame is tested
 src/clipboard.rs selection reads and writes (wl_data_device) → event loop bridge
