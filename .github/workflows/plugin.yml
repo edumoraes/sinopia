@@ -1,0 +1,106 @@
+name: Plugin
+
+# plugin/ is developed here, beside the engine it drives, but people add it
+# from a mirror that holds nothing else: `omarchy plugin add` clones a
+# repository whole and wants its manifest at the root. Each release puts
+# that release's plugin there, after the engine has been packaged, so the
+# mirror never runs ahead of the engine the AUR hands out.
+
+on:
+  pull_request:
+    paths:
+      - plugin/**
+      - LICENSE
+      - .github/workflows/plugin.yml
+  # A published release's plugin put on the mirror by hand: the first time,
+  # or again after a push that failed.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A published release, such as v1.2.3 (empty only validates)
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+    secrets:
+      PLUGIN_DEPLOY_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  MIRROR: git@github.com:edumoraes/omawhite-plugin.git
+  # Omarchy's own validator — the one `omarchy plugin add` runs before it
+  # installs anything — at a fixed commit.
+  OMARCHY_VALIDATE: https://raw.githubusercontent.com/omacom/omarchy/f8835df6449c5349ad96fd75e338b2280bb8e0f8/bin/omarchy-plugin-validate
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: What omarchy plugin add checks
+        run: |
+          curl -fsSL "$OMARCHY_VALIDATE" -o "$RUNNER_TEMP/omarchy-plugin-validate"
+          bash "$RUNNER_TEMP/omarchy-plugin-validate" plugin
+      # The mirror is plugin/ and nothing else, so what the marketplace asks
+      # to find at a repository's root has to be in here.
+      - name: What the marketplace asks of the mirror's root
+        run: |
+          test -s plugin/README.md
+          cmp LICENSE plugin/LICENSE
+
+  mirror:
+    name: Mirror
+    if: inputs.version != '' && vars.PUBLISH_PLUGIN == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # plugin/'s own history, split out of the release's. The same commits
+      # always split into the same ones, so every release fast-forwards the
+      # mirror — and a mirror that anything else has written to refuses the
+      # push rather than losing what was written.
+      - name: Split the release's plugin out
+        run: |
+          if ! [[ $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::not a release: $VERSION"
+            exit 1
+          fi
+          split=$(git subtree split --prefix=plugin "refs/tags/$VERSION")
+          # An empty split would make the push below `:main` — a deletion.
+          [[ $split =~ ^[0-9a-f]{40}$ ]]
+          echo "SPLIT=$split" >> "$GITHUB_ENV"
+      # What is pushed is what was checked: the split's own tree, not the
+      # checkout's.
+      - name: Validate what goes out
+        run: |
+          mkdir "$RUNNER_TEMP/mirror"
+          git archive "$SPLIT" | tar -x -C "$RUNNER_TEMP/mirror"
+          curl -fsSL "$OMARCHY_VALIDATE" -o "$RUNNER_TEMP/omarchy-plugin-validate"
+          bash "$RUNNER_TEMP/omarchy-plugin-validate" "$RUNNER_TEMP/mirror"
+          test -s "$RUNNER_TEMP/mirror/README.md"
+          test -s "$RUNNER_TEMP/mirror/LICENSE"
+      - name: Push it to the mirror
+        env:
+          PLUGIN_DEPLOY_KEY: ${{ secrets.PLUGIN_DEPLOY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ $SPLIT =~ ^[0-9a-f]{40}$ ]]
+          test -n "$PLUGIN_DEPLOY_KEY"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$PLUGIN_DEPLOY_KEY" > ~/.ssh/plugin
+          chmod 600 ~/.ssh/plugin
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > ~/.ssh/known_hosts
+          test -s ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/plugin -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes"
+          # Atomic: a mirror that refuses main does not get the tag either.
+          git push --atomic "$MIRROR" "$SPLIT:refs/heads/main" "$SPLIT:refs/tags/$VERSION"

@@ -702,14 +702,14 @@ Two artifacts. Whoever mixes the two into the same “it's just a plugin” gets
 Paths, from most Omarchy to loosest:
 
 1. **Arch package / Omarchy repo** — `omawhite` on the PATH, updates with `omarchy update` / pacman. Best destination.
-2. **AUR + `makepkg`** — the pattern Omaboard already uses. Acceptable on day 1.
+2. **AUR + `makepkg`** — the pattern Omaboard already uses. Acceptable on day 1. *Landed:* `omawhite-bin`, `omawhite` and `omawhite-git`, filled in from each GitHub release by native-packages and built on a clean Arch before they are published; the binary, the desktop entry, and the plugin, hook and skill as opt-in files under `/usr/share/omawhite` (PACKAGING.md).
 3. **`cargo install --path` / tarball in `~/.local/bin`** — development.
 
 The plugin looks, in this order: `omawhite` on the `PATH`, `~/.local/bin/omawhite`, configurable path. If not found: an “install the engine” panel that **opens the terminal** with the package command, as other Omarchy plugins do with dependencies. QML does not silently download a binary.
 
 Target: `x86_64-unknown-linux-gnu` first. Wayland only. No X11 in the MVP, unless winit delivers it for free.
 
-Release: stripped binary, `opt-level = 3`, LTO in the release profile when CI time allows. GPU: wgpu Vulkan on Arch is the path; GL fallback if ever needed, not on day 1.
+Release: stripped binary, `opt-level = 3`, thin LTO over one codegen unit (`Cargo.toml`'s release profile). GPU: wgpu Vulkan on Arch is the path; GL fallback if ever needed, not on day 1.
 
 ### 10.2 Plugin
 
@@ -737,6 +737,8 @@ No engine submodule. README with:
 - a warning that plugins run unsandboxed.
 
 List on the marketplace (plugins.omarchy.org / omarchyplugins.com) under Developer Tools / Productivity. Short tags: `whiteboard`, `agent`, `productivity`.
+
+*Landed:* the plugin is developed in `plugin/` of the engine's repository and mirrored, one release at a time, to `edumoraes/omawhite-plugin`: `omarchy plugin add` clones a repository whole, wants the manifest at its root and refuses a symlink anywhere inside, so the engine's repository cannot be the one people add. The AUR packages carry the plugin too, under `/usr/share/omawhite/plugin`. The marketplace's categories and tags are a fixed list, and the whiteboard's are `Productivity` with `ai`, `bar` and `launcher` (PACKAGING.md).
 
 ### 10.3 Joint versioning
 

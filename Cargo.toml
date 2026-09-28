@@ -2,6 +2,9 @@
 name = "omawhite"
 version = "0.1.0"
 edition = "2024"
+description = "Local-first whiteboard for Omarchy with export for the agent"
+license = "MIT"
+repository = "https://github.com/edumoraes/omawhite"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -30,3 +33,11 @@ winit = "0.30.13"
 # validates the WGSL, which otherwise fails only at the first window.
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 tempfile = "3.27.0"
+
+# What a package ships (§10.1): link-time optimised and stripped. Thin
+# rather than fat, since every tag and every source install pays for
+# this build.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

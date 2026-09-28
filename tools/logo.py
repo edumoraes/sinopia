@@ -297,6 +297,32 @@ def _page(draw, s, tx, ty, word, left, right, dy=0.0):
             [icon] + word)
 
 
+# --- the app icon ----------------------------------------------------------
+#
+# What a launcher shows beside the name, and the one mark here that brings
+# its own ground: a line in one colour disappears on half the themes a
+# launcher can wear. A whiteboard is dark ink on a white board, so the mark
+# goes on in black over a white tile -- and on a white ground, where the
+# tile goes, the mark stays.
+
+TILE, TILE_R, TILE_MARK = 22, 5, 0.66
+
+
+def app_icon(draw):
+    """The mark centred on its tile, weighed like the lockups: scaled, not thinned."""
+    x0, x1, y0, y1 = draw.reaches
+    s = TILE_MARK
+    tx = GRID / 2 - (x0 + x1) / 2 * s
+    ty = GRID / 2 - (y0 + y1) / 2 * s
+    m = (GRID - TILE) / 2
+    return [
+        f'<rect x="{n(m)}" y="{n(m)}" width="{n(TILE)}" height="{n(TILE)}" '
+        f'rx="{n(TILE_R)}" fill="#ffffff" stroke="none"/>',
+        f'<g transform="translate({n(tx)} {n(ty)}) scale({n(s)})" '
+        f'stroke-width="{n(STROKE / s)}">' + "".join(draw()) + "</g>",
+    ]
+
+
 # --- write it out ----------------------------------------------------------
 
 def main():
@@ -308,6 +334,8 @@ def main():
     write("icon", view, primary())
     write("wordmark-horizontal", *lockup_horizontal(primary))
     write("wordmark-vertical", *lockup_vertical(primary))
+    with open(os.path.join(OUT, "app-icon.svg"), "w") as f:
+        f.write(svg(view, app_icon(primary), "#000000"))
     print(f"wrote {len(os.listdir(OUT)) - 1} files + {len(os.listdir(os.path.join(OUT, 'explore')))} explorations in {OUT}")
 
 

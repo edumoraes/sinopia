@@ -1,0 +1,30 @@
+# Maintainer: Eduardo de Moraes <edumoraesdg@gmail.com>
+pkgname=omawhite-bin
+pkgver=@VERSION@
+pkgrel=@PKGREL@
+pkgdesc="Local-first whiteboard for Omarchy with export for the agent"
+arch=('x86_64')
+url="https://github.com/edumoraes/omawhite"
+license=('MIT' 'OFL-1.1-RFN')
+install="${pkgname}.install"
+# The binary links glibc and libgcc alone. The rest it loads at startup
+# — the window through Wayland, the keyboard through xkbcommon, the GPU
+# through Vulkan — so this list is the only place that says it needs them.
+depends=('glibc' 'libgcc' 'wayland' 'libxkbcommon' 'vulkan-icd-loader' 'vulkan-driver')
+optdepends=('xdg-desktop-portal-gtk: a file chooser for Save and Open'
+            'zenity: the question asked before closing unsaved work'
+            'herdr: sending a board to an agent running in herdr'
+            'tmux: sending a board to an agent running in tmux'
+            'fontconfig: lettering the chrome in the desktop monospace face'
+            'quickshell: the bar widget, on the Omarchy shell')
+provides=("omawhite=${pkgver}")
+conflicts=('omawhite' 'omawhite-git')
+# The release built it stripped: nothing left to split out or strip.
+options=('!debug' '!strip')
+source_x86_64=("${url}/releases/download/v${pkgver}/omawhite-v${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('@AMD64_SHA256@')
+
+package() {
+  cd "omawhite-v${pkgver}-${CARCH}-unknown-linux-gnu"
+  sh packaging/install.sh omawhite "$pkgdir" "$pkgname"
+}

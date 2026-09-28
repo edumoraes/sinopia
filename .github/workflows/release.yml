@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (x86_64-unknown-linux-gnu)
+    # The glibc a binary is linked against is the oldest it runs on, and
+    # Arch is always newer than this one's 2.39.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      # Both are checked before anything is built: a release that would
+      # be refused should not cost a build first.
+      - name: The tag, Cargo.toml, the plugin and the notes agree
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tagged $GITHUB_REF_NAME, but Cargo.toml says $version"
+            exit 1
+          fi
+          # The plugin is released with the engine and carries its number.
+          plugin=$(jq -r .version plugin/manifest.json)
+          if [ "$plugin" != "$version" ]; then
+            echo "::error::Cargo.toml says $version, but plugin/manifest.json says $plugin"
+            exit 1
+          fi
+          if [ ! -s "packaging/release-notes/$GITHUB_REF_NAME.md" ]; then
+            echo "::error::no notes written at packaging/release-notes/$GITHUB_REF_NAME.md"
+            exit 1
+          fi
+      # No build cache: a published binary is never built out of outputs
+      # restored from one.
+      - run: cargo build --release --locked
+      - run: sh packaging/archive.sh "$GITHUB_REF_NAME" target/release/omawhite dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: linux-x86_64
+          path: dist
+      # What the source recipe builds from, published as an asset of its
+      # own: a recipe pins a checksum, so the bytes behind it are the
+      # release's and not an archive GitHub makes on request.
+      - name: Source archive
+        run: |
+          git archive --format=tar.gz --prefix="omawhite-${GITHUB_REF_NAME#v}/" \
+            -o "dist/omawhite-${GITHUB_REF_NAME}-source.tar.gz" HEAD
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > checksums.txt
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          name: Omawhite ${{ github.ref_name }}
+          body_path: packaging/release-notes/${{ github.ref_name }}.md
+          generate_release_notes: false
+          # A tag with a suffix (v0.2.0-rc1) is a pre-release: it stays
+          # off "latest", and off the AUR below.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  packaging:
+    name: AUR
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: publish
+    permissions:
+      contents: write
+    uses: ./.github/workflows/packaging.yml
+    with:
+      version: ${{ github.ref_name }}
+      publish: true
+    secrets: inherit
+
+  # After the engine: the mirror is only as far along as the packages.
+  plugin:
+    name: Plugin
+    needs: packaging
+    uses: ./.github/workflows/plugin.yml
+    with:
+      version: ${{ github.ref_name }}
+    secrets: inherit

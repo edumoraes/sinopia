@@ -1,12 +1,57 @@
 # Omawhite bar widget
 
-The Omarchy shell plugin (§10.2): a bar icon whose popout holds the two ways
-into the board — `n` for a new one, `o` for the recent projects.
+The Omarchy shell plugin for [Omawhite](https://github.com/edumoraes/omawhite),
+the local-first whiteboard: a bar icon whose popout holds the two ways into
+the board — `n` for a new one, `o` for the recent projects.
 
-It is a shell, not a second engine. It reads `index.json` and nothing else
-(§6), speaks intent through the CLI that mirrors the socket (§5), and
-launches the binary detached, so the board owns its own window (§4.1) and
-killing it cannot take the shell down (§11).
+It is a shell, not a second engine. It reads the engine's `index.json` and
+nothing else, speaks intent through the engine's own command line, and
+launches the board detached, so the board owns its own window and killing it
+cannot take the shell down.
+
+## Install
+
+The widget is a plugin for Omarchy's shell, from Omarchy Quattro on, and it
+drives the Omawhite engine, a program of its own. Install the engine first —
+from the AUR, on Arch and Omarchy:
+
+```sh
+yay -S omawhite-bin
+```
+
+Then add the widget to the bar:
+
+```sh
+omarchy plugin add https://github.com/edumoraes/omawhite-plugin.git --enable
+```
+
+`omarchy plugin update edu.omawhite` brings it up to date. omawhite-plugin
+moves only when an engine release does, so the widget it hands out is never
+ahead of the engine the AUR hands out.
+
+The AUR packages carry the widget too, at `/usr/share/omawhite/plugin`.
+Linking that one instead keeps it in step with the engine through pacman; a
+change there loads on the shell's next start (`omarchy restart shell`), since
+the shell does not watch through a link:
+
+```sh
+mkdir -p ~/.config/omarchy/plugins
+ln -s /usr/share/omawhite/plugin ~/.config/omarchy/plugins/edu.omawhite
+omarchy plugin enable edu.omawhite right
+```
+
+One or the other: both are the same plugin id, and `omarchy plugin add`
+refuses an id that is already installed.
+
+## Remove
+
+```sh
+omarchy plugin remove edu.omawhite
+```
+
+That takes the widget off the bar and out of the plugins folder — a clone is
+deleted, a link is unlinked. The engine stays until its own package is
+removed, and the boards stay in `~/.local/share/omawhite` after that.
 
 ## The recents
 
@@ -24,35 +69,19 @@ process, dims a file that is not there right now and says so: an unmounted
 drive is not a deletion, and only the engine failing to open it drops the
 entry — which the watcher then sees.
 
-## Install
-
-The shell refuses a symlink *inside* a plugin folder, but the folder itself
-may be one — which is what keeps the plugin versioned with the engine it
-drives:
-
-```sh
-ln -s ~/Work/board/plugin ~/.config/omarchy/plugins/edu.omawhite
-omarchy plugin validate ~/Work/board/plugin
-omarchy plugin enable edu.omawhite right
-```
-
-Saving any file under `~/.config/omarchy/plugins/` reloads plugin code on its
-own; `omarchy-shell shell rescanPlugins` forces it.
-
 ## Finding the engine
 
-Looked for in this order, when the popout opens (§10.1):
+Looked for in this order, when the popout opens:
 
 1. `omawhite` on the `PATH`
 2. `~/.local/bin/omawhite`
 3. `enginePath`, set on this widget's entry in `~/.config/omarchy/shell.json`
 4. `target/release/omawhite`, then `target/debug/omawhite`, beside a checkout
-   of this repo — the plugin folder is resolved through `readlink -f` first,
-   so the search climbs out of the symlink into the repo rather than into
-   `~/.config/omarchy/plugins/`
+   of the Omawhite repository — the plugin folder is resolved through
+   `readlink -f` first, so the search climbs out of the symlink into the
+   checkout rather than into `~/.config/omarchy/plugins/`
 
-With none of them, the popout says so and the rows go quiet. It offers no
-install command, because there is no package to name yet.
+With none of them, the popout says so and the rows go quiet.
 
 ## Keys and gestures
 
@@ -75,3 +104,25 @@ first row picked.
 
 `omarchy-shell edu.omawhite toggle` opens it from a keybinding — the
 `ipcTarget` comes with `Ui/Panel`.
+
+## Developing
+
+The widget lives in the [Omawhite repository](https://github.com/edumoraes/omawhite),
+in `plugin/`, beside the engine it drives; each engine release mirrors that
+folder to [omawhite-plugin](https://github.com/edumoraes/omawhite-plugin).
+Changes go to the first, never to the mirror.
+
+From the root of a checkout, link the folder itself — the shell refuses a
+symlink *inside* a plugin folder, but the folder may be one:
+
+```sh
+ln -s "$PWD/plugin" ~/.config/omarchy/plugins/edu.omawhite
+omarchy plugin validate plugin
+omarchy plugin enable edu.omawhite right
+```
+
+Through the link an edit does not reload on its own: the shell watches
+`~/.config/omarchy/plugins/` without following links, and
+`omarchy-shell shell rescanPlugins` only refreshes the list of plugins.
+`omarchy restart shell` is what loads the edit; QML errors land in
+`journalctl --user -t omarchy-shell`.
