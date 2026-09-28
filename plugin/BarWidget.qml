@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "recents.js" as Recents
 
 // Sinopia on the bar: an icon whose popout holds the two ways into the
 // board — a new one, or one of the recent projects.
@@ -86,46 +87,11 @@ Panel {
 
   // ------------------------------------------------------------- the index
 
-  // Mirrors `validate_id` in the engine's own store: a row naming an id
-  // it would refuse could never be opened, so it is not shown.
-  function validId(id) {
-    var s = String(id || "")
-    return s.length > 0 && s.length <= 64 && /^[A-Za-z0-9_-]+$/.test(s)
-  }
-
-  // A file is called by its own name, as the tab calls it: the title
-  // travelled inside the JSON, the name is what the person chose.
-  function fileName(path) {
-    var parts = String(path).split("/")
-    var last = parts[parts.length - 1] || ""
-    var dot = last.lastIndexOf(".")
-    return (dot > 0 ? last.slice(0, dot) : last) || "untitled"
-  }
-
+  // The reading itself is recents.js's, where it is tested; a text that
+  // will not parse leaves the last good list up.
   function absorb(raw) {
-    var list = []
-    try {
-      var d = JSON.parse(String(raw || ""))
-      var entries = (d && d.boards) || []
-      for (var i = 0; i < entries.length; i++) {
-        var e = entries[i]
-        if (!e || !root.validId(e.id)) {
-          continue
-        }
-        var path = typeof e.path === "string" && e.path !== "" ? e.path : ""
-        var title = String(e.title || "").replace(/\s+/g, " ").trim()
-        list.push({
-          "id": String(e.id),
-          "path": path,
-          "name": path !== "" ? root.fileName(path) : (title !== "" ? title : "untitled"),
-          "titled": path !== "" || title !== "",
-          "updated": Number(e.updated_at) || 0
-        })
-      }
-      list.sort(function (a, b) { return b.updated - a.updated })
-    } catch (err) {
-      // A half-written index — the engine writes atomically, but a reader
-      // can still meet a truncated read — leaves the last good list up.
+    var list = Recents.parse(raw)
+    if (list === null) {
       return
     }
     root.projects = list
@@ -269,7 +235,7 @@ Panel {
     }
     if (p.path !== "") {
       root.launch(["--open-file", p.path])
-    } else if (root.validId(p.id)) {
+    } else if (Recents.validId(p.id)) {
       root.launch(["--open", p.id])
     }
   }
