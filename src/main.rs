@@ -36,6 +36,7 @@ mod props;
 mod scene;
 mod select;
 mod send;
+mod shape;
 mod skills;
 mod slots;
 mod spans;

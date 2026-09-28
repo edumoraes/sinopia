@@ -3,7 +3,7 @@
 //! handles drive. Pure — `editor` decides when, this decides what.
 
 use crate::curve::{self, Cubic};
-use crate::doc::{Document, Element, MAX_TEXT_SIZE, MIN_TEXT_SIZE, TextMode};
+use crate::doc::{Document, Element, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Shape, TextMode};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::{Prim, ScreenRect, View, with_alpha};
 use crate::theme::Theme;
@@ -120,7 +120,8 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
     }
     match el {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
-        Element::Rect(_) | Element::Image(_) | Element::Text(_) | Element::Shape(_) => true,
+        Element::Rect(_) | Element::Image(_) | Element::Text(_) => true,
+        Element::Shape(s) => shape_hit(s, &f, p, slop),
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
         // A frame is an area with a surface, not an outline. It is
         // painted before what it holds, so a walk from the top finds
@@ -132,6 +133,18 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
             .strokes
             .iter()
             .any(|s| ink_hit(&s.curves, s.width, p, slop)),
+    }
+}
+
+/// Whether `p` is on what shape `s` shows, framed by `f`: anywhere in its
+/// figure when it is filled, and on its stroke alone when it is hollow —
+/// the stroke laid inside the edge, `width` deep. A hollow shape drawn
+/// round other things is not in the way of the pointer reaching them.
+fn shape_hit(s: &Shape, f: &Frame, p: Point, slop: f64) -> bool {
+    let d = crate::shape::distance(s, f.to_local(p));
+    match s.fill {
+        Some(_) => d <= slop,
+        None => d <= slop && d >= -(s.width + slop),
     }
 }
 
@@ -238,9 +251,14 @@ pub fn transform(el: &mut Element, m: &Affine) {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
         }
+        // A box that only turns cannot mirror: a map that does is the
+        // box's turn and the model flipped inside it.
         Element::Shape(s) => {
             (s.x, s.y, s.w, s.h, s.rotation) =
                 box_fields(box_frame(s.x, s.y, s.w, s.h, s.rotation).transformed(m));
+            if m.a * m.d - m.b * m.c < 0.0 {
+                s.flip = !s.flip;
+            }
         }
         // A frame's box is mapped and its lines reflow in it. Artistic
         // text is its letters: it is scaled evenly, by the middle of
@@ -1368,5 +1386,115 @@ mod tests {
         let t = text_of(&el);
         assert!((t.style.size - 40.0).abs() < 1e-9);
         assert_eq!(t.runs[0].style.size, Some(60.0), "twice the size, as the rest");
+    }
+
+    /// A `model` over (0,0)–(100,60), stroked 4 wide, filled or not.
+    fn shape(model: crate::doc::Model, filled: bool) -> Element {
+        Element::Shape(crate::doc::Shape {
+            id: "s".into(),
+            layer: String::new(),
+            model,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 60.0,
+            rotation: 0.0,
+            flip: false,
+            fill: filled.then(|| "#e5484d".into()),
+            stroke: Some("#000000".into()),
+            width: 4.0,
+            radius: 0.0,
+            sides: 5,
+            inner: crate::doc::DEFAULT_INNER,
+        })
+    }
+
+    fn shape_of(el: &Element) -> &crate::doc::Shape {
+        match el {
+            Element::Shape(s) => s,
+            other => panic!("expected a shape, got {other:?}"),
+        }
+    }
+
+    use crate::doc::Model;
+
+    #[test]
+    fn a_shape_is_its_box_turned_about_its_centre() {
+        let mut el = shape(Model::Star, true);
+        if let Element::Shape(s) = &mut el {
+            s.rotation = 90.0;
+        }
+        let f = frame(&el).unwrap();
+        assert_eq!((f.center, f.half), ([50.0, 30.0], [50.0, 30.0]));
+        assert!((f.angle - QUARTER).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_filled_shape_is_hit_on_its_figure_and_not_beside_it() {
+        let d = doc(vec![shape(Model::Ellipse, true)]);
+        assert_eq!(element_at(&d, [50.0, 30.0], 0.0), Some("s"));
+        assert_eq!(element_at(&d, [3.0, 3.0], 1.0), None, "the box's corner is past the ellipse");
+        assert_eq!(element_at(&d, [101.0, 30.0], 2.0), Some("s"), "within slop of the edge");
+        assert_eq!(element_at(&d, [105.0, 30.0], 2.0), None);
+    }
+
+    #[test]
+    fn a_hollow_shape_is_hit_on_its_stroke_alone() {
+        let d = doc(vec![shape(Model::Rectangle, false)]);
+        assert_eq!(element_at(&d, [50.0, 30.0], 2.0), None, "the middle of it is empty");
+        assert_eq!(element_at(&d, [2.0, 30.0], 0.0), Some("s"), "on the stroke, inside the edge");
+        assert_eq!(element_at(&d, [-1.0, 30.0], 2.0), Some("s"), "within slop outside it");
+        assert_eq!(element_at(&d, [5.5, 30.0], 2.0), Some("s"), "within slop inside the stroke");
+        assert_eq!(element_at(&d, [9.0, 30.0], 2.0), None);
+    }
+
+    #[test]
+    fn a_turned_shape_is_hit_where_it_was_turned_to() {
+        // A triangle in a 100 by 60 box, a quarter turn: its apex points
+        // right, out of the box's centre, and its base stands on the left.
+        let mut el = shape(Model::Triangle, true);
+        let f = frame(&el).unwrap();
+        transform(&mut el, &rotate_map(&f, QUARTER));
+        let d = doc(vec![el]);
+        assert_eq!(element_at(&d, [78.0, 30.0], 0.0), Some("s"), "the apex");
+        assert_eq!(element_at(&d, [78.0, 5.0], 0.0), None, "beside it");
+        assert_eq!(element_at(&d, [22.0, 76.0], 0.0), Some("s"), "the base's end");
+    }
+
+    #[test]
+    fn a_shape_moves_turns_and_stretches_as_its_box_does() {
+        let mut el = shape(Model::Diamond, true);
+        let f = frame(&el).unwrap();
+        transform(&mut el, &resize_map(&f, Corner::BottomRight, [200.0, 90.0], FREE));
+        let s = shape_of(&el);
+        assert_eq!((s.x, s.y, s.w, s.h), (0.0, 0.0, 200.0, 90.0));
+        transform(&mut el, &Affine::translate(10.0, -5.0));
+        let s = shape_of(&el);
+        assert_eq!((s.x, s.y, s.width), (10.0, -5.0, 4.0), "the stroke keeps its width");
+    }
+
+    #[test]
+    fn a_flip_mirrors_a_shape_rather_than_turning_it() {
+        // Near the box's top left a triangle is empty and near its bottom
+        // left it is not — until it is flipped top to bottom. Flipped side
+        // to side it stands as it stood.
+        let (top, bottom) = ([12.0, 8.0], [12.0, 56.0]);
+        let under = |el: &Element, p: Point| element_at(&doc(vec![el.clone()]), p, 0.0).is_some();
+        let upright = shape(Model::Triangle, true);
+        assert!(!under(&upright, top) && under(&upright, bottom));
+
+        let f = frame(&upright).unwrap();
+        let mut flipped = upright.clone();
+        transform(&mut flipped, &Affine::scale(1.0, -1.0).about(f.center));
+        assert!(shape_of(&flipped).flip);
+        assert!(under(&flipped, top) && !under(&flipped, bottom), "top to bottom");
+
+        let mut mirrored = upright.clone();
+        transform(&mut mirrored, &Affine::scale(-1.0, 1.0).about(f.center));
+        assert!(!under(&mirrored, top) && under(&mirrored, bottom), "side to side");
+
+        // Twice over is where it started.
+        transform(&mut flipped, &Affine::scale(1.0, -1.0).about(f.center));
+        assert!(!shape_of(&flipped).flip);
     }
 }

@@ -1476,6 +1476,11 @@ pub const DEFAULT_INNER: f64 = 0.382;
 /// absent; the stroke is `width` world units wide and laid inside the
 /// edge, so what a shape paints is its box and nothing past it.
 ///
+/// `flip` mirrors the model top to bottom inside its box: a triangle
+/// flipped points down. It is what a map that mirrors leaves behind, since
+/// a box that only turns cannot say it — every model is its own mirror
+/// image side to side, so a mirror either way is a turn and, at most, this.
+///
 /// `radius` rounds a rectangle's corners, `sides` is a polygon's sides
 /// and a star's points, and `inner` is how far in a star is cut, as a
 /// fraction of its outer radius. Each is kept whatever the model — so a
@@ -1494,6 +1499,8 @@ pub struct Shape {
     pub h: f64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub rotation: f64,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1541,6 +1548,8 @@ struct ShapeOnDisk {
     h: f64,
     #[serde(default)]
     rotation: f64,
+    #[serde(default)]
+    flip: bool,
     #[serde(default)]
     fill: Option<String>,
     #[serde(default)]
@@ -1593,6 +1602,7 @@ impl TryFrom<ShapeOnDisk> for Shape {
             w: s.w,
             h: s.h,
             rotation: s.rotation,
+            flip: s.flip,
             fill: s.fill,
             stroke: s.stroke,
             width: s.width,
@@ -3960,12 +3970,13 @@ mod tests {
         ] {
             let doc = with_shape(&format!(
                 r##""model": "{word}", "x": -5, "y": 7.5, "w": 30, "h": 40, "rotation": 30,
-                    "fill": "#f5a524", "stroke": "#3b82f6", "width": 4.5, "radius": 6,
-                    "sides": 7, "inner": 0.25"##
+                    "flip": true, "fill": "#f5a524", "stroke": "#3b82f6", "width": 4.5,
+                    "radius": 6, "sides": 7, "inner": 0.25"##
             ))
             .unwrap();
             let s = only_shape(&doc);
             assert_eq!(s.model, model, "{word}");
+            assert!(s.flip);
             assert_eq!((s.rotation, s.width, s.radius, s.sides, s.inner), (30.0, 4.5, 6.0, 7, 0.25));
             assert_eq!(s.fill.as_deref(), Some("#f5a524"));
             assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc, "{word}");
