@@ -14,7 +14,7 @@ selection, navigation, pasted images, projects in tabs, frames, text,
 shapes and arrows, export to the agent, the CLI an agent asks the board through, and the
 packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1341 tests, and the plugin's
+- `cargo build` clean, `cargo test` with 1345 tests, and the plugin's
   own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,

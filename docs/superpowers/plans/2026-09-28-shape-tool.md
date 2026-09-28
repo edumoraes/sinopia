@@ -96,17 +96,20 @@ Shell:
 
 The door an agent asks through:
 
-- [ ] `export`: `board.md` counts shapes and lines by model.
-- [ ] `graft` + `skills/sinopia/SKILL.md`: a fragment may carry shapes
+- [x] `export`: `board.md` counts shapes and lines by model.
+- [x] `graft` + `skills/sinopia/SKILL.md`: a fragment may carry shapes
       and lines.
 
 Wrap-up:
 
-- [ ] AGENTS.md, DEVELOPMENT.md, ARCHITECTURE.md (§6.1, §7.2).
-- [ ] `cargo build`, `cargo clippy --all-targets` with zero warnings;
+- [x] AGENTS.md, DEVELOPMENT.md, ARCHITECTURE.md (§6.1, §7.2).
+- [x] `cargo build`, `cargo clippy --all-targets` with zero warnings;
       `cargo test`.
-- [ ] Seen working in a window: every model dragged out, Shift and Alt,
+- [x] Seen working in a window: every model dragged out, Shift and Alt,
       a click; fill and stroke from the bar and the dock; width, radius,
       sides, points and depth; heads; a line's ends dragged; resize,
       turn and flip; undo; the layers panel; a deep zoom.
+- [x] An independent review of the diff: two defects confirmed and one
+      plausible, each fixed with a test, and two old patterns the new
+      state inherited fixed with them.
 - [ ] Pushed; CI green.
