@@ -43,6 +43,7 @@ use crate::ipc::proto::{Event, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::menu;
+use crate::menubar::{self, Action};
 use crate::omarchy::{self, Style};
 use crate::palette::{self, Palette};
 use crate::slots::{self, Strip};
@@ -57,7 +58,7 @@ use crate::skills;
 use crate::store::{self, Store};
 use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
-use crate::tree::{Arrange, Place};
+use crate::tree::Place;
 use crate::text::{self, Atlas, Font};
 use crate::theme::{INKS, Theme};
 
@@ -3455,17 +3456,7 @@ impl App {
                     self.redraw();
                 }
             }
-            // The active layer's name, opened where its row is: the panel
-            // comes out, and the list goes to the row.
-            Key::Named(NamedKey::F2) if pressed => {
-                let id = self.editor().active(self.doc()).to_owned();
-                let (editor, doc) = self.active();
-                editor.reveal(doc, &id);
-                self.layers_shown = true;
-                self.focused = None;
-                self.panel_hit(PanelHit::Rename(id));
-                self.redraw();
-            }
+            Key::Named(NamedKey::F2) if pressed => self.rename_active(),
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
                 let (editor, doc) = self.active();
                 let change = editor.delete(doc);
@@ -3474,20 +3465,18 @@ impl App {
             Key::Character(text) if pressed && self.modifiers.state().control_key() => {
                 // Shift turns the character upper case, so the letter is
                 // read case-insensitively and the modifier separately.
+                // The letters follow the layout, as a hotkey should; the
+                // bare key is asked second, since Shift turns a bracket
+                // into a brace on one layout and something else on the
+                // next.
                 let shift = self.modifiers.state().shift_key();
                 let alt = self.modifiers.state().alt_key();
-                match text.to_ascii_lowercase().as_str() {
-                    "v" => self.paste(),
-                    "c" if !shift => self.copy_layers(false),
-                    "x" if !shift => self.copy_layers(true),
-                    "z" if shift => self.redo(),
-                    "z" => self.undo(),
-                    "s" if shift => self.ask_name(self.active, Then::Stay),
-                    "s" => self.save_active(),
-                    "o" => self.ask_open(),
-                    "e" if !shift && !alt => self.ask_send(),
-                    "w" => self.request_close(self.active),
-                    _ => self.layer_command(bare, shift, alt),
+                let action = menubar::shortcut(&text.to_ascii_lowercase(), shift, alt).or_else(|| match bare {
+                    Key::Character(c) => menubar::shortcut(&c.to_ascii_lowercase(), shift, alt),
+                    _ => None,
+                });
+                if let Some(action) = action {
+                    self.run_action(action);
                 }
             }
             Key::Character(text) if pressed => {
@@ -3505,25 +3494,63 @@ impl App {
         self.update_cursor_icon();
     }
 
-    /// A layer command under `Ctrl`, Photoshop's keys: `G` groups the
-    /// picked layers and `Shift+G` ungroups, `J` duplicates, `Shift+N`
-    /// opens a new layer, the brackets arrange — a step with `[` and `]`,
-    /// all the way with Shift — `/` locks and `,` hides. Read off the bare key, since Shift
-    /// turns a bracket into a brace on one layout and something else on
-    /// the next.
-    fn layer_command(&mut self, bare: &Key, shift: bool, alt: bool) {
-        let Key::Character(c) = bare else { return };
-        let (editor, doc) = self.active();
-        let key = c.to_ascii_lowercase();
-        let change = match (key.as_str(), shift) {
-            ("n", true) => editor.add_layer(doc),
-            _ => match layer_key(&key, shift, alt) {
-                Some(command) if command.merges() => return self.merge_layers(command),
-                Some(command) => editor.run(doc, command),
-                None => Change::None,
-            },
+    /// What a key under `Ctrl` or a line of the application menu asks
+    /// for: the two are one door, so what is taught cannot disagree with
+    /// what is done.
+    fn run_action(&mut self, action: Action) {
+        let change = match action {
+            Action::New => return self.open_project(Project::untitled()),
+            Action::Open => return self.ask_open(),
+            Action::Save => return self.save_active(),
+            Action::SaveAs => return self.ask_name(self.active, Then::Stay),
+            Action::Export => return self.ask_send(),
+            Action::Close => return self.request_close(self.active),
+            Action::Quit => return self.quit(),
+            Action::Undo => return self.undo(),
+            Action::Redo => return self.redo(),
+            Action::Cut => return self.copy_layers(true),
+            Action::Copy => return self.copy_layers(false),
+            Action::Paste => return self.paste(),
+            Action::Rename => return self.rename_active(),
+            Action::Layers => {
+                self.layers_shown = !self.layers_shown;
+                return self.redraw();
+            }
+            Action::Library => {
+                self.palette_shown = !self.palette_shown;
+                return self.redraw();
+            }
+            Action::Layer(command) if command.merges() => return self.merge_layers(command),
+            Action::Delete => {
+                let (editor, doc) = self.active();
+                editor.delete(doc)
+            }
+            Action::NewLayer => {
+                let (editor, doc) = self.active();
+                editor.add_layer(doc)
+            }
+            Action::NewGroup => {
+                let (editor, doc) = self.active();
+                editor.add_group(doc)
+            }
+            Action::Layer(command) => {
+                let (editor, doc) = self.active();
+                editor.run(doc, command)
+            }
         };
         self.apply(change);
+    }
+
+    /// The active layer's name, opened where its row is: the panel comes
+    /// out, and the list goes to the row.
+    fn rename_active(&mut self) {
+        let id = self.editor().active(self.doc()).to_owned();
+        let (editor, doc) = self.active();
+        editor.reveal(doc, &id);
+        self.layers_shown = true;
+        self.focused = None;
+        self.panel_hit(PanelHit::Rename(id));
+        self.redraw();
     }
 
     /// A character typed with no modifier but Shift: `Shift+L` shows or
@@ -3559,11 +3586,9 @@ impl App {
             return;
         }
         if shift && c.eq_ignore_ascii_case(&'l') {
-            self.layers_shown = !self.layers_shown;
-            self.redraw();
+            self.run_action(Action::Layers);
         } else if shift && c.eq_ignore_ascii_case(&'b') {
-            self.palette_shown = !self.palette_shown;
-            self.redraw();
+            self.run_action(Action::Library);
         } else if let Some(tool) = Tool::from_hotkey(c) {
             let (editor, doc) = self.active();
             editor.set_tool(tool, doc);
@@ -4069,25 +4094,6 @@ impl App {
     }
 }
 
-/// The command a layer shortcut asks for: `Ctrl` with `key`, and `Shift`
-/// and `Alt` when they are held. `Ctrl+E` alone is the export's.
-fn layer_key(key: &str, shift: bool, alt: bool) -> Option<Command> {
-    Some(match (key, shift, alt) {
-        ("g", false, false) => Command::Group,
-        ("g", true, false) => Command::Ungroup,
-        ("j", false, false) => Command::Duplicate,
-        ("]", false, false) => Command::Arrange(Arrange::Forward),
-        ("]", true, false) => Command::Arrange(Arrange::Front),
-        ("[", false, false) => Command::Arrange(Arrange::Backward),
-        ("[", true, false) => Command::Arrange(Arrange::Back),
-        ("/", false, false) => Command::Lock,
-        (",", false, false) => Command::Show,
-        ("e", false, true) => Command::Merge,
-        ("e", true, false) => Command::MergeVisible,
-        _ => return None,
-    })
-}
-
 /// Puts back the blend modes `was` says every layer had.
 fn restore_blends(doc: &mut Document, was: &[(String, BlendMode)]) {
     for (id, mode) in was {
@@ -4383,19 +4389,7 @@ mod tests {
     }
 
     #[test]
-    fn the_layer_shortcuts_ask_for_the_commands_the_menu_teaches() {
-        assert_eq!(layer_key("g", false, false), Some(Command::Group));
-        assert_eq!(layer_key("g", true, false), Some(Command::Ungroup));
-        assert_eq!(layer_key("j", false, false), Some(Command::Duplicate));
-        assert_eq!(layer_key("/", false, false), Some(Command::Lock));
-        assert_eq!(layer_key(",", false, false), Some(Command::Show));
-        assert_eq!(layer_key("]", true, false), Some(Command::Arrange(Arrange::Front)));
-        assert_eq!(layer_key("[", false, false), Some(Command::Arrange(Arrange::Backward)));
-        assert_eq!(layer_key("e", false, true), Some(Command::Merge));
-        assert_eq!(layer_key("e", true, false), Some(Command::MergeVisible));
-        assert_eq!(layer_key("e", false, false), None, "Ctrl+E is the export's");
-        assert_eq!(layer_key("q", false, false), None);
-        // Every key a row's menu writes beside a command is that command's.
+    fn every_key_a_rows_menu_teaches_is_that_commands() {
         let (items, lines) = layers::row_menu(|_| true, true, layers::RowState {
             locked: false,
             hidden: false,
@@ -4418,7 +4412,11 @@ mod tests {
                 Some(k) => (true, k),
                 None => (false, keys),
             };
-            assert_eq!(layer_key(&key.to_lowercase(), shift, alt), Some(*command), "{hint}");
+            assert_eq!(
+                menubar::shortcut(&key.to_lowercase(), shift, alt),
+                Some(Action::Layer(*command)),
+                "{hint}"
+            );
         }
     }
 
