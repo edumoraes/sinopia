@@ -24,8 +24,9 @@ pub const SIDE: u32 = 2048;
 
 /// The largest a glyph is rasterized at, in px. Past it the raster is
 /// drawn larger than it was made: a glyph this big is a handful of
-/// letters filling the window, and a sheet of them would hold a dozen.
-pub const MAX_PX: u32 = 384;
+/// letters filling the window — only those on it are rasterized — and
+/// the sheet holds a couple of dozen of them.
+pub const MAX_PX: u32 = 512;
 
 /// Up to here every whole pixel is a rung of its own: small text is where
 /// a size off by a fraction shows.

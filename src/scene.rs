@@ -1888,11 +1888,25 @@ pub fn text_prims(t: &crate::doc::Text, view: &View, letters: &Letters) -> Vec<P
     let scale = wanted / rung as f32;
     let at = |x: f64, y: f64| ((sx + x * k) as f32, (sy + y * k) as f32);
     let mut out = Vec::new();
+    // A letter whose em, turned with the text, stands wholly off the
+    // window is neither drawn nor rasterized: zoomed into a line, the
+    // rest of it would otherwise fill the sheet with what nobody sees.
+    let (sin, cos) = angle.sin_cos();
+    let reach = 1.5 * wanted;
+    let (vw, vh) = (view.viewport.w as f32, view.viewport.h as f32);
+    let seen = |px: f32, py: f32| {
+        let (dx, dy) = (px + wanted / 2.0 - pivot.0, py - wanted / 3.0 - pivot.1);
+        let (cx, cy) = (pivot.0 + cos * dx - sin * dy, pivot.1 + sin * dx + cos * dy);
+        cx > -reach && cy > -reach && cx < vw + reach && cy < vh + reach
+    };
     for (ch, x, baseline) in laid.glyphs() {
+        let (px, py) = at(x, baseline);
+        if !seen(px, py) {
+            continue;
+        }
         let Some(cell) = letters.glyphs.cell(&face, ch, rung) else {
             continue;
         };
-        let (px, py) = at(x, baseline);
         let r = ScreenRect {
             x: px + cell.dx * scale,
             y: py + cell.dy * scale,
@@ -4826,5 +4840,24 @@ mod tests {
         t.h = 25.0;
         let f = document_prims(&text_board(t, &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         assert_eq!(glyph_prims(&f).len(), 2);
+    }
+
+    #[test]
+    fn letters_off_the_window_are_neither_drawn_nor_rasterized() {
+        // Zoomed far into the start of a long line: the letters past the
+        // window's edge cost nothing.
+        let v = view(0.0, 0.0, 20.0);
+        let letters = no_letters();
+        let mut t = a_text("abcdefghijklmnopqrstuvwxyz", 16.0);
+        t.x = -2.0;
+        t.y = -2.0;
+        let f = document_prims(&text_board(t, &v), &v, &ImageSlots::new(), &no_sheet(), &letters, EDGE, None);
+        let drawn = glyph_prims(&f).len();
+        assert!(drawn > 0 && drawn < 5, "{drawn} letters drawn");
+        let sheet = letters.glyphs.bitmap();
+        let inked = sheet.rgba.as_chunks::<4>().0.iter().filter(|t| t[3] > 0).count();
+        assert!(inked > 0);
+        drop(sheet);
+        assert!(letters.glyphs.take_dirty().is_some());
     }
 }
