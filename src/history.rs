@@ -44,6 +44,9 @@ pub struct Entry {
     /// Roughly what this costs to keep, so the ceiling can be counted
     /// without walking the board again.
     weight: usize,
+    /// The typing session that wrote it, if one did: the next keystroke
+    /// of the same session is folded into it rather than stacked on it.
+    session: Option<u64>,
 }
 
 impl Entry {
@@ -52,6 +55,7 @@ impl Entry {
             doc: doc.clone(),
             spot,
             weight: weight(doc),
+            session: None,
         }
     }
 
@@ -109,15 +113,50 @@ impl History {
     ///
     /// A board that really changed pushes an entry and drops the future,
     /// because there is no longer a way forward from here.
-    pub fn keep(&mut self, doc: &Document, spot: Spot) {
+    ///
+    /// `session` is the typing session that made the change, if one did.
+    /// Text is
+    /// typed a character at a time and every character comes to rest,
+    /// but nobody undoes a word a letter at a time: a keystroke of the
+    /// session that wrote the present step is folded into it, so the
+    /// whole of what was typed is one step. The session is `None` for
+    /// every other change, which is never folded; and a keystroke after
+    /// an undo is a step of its own, since the one it would fold into
+    /// is not the present any more.
+    pub fn keep(&mut self, doc: &Document, spot: Spot, session: Option<u64>) {
         if self.present_mut().doc.same_board(doc) {
             self.mark(spot);
             return;
         }
+        let folds = session.is_some()
+            && self.future.is_empty()
+            && self.past.len() > 1
+            && self.present_mut().session == session;
         for gone in self.future.drain(..) {
             self.weight -= gone.weight;
         }
-        let entry = Entry::of(doc, spot);
+        // A session that ends where it began — a text typed and then
+        // taken away — leaves no step at all.
+        if folds && self.past[self.past.len() - 2].doc.same_board(doc) {
+            let gone = self.past.pop().expect("a present to fold into");
+            self.weight -= gone.weight;
+            return self.mark(spot);
+        }
+        if folds {
+            let present = self.present_mut();
+            let was = present.weight;
+            *present = Entry {
+                session,
+                ..Entry::of(doc, spot)
+            };
+            let now = present.weight;
+            self.weight = self.weight - was + now;
+            return self.trim();
+        }
+        let entry = Entry {
+            session,
+            ..Entry::of(doc, spot)
+        };
         self.weight += entry.weight;
         self.past.push(entry);
         self.trim();
@@ -216,6 +255,7 @@ fn element(el: &Element) -> usize {
                 .iter()
                 .map(|s| ELEMENT + s.curves.len() * size_of::<Cubic>() + envelope(&s.pen))
                 .sum(),
+            Element::Text(t) => t.text.len(),
             Element::Rect(_) | Element::Image(_) | Element::Frame(_) => 0,
         }
 }
@@ -303,7 +343,7 @@ mod tests {
     #[test]
     fn a_board_that_changed_is_one_step() {
         let mut h = History::new(&board(), spot(&[]));
-        h.keep(&with_layers(1), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), None);
         assert!(h.can_undo());
         assert_eq!(h.past.len(), 2);
     }
@@ -314,8 +354,8 @@ mod tests {
         // nothing to step behind, and no case in the code that says so —
         // the guard is the whole of it.
         let mut h = History::new(&board(), spot(&[]));
-        h.keep(&board(), spot(&[]));
-        h.keep(&board(), spot(&[]));
+        h.keep(&board(), spot(&[]), None);
+        h.keep(&board(), spot(&[]), None);
         assert!(!h.can_undo());
         assert_eq!(h.past.len(), 1);
     }
@@ -326,9 +366,9 @@ mod tests {
         // before the move with a still selected — which is only possible
         // if selecting it was written into the state on screen.
         let mut h = History::new(&board(), spot(&[]));
-        h.keep(&board(), spot(&["a"]));
+        h.keep(&board(), spot(&["a"]), None);
         assert_eq!(present(&h).spot, spot(&["a"]));
-        h.keep(&with_layers(1), spot(&["a"]));
+        h.keep(&with_layers(1), spot(&["a"]), None);
 
         let (_, editor) = step(&mut h, true);
         assert_eq!(editor.at(), spot(&["a"]));
@@ -338,7 +378,7 @@ mod tests {
     fn a_step_back_restores_the_board_and_the_hand_together() {
         let before = board();
         let mut h = History::new(&before, spot(&["a", "b"]));
-        h.keep(&with_layers(2), spot(&[]));
+        h.keep(&with_layers(2), spot(&[]), None);
 
         let (doc, editor) = step(&mut h, true);
         assert!(doc.same_board(&before), "the board is what it was");
@@ -353,7 +393,7 @@ mod tests {
             zoom: 3.5,
         };
         let mut h = History::new(&board(), spot(&[]));
-        h.keep(&with_layers(1), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), None);
 
         let (mut doc, mut editor) = (with_layers(1), Editor::new());
         doc.camera = looking;
@@ -370,7 +410,7 @@ mod tests {
             y: 40.0,
             zoom: 2.0,
         };
-        h.keep(&panned, spot(&[]));
+        h.keep(&panned, spot(&[]), None);
         assert!(!h.can_undo());
     }
 
@@ -379,7 +419,7 @@ mod tests {
         let states: Vec<Document> = (0..4).map(with_layers).collect();
         let mut h = History::new(&states[0], spot(&[]));
         for s in &states[1..] {
-            h.keep(s, spot(&[]));
+            h.keep(s, spot(&[]), None);
         }
 
         for want in states.iter().rev().skip(1) {
@@ -398,10 +438,10 @@ mod tests {
     #[test]
     fn a_new_change_drops_the_way_forward() {
         let mut h = History::new(&board(), spot(&[]));
-        h.keep(&with_layers(1), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), None);
         h.undo();
         assert!(!h.future.is_empty());
-        h.keep(&with_layers(7), spot(&[]));
+        h.keep(&with_layers(7), spot(&[]), None);
         assert!(h.future.is_empty(), "there is no forward from a different past");
     }
 
@@ -409,7 +449,7 @@ mod tests {
     fn redo_at_the_end_of_the_line_answers_nothing() {
         let mut h = History::new(&board(), spot(&[]));
         assert!(h.redo().is_none());
-        h.keep(&with_layers(1), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), None);
         assert!(h.redo().is_none(), "a step nobody took back");
     }
 
@@ -417,7 +457,7 @@ mod tests {
     fn the_way_forward_is_there_only_after_a_step_back() {
         let mut h = History::new(&board(), spot(&[]));
         assert!(!h.can_redo());
-        h.keep(&with_layers(1), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), None);
         assert!(!h.can_redo(), "a step nobody took back");
         h.undo();
         assert!(h.can_redo());
@@ -446,7 +486,7 @@ mod tests {
     fn the_history_is_no_deeper_than_the_depth() {
         let mut h = History::new(&board(), spot(&[]));
         for i in 1..DEPTH * 2 {
-            h.keep(&with_layers(i), spot(&[]));
+            h.keep(&with_layers(i), spot(&[]), None);
         }
         assert_eq!(h.past.len() + h.future.len(), DEPTH);
     }
@@ -455,7 +495,7 @@ mod tests {
     fn the_depth_drops_the_oldest_and_keeps_the_newest() {
         let mut h = History::new(&board(), spot(&[]));
         for i in 1..DEPTH * 2 {
-            h.keep(&with_layers(i), spot(&[]));
+            h.keep(&with_layers(i), spot(&[]), None);
         }
         let newest = with_layers(DEPTH * 2 - 1);
         assert!(present(&h).doc.same_board(&newest), "the present survives");
@@ -475,7 +515,7 @@ mod tests {
         let mut kept = 0usize;
         for round in 1..DEPTH * 3 {
             kept += 1;
-            h.keep(&with_layers(kept), spot(&[]));
+            h.keep(&with_layers(kept), spot(&[]), None);
             if round % 3 == 0 {
                 for _ in 0..round % 7 {
                     h.undo();
@@ -497,7 +537,7 @@ mod tests {
         // leaving the tab with no state to be in.
         let over = BUDGET / size_of::<Cubic>() + 1;
         let mut h = History::new(&board(), spot(&[]));
-        h.keep(&heavy(over), spot(&[]));
+        h.keep(&heavy(over), spot(&[]), None);
         assert_eq!(h.past.len(), 1, "trimmed back to the present alone");
         assert!(present(&h).doc.same_board(&heavy(over)));
         assert!(!h.can_undo());
@@ -512,7 +552,7 @@ mod tests {
         for i in 1..20 {
             let mut doc = heavy(tenth);
             doc.layers.push(Layer::new(&format!("L{i}")));
-            h.keep(&doc, spot(&[]));
+            h.keep(&doc, spot(&[]), None);
         }
         assert!(h.past.len() < DEPTH, "the weight stopped it, not the count");
         assert!(h.weight <= BUDGET, "and stopped it inside the budget");
@@ -524,7 +564,7 @@ mod tests {
         // is kept twice, and nothing is paid for after it is dropped.
         let mut h = History::new(&board(), spot(&[]));
         for i in 1..5 {
-            h.keep(&with_layers(i), spot(&[]));
+            h.keep(&with_layers(i), spot(&[]), None);
         }
         let full = h.weight;
         h.undo();
@@ -532,9 +572,69 @@ mod tests {
         assert_eq!(h.weight, full, "a step back keeps what it stepped over");
         h.redo();
         assert_eq!(h.weight, full);
-        h.keep(&heavy(40), spot(&[]));
+        h.keep(&heavy(40), spot(&[]), None);
         let counted: usize = h.past.iter().chain(&h.future).map(|e| e.weight).sum();
         assert_eq!(h.weight, counted, "the future it dropped is not still paid for");
+    }
+
+    #[test]
+    fn what_one_typing_session_types_is_one_step() {
+        let before = board();
+        let mut h = History::new(&before, spot(&[]));
+        for n in 1..=4 {
+            h.keep(&with_layers(n), spot(&[]), Some(7));
+        }
+        assert_eq!(h.past.len(), 2, "four keystrokes, one step");
+        assert!(present(&h).doc.same_board(&with_layers(4)), "the step is the last of them");
+        let (doc, _) = step(&mut h, true);
+        assert!(doc.same_board(&before), "and one undo takes them all back");
+    }
+
+    #[test]
+    fn another_session_or_no_session_is_a_step_of_its_own() {
+        let mut h = History::new(&board(), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), Some(1));
+        h.keep(&with_layers(2), spot(&[]), Some(2));
+        assert_eq!(h.past.len(), 3);
+        h.keep(&with_layers(3), spot(&[]), None);
+        h.keep(&with_layers(4), spot(&[]), None);
+        assert_eq!(h.past.len(), 5, "a change outside a session is never folded");
+        h.keep(&with_layers(5), spot(&[]), Some(2));
+        assert_eq!(h.past.len(), 6, "a session is folded only into its own last step");
+    }
+
+    #[test]
+    fn folding_a_keystroke_in_drops_the_way_forward() {
+        let mut h = History::new(&board(), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), Some(3));
+        h.keep(&with_layers(2), spot(&[]), Some(3));
+        h.undo();
+        assert!(h.can_redo());
+        // Typing on after an undo is a new step, not the old one amended.
+        h.keep(&with_layers(3), spot(&[]), Some(3));
+        assert!(!h.can_redo());
+        assert_eq!(h.past.len(), 2);
+        let (doc, _) = step(&mut h, true);
+        assert!(doc.same_board(&board()));
+    }
+
+    #[test]
+    fn a_folded_step_is_weighed_as_what_it_now_holds() {
+        let mut h = History::new(&board(), spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), Some(4));
+        h.keep(&with_layers(9), spot(&[]), Some(4));
+        let total: usize = h.past.iter().chain(&h.future).map(|e| e.weight).sum();
+        assert_eq!(h.weight, total);
+    }
+
+    #[test]
+    fn a_session_that_ends_where_it_began_leaves_no_step() {
+        let before = board();
+        let mut h = History::new(&before, spot(&[]));
+        h.keep(&with_layers(1), spot(&[]), Some(5));
+        h.keep(&before, spot(&[]), Some(5));
+        assert!(!h.can_undo(), "typed, and taken back off: nothing happened");
+        assert_eq!(h.weight, present(&h).weight);
     }
 }
 
@@ -561,7 +661,7 @@ mod gestures {
         }
         match e.busy() {
             true => h.mark(e.at()),
-            false => h.keep(doc, e.at()),
+            false => h.keep(doc, e.at(), None),
         }
     }
 

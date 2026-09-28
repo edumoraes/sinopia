@@ -82,6 +82,16 @@ impl Item {
     }
 }
 
+/// The first line that can be taken whose label starts with `typed`,
+/// whatever the case: what typing a name into an open menu lands on, as
+/// every list of fonts answers it.
+pub fn find(items: &[Item], typed: &str) -> Option<usize> {
+    let typed = typed.to_lowercase();
+    items
+        .iter()
+        .position(|i| i.enabled && i.label.to_lowercase().starts_with(&typed))
+}
+
 /// A menu laid out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Menu {
@@ -121,15 +131,22 @@ impl Menu {
             .map(|i| if i.rule { (ITEM + RULE) * s } else { ITEM * s })
             .sum();
         let margin = PADDING * s;
-        let room = (viewport.h as f32 - 2.0 * margin).max(0.0);
-        let h = (content + 2.0 * PADDING * s).min(room);
+        let full = content + 2.0 * PADDING * s;
         let below = at.y + at.h + GAP * s;
-        let y = if below + h <= viewport.h as f32 - margin {
-            below
-        } else if at.y - GAP * s - h >= margin {
-            at.y - GAP * s - h
+        let under = (viewport.h as f32 - margin - below).max(0.0);
+        let over = (at.y - GAP * s - margin).max(0.0);
+        // Under what opened it when it fits there, over it when it fits
+        // there instead; too tall for either, it hangs on the side with
+        // more room, cut to it and scrolling — never over the thing it
+        // was opened from, which is what a pointer goes back to.
+        let (y, h) = if full <= under {
+            (below, full)
+        } else if full <= over {
+            (at.y - GAP * s - full, full)
+        } else if under >= over {
+            (below, under)
         } else {
-            (viewport.h as f32 - margin - h).max(margin)
+            (margin, over)
         };
         let x = at.x.min(viewport.w as f32 - margin - w).max(margin);
         let rect = ScreenRect { x, y, w, h };
@@ -167,6 +184,29 @@ impl Menu {
     /// The scroll in use, and how far it can go.
     pub fn scroll(&self) -> f32 {
         self.scroll
+    }
+
+    /// Where the menu has to be scrolled for line `k` to be in sight: as
+    /// little as it takes from where it is, and not at all when it
+    /// already is.
+    pub fn scroll_showing(&self, items: &[Item], k: usize) -> f32 {
+        let s = self.scale;
+        let mut top = 0.0;
+        for item in &items[..k.min(items.len())] {
+            top += if item.rule { (ITEM + RULE) * s } else { ITEM * s };
+        }
+        if items.get(k).is_some_and(|i| i.rule) {
+            top += RULE * s;
+        }
+        let band = self.rect.h - 2.0 * PADDING * s;
+        let next = if top < self.scroll {
+            top
+        } else if top + ITEM * s > self.scroll + band {
+            top + ITEM * s - band
+        } else {
+            self.scroll
+        };
+        next.clamp(0.0, self.max_scroll())
     }
 
     pub fn max_scroll(&self) -> f32 {
@@ -329,6 +369,23 @@ mod tests {
     }
 
     #[test]
+    fn a_menu_too_tall_for_either_side_hangs_on_the_roomier_one_and_scrolls() {
+        let a = atlas();
+        // A button near the top: there is more room under it, and the
+        // menu hangs there cut to it, never over the button.
+        let at = button(100.0, 40.0);
+        let m = Menu::layout(VP, 1.0, at, &a, &items(300), 0.0);
+        assert!(m.rect.y >= at.y + at.h, "under what opened it");
+        assert!(m.rect.y + m.rect.h <= 800.0);
+        assert!(m.max_scroll() > 0.0);
+        // Near the bottom, over it.
+        let at = button(100.0, 700.0);
+        let m = Menu::layout(VP, 1.0, at, &a, &items(300), 0.0);
+        assert!(m.rect.y + m.rect.h <= at.y, "over what opened it");
+        assert!(m.rect.y >= 0.0);
+    }
+
+    #[test]
     fn only_an_item_that_can_be_taken_answers_the_pointer() {
         let a = atlas();
         let list = vec![Item::new("On"), Item::new("Off").enabled(false)];
@@ -410,5 +467,33 @@ mod tests {
             prims.iter().any(|q| q.kind == KIND_IMAGE && q.color == theme.muted),
             "what cannot be taken is muted"
         );
+    }
+
+    #[test]
+    fn typing_a_name_finds_the_first_line_it_starts() {
+        let list: Vec<Item> = ["Adwaita Sans", "iA Writer Duo", "Noto Sans", "Noto Serif", "Off"]
+            .iter()
+            .map(|l| Item::new(l))
+            .collect();
+        let mut off = list.clone();
+        off[4] = Item::new("Off").enabled(false);
+        assert_eq!(find(&list, "no"), Some(2));
+        assert_eq!(find(&list, "NOTO SE"), Some(3));
+        assert_eq!(find(&list, "ia"), Some(1), "whatever the case");
+        assert_eq!(find(&list, "zz"), None);
+        assert_eq!(find(&off, "off"), None, "a line that cannot be taken is not found");
+    }
+
+    #[test]
+    fn a_line_is_brought_into_sight_by_as_little_scroll_as_it_takes() {
+        let a = atlas();
+        let many = items(60);
+        let m = Menu::layout(VP, 1.0, button(100.0, 40.0), &a, &many, 0.0);
+        assert_eq!(m.scroll_showing(&many, 0), 0.0, "already in sight");
+        let far = m.scroll_showing(&many, 59);
+        assert_eq!(far, m.max_scroll(), "the last line, at the bottom");
+        let again = Menu::layout(VP, 1.0, button(100.0, 40.0), &a, &many, far);
+        assert_eq!(again.rows.last().unwrap().1, 59);
+        assert_eq!(again.scroll_showing(&many, 58), far, "a line in sight asks nothing");
     }
 }

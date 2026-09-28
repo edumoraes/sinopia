@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 
 use crate::brush::Tip;
+use crate::fonts::Fonts;
+use crate::glyphs::Glyphs;
 use crate::curve::{self, Cubic};
 use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Kind, Layer, Paper, Pressure, Stamp};
 
@@ -1814,6 +1816,7 @@ pub fn document_prims(
     view: &View,
     images: &ImageSlots,
     shapes: &Shapes,
+    letters: &Letters,
     edge: Rgba,
     live: Option<Live>,
 ) -> Frame {
@@ -1836,6 +1839,7 @@ pub fn document_prims(
         view,
         images,
         shapes,
+        letters,
         edge,
         on,
         live_cut,
@@ -1853,6 +1857,96 @@ pub fn document_prims(
     frame
 }
 
+/// How far under the baseline an underline runs, and above it a line
+/// through, as shares of the size — where Liberation Sans puts them, and
+/// near enough where every text face does.
+const UNDERLINE_AT: f64 = 0.105;
+const STRIKE_AT: f64 = -0.265;
+/// How thick either rule is, as a share of the size.
+const RULE: f64 = 0.07;
+
+/// A text: every letter a glyph of the board's sheet, rasterized at the
+/// rung nearest the size it is seen at and scaled the rest of the way,
+/// then turned with the text's box about its centre; the rules under and
+/// through each line go down after the letters. A text too small on
+/// screen to be anything but a smudge draws nothing.
+pub fn text_prims(t: &crate::doc::Text, view: &View, letters: &Letters) -> Vec<Prim> {
+    let k = view.px_per_world();
+    let wanted = (t.style.size * k) as f32;
+    let Some(rung) = crate::glyphs::ladder(wanted).map(|r| r.min(letters.glyphs.ceiling())) else {
+        return Vec::new();
+    };
+    let laid = crate::typeset::Laid::of(t, letters.fonts);
+    let face = letters.fonts.face(&t.style.font, t.style.bold, t.style.italic);
+    let color = parse_color(&t.style.color);
+    let (sx, sy) = view.world_to_screen(t.x, t.y);
+    let pivot = (
+        (sx + t.w * k / 2.0) as f32,
+        (sy + t.h * k / 2.0) as f32,
+    );
+    let angle = t.rotation.to_radians() as f32;
+    let scale = wanted / rung as f32;
+    let at = |x: f64, y: f64| ((sx + x * k) as f32, (sy + y * k) as f32);
+    let mut out = Vec::new();
+    // A letter whose em, turned with the text, stands wholly off the
+    // window is neither drawn nor rasterized: zoomed into a line, the
+    // rest of it would otherwise fill the sheet with what nobody sees.
+    let (sin, cos) = angle.sin_cos();
+    let reach = 1.5 * wanted;
+    let (vw, vh) = (view.viewport.w as f32, view.viewport.h as f32);
+    let seen = |px: f32, py: f32| {
+        let (dx, dy) = (px + wanted / 2.0 - pivot.0, py - wanted / 3.0 - pivot.1);
+        let (cx, cy) = (pivot.0 + cos * dx - sin * dy, pivot.1 + sin * dx + cos * dy);
+        cx > -reach && cy > -reach && cx < vw + reach && cy < vh + reach
+    };
+    for (ch, x, baseline) in laid.glyphs() {
+        let (px, py) = at(x, baseline);
+        if !seen(px, py) {
+            continue;
+        }
+        let Some(cell) = letters.glyphs.cell(&face, ch, rung) else {
+            continue;
+        };
+        let r = ScreenRect {
+            x: px + cell.dx * scale,
+            y: py + cell.dy * scale,
+            w: cell.w * scale,
+            h: cell.h * scale,
+        };
+        out.push(Prim::glyph(r, cell.uv, letters.slot, color).transformed(pivot, 1.0, angle, (0.0, 0.0)));
+    }
+    let rules = [(t.style.underline, UNDERLINE_AT), (t.style.strike, STRIKE_AT)];
+    let thick = (t.style.size * RULE * k).max(1.0) as f32;
+    for row in &laid.rows[..laid.shown] {
+        if row.width <= 0.0 {
+            continue;
+        }
+        for (on, offset) in rules {
+            if !on {
+                continue;
+            }
+            let (x, y) = at(row.x(row.start), row.baseline + offset * t.style.size);
+            let r = ScreenRect {
+                x,
+                y: y - thick / 2.0,
+                w: (row.width * k) as f32,
+                h: thick,
+            };
+            out.push(Prim::turned(r, pivot, angle, color));
+        }
+    }
+    out
+}
+
+/// What a text on the board is drawn with: the faces, the sheet its
+/// letters are rasterized into, and the texture slot that sheet is
+/// uploaded to.
+pub struct Letters<'a> {
+    pub fonts: &'a Fonts,
+    pub glyphs: &'a Glyphs,
+    pub slot: u32,
+}
+
 /// What [`document_prims`] walks the tree with: the board, how it is
 /// seen, and what stands on each layer in document order.
 struct Walk<'a> {
@@ -1860,6 +1954,7 @@ struct Walk<'a> {
     view: &'a View,
     images: &'a ImageSlots,
     shapes: &'a Shapes,
+    letters: &'a Letters<'a>,
     edge: Rgba,
     on: HashMap<&'a str, Vec<&'a Element>>,
     live_cut: Option<ScreenRect>,
@@ -1890,7 +1985,7 @@ impl Walk<'_> {
                     f.extend(self.ground(fr));
                     self.stack(f, &fr.layers, Some(frame_rect(fr, self.view)), live);
                 }
-                Kind::Raster | Kind::Vector => self.leaf(f, &layer.id, cut, live),
+                Kind::Raster | Kind::Vector | Kind::Text => self.leaf(f, &layer.id, cut, live),
             };
             match self.composited(layer) {
                 Some((opacity, lays, backdrop)) => frame.layer(opacity, lays, backdrop, draw),
@@ -1917,7 +2012,7 @@ impl Walk<'_> {
                 let inside = match layer.kind {
                     Kind::Group => blends(&layer.layers),
                     Kind::Frame => self.doc.frame_on(&layer.id).is_some_and(|f| blends(&f.layers)),
-                    Kind::Raster | Kind::Vector => false,
+                    Kind::Raster | Kind::Vector | Kind::Text => false,
                 };
                 (opacity < 1.0 || inside).then_some((opacity, Blend::Over, false))
             }
@@ -1999,6 +2094,7 @@ impl Walk<'_> {
                     let prims = path_prims(&p.curves, &tip, &p.pen, parse_color(&p.stroke), self.view, self.shapes);
                     frame.stroke(cut_all(prims, cut), &tip);
                 }
+                Element::Text(t) => frame.extend(cut_all(text_prims(t, self.view, self.letters), cut)),
                 other => frame.extend(cut_all(self.boxed(other), cut)),
             }
         }
@@ -2076,7 +2172,7 @@ impl Walk<'_> {
             }
             // A frame on a layer that is not its own frame layer is not a
             // board the parse lets in; a frame is drawn by its layer.
-            Element::Frame(_) | Element::Path(_) | Element::Paint(_) => {}
+            Element::Frame(_) | Element::Path(_) | Element::Paint(_) | Element::Text(_) => {}
         }
         out
     }
@@ -2865,7 +2961,7 @@ mod tests {
             strokes: vec![laid(a.clone(), Tip::PENCIL), laid(b.clone(), soft.clone())],
             rotation: 0.0,
         });
-        let together = document_prims(&doc_with(vec![paint], &v), &v, &none, &no_sheet(), EDGE, None);
+        let together = document_prims(&doc_with(vec![paint], &v), &v, &none, &no_sheet(), &no_letters(), EDGE, None);
         // Two strokes in one paint draw what two paths draw: nothing
         // joins them, and the soft one is still composited on its own.
         let apart = document_prims(
@@ -2873,6 +2969,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            &no_letters(),
             EDGE,
             None,
         );
@@ -2885,7 +2982,7 @@ mod tests {
     fn a_hard_opaque_path_is_direct_and_a_soft_one_is_a_group() {
         let v = view(0.0, 0.0, 1.0);
         let none = ImageSlots::new();
-        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none, &no_sheet(), EDGE, None);
+        let direct = document_prims(&doc_with(vec![path_with(Tip::PENCIL)], &v), &v, &none, &no_sheet(), &no_letters(), EDGE, None);
         assert_eq!(direct.prims.len(), 1);
         assert!(direct.groups.is_empty(), "the pencil needs no compositing");
 
@@ -2894,6 +2991,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            &no_letters(),
             EDGE,
             None,
         );
@@ -2907,6 +3005,7 @@ mod tests {
             &v,
             &none,
             &no_sheet(),
+            &no_letters(),
             EDGE,
             None,
         );
@@ -3204,6 +3303,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            &no_letters(),
             EDGE,
             Some(Live {
                 layer: &layer,
@@ -3219,6 +3319,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            &no_letters(),
             EDGE,
             Some(Live {
                 layer: "top",
@@ -3241,6 +3342,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            &no_letters(),
             EDGE,
             Some(Live {
                 layer: "nothing",
@@ -3267,6 +3369,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            &no_letters(),
             EDGE,
             Some(Live {
                 layer: &layer,
@@ -3283,7 +3386,7 @@ mod tests {
     fn a_paint_with_nothing_to_rub_out_is_drawn_as_it_always_was() {
         let v = view(0.0, 0.0, 1.0);
         let paint = paint_of(vec![laid(vec![cubic()], tip(8.0, 1.0, 0.5))]);
-        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         assert!(f.sheets.is_empty(), "no sheet is opened for ink alone");
         assert_eq!(f.groups.len(), 1);
     }
@@ -3295,7 +3398,7 @@ mod tests {
             laid(vec![cubic()], stamped(8.0, ROUND)),
             laid(vec![cubic()], rubber(8.0)),
         ]);
-        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let f = document_prims(&doc_with(vec![paint], &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         assert_eq!(f.sheets.len(), 1, "the layer gets a surface of its own");
         let sheet = f.sheets[0];
         assert_eq!((sheet.start, sheet.end), (0, f.prims.len() as u32));
@@ -3363,7 +3466,7 @@ mod tests {
     }
 
     fn drawn(doc: &Document) -> Frame {
-        document_prims(doc, &view(0.0, 0.0, 1.0), &ImageSlots::new(), &no_sheet(), EDGE, None)
+        document_prims(doc, &view(0.0, 0.0, 1.0), &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None)
     }
 
     #[test]
@@ -3463,6 +3566,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            &no_letters(),
             EDGE,
             Some(Live {
                 layer: &layer,
@@ -3803,12 +3907,12 @@ mod tests {
         });
         // The white rect is first in `elements` but on the top layer.
         doc.elements[0].set_layer("top");
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].color, [0.0, 0.0, 0.0, 1.0], "the lower layer paints first");
         assert_eq!(got[1].color, WHITE);
         doc.layers[1].visible = false;
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
         assert_eq!(got.len(), 1, "a hidden layer paints nothing");
     }
     const BLOB: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -4051,7 +4155,7 @@ mod tests {
         if let Element::Rect(r) = &mut el {
             r.rotation = 90.0;
         }
-        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc_with(vec![el], &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
         assert_eq!(got.len(), 5);
         let a = std::f32::consts::FRAC_PI_2;
         // The fill is the unturned box, turned in place.
@@ -4071,7 +4175,7 @@ mod tests {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#fff"))], &v);
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims,
             vec![Prim::rect(sr(50.0, 50.0, 10.0, 10.0), WHITE)]
         );
     }
@@ -4082,7 +4186,7 @@ mod tests {
         let doc = doc_with(vec![rect(10.0, 10.0, 20.0, 20.0, Some("#fff"), None)], &v);
         let t = STROKE_PX;
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims,
             vec![
                 // top, bottom, left, right — aligned inwards.
                 Prim::rect(sr(60.0, 60.0, 20.0, t), WHITE),
@@ -4100,7 +4204,7 @@ mod tests {
             vec![rect(0.0, 0.0, 10.0, 10.0, Some("#000"), Some("#fff"))],
             &v,
         );
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
         assert_eq!(got.len(), 5);
         assert_eq!(got[0].color, WHITE, "fill first");
         assert_eq!(got[1].color, [0.0, 0.0, 0.0, 1.0], "stroke after");
@@ -4110,7 +4214,7 @@ mod tests {
     fn zoom_scales_rect_position_and_size() {
         let v = view(0.0, 0.0, 2.0);
         let doc = doc_with(vec![rect(1.0, 0.0, 5.0, 5.0, None, Some("#fff"))], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
         assert_eq!(got[0].geom, [52.0, 50.0, 10.0, 10.0]);
     }
 
@@ -4118,7 +4222,7 @@ mod tests {
     fn rect_without_any_color_still_paints_with_fallback() {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 4.0, 4.0, None, None)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].color, FALLBACK_COLOR);
     }
@@ -4189,7 +4293,7 @@ mod tests {
         );
         // Width is in world units: 2 * zoom 2 = 4px wide → half-width 2.
         assert_eq!(
-            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims,
+            document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims,
             vec![Prim::segment(
                 (50.0, 50.0),
                 (68.0, 50.0),
@@ -4254,7 +4358,7 @@ mod tests {
         let v = view(0.0, 0.0, 2.0);
         let slots = ImageSlots::from([(BLOB.to_owned(), 7)]);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 90.0)], &v);
-        let got = document_prims(&doc, &v, &slots, &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc, &v, &slots, &no_sheet(), &no_letters(), EDGE, None).prims;
         // One instance: the SDF box carries the texture, so the turn, the
         // rounded corners and the antialiasing come from the same field.
         assert_eq!(got.len(), 1, "{got:?}");
@@ -4298,7 +4402,7 @@ mod tests {
         // element still has to occupy its box.
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![image(0.0, 0.0, 20.0, 10.0, 0.0)], &v);
-        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None).prims;
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].kind, KIND_BOX);
         assert_eq!(got[0].color, PLACEHOLDER_COLOR);
@@ -4462,7 +4566,7 @@ mod tests {
     fn a_frame_lays_its_ground_and_then_its_edge() {
         let doc = framed_doc();
         let v = view(0.0, 0.0, 1.0);
-        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         assert_eq!(
             f.prims[0].color,
             parse_color("#ff0000"),
@@ -4484,7 +4588,7 @@ mod tests {
         };
         fr.background = None;
         let v = view(0.0, 0.0, 1.0);
-        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         assert_eq!(f.prims[0].color, EDGE);
     }
 
@@ -4492,7 +4596,7 @@ mod tests {
     fn what_a_frame_holds_is_cut_to_its_boundary() {
         let doc = framed_doc();
         let v = view(0.0, 0.0, 1.0);
-        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         let cut = frame_rect(doc.frame("fr").unwrap(), &v);
         let content = f
             .prims
@@ -4510,7 +4614,7 @@ mod tests {
     fn a_frames_own_prims_are_not_cut_by_itself() {
         let doc = framed_doc();
         let v = view(0.0, 0.0, 1.0);
-        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         assert!(
             f.prims[..5].iter().all(|p| p.clip == NO_CLIP),
             "a frame is not inside itself"
@@ -4521,7 +4625,7 @@ mod tests {
     fn what_is_not_in_a_frame_is_not_cut() {
         let v = view(0.0, 0.0, 1.0);
         let doc = doc_with(vec![rect(0.0, 0.0, 10.0, 10.0, None, Some("#000"))], &v);
-        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), EDGE, None);
+        let f = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
         assert!(
             f.prims.iter().all(|p| p.clip == NO_CLIP),
             "an element on the open board carries no cut"
@@ -4547,6 +4651,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            &no_letters(),
             EDGE,
             Some(live),
         );
@@ -4577,6 +4682,7 @@ mod tests {
             &v,
             &ImageSlots::new(),
             &no_sheet(),
+            &no_letters(),
             EDGE,
             Some(live),
         );
@@ -4605,5 +4711,153 @@ mod tests {
         let cell = ScreenRect { x: 10.0, y: 10.0, w: 20.0, h: 20.0 };
         f.cut(cell);
         assert_eq!(f.prims[0].clip, Prim::rect(cell, [1.0; 4]).clipped(cell).clip);
+    }
+
+    /// The bundled faces and a sheet of their own, the sheet in slot
+    /// [`LETTERS_SLOT`]. Leaked: a test's frame borrows them for as long
+    /// as it likes.
+    fn no_letters() -> Letters<'static> {
+        Letters {
+            fonts: Box::leak(Box::new(crate::fonts::Fonts::bundled())),
+            glyphs: Box::leak(Box::new(crate::glyphs::Glyphs::default())),
+            slot: LETTERS_SLOT,
+        }
+    }
+
+    const LETTERS_SLOT: u32 = 7;
+
+    /// A board holding one text on a text layer.
+    fn text_board(text: crate::doc::Text, view: &View) -> Document {
+        let mut d = Document::new("t");
+        d.camera = view.camera;
+        d.layers = vec![Layer {
+            id: "tl".into(),
+            ..Layer::of("Text 1", Kind::Text)
+        }];
+        d.elements = vec![Element::Text(crate::doc::Text {
+            layer: "tl".into(),
+            ..text
+        })];
+        d
+    }
+
+    fn a_text(s: &str, size: f64) -> crate::doc::Text {
+        crate::doc::Text {
+            id: "t".into(),
+            layer: String::new(),
+            x: 0.0,
+            y: 0.0,
+            w: 40.0,
+            h: 20.0,
+            rotation: 0.0,
+            mode: crate::doc::TextMode::Artistic,
+            text: s.into(),
+            style: crate::doc::TextStyle::with_size(size, "#ff0000"),
+        }
+    }
+
+    fn glyph_prims(f: &Frame) -> Vec<Prim> {
+        f.prims.iter().copied().filter(|p| p.kind == KIND_IMAGE).collect()
+    }
+
+    #[test]
+    fn a_text_is_one_glyph_a_letter_in_its_ink() {
+        let v = view(0.0, 0.0, 1.0);
+        let f = document_prims(&text_board(a_text("Hi you", 16.0), &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
+        let glyphs = glyph_prims(&f);
+        assert_eq!(glyphs.len(), 5, "the space is not drawn");
+        assert_eq!(f.prims.len(), 5, "and nothing else is");
+        for g in &glyphs {
+            assert_eq!(g.slot, LETTERS_SLOT);
+            assert_eq!(g.color, parse_color("#ff0000"));
+            assert_eq!(g.angle, 0.0);
+        }
+        // Left to right, from the text's own corner — the world origin,
+        // which is the middle of the view.
+        assert!(glyphs[0].geom[0] >= 50.0 && glyphs[0].geom[0] < 52.0, "{:?}", glyphs[0].geom);
+        assert!(glyphs.windows(2).all(|w| w[1].geom[0] > w[0].geom[0]));
+    }
+
+    #[test]
+    fn a_text_zoomed_in_is_drawn_bigger() {
+        let near = view(0.0, 0.0, 3.0);
+        let far = view(0.0, 0.0, 1.0);
+        let tall = |v: &View| {
+            let f = document_prims(&text_board(a_text("H", 40.0), v), v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
+            glyph_prims(&f)[0].geom[3]
+        };
+        let (a, b) = (tall(&near), tall(&far));
+        assert!((a / b - 3.0).abs() < 0.15, "{a} is not three times {b}");
+    }
+
+    #[test]
+    fn a_text_too_small_to_see_draws_nothing() {
+        let v = view(0.0, 0.0, 0.01);
+        let f = document_prims(&text_board(a_text("Hello", 16.0), &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
+        assert!(f.prims.is_empty());
+    }
+
+    #[test]
+    fn a_turned_text_turns_every_letter_about_its_box() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut t = a_text("ab", 16.0);
+        t.rotation = 90.0;
+        let f = document_prims(&text_board(t, &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
+        let glyphs = glyph_prims(&f);
+        assert_eq!(glyphs.len(), 2);
+        for g in &glyphs {
+            assert!((g.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        }
+        // A quarter turn clockwise about (70, 60): what ran left to right
+        // now runs top to bottom.
+        let centre = |p: &Prim| (p.geom[0] + p.geom[2] / 2.0, p.geom[1] + p.geom[3] / 2.0);
+        let (a, b) = (centre(&glyphs[0]), centre(&glyphs[1]));
+        assert!(b.1 > a.1 + 3.0, "{a:?} {b:?}");
+        assert!((b.0 - a.0).abs() < 3.0, "{a:?} {b:?}");
+    }
+
+    #[test]
+    fn underline_and_strike_are_a_rule_a_line() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut t = a_text("ab\ncd", 16.0);
+        t.style.underline = true;
+        t.style.strike = true;
+        let f = document_prims(&text_board(t, &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
+        let rules: Vec<&Prim> = f.prims.iter().filter(|p| p.kind == KIND_BOX).collect();
+        assert_eq!(rules.len(), 4, "two lines, two rules each");
+        for r in rules {
+            assert_eq!(r.color, parse_color("#ff0000"));
+            assert!(r.geom[2] > r.geom[3], "a rule runs across");
+        }
+    }
+
+    #[test]
+    fn a_frame_text_draws_only_the_lines_it_has_room_for() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut t = a_text("a\nb\nc", 10.0);
+        t.mode = crate::doc::TextMode::Frame;
+        t.w = 100.0;
+        t.h = 25.0;
+        let f = document_prims(&text_board(t, &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
+        assert_eq!(glyph_prims(&f).len(), 2);
+    }
+
+    #[test]
+    fn letters_off_the_window_are_neither_drawn_nor_rasterized() {
+        // Zoomed far into the start of a long line: the letters past the
+        // window's edge cost nothing.
+        let v = view(0.0, 0.0, 20.0);
+        let letters = no_letters();
+        let mut t = a_text("abcdefghijklmnopqrstuvwxyz", 16.0);
+        t.x = -2.0;
+        t.y = -2.0;
+        let f = document_prims(&text_board(t, &v), &v, &ImageSlots::new(), &no_sheet(), &letters, EDGE, None);
+        let drawn = glyph_prims(&f).len();
+        assert!(drawn > 0 && drawn < 5, "{drawn} letters drawn");
+        let sheet = letters.glyphs.bitmap();
+        let inked = sheet.rgba.as_chunks::<4>().0.iter().filter(|t| t[3] > 0).count();
+        assert!(inked > 0);
+        drop(sheet);
+        assert!(letters.glyphs.take_dirty().is_some());
     }
 }

@@ -233,7 +233,7 @@ impl Dock {
     }
 }
 
-/// The six illustrations stand in dock order on one 6 x 1 sheet.
+/// The seven illustrations stand in dock order on one 7 x 1 sheet.
 fn icon_uv(tool: Tool) -> [f32; 4] {
     let col = match tool {
         Tool::Select => 0,
@@ -241,7 +241,8 @@ fn icon_uv(tool: Tool) -> [f32; 4] {
         Tool::Pencil => 2,
         Tool::Brush => 3,
         Tool::Frame => 4,
-        Tool::Zoom => 5,
+        Tool::Text => 5,
+        Tool::Zoom => 6,
     } as f32;
     let cols = Tool::ALL.len() as f32;
     // Stay half a texel inside the cell, so linear filtering at a scaled
@@ -336,6 +337,12 @@ fn icon(tool: Tool) -> &'static [&'static [(f32, f32)]] {
             ],
             &[(9.5, 2.0), (9.5, 22.0)],
             &[(2.0, 9.5), (22.0, 9.5)],
+        ],
+        // A capital T with its serifs.
+        Tool::Text => &[
+            &[(5.0, 7.5), (5.0, 4.5), (19.0, 4.5), (19.0, 7.5)],
+            &[(12.0, 4.5), (12.0, 19.5)],
+            &[(9.0, 19.5), (15.0, 19.5)],
         ],
         // Magnifier: 12-gon lens, handle, plus sign.
         Tool::Zoom => &[

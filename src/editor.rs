@@ -16,6 +16,9 @@ use crate::scene::View;
 use crate::select::{self, Handle};
 use crate::tree::{self, Arrange, Filter, Place};
 
+mod typing;
+pub use typing::{Move, TEXT_MAX, TextKey, Typing, fit_texts, step_size};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
     #[default]
@@ -24,17 +27,19 @@ pub enum Tool {
     Pencil,
     Brush,
     Frame,
+    Text,
     Zoom,
 }
 
 impl Tool {
     /// Dock order.
-    pub const ALL: [Tool; 6] = [
+    pub const ALL: [Tool; 7] = [
         Tool::Select,
         Tool::Hand,
         Tool::Pencil,
         Tool::Brush,
         Tool::Frame,
+        Tool::Text,
         Tool::Zoom,
     ];
 
@@ -45,6 +50,7 @@ impl Tool {
             Tool::Pencil => 'p',
             Tool::Brush => 'b',
             Tool::Frame => 'f',
+            Tool::Text => 't',
             Tool::Zoom => 'z',
         }
     }
@@ -345,6 +351,19 @@ pub struct Editor {
     /// shown whole and the filter waits as it was left.
     filter: Filter,
     filtering: bool,
+    /// The text being typed into, if one is.
+    typing: Option<Typing>,
+    /// The area a press with the Text tool is dragging out, in world
+    /// units, and the ink the text will be born in.
+    placing: Option<(Point, Point, String)>,
+    /// The kind of text the Text tool makes, and how the next one is set.
+    text_mode: crate::doc::TextMode,
+    text_style: crate::doc::TextStyle,
+    /// How many typing sessions this editor has opened: each one's id.
+    sessions: u64,
+    /// The session the last change belongs to, until `app` has written
+    /// it down.
+    folding: Option<u64>,
 }
 
 /// One layer as the command line lists it: where it stands in the tree,
@@ -466,6 +485,7 @@ impl Editor {
     /// Switching tools abandons whatever was in progress, selection
     /// included.
     pub fn set_tool(&mut self, tool: Tool, doc: &mut Document) {
+        let _ = self.end_typing(doc);
         self.cancel(doc);
         if tool != self.tool {
             self.selection.clear();
@@ -1338,7 +1358,7 @@ impl Editor {
         if !doc.remove_layer(owner, index) {
             match doc.stack(owner).get(index).map(|l| l.kind) {
                 // A layer that holds objects stays, emptied.
-                Some(Kind::Raster | Kind::Vector) => {
+                Some(Kind::Raster | Kind::Vector | Kind::Text) => {
                     if !doc.elements.iter().any(|el| el.layer() == a) {
                         return Change::None;
                     }
@@ -1500,6 +1520,7 @@ impl Editor {
     pub fn busy(&self) -> bool {
         self.stroke.is_some()
             || self.framing.is_some()
+            || self.placing.is_some()
             || self.nav.is_some()
             || self.drag.is_some()
     }
@@ -1526,6 +1547,7 @@ impl Editor {
             || self.nav.is_some()
             || self.drag.is_some()
             || self.framing.is_some()
+            || self.placing.is_some()
         {
             return Change::None;
         }
@@ -1770,6 +1792,14 @@ impl Editor {
             .collect()
     }
 
+    /// Whether artistic text is in the selection — which scales evenly.
+    fn selection_holds_artistic_text(&self, doc: &Document) -> bool {
+        doc.elements.iter().any(|el| {
+            matches!(el, Element::Text(t) if t.mode == crate::doc::TextMode::Artistic)
+                && self.selection.iter().any(|id| id == el.id())
+        })
+    }
+
     /// Whether a frame is in the selection — which is what refuses a
     /// rotation, since the cut that makes a frame is axis-aligned.
     fn selection_holds_a_frame(&self, doc: &Document) -> bool {
@@ -1791,6 +1821,14 @@ impl Editor {
     /// physical px to the last one are dropped so jitter does not bloat the
     /// path.
     pub fn moved(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
+        if let Some((_, to, _)) = &mut self.placing {
+            let world = view.screen_to_world(screen.0, screen.1);
+            *to = [world.0, world.1];
+            return Change::Selection;
+        }
+        if self.drags_through_text() {
+            return self.select_through_text(view, screen, doc);
+        }
         if let Some((_, to)) = &mut self.framing {
             let world = view.screen_to_world(screen.0, screen.1);
             *to = [world.0, world.1];
@@ -1837,9 +1875,12 @@ impl Editor {
         let world = point(view.screen_to_world(screen.0, screen.1));
         let shift = self.shift;
         // Shift keeps the proportions, Ctrl holds the center; read before
-        // the drag borrows the editor.
+        // the drag borrows the editor. Artistic text is its letters, and
+        // letters scale evenly, so a selection holding any keeps its
+        // proportions with or without Shift — the box follows the hand
+        // exactly as far as the letters can.
         let constraints = select::Resize {
-            uniform: self.shift,
+            uniform: self.shift || self.selection_holds_artistic_text(doc),
             from_center: self.ctrl,
         };
         match &mut self.drag {
@@ -2007,9 +2048,9 @@ impl Editor {
         match kind {
             Kind::Vector => curve::fit(&hand, tolerance),
             // A stroke is a pencil's or a brush's. A frame layer holds
-            // an area and a group holds layers; neither asks for curves,
-            // so either can only mean the brush's answer here.
-            Kind::Raster | Kind::Frame | Kind::Group => curve::polyline(&hand),
+            // an area, a group holds layers and a text layer words; none
+            // asks for curves, so any can only mean the brush's answer.
+            Kind::Raster | Kind::Frame | Kind::Group | Kind::Text => curve::polyline(&hand),
         }
     }
 
@@ -2035,6 +2076,14 @@ impl Editor {
             && let Some((from, to)) = self.framing.take()
         {
             return self.lay_frame(doc, view, from, to);
+        }
+        if button == Button::Left
+            && let Some((from, to, ink)) = self.placing.take()
+        {
+            return self.open_text(doc, view, from, to, &ink);
+        }
+        if button == Button::Left && self.drags_through_text() {
+            return self.stop_selecting_text();
         }
         if button == Button::Left
             && let Some(live) = self.stroke.take()
@@ -2169,7 +2218,7 @@ impl Editor {
     /// selection stays.
     pub fn cancel(&mut self, doc: &mut Document) -> bool {
         let had_stroke = self.stroke.take().is_some();
-        let had_area = self.framing.take().is_some();
+        let had_area = self.framing.take().is_some() | self.placing.take().is_some();
         let had_nav = self.nav.take().is_some();
         let had_drag = match self.drag.take() {
             Some(
@@ -2987,6 +3036,31 @@ mod tests {
     }
 
     #[test]
+    fn a_resize_of_artistic_text_keeps_its_proportions_without_shift() {
+        let mut doc = Document::new("t");
+        let layer = doc.layers[0].id.clone();
+        doc.layers[0].kind = Kind::Text;
+        doc.elements.push(Element::Text(crate::doc::Text {
+            id: "t".into(),
+            layer,
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 40.0,
+            rotation: 0.0,
+            mode: crate::doc::TextMode::Artistic,
+            text: "words".into(),
+            style: crate::doc::TextStyle::with_size(20.0, "#000"),
+        }));
+        let v = view();
+        let mut e = tool(Tool::Select);
+        let _ = click(&mut e, &v, &mut doc, at(&v, 50.0, 20.0));
+        let _ = drag(&mut e, &v, &mut doc, at(&v, 100.0, 40.0), at(&v, 300.0, 60.0));
+        let Element::Text(t) = &doc.elements[0] else { panic!() };
+        assert!((t.w / t.h - 100.0 / 40.0).abs() < 1e-9, "{} x {}", t.w, t.h);
+    }
+
+    #[test]
     fn delete_is_offered_only_where_del_would_take_something() {
         let mut e = Editor::new();
         let mut doc = board();
@@ -3436,7 +3510,7 @@ mod tests {
     }
 
     #[test]
-    fn dock_order_is_select_hand_pencil_brush_frame_zoom() {
+    fn dock_order_is_select_hand_pencil_brush_frame_text_zoom() {
         assert_eq!(
             Tool::ALL,
             [
@@ -3445,6 +3519,7 @@ mod tests {
                 Tool::Pencil,
                 Tool::Brush,
                 Tool::Frame,
+                Tool::Text,
                 Tool::Zoom
             ]
         );

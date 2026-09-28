@@ -6,9 +6,11 @@ description: |
   diagram they have drawn and wants you to look at it; when they ask what is
   on the board; or when they ask you to put a diagram, a flow, a layout or a
   drawing onto the board. Exports a frame to yourself as PNG + JSON + an
-  inventory, and grafts new frames back on; lists and arranges the board's
+  inventory, and grafts new frames back on — text included; puts labels
+  and notes on the board and changes them; lists and arranges the board's
   layers when the person asks. Triggers: sinopia, whiteboard, the board,
-  this frame, read my sketch, draw this on the board, the layers.
+  this frame, read my sketch, draw this on the board, write on the board,
+  label this, the layers.
 ---
 
 # Sinopia, from an agent's side
@@ -48,7 +50,7 @@ Three files land in `<dir>/.sinopia/<frame-name-slugged>/`:
 | --- | --- |
 | `board.png` | the picture — **read this first**, it is what the person drew |
 | `board.json` | the same objects in the board's schema; hand it straight back to `agent add` |
-| `board.md` | a generated inventory: counts and the area, nothing more |
+| `board.md` | a generated inventory: counts, the area, and what every text says |
 | `blobs/<sha256>` | the bytes behind any image in the frame |
 
 Two frames sharing a name share a folder, and reading the same frame twice
@@ -128,6 +130,7 @@ Rules that make it parse:
 | --- | --- | --- |
 | `rect` | `x y w h`, `fill`, `stroke`, `rotation` | colours are `#rgb` or `#rrggbb` |
 | `path` | `curves`, `stroke`, `width` | ink: lines, arrows, curves |
+| `text` | `x y w h`, `text`, `size`, `color`, and the style below | words, on a layer of `"kind": "text"` |
 | `image` | `x y w h`, `blob`, `rotation` | a picture you rendered yourself |
 
 A `path`'s `curves` is a list of cubic Béziers, each `[start, c1, c2, end]`.
@@ -147,21 +150,65 @@ blobs/e38052c677755ffd23d527051055cb1018aaabbed294abddfd561411b74a1c32
 PNG, JPEG or WebP, at most 8192 px a side. Bytes that are not the hash they
 are named by are refused.
 
-### What you cannot draw: text
+### Text
 
-**The canvas draws no text.** A `rect` has a `text` field and nothing renders
-it. So a diagram of bare boxes says nothing — if your frame needs labels,
-**render them into a PNG yourself and place it as an `image`**. That is the
-supported way to put words on the board today.
+A `text` is words, and it stands on a layer of its own of `"kind":
+"text"` — one text to a text layer, as the board keeps them. Two kinds,
+as a design tool has them:
 
-Prefer, in order: an image you rendered with the labels in it; shapes plus
-paths for structure; and a plain `board.md`-style summary in your reply for
-anything the picture cannot carry.
+- **artistic** (the default): a line set at `x`/`y`; a newline in `text`
+  breaks it. Its box is what its letters measure — the board fits `w`
+  and `h` itself, so put anything there.
+- **frame** (`"mode": "frame"`): the words wrap at `w`, and what does not
+  fit in `h` is hidden. Leave room.
+
+```json
+{ "type": "text", "id": "T1", "layer": "LT",
+  "x": 40, "y": 110, "w": 0, "h": 0,
+  "text": "API Gateway", "size": 20, "color": "#2b4c8c" }
+```
+
+with `{ "id": "LT", "name": "API Gateway", "kind": "text" }` among the
+frame's `layers`. The rest of the style is optional and off by default:
+`font` (a family name; the default `Liberation Sans` is on every
+machine), `bold`, `italic`, `underline`, `strike`, `align` (`left`,
+`center`, `right`, `justify`), `valign` for a frame (`top`, `middle`,
+`bottom`), `leading` (line spacing as a share of the size, default 1.2),
+`tracking` (thousandths of an em), `rotation` (degrees).
+
+So a diagram that reads itself is boxes (`rect`), arrows (`path`) and
+their labels (`text`), all in one fragment. Render a picture only for
+what is not words.
+
+## Writing on the board, when the person asks
+
+`sinopia text` puts a text on the board that is open, or changes one —
+for a label or a note the person asked for, not for work of your own in
+their frames. Each is one step they can undo.
+
+```sh
+sinopia text list                                  # every text on show, as JSON
+sinopia text add "Deploy on Friday" --size 32 --bold --color "#c0392b"
+sinopia text add "Login → Token" --frame "Auth Flow" --at 20,30   # in a frame, from its corner
+sinopia text add "A longer note that wraps." --width 240 --align justify
+sinopia text set "Deploy on Friday" --to "Deploy on Monday" --italic
+sinopia text set 01M3… --size 18 --bold false --at 100,-40
+```
+
+`add` answers `{"ev":"texted","id":…,"layer":…}`. Without `--frame` or
+`--at` the text lands in the middle of what the window shows. `--width`
+makes it a text frame (its height, unless `--height` says, is as tall as
+its lines). A text is named by its id, its layer's id, or the name its
+layer goes by — which is what it says, until the person renames it. `set`
+takes `--to` for the words, `--kind artistic|frame`, `--at X,Y` on the
+board, `--width`, `--height`, and every style flag `add` takes; a toggle
+given alone is on, `--bold false` turns it off. A text a lock keeps is
+refused.
 
 ## The layers, when the person asks
 
 `sinopia layer list` prints the whole tree, top first: each layer's `id`,
-`name`, `kind` (`raster`, `vector`, `group`, `frame`), the `owner` holding it
+`name`, `kind` (`raster`, `vector`, `text`, `group`, `frame`), the `owner` holding it
 (`null` on the board's root) and its `depth`, `visible` (its own eye) and
 `shown` (on show at all), `locked`, `opacity` (a fraction), `blend`,
 `color`, whether it is `active` or `picked`, and how many `elements` stand on
@@ -206,11 +253,15 @@ asked.
 | `image … is neither in the store nor at …` | write `blobs/<sha256>` beside the fragment |
 | `no layer "X" on the board that is open` | `sinopia layer list`, and name it by id |
 | `N layers go by "X"` | name the one you mean by its id |
+| `text "X" stands on layer "Y", which is not a text layer` | give each text its own layer of `"kind": "text"` |
+| `no text "X" on show on the board that is open` | `sinopia text list`, and name it by its id |
+| `field color must be #rgb or #rrggbb` | write colours as hex |
 | `"X" is locked, and a lock keeps …` | the person locked it: ask before unlocking |
 
 ## Undo
 
 Anything you graft is one undo step for the person: `Ctrl+Z` takes your frame
-back off the board, and every `sinopia layer` change is one step too. You
+back off the board, and every `sinopia layer` and `sinopia text` change is one
+step too. You
 cannot undo from here. If you got it wrong, say so — and graft a corrected
 frame, or put the layers back the way the listing you took first had them.
