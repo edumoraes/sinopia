@@ -42,6 +42,7 @@ mod store;
 mod tablet;
 mod tabs;
 mod text;
+mod textbar;
 mod theme;
 mod thumbs;
 mod tree;
