@@ -3592,6 +3592,10 @@ impl App {
     /// for: the two are one door, so what is taught cannot disagree with
     /// what is done.
     fn run_action(&mut self, action: Action) {
+        // A key taken while a menu stands puts it away first: its lines
+        // were written for the board as it was, and a new tab or a step
+        // back would leave them answering for another.
+        self.close_menu(None);
         let change = match action {
             Action::New => return self.open_project(Project::untitled()),
             Action::Open => return self.ask_open(),
