@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::bitmap;
 use crate::brush::{Dynamics, Tip};
 use crate::curve::{self, Cubic};
-use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Model, Paint, Path, Tag, new_id};
+use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, Layer, Paint, Path, Tag, new_id};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::merge::{Merge, Run};
 use crate::scene::View;
@@ -18,7 +18,7 @@ use crate::tree::{self, Arrange, Filter, Place};
 
 mod shaping;
 mod typing;
-pub use shaping::model_for_key;
+pub use shaping::figure_for_key;
 pub use typing::{Look, Move, TEXT_MAX, TextKey, Typing, fit_texts, step_size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -369,8 +369,8 @@ pub struct Editor {
     text_style: crate::doc::TextStyle,
     /// How many typing sessions this editor has opened: each one's id.
     sessions: u64,
-    /// The model the Shape tool draws, and how the next shape is drawn.
-    model: Model,
+    /// The figure the Shape tool draws, and how the next one is drawn.
+    figure: crate::shape::Figure,
     shape_style: shaping::ShapeStyle,
     /// The area the Shape tool is dragging out: where the press was and
     /// where the pointer is, in world units.
@@ -565,7 +565,7 @@ impl Editor {
     pub fn choose_tool(&mut self, tool: Tool, doc: &mut Document) {
         match tool {
             Tool::Text if self.tool == Tool::Text => self.switch_text_kind(),
-            Tool::Shape if self.tool == Tool::Shape => self.next_model(),
+            Tool::Shape if self.tool == Tool::Shape => self.next_figure(),
             _ => self.set_tool(tool, doc),
         }
     }
@@ -2124,7 +2124,7 @@ impl Editor {
         if button == Button::Left
             && let Some((from, to)) = self.shaping.take()
         {
-            return self.lay_shape(doc, view, from, to, ink);
+            return self.lay_figure(doc, view, from, to, ink);
         }
         if button == Button::Left
             && let Some((from, to, ink)) = self.placing.take()

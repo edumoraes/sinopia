@@ -9,17 +9,23 @@
 //! after its model, in the frame the press landed in, and arrives
 //! selected.
 
-use super::{CLICK_SLOP_PX, Change, Editor, Tool};
-use crate::doc::{DEFAULT_INNER, DEFAULT_SHAPE_WIDTH, DEFAULT_SIDES, Document, Element, Kind, Model, Shape, new_id};
+use super::{CLICK_SLOP_PX, Change, Editor, ROTATE_SNAP_DEG, Tool};
+use crate::doc::{
+    DEFAULT_INNER, DEFAULT_SHAPE_WIDTH, DEFAULT_SIDES, Document, Element, Head, Kind, Line, Shape, new_id,
+};
 use crate::geom::Point;
 use crate::scene::View;
+use crate::shape::Figure;
 
-/// How many world units a side a click lays a shape: Figma's own.
+/// How many world units a click lays a figure: a shape this many a side,
+/// Figma's own, and a line this long.
 pub const DEFAULT_SIZE: f64 = 100.0;
 
-/// How the next shape is drawn, and what the bar shows with no shape to
-/// look at. Its stroke is the window's ink, read at the press as a new
-/// text's colour is; `outline` says whether it has a stroke at all.
+/// How the next figure is drawn, and what the bar shows with nothing to
+/// look at. A shape's stroke is the window's ink, read at the press as a
+/// new text's colour is, and `outline` says whether it has one at all; a
+/// line is nothing but its ink, and always has it. An arrow wears
+/// `start` and `end`; a line, neither.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapeStyle {
     pub fill: Option<String>,
@@ -28,11 +34,14 @@ pub struct ShapeStyle {
     pub radius: f64,
     pub sides: u32,
     pub inner: f64,
+    pub start: Head,
+    pub end: Head,
 }
 
 impl Default for ShapeStyle {
     /// An outline in the ink in the hand and nothing inside it, as a
-    /// board's shapes are drawn: what is round them stays readable.
+    /// board's shapes are drawn: what is round them stays readable. An
+    /// arrow's head is at its end, open.
     fn default() -> ShapeStyle {
         ShapeStyle {
             fill: None,
@@ -41,46 +50,62 @@ impl Default for ShapeStyle {
             radius: 0.0,
             sides: DEFAULT_SIDES,
             inner: DEFAULT_INNER,
+            start: Head::None,
+            end: Head::Arrow,
         }
     }
 }
 
 impl Editor {
-    /// Takes the Shape tool up with `model` in hand.
-    pub fn choose_model(&mut self, model: Model, doc: &mut Document) {
+    /// Takes the Shape tool up with `figure` in hand.
+    pub fn choose_figure(&mut self, figure: Figure, doc: &mut Document) {
         self.set_tool(Tool::Shape, doc);
-        self.model = model;
+        self.figure = figure;
     }
 
-    /// The next model along, and round to the first after the last:
+    /// The next figure along, and round to the first after the last:
     /// what the tool's key does with the tool already in hand.
-    pub(super) fn next_model(&mut self) {
-        let at = Model::ALL.iter().position(|m| *m == self.model).unwrap_or(0);
-        self.model = Model::ALL[(at + 1) % Model::ALL.len()];
+    pub(super) fn next_figure(&mut self) {
+        let at = Figure::ALL.iter().position(|f| *f == self.figure).unwrap_or(0);
+        self.figure = Figure::ALL[(at + 1) % Figure::ALL.len()];
     }
 
-    /// The shape the drag in progress would lay, stroked in `ink` — none
-    /// while the drag is still a click, which lays a shape of its own
-    /// size rather than one the hand is making.
-    pub fn shaping(&self, view: &View, ink: &str) -> Option<Shape> {
+    /// What the drag in progress would lay — a shape or a line — stroked
+    /// in `ink`; none while the drag is still a click, which lays a
+    /// figure of its own size rather than one the hand is making.
+    pub fn shaping(&self, view: &View, ink: &str) -> Option<Element> {
         let (from, to) = self.shaping?;
         (!is_click(view, from, to)).then(|| self.shaped(view, from, to, ink))
     }
 
-    /// The shape a drag from `from` to `to` lays, as the model, the held
-    /// keys and the style say — with neither id nor layer yet.
-    fn shaped(&self, view: &View, from: Point, to: Point, ink: &str) -> Shape {
+    /// What a drag from `from` to `to` lays, as the figure, the held keys
+    /// and the style say — with neither id nor layer yet.
+    fn shaped(&self, view: &View, from: Point, to: Point, ink: &str) -> Element {
+        let style = &self.shape_style;
+        let Some(model) = self.figure.model() else {
+            let (from, to) = self.dragged_ends(view, from, to);
+            let arrow = self.figure == Figure::Arrow;
+            return Element::Line(Line {
+                id: String::new(),
+                layer: String::new(),
+                from,
+                to,
+                stroke: ink.to_owned(),
+                width: style.width,
+                start: if arrow { style.start } else { Head::None },
+                end: if arrow { style.end } else { Head::None },
+            });
+        };
         let (lo, hi) = if is_click(view, from, to) {
             let half = DEFAULT_SIZE / 2.0;
             ([from[0] - half, from[1] - half], [from[0] + half, from[1] + half])
         } else {
             self.dragged_box(view, from, to)
         };
-        let style = &self.shape_style;
-        Shape {
+        Element::Shape(Shape {
             id: String::new(),
             layer: String::new(),
-            model: self.model,
+            model,
             x: lo[0],
             y: lo[1],
             w: hi[0] - lo[0],
@@ -93,7 +118,7 @@ impl Editor {
             radius: style.radius,
             sides: style.sides,
             inner: style.inner,
-        }
+        })
     }
 
     /// The box a drag spans: from the press to the pointer, both sides the
@@ -122,32 +147,59 @@ impl Editor {
         )
     }
 
-    /// Lays the shape the drag from `from` to `to` makes, stroked in
-    /// `ink`, on a vector layer of its own named after its model — in the
-    /// frame the press landed in — and selects it.
-    pub(super) fn lay_shape(&mut self, doc: &mut Document, view: &View, from: Point, to: Point, ink: &str) -> Change {
-        let mut shape = self.shaped(view, from, to, ink);
+    /// The ends a drag lays a line between: the press and the pointer,
+    /// turned to the nearest fifteen degrees under `Shift` — the rotation
+    /// ring's own step — and run as far past the press the other way
+    /// under `Alt`. A click lays one across it, level.
+    fn dragged_ends(&self, view: &View, from: Point, to: Point) -> (Point, Point) {
+        if is_click(view, from, to) {
+            let half = DEFAULT_SIZE / 2.0;
+            return ([from[0] - half, from[1]], [from[0] + half, from[1]]);
+        }
+        let mut d = [to[0] - from[0], to[1] - from[1]];
+        if self.shift {
+            let step = ROTATE_SNAP_DEG.to_radians();
+            let angle = (d[1].atan2(d[0]) / step).round() * step;
+            let length = d[0].hypot(d[1]);
+            d = [length * angle.cos(), length * angle.sin()];
+        }
+        let end = [from[0] + d[0], from[1] + d[1]];
+        if self.alt {
+            return ([from[0] - d[0], from[1] - d[1]], end);
+        }
+        (from, end)
+    }
+
+    /// Lays what the drag from `from` to `to` makes, stroked in `ink`, on
+    /// a vector layer of its own named after its figure — in the frame
+    /// the press landed in — and selects it.
+    pub(super) fn lay_figure(&mut self, doc: &mut Document, view: &View, from: Point, to: Point, ink: &str) -> Change {
+        let mut laid = self.shaped(view, from, to, ink);
         let born = doc.stack_at(from).map(str::to_owned);
         let layer = self.fresh_layer(doc, Kind::Vector, born.as_deref());
         let owner = doc.locate(&layer).and_then(|(owner, _)| owner.map(str::to_owned));
-        let name = doc.next_name(owner.as_deref(), self.model.name());
+        let name = doc.next_name(owner.as_deref(), self.figure.name());
         if let Some(l) = doc.layer_mut(&layer) {
             l.name = name;
         }
-        shape.id = new_id();
-        shape.layer = layer;
-        self.selection = vec![shape.id.clone()];
-        doc.elements.push(Element::Shape(shape));
+        let id = new_id();
+        laid.set_id(&id);
+        laid.set_layer(&layer);
+        self.selection = vec![id];
+        doc.elements.push(laid);
         Change::Scene
     }
 }
 
-/// The model a key takes the Shape tool up with: `R` the rectangle and
-/// `O` the ellipse, as Figma's and every board's own keys do.
-pub fn model_for_key(c: char) -> Option<Model> {
+/// The figure a key takes the Shape tool up with: `R` the rectangle, `O`
+/// the ellipse, `L` the line and `A` the arrow, as Figma's and every
+/// board's own keys do.
+pub fn figure_for_key(c: char) -> Option<Figure> {
     match c.to_ascii_lowercase() {
-        'r' => Some(Model::Rectangle),
-        'o' => Some(Model::Ellipse),
+        'r' => Some(Figure::Rectangle),
+        'o' => Some(Figure::Ellipse),
+        'l' => Some(Figure::Line),
+        'a' => Some(Figure::Arrow),
         _ => None,
     }
 }
@@ -164,6 +216,7 @@ mod tests {
     use super::super::{Button, Tool};
     use super::*;
     use crate::brush::Tip;
+    use crate::doc::Model;
     use crate::scene::Viewport;
 
     const INK: &str = "#112233";
@@ -197,6 +250,26 @@ mod tests {
         let _ = e.moved(&view(), at((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0), doc);
         let _ = e.moved(&view(), at(to.0, to.1), doc);
         e.release(Button::Left, &view(), at(to.0, to.1), doc, INK)
+    }
+
+    fn lines(doc: &Document) -> Vec<&Line> {
+        doc.elements
+            .iter()
+            .filter_map(|el| match el {
+                Element::Line(l) => Some(l),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn only_line(doc: &Document) -> &Line {
+        let all = lines(doc);
+        assert_eq!(all.len(), 1, "{all:?}");
+        all[0]
+    }
+
+    fn close(a: [f64; 2], b: [f64; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9
     }
 
     fn shapes(doc: &Document) -> Vec<&Shape> {
@@ -238,12 +311,14 @@ mod tests {
     fn its_layer_is_named_after_its_model() {
         let (mut e, mut doc) = shaping();
         let _ = drag(&mut e, &mut doc, (0.0, 0.0), (50.0, 50.0));
-        e.choose_model(Model::Ellipse, &mut doc);
+        e.choose_figure(Figure::Ellipse, &mut doc);
         let _ = drag(&mut e, &mut doc, (100.0, 0.0), (150.0, 50.0));
-        e.choose_model(Model::Rectangle, &mut doc);
+        e.choose_figure(Figure::Rectangle, &mut doc);
         let _ = drag(&mut e, &mut doc, (200.0, 0.0), (250.0, 50.0));
+        e.choose_figure(Figure::Arrow, &mut doc);
+        let _ = drag(&mut e, &mut doc, (300.0, 0.0), (350.0, 50.0));
         let names: Vec<&str> = doc.layers.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, ["Layer 1", "Rectangle 1", "Ellipse 1", "Rectangle 2"]);
+        assert_eq!(names, ["Layer 1", "Rectangle 1", "Ellipse 1", "Rectangle 2", "Arrow 1"]);
     }
 
     #[test]
@@ -266,7 +341,7 @@ mod tests {
     #[test]
     fn a_click_lays_the_model_at_its_default_size_centred_on_it() {
         let (mut e, mut doc) = shaping();
-        e.choose_model(Model::Star, &mut doc);
+        e.choose_figure(Figure::Star, &mut doc);
         let _ = e.press(Button::Left, &view(), at(10.0, 20.0), &mut doc, &Tip::PENCIL);
         let _ = e.moved(&view(), (at(10.0, 20.0).0 + 1.0, at(10.0, 20.0).1), &mut doc);
         let _ = e.release(Button::Left, &view(), at(10.0, 20.0), &mut doc, INK);
@@ -284,7 +359,9 @@ mod tests {
         let _ = e.moved(&view(), at(60.0, 40.0), &mut doc);
         assert!(shapes(&doc).is_empty());
         assert!(e.busy() && e.is_drawing());
-        let preview = e.shaping(&view(), INK).expect("the shape being dragged out");
+        let Some(Element::Shape(preview)) = e.shaping(&view(), INK) else {
+            panic!("the shape being dragged out");
+        };
         assert_eq!(boxed(&preview), (0.0, 0.0, 60.0, 40.0));
         assert_eq!(preview.stroke.as_deref(), Some(INK));
         assert!(e.cancel(&mut doc));
@@ -295,48 +372,113 @@ mod tests {
 
     #[test]
     fn what_is_dragged_out_is_what_lands() {
-        let (mut e, mut doc) = shaping();
-        e.choose_model(Model::Polygon, &mut doc);
+        let (mut e, _) = shaping();
         e.hold_shift(true);
-        let _ = e.press(Button::Left, &view(), at(5.0, 5.0), &mut doc, &Tip::PENCIL);
-        let _ = e.moved(&view(), at(95.0, 60.0), &mut doc);
-        let preview = e.shaping(&view(), INK).unwrap();
-        let _ = e.release(Button::Left, &view(), at(95.0, 60.0), &mut doc, INK);
-        let s = only(&doc);
-        assert_eq!(Shape { id: s.id.clone(), layer: s.layer.clone(), ..preview }, *s);
+        for figure in [Figure::Polygon, Figure::Arrow] {
+            let mut doc = Document::new("t");
+            e.choose_figure(figure, &mut doc);
+            let _ = e.press(Button::Left, &view(), at(5.0, 5.0), &mut doc, &Tip::PENCIL);
+            let _ = e.moved(&view(), at(95.0, 60.0), &mut doc);
+            let mut preview = e.shaping(&view(), INK).unwrap();
+            let _ = e.release(Button::Left, &view(), at(95.0, 60.0), &mut doc, INK);
+            let landed = &doc.elements[0];
+            preview.set_id(landed.id());
+            preview.set_layer(landed.layer());
+            assert_eq!(preview, *landed, "{figure:?}");
+        }
     }
 
     #[test]
-    fn u_again_steps_through_the_models() {
+    fn u_again_steps_through_the_figures() {
         let (mut e, mut doc) = shaping();
-        assert_eq!(e.model, Model::Rectangle);
+        assert_eq!(e.figure, Figure::Rectangle);
         e.choose_tool(Tool::Shape, &mut doc);
-        assert_eq!(e.model, Model::Ellipse);
-        for _ in 0..Model::ALL.len() - 1 {
+        assert_eq!(e.figure, Figure::Ellipse);
+        for _ in 0..Figure::ALL.len() - 1 {
             e.choose_tool(Tool::Shape, &mut doc);
         }
-        assert_eq!(e.model, Model::Rectangle, "and round again");
+        assert_eq!(e.figure, Figure::Rectangle, "and round again");
         e.choose_tool(Tool::Select, &mut doc);
         e.choose_tool(Tool::Shape, &mut doc);
-        assert_eq!(e.model, Model::Rectangle, "taking the tool up keeps the model");
+        assert_eq!(e.figure, Figure::Rectangle, "taking the tool up keeps the figure");
     }
 
     #[test]
-    fn r_and_o_take_the_tool_up_with_the_rectangle_and_the_ellipse() {
-        assert_eq!(model_for_key('r'), Some(Model::Rectangle));
-        assert_eq!(model_for_key('O'), Some(Model::Ellipse));
-        assert_eq!(model_for_key('u'), None, "the tool's own key steps through them");
-        for c in ['r', 'o'] {
+    fn r_o_l_and_a_take_the_tool_up_with_their_figures() {
+        assert_eq!(figure_for_key('r'), Some(Figure::Rectangle));
+        assert_eq!(figure_for_key('O'), Some(Figure::Ellipse));
+        assert_eq!(figure_for_key('l'), Some(Figure::Line));
+        assert_eq!(figure_for_key('a'), Some(Figure::Arrow));
+        assert_eq!(figure_for_key('u'), None, "the tool's own key steps through them");
+        for c in ['r', 'o', 'l', 'a'] {
             assert_eq!(Tool::from_hotkey(c), None, "{c} is no tool's");
         }
     }
 
     #[test]
-    fn choosing_a_model_takes_the_tool_up_with_it() {
+    fn choosing_a_figure_takes_the_tool_up_with_it() {
         let mut e = Editor::new();
         let mut doc = Document::new("t");
-        e.choose_model(Model::Ellipse, &mut doc);
-        assert_eq!((e.tool(), e.model), (Tool::Shape, Model::Ellipse));
+        e.choose_figure(Figure::Ellipse, &mut doc);
+        assert_eq!((e.tool(), e.figure), (Tool::Shape, Figure::Ellipse));
+    }
+
+    #[test]
+    fn a_line_runs_from_the_press_to_the_release() {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Line, &mut doc);
+        let _ = drag(&mut e, &mut doc, (10.0, 20.0), (-90.0, 60.0));
+        let l = only_line(&doc);
+        assert_eq!((l.from, l.to), ([10.0, 20.0], [-90.0, 60.0]));
+        assert_eq!((l.stroke.as_str(), l.width), (INK, crate::doc::DEFAULT_SHAPE_WIDTH));
+        assert_eq!((l.start, l.end), (Head::None, Head::None));
+        assert_eq!(doc.layer(&l.layer).map(|l| l.name.as_str()), Some("Line 1"));
+        assert_eq!(e.selection(), std::slice::from_ref(&l.id));
+    }
+
+    #[test]
+    fn an_arrow_is_a_line_with_a_head_at_its_end() {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Arrow, &mut doc);
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 0.0));
+        let l = only_line(&doc);
+        assert_eq!((l.start, l.end), (Head::None, Head::Arrow));
+        // A line drawn with no stroke in the style is still drawn: a line
+        // is nothing but its ink.
+        doc.elements.clear();
+        e.shape_style.outline = false;
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 0.0));
+        assert_eq!(only_line(&doc).stroke, INK);
+    }
+
+    #[test]
+    fn shift_turns_a_line_in_fifteen_degree_steps_and_alt_draws_it_from_its_middle() {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Line, &mut doc);
+        e.hold_shift(true);
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 20.0));
+        let l = only_line(&doc);
+        let length = 100f64.hypot(20.0);
+        let a = 15f64.to_radians();
+        assert!(close(l.to, [length * a.cos(), length * a.sin()]), "{:?}", l.to);
+        doc.elements.clear();
+        e.hold_shift(false);
+        e.hold_alt(true);
+        let _ = drag(&mut e, &mut doc, (50.0, 50.0), (80.0, 40.0));
+        let l = only_line(&doc);
+        assert_eq!((l.from, l.to), ([20.0, 60.0], [80.0, 40.0]), "the press is its middle");
+    }
+
+    #[test]
+    fn a_click_lays_a_line_across_it() {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Arrow, &mut doc);
+        let _ = e.press(Button::Left, &view(), at(0.0, 0.0), &mut doc, &Tip::PENCIL);
+        let _ = e.release(Button::Left, &view(), at(0.0, 0.0), &mut doc, INK);
+        let l = only_line(&doc);
+        let half = DEFAULT_SIZE / 2.0;
+        assert_eq!((l.from, l.to), ([-half, 0.0], [half, 0.0]));
+        assert_eq!(l.end, Head::Arrow);
     }
 
     #[test]
@@ -375,6 +517,7 @@ mod tests {
             radius: 12.0,
             sides: 8,
             inner: 0.6,
+            ..ShapeStyle::default()
         };
         let _ = drag(&mut e, &mut doc, (0.0, 0.0), (40.0, 40.0));
         let s = only(&doc);

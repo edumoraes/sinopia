@@ -1460,16 +1460,6 @@ pub enum Model {
 }
 
 impl Model {
-    /// In the order the tool steps through them, and the bar lists them.
-    pub const ALL: [Model; 6] = [
-        Model::Rectangle,
-        Model::Ellipse,
-        Model::Triangle,
-        Model::Diamond,
-        Model::Polygon,
-        Model::Star,
-    ];
-
     /// What it is called: the word its layer is named after.
     pub fn name(self) -> &'static str {
         match self {

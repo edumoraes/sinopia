@@ -3297,9 +3297,11 @@ impl App {
             edge,
             live,
         ));
-        // The shape the Shape tool is dragging out, drawn as it will land.
-        if let Some(shape) = self.editor().shaping(view, self.ink_hex()) {
-            frame.extend(scene::shape_prims(&shape, view));
+        // What the Shape tool is dragging out, drawn as it will land.
+        match self.editor().shaping(view, self.ink_hex()) {
+            Some(Element::Shape(shape)) => frame.extend(scene::shape_prims(&shape, view)),
+            Some(Element::Line(line)) => frame.extend(scene::line_prims(&line, view)),
+            _ => {}
         }
         if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
@@ -4486,10 +4488,10 @@ impl App {
             let (editor, doc) = self.active();
             editor.choose_tool(tool, doc);
             self.redraw();
-        } else if let Some(model) = crate::editor::model_for_key(c) {
+        } else if let Some(figure) = crate::editor::figure_for_key(c) {
             self.end_typing();
             let (editor, doc) = self.active();
-            editor.choose_model(model, doc);
+            editor.choose_figure(figure, doc);
             self.redraw();
         } else if self.brush_key(c) {
             self.redraw();

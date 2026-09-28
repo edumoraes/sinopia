@@ -14,6 +14,57 @@ use crate::geom::Point;
 /// may have, each with a corner cut in beside it.
 pub const MAX_CORNERS: u32 = 2 * MAX_SIDES;
 
+/// What the Shape tool draws: one of the six closed models, a line, or an
+/// arrow — a line with a head at its end. The bar lists them in this
+/// order, and the tool's key steps through them in it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Figure {
+    #[default]
+    Rectangle,
+    Ellipse,
+    Triangle,
+    Diamond,
+    Polygon,
+    Star,
+    Line,
+    Arrow,
+}
+
+impl Figure {
+    pub const ALL: [Figure; 8] = [
+        Figure::Rectangle,
+        Figure::Ellipse,
+        Figure::Triangle,
+        Figure::Diamond,
+        Figure::Polygon,
+        Figure::Star,
+        Figure::Line,
+        Figure::Arrow,
+    ];
+
+    /// The closed model it is, or none for a line.
+    pub fn model(self) -> Option<Model> {
+        match self {
+            Figure::Rectangle => Some(Model::Rectangle),
+            Figure::Ellipse => Some(Model::Ellipse),
+            Figure::Triangle => Some(Model::Triangle),
+            Figure::Diamond => Some(Model::Diamond),
+            Figure::Polygon => Some(Model::Polygon),
+            Figure::Star => Some(Model::Star),
+            Figure::Line | Figure::Arrow => None,
+        }
+    }
+
+    /// What it is called: the word its layer is named after.
+    pub fn name(self) -> &'static str {
+        match self {
+            Figure::Line => "Line",
+            Figure::Arrow => "Arrow",
+            _ => self.model().map_or("Shape", Model::name),
+        }
+    }
+}
+
 /// Where a polygon model's corners stand. Every one of them is walked
 /// from straight up, clockwise, evenly round a circle of radius 1 — every
 /// other one on a circle of `inner` for a star — and then fitted to the
