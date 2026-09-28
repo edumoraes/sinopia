@@ -253,6 +253,9 @@ struct App {
     /// Whether the last frame drew the caret: the loop redraws for the
     /// blink only when that is about to change.
     caret_drawn: std::cell::Cell<Option<bool>>,
+    /// `Ctrl+V` on the board found no layers and no image, only words:
+    /// what arrives is a text of its own, where the pointer is.
+    pasting_words: bool,
     /// The last press on the canvas, where, and how many in a row it
     /// made: two are a double click, three a triple.
     last_press: Option<(Instant, (f64, f64), u32)>,
@@ -1294,6 +1297,9 @@ impl App {
     /// Clipboard text came back. The field that asked for it may have
     /// closed since, and then the text has nowhere to go and goes nowhere.
     fn pasted_text(&mut self, text: &str) {
+        if std::mem::take(&mut self.pasting_words) && self.field_in_hand().is_none() && self.editor().typing().is_none() {
+            return self.paste_words(text);
+        }
         if self.field_in_hand().is_none() && self.editor().typing().is_some() {
             let change = self.with_text(|editor, doc, fonts| editor.paste_text(text, doc, fonts));
             self.text_input();
@@ -1310,12 +1316,57 @@ impl App {
         }
     }
 
+    /// Words pasted on the board: a text of their own, its first line
+    /// centred on the pointer — or in the middle of the window when the
+    /// pointer is not over it — set as the next text would be, in the ink
+    /// in the hand, as pasting plain text does on every board.
+    fn paste_words(&mut self, text: &str) {
+        let words: String = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ")
+            .chars()
+            .filter(|&c| c == '\n' || !c.is_control())
+            .collect();
+        let words = words.trim_end_matches('\n');
+        if words.trim().is_empty() {
+            return;
+        }
+        let Some(view) = self.view() else { return };
+        let screen = self
+            .cursor
+            .filter(|&at| !self.over_chrome(&view, at))
+            .unwrap_or((f64::from(view.viewport.w) / 2.0, f64::from(view.viewport.h) / 2.0));
+        let (x, y) = view.screen_to_world(screen.0, screen.1);
+        let mut style = self.editor().next_style();
+        self.ink_hex().clone_into(&mut style.color);
+        let text = crate::doc::Text {
+            id: String::new(),
+            layer: String::new(),
+            x,
+            y: y - style.size * style.leading / 2.0,
+            w: 0.0,
+            h: 0.0,
+            rotation: 0.0,
+            mode: crate::doc::TextMode::Artistic,
+            text: words.chars().take(crate::editor::TEXT_MAX).collect(),
+            style,
+        };
+        let born = self.doc().stack_at([x, y]).map(str::to_owned);
+        self.with_text(|e, d, f| e.place_text(d, f, text, born.as_deref()));
+        self.apply(Change::Scene);
+    }
+
     /// Asks the clipboard for an image. The bytes arrive later, as
     /// [`UserEvent::Pasted`].
     fn paste(&mut self) {
         match (&self.clipboard, &self.clip) {
+            // Layers and images first, as always; words when that is all
+            // the clipboard holds, which land as a text of their own.
             (Some(clipboard), _) => {
-                clipboard.paste();
+                if !clipboard.paste() {
+                    self.pasting_words = clipboard.paste_text();
+                }
             }
             (None, Some(clip)) => self.pasted_layers(clip.clone()),
             (None, None) => log::debug!("paste: no clipboard on this display"),
@@ -5096,6 +5147,7 @@ pub fn run(
         text_grab: None,
         typed_at: Instant::now(),
         caret_drawn: std::cell::Cell::new(None),
+        pasting_words: false,
         last_press: None,
         glyphs: crate::glyphs::Glyphs::default(),
         letters_slot: 0,
