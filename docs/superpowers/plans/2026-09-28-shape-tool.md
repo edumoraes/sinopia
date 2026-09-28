@@ -70,19 +70,19 @@ Model and pure core:
       a ring — the stroke laid inside the edge — for them and the box.
 - [x] `editor`: the Shape tool — the drag, Shift, Alt, the click, the
       layer named after the model, the shape selected, Esc.
-- [ ] `doc`: `Element::Line` — two ends, a stroke and its width, a head
+- [x] `doc`: `Element::Line` — two ends, a stroke and its width, a head
       at either end.
-- [ ] `shape` + `select`: a line's shaft and heads; its frame, hit and
+- [x] `shape` + `select`: a line's shaft and heads; its frame, hit and
       transform.
-- [ ] `scene`: a line and its heads drawn.
-- [ ] `editor`: the Line and Arrow models; Shift at 15° steps.
-- [ ] `select` + `editor`: a lone line's ends are its handles.
-- [ ] `editor`: where the shape bar looks and what it changes — the
+- [x] `scene`: a line and its heads drawn.
+- [x] `editor`: the Line and Arrow models; Shift at 15° steps.
+- [x] `select` + `editor`: a lone line's ends are its handles.
+- [x] `editor`: where the shape bar looks and what it changes — the
       style of the next shape, the shapes selected, the model switched.
 
 Chrome:
 
-- [ ] `shapebar`: the bar — the models, the fill and stroke wells, the
+- [x] `shapebar`: the bar — the models, the fill and stroke wells, the
       width, and each model's own sliders and buttons.
 - [x] `dock`: the Shape tool, its illustration and its line icon, `U`.
 
@@ -90,7 +90,7 @@ Shell:
 
 - [x] `app`: the tool on the canvas — the shape being dragged out drawn,
       the cursor, the keys, `Alt` held.
-- [ ] `app`: the shape bar, its colour menus tried as the pointer
+- [x] `app`: the shape bar, its colour menus tried as the pointer
       passes, a slider's drag as one step; the dock's ink on the shapes
       selected.
 
