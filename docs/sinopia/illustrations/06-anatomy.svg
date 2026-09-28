@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 780" width="1200" height="780" role="img" aria-labelledby="title desc">
-<title id="title">Anatomy of a wall, anatomy of a board</title>
-<desc id="desc">An exploded view of a fresco wall in five layers, from the bottom: the masonry (muro); rough plaster (arriccio); the red drawing (sinopia), floating on its own; the fine plaster laid in daily patches (intonaco, giornate); and the painting (affresco). On the left, what each layer is in the workshop; on the right, what it is in Sinopia: the machine, the board, the drawing, the agents' work, what gets built.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 90 930 650" width="930" height="650" role="img" aria-labelledby="title desc">
+<title id="title">Anatomy of a wall</title>
+<desc id="desc">An exploded view of a fresco wall in five layers, from the bottom: the masonry (muro); rough plaster (arriccio); the red drawing (sinopia), floating on its own; the fine plaster laid in daily patches (intonaco, giornate); and the painting (affresco). Each layer is named on the left with what it is in the workshop.</desc>
 <defs>
 <filter id="grain" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="23"/><feColorMatrix type="matrix" values="0 0 0 0 0.32  0 0 0 0 0.25  0 0 0 0 0.17  0.55 0 0 0 -0.24"/><feComposite in2="SourceAlpha" operator="in"/></filter>
 <filter id="mottle" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency="0.016 0.028" numOctaves="4" seed="28"/><feColorMatrix type="matrix" values="0 0 0 0 0.45  0 0 0 0 0.34  0 0 0 0 0.22  0.95 0 0 0 -0.42"/><feComposite in2="SourceAlpha" operator="in"/></filter>
@@ -14,8 +14,6 @@
 </defs>
 <rect x="0" y="0" width="1200" height="780" fill="#F3ECDF"/>
 <rect x="0" y="0" width="1200" height="780" fill="#000" filter="url(#mottle)" opacity="0.15"/>
-<text x="40" y="58" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="12.5" fill="#6B6259" letter-spacing="2.6">IN THE BOTTEGA</text>
-<text x="972" y="58" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="12.5" fill="#A3402A" letter-spacing="2.6">IN SINOPIA</text>
 <path d="M330,224 L330,330" fill="none" stroke="#A2978A" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 4" opacity="0.70"/>
 <path d="M790,224 L790,330" fill="none" stroke="#A2978A" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 4" opacity="0.70"/>
 <path d="M930,134 L930,240" fill="none" stroke="#A2978A" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 4" opacity="0.70"/>
@@ -307,48 +305,25 @@
 <text x="300" y="193.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">as the lime sets, it becomes the wall</text>
 <path d="M308,159 L394,159" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="396" cy="159" r="2.2" fill="#2E2925"/>
-<text x="972" y="153" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="20" fill="#A3402A" font-style="italic">what gets built</text>
-<text x="972" y="175" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">the idea, in the world</text>
-<path d="M868,159 L962,159" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="866" cy="159" r="2.2" fill="#2E2925"/>
 <text x="300" y="273" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="23" fill="#2E2925" text-anchor="end" font-style="italic">intonaco</text>
 <text x="300" y="295" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">fine plaster, laid fresh each day:</text>
 <text x="300" y="313.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">one patch, one giornata</text>
 <path d="M308,279 L394,279" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="396" cy="279" r="2.2" fill="#2E2925"/>
-<text x="972" y="273" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="20" fill="#A3402A" font-style="italic">the agents' work</text>
-<text x="972" y="295" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">one frame, one task, laid</text>
-<text x="972" y="313.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">while it is fresh</text>
-<path d="M868,279 L962,279" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="866" cy="279" r="2.2" fill="#2E2925"/>
 <text x="300" y="393" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="23" fill="#A3402A" text-anchor="end" font-style="italic">sinopia</text>
 <text x="300" y="415" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">the full-size drawing in red earth,</text>
 <text x="300" y="433.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">made where the work will stand</text>
 <path d="M308,399 L394,399" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="396" cy="399" r="2.2" fill="#2E2925"/>
-<text x="972" y="393" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="20" fill="#A3402A" font-style="italic">your drawing</text>
-<text x="972" y="415" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">strokes, layers, frames:</text>
-<text x="972" y="433.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">the reasoning, in plain sight</text>
-<path d="M868,399 L962,399" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="866" cy="399" r="2.2" fill="#2E2925"/>
 <text x="300" y="513" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="23" fill="#2E2925" text-anchor="end" font-style="italic">arriccio</text>
 <text x="300" y="535" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">rough plaster, left coarse</text>
 <text x="300" y="553.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">to hold what comes next</text>
 <path d="M308,519 L394,519" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="396" cy="519" r="2.2" fill="#2E2925"/>
-<text x="972" y="513" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="20" fill="#A3402A" font-style="italic">the board</text>
-<text x="972" y="535" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">infinite, local, yours</text>
-<path d="M868,519 L962,519" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="866" cy="519" r="2.2" fill="#2E2925"/>
 <text x="300" y="633" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="23" fill="#2E2925" text-anchor="end" font-style="italic">muro</text>
 <text x="300" y="655" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">the masonry,</text>
 <text x="300" y="673.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259" text-anchor="end">under everything</text>
 <path d="M308,639 L394,639" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
 <circle cx="396" cy="639" r="2.2" fill="#2E2925"/>
-<text x="972" y="633" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="20" fill="#A3402A" font-style="italic">Omarchy</text>
-<text x="972" y="655" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">the machine, the room</text>
-<text x="972" y="673.9" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="14" fill="#6B6259">it all stands in</text>
-<path d="M868,639 L962,639" fill="none" stroke="#A2978A" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="866" cy="639" r="2.2" fill="#2E2925"/>
 <rect x="0" y="0" width="1200" height="780" fill="#000" filter="url(#grain)" opacity="1.0"/>
 </svg>

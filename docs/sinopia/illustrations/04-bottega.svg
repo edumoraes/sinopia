@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" width="1200" height="640" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-labelledby="title desc">
 <title id="title">The bottega, stage by stage</title>
-<desc id="desc">Six round vignettes in a row, each a stage of a fresco and, beneath it, what that stage is in Sinopia: primo pensiero, a first gesture on a scrap; schizzo, tries side by side, one crossed out; cartone, the clean full-size drawing, squared; spolvero, the drawing pricked and patted with charcoal dust; giornata, a day's patch of plaster painted over the red drawing; affresco, the finished painting. Two arcs run back: an agent's frame grafted beside the person's, and every state at rest kept for undo.</desc>
+<desc id="desc">Six round vignettes in a row, each a stage of a fresco: primo pensiero, a first gesture on a scrap; schizzo, tries side by side, one crossed out; cartone, the clean full-size drawing, squared; spolvero, the drawing pricked and patted with charcoal dust; giornata, a day's patch of plaster painted over the red drawing; affresco, the finished painting.</desc>
 <defs>
 <filter id="grain" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="15"/><feColorMatrix type="matrix" values="0 0 0 0 0.32  0 0 0 0 0.25  0 0 0 0 0.17  0.55 0 0 0 -0.24"/><feComposite in2="SourceAlpha" operator="in"/></filter>
 <filter id="mottle" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB"><feTurbulence type="fractalNoise" baseFrequency="0.016 0.028" numOctaves="4" seed="20"/><feColorMatrix type="matrix" values="0 0 0 0 0.45  0 0 0 0 0.34  0 0 0 0 0.22  0.95 0 0 0 -0.42"/><feComposite in2="SourceAlpha" operator="in"/></filter>
@@ -23,7 +23,7 @@
 <rect x="0" y="0" width="1200" height="640" fill="#F3ECDF"/>
 <rect x="0" y="0" width="1200" height="640" fill="#000" filter="url(#mottle)" opacity="0.15"/>
 <text x="60" y="60" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="32" fill="#2E2925" font-style="italic">the bottega</text>
-<text x="240" y="60" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="16.5" fill="#6B6259" font-style="italic">a master and assistants: in Sinopia, a person and their agents</text>
+<text x="240" y="60" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="16.5" fill="#6B6259" font-style="italic">a master and assistants, and a wall reached one drawing at a time</text>
 <circle cx="110" cy="206" r="80" fill="#F7F1E5" filter="url(#lift)"/>
 <circle cx="306" cy="206" r="80" fill="#F7F1E5" filter="url(#lift)"/>
 <circle cx="502" cy="206" r="80" fill="#F7F1E5" filter="url(#lift)"/>
@@ -955,42 +955,15 @@
 <path d="M999.6,203.4 L1005,206 L999.6,208.6" fill="none" stroke="#A3402A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
 <text x="110" y="332" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="25" fill="#2E2925" text-anchor="middle" font-style="italic">primo pensiero</text>
 <text x="110" y="356" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#6B6259" text-anchor="middle">the first thought</text>
-<path d="M94,374 L126,374" fill="none" stroke="#A3402A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.80"/>
-<text x="110" y="398" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">the first mark on</text>
-<text x="110" y="418.2" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">an empty board</text>
 <text x="306" y="332" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="25" fill="#2E2925" text-anchor="middle" font-style="italic">schizzo</text>
 <text x="306" y="356" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#6B6259" text-anchor="middle">the sketch</text>
-<path d="M290,374 L322,374" fill="none" stroke="#A3402A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.80"/>
-<text x="306" y="398" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">strokes and layers,</text>
-<text x="306" y="418.2" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">tries side by side</text>
 <text x="502" y="332" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="25" fill="#2E2925" text-anchor="middle" font-style="italic">cartone</text>
 <text x="502" y="356" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#6B6259" text-anchor="middle">the full-size drawing</text>
-<path d="M486,374 L518,374" fill="none" stroke="#A3402A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.80"/>
-<text x="502" y="398" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">a frame: named,</text>
-<text x="502" y="418.2" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">bounded, addressed</text>
 <text x="698" y="332" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="25" fill="#2E2925" text-anchor="middle" font-style="italic">spolvero</text>
 <text x="698" y="356" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#6B6259" text-anchor="middle">the pounce</text>
-<path d="M682,374 L714,374" fill="none" stroke="#A3402A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.80"/>
-<text x="698" y="398" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">Ctrl+E or agent read:</text>
-<text x="698" y="418.2" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">png, json and md</text>
 <text x="894" y="332" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="25" fill="#2E2925" text-anchor="middle" font-style="italic">giornata</text>
 <text x="894" y="356" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#6B6259" text-anchor="middle">one day's plaster</text>
-<path d="M878,374 L910,374" fill="none" stroke="#A3402A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.80"/>
-<text x="894" y="398" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">one frame,</text>
-<text x="894" y="418.2" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">one agent's task</text>
 <text x="1090" y="332" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="25" fill="#2E2925" text-anchor="middle" font-style="italic">affresco</text>
 <text x="1090" y="356" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#6B6259" text-anchor="middle">the fresco</text>
-<path d="M1074,374 L1106,374" fill="none" stroke="#A3402A" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity="0.80"/>
-<text x="1090" y="398" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">what gets built:</text>
-<text x="1090" y="418.2" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15" fill="#A3402A" text-anchor="middle">the idea, made real</text>
-<path d="M1090,446 L1088.9,454 L1085.7,461.7 L1080.6,468.9 L1073.5,475.7 L1064.7,482.1 L1054.3,488.1 L1042.3,493.7 L1028.8,498.8 L1014.1,503.6 L998.1,508 L981.1,511.9 L963,515.5 L944,518.6 L924.3,521.3 L904,523.7 L883,525.6 L861.7,527.1 L840,528.2 L818,528.9 L796,529.2 L774,529.2 L752,528.7 L730.3,527.8 L709,526.5 L688,524.8 L667.7,522.7 L648,520.2 L629,517.4 L610.9,514.1 L593.9,510.4 L577.9,506.3 L563.2,501.9 L549.7,497 L537.7,491.8 L527.3,486.1 L518.5,480.1 L511.4,473.6 L506.3,466.8 L503.1,459.6 L502,452" fill="none" stroke="#A3402A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4 5" opacity="0.85"/>
-<path d="M502,470 L502,468.6 L502,467.2 L502,465.9 L502,464.5 L502,463.1 L502,461.8 L502,460.4 L502,459 L502,457.6 L502,456.2 L502,454.9 L502,453.5 L502,452.1 L502,450.8 L502,449.4 L502,448" fill="none" stroke="#A3402A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<path d="M498.5,455.2 L502,448 L505.5,455.2" fill="none" stroke="#A3402A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-<text x="796" y="574" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15.5" fill="#2E2925" text-anchor="middle" font-style="italic">agent add: a new frame comes back, grafted beside yours</text>
-<path d="M306,446 L305.4,454.7 L303.5,462.8 L300.5,470.3 L296.5,477.2 L291.5,483.5 L285.6,489.2 L279,494.4 L271.6,498.9 L263.7,502.9 L255.2,506.2 L246.3,509 L237,511.2 L227.5,512.8 L217.8,513.8 L208,514.2 L198.2,514.1 L188.5,513.4 L179,512.1 L169.7,510.2 L160.8,507.8 L152.3,504.8 L144.4,501.2 L137,497 L130.4,492.3 L124.5,487 L119.5,481.1 L115.5,474.7 L112.5,467.7 L110.6,460.1 L110,452" fill="none" stroke="#2E2925" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4 5" opacity="0.70"/>
-<path d="M110,470 L110,468.6 L110,467.2 L110,465.9 L110,464.5 L110,463.1 L110,461.8 L110,460.4 L110,459 L110,457.6 L110,456.2 L110,454.9 L110,453.5 L110,452.1 L110,450.8 L110,449.4 L110,448" fill="none" stroke="#2E2925" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" opacity="0.70"/>
-<path d="M106.5,455.2 L110,448 L113.5,455.2" fill="none" stroke="#2E2925" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" opacity="0.70"/>
-<text x="208" y="574" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15.5" fill="#2E2925" text-anchor="middle" font-style="italic">pentimento: every state at rest</text>
-<text x="208" y="594" font-family="'EB Garamond','Cormorant Garamond','Palatino Linotype',Palatino,P052,'Book Antiqua',Georgia,serif" font-size="15.5" fill="#2E2925" text-anchor="middle" font-style="italic">can be walked back</text>
 <rect x="0" y="0" width="1200" height="640" fill="#000" filter="url(#grain)" opacity="1.0"/>
 </svg>
