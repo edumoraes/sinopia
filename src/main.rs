@@ -16,6 +16,7 @@ mod dock;
 mod editor;
 mod export;
 mod field;
+mod fonts;
 mod geom;
 mod gestures;
 mod gfx;
