@@ -4155,7 +4155,7 @@ fn read_fragment(path: &Path) -> anyhow::Result<Document> {
     Document::from_json(&text).with_context(|| format!("parsing {path:?}"))
 }
 
-/// The pages `docs/boards/` in `cwd` already holds. A directory that is
+/// The pages `.sinopia/` in `cwd` already holds. A directory that is
 /// not there holds nothing, which is the answer, not an error.
 fn taken_names(cwd: &str) -> Vec<String> {
     let at = std::path::Path::new(cwd).join(export::BOARDS_DIR);
