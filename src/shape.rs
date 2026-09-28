@@ -6,7 +6,8 @@
 //! same distances out again, line for line, so the two cannot come to
 //! disagree about where an edge is.
 
-use crate::doc::{MAX_SIDES, Model, Shape};
+use crate::curve::point_segment_distance;
+use crate::doc::{Head, Line, MAX_SIDES, Model, Shape};
 use crate::geom::Point;
 
 /// The most corners the shader walks: a star of the most points a figure
@@ -169,6 +170,105 @@ pub fn polygon(p: Point, corners: &[Point]) -> f64 {
         prev = v;
     }
     sign * nearest.sqrt()
+}
+
+/// How long a line's head is, in world units: this much, and this much
+/// again for every unit the line is wide, as Figma sizes its caps by the
+/// stroke they end.
+pub const HEAD_BASE: f64 = 10.0;
+pub const HEAD_PER_WIDTH: f64 = 3.0;
+/// How far a head opens either side of its line.
+pub const HEAD_ANGLE: f64 = std::f64::consts::FRAC_PI_6;
+
+/// How long a head is on a line `width` wide and `length` long: never past
+/// half the line, so a short arrow with a head at either end still shows
+/// the shaft between them.
+pub fn head_length(width: f64, length: f64) -> f64 {
+    (HEAD_BASE + HEAD_PER_WIDTH * width).min(length / 2.0)
+}
+
+/// A line as it is drawn: the strokes along it — the shaft, then the two
+/// arms of every open head — each as wide as the line and capped round,
+/// and the triangles of its filled heads, each its point first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineParts {
+    pub strokes: Vec<[Point; 2]>,
+    pub heads: Vec<[Point; 3]>,
+}
+
+/// What `l` is drawn as. A filled head stands where the line ends and the
+/// shaft stops at its base, so no round cap shows past the point; a line
+/// of no length is a dot, with no way for a head to face.
+pub fn line_parts(l: &Line) -> LineParts {
+    let d = [l.to[0] - l.from[0], l.to[1] - l.from[1]];
+    let length = d[0].hypot(d[1]);
+    if length <= TINY {
+        return LineParts {
+            strokes: vec![[l.from, l.to]],
+            heads: Vec::new(),
+        };
+    }
+    let u = [d[0] / length, d[1] / length];
+    let len = head_length(l.width, length);
+    let mut shaft = [l.from, l.to];
+    let mut arms = Vec::new();
+    let mut heads = Vec::new();
+    // Each end with the way out of the line there.
+    for (end, tip, out, head) in [(0, l.from, [-u[0], -u[1]], l.start), (1, l.to, u, l.end)] {
+        let base = [tip[0] - out[0] * len, tip[1] - out[1] * len];
+        match head {
+            Head::None => {}
+            Head::Arrow => {
+                for side in [1.0, -1.0] {
+                    let (sin, cos) = (side * HEAD_ANGLE).sin_cos();
+                    let back = [-out[0], -out[1]];
+                    let arm = [back[0] * cos - back[1] * sin, back[0] * sin + back[1] * cos];
+                    arms.push([tip, [tip[0] + arm[0] * len, tip[1] + arm[1] * len]]);
+                }
+            }
+            Head::Triangle => {
+                let half = len * HEAD_ANGLE.tan();
+                let across = [-out[1], out[0]];
+                heads.push([
+                    tip,
+                    [base[0] + across[0] * half, base[1] + across[1] * half],
+                    [base[0] - across[0] * half, base[1] - across[1] * half],
+                ]);
+                shaft[end] = base;
+            }
+        }
+    }
+    let mut strokes = vec![shaft];
+    strokes.extend(arms);
+    LineParts { strokes, heads }
+}
+
+/// How far `l`'s ink reaches either side of it: half its width, or as far
+/// as its widest head opens.
+pub fn line_reach(l: &Line) -> f64 {
+    let length = (l.to[0] - l.from[0]).hypot(l.to[1] - l.from[1]);
+    let len = head_length(l.width, length);
+    let half = l.width / 2.0;
+    [l.start, l.end]
+        .iter()
+        .map(|head| match head {
+            Head::None => half,
+            Head::Arrow => len * HEAD_ANGLE.sin() + half,
+            Head::Triangle => len * HEAD_ANGLE.tan(),
+        })
+        .fold(half, f64::max)
+}
+
+/// The signed distance from `p` to `l`'s ink — its strokes as wide as the
+/// line, and its filled heads — negative on it.
+pub fn line_distance(l: &Line, p: Point) -> f64 {
+    let parts = line_parts(l);
+    let strokes = parts
+        .strokes
+        .iter()
+        .map(|[a, b]| point_segment_distance(p, *a, *b) - l.width / 2.0);
+    let heads = parts.heads.iter().map(|tri| polygon(p, tri));
+    strokes.chain(heads).fold(f64::MAX, f64::min)
 }
 
 #[cfg(test)]
@@ -358,5 +458,88 @@ mod tests {
         s.model = Model::Triangle;
         assert!(distance(&s, [-45.0, -25.0]) > 0.0, "beside a triangle's apex is outside");
         assert!(distance(&s, [0.0, 20.0]) < 0.0);
+    }
+
+    fn a_line(from: Point, to: Point, start: Head, end: Head) -> Line {
+        Line {
+            id: "l".into(),
+            layer: "v".into(),
+            from,
+            to,
+            stroke: "#000000".into(),
+            width: 2.0,
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn a_bare_line_is_one_stroke_from_end_to_end() {
+        let parts = line_parts(&a_line([0.0, 0.0], [100.0, 0.0], Head::None, Head::None));
+        assert_eq!(parts.strokes, vec![[[0.0, 0.0], [100.0, 0.0]]]);
+        assert!(parts.heads.is_empty());
+    }
+
+    #[test]
+    fn an_open_head_is_two_strokes_back_from_its_end() {
+        let l = a_line([0.0, 0.0], [100.0, 0.0], Head::None, Head::Arrow);
+        let parts = line_parts(&l);
+        let len = head_length(l.width, 100.0);
+        assert_eq!(len, HEAD_BASE + HEAD_PER_WIDTH * 2.0);
+        assert_eq!(parts.strokes.len(), 3, "the shaft to the tip, and two arms");
+        assert_eq!(parts.strokes[0], [[0.0, 0.0], [100.0, 0.0]]);
+        for arm in &parts.strokes[1..] {
+            assert_eq!(arm[0], [100.0, 0.0], "from the tip");
+            let back = [arm[1][0] - 100.0, arm[1][1]];
+            assert!(close(back[0].hypot(back[1]), len, 1e-9), "{arm:?}");
+            let opens = back[1].abs().atan2(-back[0]);
+            assert!(close(opens, HEAD_ANGLE, 1e-9), "{opens}");
+        }
+        assert!(parts.strokes[1][1][1] * parts.strokes[2][1][1] < 0.0, "one each side");
+    }
+
+    #[test]
+    fn a_filled_head_is_a_triangle_and_the_shaft_stops_at_its_base() {
+        let l = a_line([0.0, 0.0], [0.0, 100.0], Head::Triangle, Head::None);
+        let parts = line_parts(&l);
+        let len = head_length(l.width, 100.0);
+        assert_eq!(parts.heads.len(), 1);
+        let [tip, a, b] = parts.heads[0];
+        assert_eq!(tip, [0.0, 0.0], "its point at the end");
+        assert!(close(a[1], len, 1e-9) && close(b[1], len, 1e-9), "its base across the line");
+        assert!(close(a[0], -b[0], 1e-9));
+        assert_eq!(parts.strokes, vec![[[0.0, len], [0.0, 100.0]]], "no cap past the point");
+    }
+
+    #[test]
+    fn a_head_is_never_longer_than_half_its_line() {
+        assert_eq!(head_length(2.0, 20.0), 10.0);
+        assert_eq!(head_length(2.0, 1000.0), HEAD_BASE + HEAD_PER_WIDTH * 2.0);
+    }
+
+    #[test]
+    fn a_line_of_no_length_is_a_dot_with_no_heads() {
+        let parts = line_parts(&a_line([5.0, 5.0], [5.0, 5.0], Head::Arrow, Head::Triangle));
+        assert_eq!(parts.strokes, vec![[[5.0, 5.0], [5.0, 5.0]]]);
+        assert!(parts.heads.is_empty());
+    }
+
+    #[test]
+    fn a_lines_ink_reaches_as_wide_as_its_widest_head() {
+        let bare = a_line([0.0, 0.0], [100.0, 0.0], Head::None, Head::None);
+        assert_eq!(line_reach(&bare), 1.0);
+        let len = head_length(2.0, 100.0);
+        let open = Line { end: Head::Arrow, ..bare.clone() };
+        assert!(close(line_reach(&open), len * HEAD_ANGLE.sin() + 1.0, 1e-9));
+        let filled = Line { start: Head::Triangle, ..bare };
+        assert!(close(line_reach(&filled), len * HEAD_ANGLE.tan(), 1e-9));
+    }
+
+    #[test]
+    fn the_distance_to_a_line_is_to_its_ink_heads_and_all() {
+        let l = a_line([0.0, 0.0], [100.0, 0.0], Head::None, Head::Triangle);
+        assert!(close(line_distance(&l, [50.0, 5.0]), 4.0, 1e-9), "5 off, 1 of ink");
+        assert!(line_distance(&l, [95.0, 2.0]) < 0.0, "inside the head");
+        assert!(line_distance(&l, [95.0, 30.0]) > 0.0);
     }
 }

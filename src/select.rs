@@ -56,13 +56,13 @@ pub fn frame(el: &Element) -> Option<Frame> {
 }
 
 /// The box a line's ink takes: along it from end to end and past each by
-/// its round cap, turned as it runs; across it, as wide as it is.
+/// its round cap, turned as it runs; across it, as wide as it is or as its
+/// widest head opens.
 fn line_frame(l: &Line) -> Frame {
     let d = [l.to[0] - l.from[0], l.to[1] - l.from[1]];
-    let reach = l.width / 2.0;
     Frame {
         center: [(l.from[0] + l.to[0]) / 2.0, (l.from[1] + l.to[1]) / 2.0],
-        half: [d[0].hypot(d[1]) / 2.0 + reach, reach],
+        half: [d[0].hypot(d[1]) / 2.0 + l.width / 2.0, crate::shape::line_reach(l)],
         angle: d[1].atan2(d[0]),
     }
 }
@@ -135,7 +135,7 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
         Element::Rect(_) | Element::Image(_) | Element::Text(_) => true,
         Element::Shape(s) => shape_hit(s, &f, p, slop),
-        Element::Line(l) => curve::point_segment_distance(p, l.from, l.to) <= l.width / 2.0 + slop,
+        Element::Line(l) => crate::shape::line_distance(l, p) <= slop,
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
         // A frame is an area with a surface, not an outline. It is
         // painted before what it holds, so a walk from the top finds
@@ -1570,5 +1570,20 @@ mod tests {
         let mut el = line([0.0, 0.0], [10.0, 10.0], 2.0);
         transform(&mut el, &Affine::scale(3.0, 1.0));
         assert_close(line_of(&el).to, [30.0, 10.0]);
+    }
+
+    #[test]
+    fn a_line_is_framed_and_hit_as_wide_as_its_heads() {
+        let mut el = line([0.0, 0.0], [100.0, 0.0], 2.0);
+        if let Element::Line(l) = &mut el {
+            l.end = crate::doc::Head::Triangle;
+        }
+        let f = frame(&el).unwrap();
+        let reach = crate::shape::line_reach(line_of(&el));
+        assert!(reach > 1.0);
+        assert!((f.half[1] - reach).abs() < 1e-9, "{:?}", f.half);
+        let d = doc(vec![el]);
+        assert_eq!(element_at(&d, [95.0, 2.5], 0.0), Some("l"), "on its head, off its shaft");
+        assert_eq!(element_at(&d, [40.0, 2.5], 0.0), None, "the shaft is as wide as it is");
     }
 }

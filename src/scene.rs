@@ -18,7 +18,7 @@ use crate::brush::Tip;
 use crate::fonts::Fonts;
 use crate::glyphs::Glyphs;
 use crate::curve::{self, Cubic};
-use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Kind, Layer, Model, Paper, Pressure, Shape, Stamp};
+use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Kind, Layer, Line, Model, Paper, Pressure, Shape, Stamp};
 use crate::shape::Corners;
 
 /// Viewport in physical pixels.
@@ -1959,6 +1959,42 @@ pub fn shape_prims(s: &Shape, view: &View) -> Vec<Prim> {
     out
 }
 
+/// A line: its strokes, round-capped and as wide as it is — never thinner
+/// than a pixel, as a pencil line is not — and its filled heads, each a
+/// triangle standing point first along the line.
+pub fn line_prims(l: &Line, view: &View) -> Vec<Prim> {
+    let color = parse_color(&l.stroke);
+    let half = half_width_px(l.width, view);
+    let at = |p: [f64; 2]| {
+        let (x, y) = view.world_to_screen(p[0], p[1]);
+        (x as f32, y as f32)
+    };
+    let parts = crate::shape::line_parts(l);
+    let mut out: Vec<Prim> = parts
+        .strokes
+        .iter()
+        .map(|[a, b]| Prim::segment(at(*a), at(*b), half, color))
+        .collect();
+    let triangle = Corners::of(Model::Triangle, 3, 1.0).expect("a triangle has corners");
+    for [tip, a, b] in parts.heads {
+        let (tip, a, b) = (at(tip), at(a), at(b));
+        let base = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+        let (dx, dy) = (tip.0 - base.0, tip.1 - base.1);
+        let (tall, wide) = (dx.hypot(dy), (a.0 - b.0).hypot(a.1 - b.1));
+        let centre = ((tip.0 + base.0) / 2.0, (tip.1 + base.1) / 2.0);
+        let r = ScreenRect {
+            x: centre.0 - wide / 2.0,
+            y: centre.1 - tall / 2.0,
+            w: wide,
+            h: tall,
+        };
+        // A triangle stands point up in its box: turned until up is the
+        // way from its base to its point.
+        out.push(Prim::polygon(r, dx.atan2(-dy), &triangle, color));
+    }
+    out
+}
+
 /// A text: every letter a glyph of the board's sheet, rasterized at the
 /// rung nearest the size it is seen at and scaled the rest of the way,
 /// then turned with the text's box about its centre; the rules under and
@@ -2194,6 +2230,7 @@ impl Walk<'_> {
                 }
                 Element::Text(t) => frame.extend(cut_all(text_prims(t, self.view, self.letters), cut)),
                 Element::Shape(s) => frame.extend(cut_all(shape_prims(s, self.view), cut)),
+                Element::Line(l) => frame.extend(cut_all(line_prims(l, self.view), cut)),
                 other => frame.extend(cut_all(self.boxed(other), cut)),
             }
         }
@@ -5114,5 +5151,58 @@ mod tests {
         assert_eq!(got.len(), 3);
         assert_eq!(got[0].kind, KIND_BOX, "the rect, first in its layer");
         assert_eq!((got[1].kind, got[2].kind), (KIND_POLYGON, KIND_POLYGON));
+    }
+
+    fn a_line(start: crate::doc::Head, end: crate::doc::Head) -> crate::doc::Line {
+        crate::doc::Line {
+            id: "l".into(),
+            layer: String::new(),
+            from: [0.0, 0.0],
+            to: [100.0, 0.0],
+            stroke: "#ff0000".into(),
+            width: 4.0,
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn a_line_is_round_capped_strokes_as_wide_as_its_ink() {
+        use crate::doc::Head;
+        let v = view(0.0, 0.0, 2.0);
+        let got = line_prims(&a_line(Head::None, Head::Arrow), &v);
+        assert_eq!(got.len(), 3, "the shaft and the head's two arms");
+        for p in &got {
+            assert_eq!((p.kind, p.color, p.radius), (KIND_SEGMENT, RED, 4.0));
+        }
+        assert_eq!(got[0].geom, [50.0, 50.0, 250.0, 50.0], "from the view's middle, twice as long");
+    }
+
+    #[test]
+    fn a_filled_head_is_a_triangle_pointing_along_its_line() {
+        use crate::doc::Head;
+        let v = view(0.0, 0.0, 1.0);
+        let l = a_line(Head::None, Head::Triangle);
+        let got = line_prims(&l, &v);
+        assert_eq!(got.len(), 2);
+        let head = got[1];
+        assert_eq!((head.kind, head.color), (KIND_POLYGON, RED));
+        assert_eq!(head.uv[..2], [3.0, 1.0]);
+        // A triangle stands point up in its box: turned a quarter round
+        // clockwise it points along +x, the way the line runs.
+        assert!((head.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-5, "{}", head.angle);
+        let len = crate::shape::head_length(l.width, 100.0) as f32;
+        let (cx, cy) = (head.geom[0] + head.geom[2] / 2.0, head.geom[1] + head.geom[3] / 2.0);
+        assert!((cx - (150.0 - len / 2.0)).abs() < 1e-4 && (cy - 50.0).abs() < 1e-4, "{cx} {cy}");
+        assert!((head.geom[3] - len).abs() < 1e-4, "as tall as the head is long");
+    }
+
+    #[test]
+    fn a_line_on_the_board_is_drawn_in_its_place() {
+        let v = view(0.0, 0.0, 1.0);
+        let doc = doc_with(vec![Element::Line(a_line(crate::doc::Head::None, crate::doc::Head::None))], &v);
+        let got = document_prims(&doc, &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None).prims;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, KIND_SEGMENT);
     }
 }
