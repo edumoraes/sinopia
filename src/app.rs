@@ -1426,6 +1426,7 @@ impl App {
             atlas,
             &labels,
             self.active,
+            0.0,
         ))
     }
 
