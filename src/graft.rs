@@ -685,4 +685,19 @@ mod tests {
         assert_eq!(b.context(&shape.layer), Some(frame.layer.as_str()));
         assert!(Document::from_json(&b.to_json().unwrap()).is_ok());
     }
+
+    /// What the skill teaches an agent to write is what the board takes:
+    /// its example fragment, read out of the skill itself, grafts.
+    #[test]
+    fn the_fragment_the_skill_teaches_grafts() {
+        let skill = include_str!("../skills/sinopia/SKILL.md");
+        let open = "```json\n{\n  \"schema\"";
+        let start = skill.find(open).expect("the skill shows a fragment") + "```json\n".len();
+        let end = start + skill[start..].find("```").expect("and closes it");
+        let fragment = Document::from_json(&skill[start..end]).expect("the skill's fragment parses");
+        let mut b = board();
+        plant(&mut b, &fragment).expect("and grafts");
+        assert!(b.elements.iter().any(|e| matches!(e, Element::Shape(_))), "a box");
+        assert!(b.elements.iter().any(|e| matches!(e, Element::Line(_))), "an arrow");
+    }
 }
