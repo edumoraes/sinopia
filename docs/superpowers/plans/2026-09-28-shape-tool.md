@@ -112,4 +112,5 @@ Wrap-up:
 - [x] An independent review of the diff: two defects confirmed and one
       plausible, each fixed with a test, and two old patterns the new
       state inherited fixed with them.
-- [ ] Pushed; CI green.
+- [x] Pushed (`shape-tool`); CI green — build, clippy, the suite and the
+      release archive, and the plugin's own suite.
