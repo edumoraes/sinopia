@@ -270,6 +270,30 @@ impl Editor {
             .collect()
     }
 
+    /// Wears `paint` as the fill — or the stroke — of each of `ids` that
+    /// the bar is still looking at, as far as each can take it: what a
+    /// menu opened on those shapes tries and takes. What is no longer
+    /// selected is left alone, and how the next shape is drawn is never
+    /// this function's to touch, whatever became of the selection while
+    /// the menu stood.
+    pub fn paint_shapes(&self, doc: &mut Document, ids: &[String], paint: Option<String>, stroke: bool) -> Change {
+        let targets = self.shape_targets(doc);
+        let change = if stroke {
+            Restyle::Stroke(paint)
+        } else {
+            Restyle::Fill(paint)
+        };
+        let mut changed = false;
+        for el in doc
+            .elements
+            .iter_mut()
+            .filter(|el| ids.iter().any(|id| id == el.id()) && targets.iter().any(|t| t == el.id()))
+        {
+            changed |= change.onto(el);
+        }
+        if changed { Change::Scene } else { Change::None }
+    }
+
     /// Puts back what [`Editor::paints`] kept.
     pub fn repaint(&self, doc: &mut Document, was: &[(String, Option<String>)], stroke: bool) {
         for (id, paint) in was {
@@ -1035,5 +1059,20 @@ mod tests {
         assert_eq!(e.figure, Figure::Arrow);
         let look = e.shape_look(&doc, INK);
         assert_eq!((look.start, look.end), (Head::Triangle, Head::None));
+    }
+
+    #[test]
+    fn a_paint_tried_reaches_only_the_shapes_its_menu_opened_on() {
+        let (mut e, mut doc) = two_selected();
+        let opened: Vec<String> = e.paints(&doc, false).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(e.paint_shapes(&mut doc, &opened, Some("#e5484d".into()), false), Change::Scene);
+        assert_eq!(only(&doc).fill.as_deref(), Some("#e5484d"));
+        // The selection lets go while the menu still stands: what it tries
+        // next goes nowhere — not onto what is no longer selected, and
+        // not into how the next shape is drawn.
+        assert!(e.escape(&mut doc));
+        assert_eq!(e.paint_shapes(&mut doc, &opened, Some("#30a46c".into()), false), Change::None);
+        assert_eq!(only(&doc).fill.as_deref(), Some("#e5484d"));
+        assert_eq!(e.shape_look(&doc, INK).fill, None);
     }
 }

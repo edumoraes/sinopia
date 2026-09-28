@@ -2005,10 +2005,11 @@ impl App {
         {
             let tried = hover.and_then(|i| paints.get(i).cloned());
             let (stroke, was) = (*stroke, was.clone());
+            let opened: Vec<String> = was.iter().map(|(id, _)| id.clone()).collect();
             let (editor, doc) = self.active();
             editor.repaint(doc, &was, stroke);
             if let Some(paint) = tried {
-                let _ = editor.restyle_shapes(doc, paint_change(stroke, paint));
+                let _ = editor.paint_shapes(doc, &opened, paint, stroke);
             }
         }
         self.redraw();
@@ -2052,9 +2053,13 @@ impl App {
             {
                 self.ink = i;
             }
+            // Opened on shapes, the menu's line is theirs alone; opened on
+            // none, it is how the next one is drawn.
+            let opened: Vec<String> = was.iter().map(|(id, _)| id.clone()).collect();
             let (editor, doc) = self.active();
             editor.repaint(doc, was, stroke);
             let change = match paint {
+                Some(paint) if !opened.is_empty() => editor.paint_shapes(doc, &opened, paint, stroke),
                 Some(paint) => editor.restyle_shapes(doc, paint_change(stroke, paint)),
                 None => Change::None,
             };
