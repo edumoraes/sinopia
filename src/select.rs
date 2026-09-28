@@ -3,7 +3,7 @@
 //! handles drive. Pure — `editor` decides when, this decides what.
 
 use crate::curve::{self, Cubic};
-use crate::doc::{Document, Element, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Shape, TextMode};
+use crate::doc::{Document, Element, Line, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Shape, TextMode};
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::scene::{Prim, ScreenRect, View, with_alpha};
 use crate::theme::Theme;
@@ -41,6 +41,7 @@ pub fn frame(el: &Element) -> Option<Frame> {
     match el {
         Element::Rect(r) => Some(box_frame(r.x, r.y, r.w, r.h, r.rotation)),
         Element::Shape(s) => Some(box_frame(s.x, s.y, s.w, s.h, s.rotation)),
+        Element::Line(l) => Some(line_frame(l)),
         Element::Image(i) => Some(box_frame(i.x, i.y, i.w, i.h, i.rotation)),
         Element::Path(p) => ink_frame([(p.curves.as_slice(), p.width)], p.rotation),
         Element::Paint(p) => ink_frame(
@@ -51,6 +52,18 @@ pub fn frame(el: &Element) -> Option<Frame> {
         // frame is an axis-aligned box in the shader.
         Element::Frame(f) => Some(box_frame(f.x, f.y, f.w, f.h, 0.0)),
         Element::Text(t) => Some(box_frame(t.x, t.y, t.w, t.h, t.rotation)),
+    }
+}
+
+/// The box a line's ink takes: along it from end to end and past each by
+/// its round cap, turned as it runs; across it, as wide as it is.
+fn line_frame(l: &Line) -> Frame {
+    let d = [l.to[0] - l.from[0], l.to[1] - l.from[1]];
+    let reach = l.width / 2.0;
+    Frame {
+        center: [(l.from[0] + l.to[0]) / 2.0, (l.from[1] + l.to[1]) / 2.0],
+        half: [d[0].hypot(d[1]) / 2.0 + reach, reach],
+        angle: d[1].atan2(d[0]),
     }
 }
 
@@ -122,6 +135,7 @@ fn hits(el: &Element, p: Point, slop: f64) -> bool {
         // A bitmap is opaque to the pointer: the box decides, not the pixels.
         Element::Rect(_) | Element::Image(_) | Element::Text(_) => true,
         Element::Shape(s) => shape_hit(s, &f, p, slop),
+        Element::Line(l) => curve::point_segment_distance(p, l.from, l.to) <= l.width / 2.0 + slop,
         Element::Path(path) => ink_hit(&path.curves, path.width, p, slop),
         // A frame is an area with a surface, not an outline. It is
         // painted before what it holds, so a walk from the top finds
@@ -250,6 +264,11 @@ pub fn transform(el: &mut Element, m: &Affine) {
         Element::Image(i) => {
             (i.x, i.y, i.w, i.h, i.rotation) =
                 box_fields(box_frame(i.x, i.y, i.w, i.h, i.rotation).transformed(m));
+        }
+        // A line's ends are what it is, and map exactly.
+        Element::Line(l) => {
+            l.from = m.apply(l.from);
+            l.to = m.apply(l.to);
         }
         // A box that only turns cannot mirror: a map that does is the
         // box's turn and the model flipped inside it.
@@ -1496,5 +1515,60 @@ mod tests {
         // Twice over is where it started.
         transform(&mut flipped, &Affine::scale(1.0, -1.0).about(f.center));
         assert!(!shape_of(&flipped).flip);
+    }
+
+    fn line(from: Point, to: Point, width: f64) -> Element {
+        Element::Line(crate::doc::Line {
+            id: "l".into(),
+            layer: String::new(),
+            from,
+            to,
+            stroke: "#000000".into(),
+            width,
+            start: crate::doc::Head::None,
+            end: crate::doc::Head::None,
+        })
+    }
+
+    fn line_of(el: &Element) -> &crate::doc::Line {
+        match el {
+            Element::Line(l) => l,
+            other => panic!("expected a line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_line_is_framed_along_itself_and_past_its_ends_by_its_caps() {
+        let f = frame(&line([0.0, 0.0], [30.0, 40.0], 4.0)).unwrap();
+        assert_close(f.center, [15.0, 20.0]);
+        assert!((f.half[0] - 27.0).abs() < 1e-9, "half of 50, and a cap of 2: {:?}", f.half);
+        assert!((f.half[1] - 2.0).abs() < 1e-9, "{:?}", f.half);
+        assert!((f.angle - 40f64.atan2(30.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_line_is_hit_on_its_ink_alone() {
+        let d = doc(vec![line([0.0, 0.0], [100.0, 100.0], 6.0)]);
+        assert_eq!(element_at(&d, [50.0, 52.0], 0.0), Some("l"), "within its width");
+        // 4.2 off the line, 3 of ink and 2 of slop.
+        assert_eq!(element_at(&d, [50.0, 56.0], 2.0), Some("l"), "and the slop past it");
+        assert_eq!(element_at(&d, [50.0, 62.0], 2.0), None);
+        assert_eq!(element_at(&d, [-3.0, -1.0], 1.0), Some("l"), "round its end");
+    }
+
+    #[test]
+    fn a_line_moves_turns_and_flips_by_its_two_ends() {
+        let mut el = line([10.0, 0.0], [30.0, 0.0], 2.0);
+        transform(&mut el, &Affine::rotate(QUARTER));
+        let l = line_of(&el);
+        assert_close(l.from, [0.0, 10.0]);
+        assert_close(l.to, [0.0, 30.0]);
+        transform(&mut el, &Affine::scale(-2.0, 1.0));
+        let l = line_of(&el);
+        assert_close(l.from, [0.0, 10.0]);
+        assert_eq!(l.width, 2.0, "a stretch leaves the ink as wide as it was");
+        let mut el = line([0.0, 0.0], [10.0, 10.0], 2.0);
+        transform(&mut el, &Affine::scale(3.0, 1.0));
+        assert_close(line_of(&el).to, [30.0, 10.0]);
     }
 }

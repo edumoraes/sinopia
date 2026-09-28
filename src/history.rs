@@ -256,7 +256,7 @@ fn element(el: &Element) -> usize {
                 .map(|s| ELEMENT + s.curves.len() * size_of::<Cubic>() + envelope(&s.pen))
                 .sum(),
             Element::Text(t) => t.text.len(),
-            Element::Rect(_) | Element::Image(_) | Element::Frame(_) | Element::Shape(_) => 0,
+            Element::Rect(_) | Element::Image(_) | Element::Frame(_) | Element::Shape(_) | Element::Line(_) => 0,
         }
 }
 

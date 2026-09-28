@@ -215,6 +215,7 @@ pub(crate) fn placed(el: &Element) -> bool {
         Element::Frame(f) => [f.x, f.y, f.w, f.h].iter().all(ok),
         Element::Text(t) => [t.x, t.y, t.w, t.h, t.rotation, t.style.size].iter().all(ok),
         Element::Shape(s) => [s.x, s.y, s.w, s.h, s.rotation].iter().all(ok),
+        Element::Line(l) => l.from.iter().chain(&l.to).all(ok),
     }
 }
 

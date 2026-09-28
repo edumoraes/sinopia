@@ -325,7 +325,7 @@ pub struct Camera {
 
 /// Scene elements (§6.1). Types enter as their tools exist: `rect` from the
 /// scaffold, `path` with the pencil, `image` with the clipboard, `shape`
-/// with the Shape tool.
+/// and `line` with the Shape tool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Element {
@@ -336,6 +336,7 @@ pub enum Element {
     Frame(Frame),
     Text(Text),
     Shape(Shape),
+    Line(Line),
 }
 
 impl Element {
@@ -348,6 +349,7 @@ impl Element {
             Element::Frame(f) => &f.id,
             Element::Text(t) => &t.id,
             Element::Shape(s) => &s.id,
+            Element::Line(l) => &l.id,
         }
     }
 
@@ -361,6 +363,7 @@ impl Element {
             Element::Frame(f) => &f.layer,
             Element::Text(t) => &t.layer,
             Element::Shape(s) => &s.layer,
+            Element::Line(l) => &l.layer,
         }
     }
 
@@ -376,6 +379,7 @@ impl Element {
             Element::Frame(f) => &mut f.id,
             Element::Text(t) => &mut t.id,
             Element::Shape(s) => &mut s.id,
+            Element::Line(l) => &mut l.id,
         };
         id.clone_into(at);
     }
@@ -389,6 +393,7 @@ impl Element {
             Element::Frame(f) => &mut f.layer,
             Element::Text(t) => &mut t.layer,
             Element::Shape(s) => &mut s.layer,
+            Element::Line(l) => &mut l.layer,
         };
         id.clone_into(layer);
     }
@@ -1633,6 +1638,87 @@ impl TryFrom<ShapeOnDisk> for Shape {
             radius: s.radius,
             sides: s.sides,
             inner: s.inner,
+        })
+    }
+}
+
+/// What stands at one end of a line. None is the default, and absent on
+/// disk, so a bare line writes no heads at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Head {
+    #[default]
+    None,
+    /// Two strokes back from the end, the line's own ink and width: the
+    /// open arrowhead Figma and Excalidraw draw by default.
+    Arrow,
+    /// A filled triangle, its point at the end: tldraw's.
+    Triangle,
+}
+
+impl Head {
+    fn is_none(&self) -> bool {
+        *self == Head::None
+    }
+}
+
+/// A straight line the Shape tool draws — its Line and Arrow models —
+/// `from` one end `to` the other, in world units, `width` wide in
+/// `stroke`, with a head at either end. A line has no box of its own:
+/// its two ends are what a map moves, exactly, as a path's points are,
+/// and what a lone line selected is dragged by.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "LineOnDisk")]
+pub struct Line {
+    pub id: String,
+    #[serde(default)]
+    pub layer: String,
+    pub from: [f64; 2],
+    pub to: [f64; 2],
+    pub stroke: String,
+    pub width: f64,
+    #[serde(default, skip_serializing_if = "Head::is_none")]
+    pub start: Head,
+    #[serde(default, skip_serializing_if = "Head::is_none")]
+    pub end: Head,
+}
+
+/// What a `line` may look like on disk: checked on the way in.
+#[derive(Deserialize)]
+struct LineOnDisk {
+    id: String,
+    #[serde(default)]
+    layer: String,
+    from: [f64; 2],
+    to: [f64; 2],
+    stroke: String,
+    #[serde(default = "default_shape_width")]
+    width: f64,
+    #[serde(default)]
+    start: Head,
+    #[serde(default)]
+    end: Head,
+}
+
+impl TryFrom<LineOnDisk> for Line {
+    type Error = String;
+
+    fn try_from(l: LineOnDisk) -> Result<Line, String> {
+        if !l.from.iter().chain(&l.to).all(|v| v.is_finite()) {
+            return Err(format!("line {:?} has ends a board cannot hold", l.id));
+        }
+        if !(l.width.is_finite() && l.width > 0.0) {
+            return Err(format!("line {:?} is {} wide", l.id, l.width));
+        }
+        Ok(Line {
+            id: l.id,
+            layer: l.layer,
+            from: l.from,
+            to: l.to,
+            stroke: l.stroke,
+            width: l.width,
+            start: l.start,
+            end: l.end,
         })
     }
 }
@@ -4060,5 +4146,66 @@ mod tests {
         assert!(on("raster").is_ok());
         assert!(on("text").is_err());
         assert!(on("group").is_err());
+    }
+
+    /// A board holding one line, on a vector layer: `fields` is the
+    /// line's own past `id`, `type` and `layer`.
+    fn with_line(fields: &str) -> anyhow::Result<Document> {
+        let json = format!(
+            r##"{{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": {{ "x": 0, "y": 0, "zoom": 1 }},
+            "layers": [ {{ "id": "vl", "name": "Arrow 1", "kind": "vector" }} ],
+            "elements": [ {{ "id": "l1", "type": "line", "layer": "vl", {fields} }} ]
+        }}"##
+        );
+        Document::from_json(&json)
+    }
+
+    fn only_line(doc: &Document) -> &Line {
+        match &doc.elements[0] {
+            Element::Line(l) => l,
+            other => panic!("expected a line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bare_line_writes_its_ends_and_its_ink() {
+        let doc = with_line(r##""from": [0, 10], "to": [200, -40], "stroke": "#000000", "width": 2"##).unwrap();
+        let l = only_line(&doc);
+        assert_eq!((l.from, l.to), ([0.0, 10.0], [200.0, -40.0]));
+        assert_eq!((l.start, l.end), (Head::None, Head::None));
+        let v: serde_json::Value = serde_json::from_str(&doc.to_json().unwrap()).unwrap();
+        let el = v["elements"][0].as_object().unwrap();
+        let mut keys: Vec<&str> = el.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["from", "id", "layer", "stroke", "to", "type", "width"], "no heads, none written");
+        assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc);
+    }
+
+    #[test]
+    fn an_arrow_is_a_line_with_heads() {
+        let doc = with_line(
+            r##""from": [0, 0], "to": [100, 0], "stroke": "#e5484d", "width": 4,
+                "start": "triangle", "end": "arrow""##,
+        )
+        .unwrap();
+        let l = only_line(&doc);
+        assert_eq!((l.start, l.end), (Head::Triangle, Head::Arrow));
+        assert_eq!(Document::from_json(&doc.to_json().unwrap()).unwrap(), doc);
+    }
+
+    #[test]
+    fn a_line_the_board_cannot_draw_is_refused() {
+        for bad in [
+            r##""from": [0, 0], "to": [1, 1], "stroke": "#000", "width": 0"##,
+            r##""from": [0, 0], "to": [1, 1], "stroke": "#000", "width": -1"##,
+            r##""from": [0, 0], "to": [1, 1], "stroke": "#000", "width": 2, "end": "bar""##,
+            r##""from": [0, 0], "to": [1], "stroke": "#000", "width": 2"##,
+        ] {
+            assert!(with_line(bad).is_err(), "{bad} was let in");
+        }
+        let without = with_line(r##""from": [0, 0], "to": [1, 1], "stroke": "#000""##).unwrap();
+        assert_eq!(only_line(&without).width, DEFAULT_SHAPE_WIDTH, "a width is the pencil's until said");
     }
 }

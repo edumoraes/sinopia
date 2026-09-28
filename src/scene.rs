@@ -2275,7 +2275,8 @@ impl Walk<'_> {
             | Element::Path(_)
             | Element::Paint(_)
             | Element::Text(_)
-            | Element::Shape(_) => {}
+            | Element::Shape(_)
+            | Element::Line(_) => {}
         }
         out
     }
