@@ -312,10 +312,25 @@ impl Editor {
     /// The bar's figure: the tool draws it from now on, and what is
     /// selected becomes it within its kind — a shape another model, a
     /// line an arrow or a bare line again. A shape is not made a line,
-    /// nor a line a shape.
+    /// nor a line a shape, and a selection none of which can become the
+    /// figure is let go of, so the bar shows what is drawn next.
     pub fn set_figure(&mut self, figure: Figure, doc: &mut Document) -> Change {
         self.take_figure(figure);
         let targets = self.shape_targets(doc);
+        let takes = |el: &Element| match el {
+            Element::Shape(_) => figure.model().is_some(),
+            Element::Line(_) => figure.model().is_none(),
+            _ => false,
+        };
+        if !targets.is_empty()
+            && !doc
+                .elements
+                .iter()
+                .any(|el| targets.iter().any(|t| t == el.id()) && takes(el))
+        {
+            self.selection.clear();
+            return Change::Selection;
+        }
         let mut changed = false;
         for el in doc.elements.iter_mut().filter(|el| targets.iter().any(|t| t == el.id())) {
             match (el, figure.model()) {
@@ -341,16 +356,23 @@ impl Editor {
         if changed { Change::Scene } else { Change::Selection }
     }
 
-    /// Takes the Shape tool up with `figure` in hand.
+    /// Takes the Shape tool up with `figure` in hand. Another figure than
+    /// the one in hand lets go of what is selected, as another tool does:
+    /// the hand is on to drawing the next one, and the bar shows that.
     pub fn choose_figure(&mut self, figure: Figure, doc: &mut Document) {
         self.set_tool(Tool::Shape, doc);
+        if figure != self.figure {
+            self.selection.clear();
+        }
         self.take_figure(figure);
     }
 
     /// The next figure along, and round to the first after the last:
-    /// what the tool's key does with the tool already in hand.
+    /// what the tool's key does with the tool already in hand — letting go
+    /// of what is selected, as [`Editor::choose_figure`] does.
     pub(super) fn next_figure(&mut self) {
         let at = Figure::ALL.iter().position(|f| *f == self.figure).unwrap_or(0);
+        self.selection.clear();
         self.take_figure(Figure::ALL[(at + 1) % Figure::ALL.len()]);
     }
 
@@ -1074,5 +1096,31 @@ mod tests {
         assert_eq!(e.paint_shapes(&mut doc, &opened, Some("#30a46c".into()), false), Change::None);
         assert_eq!(only(&doc).fill.as_deref(), Some("#e5484d"));
         assert_eq!(e.shape_look(&doc, INK).fill, None);
+    }
+
+    #[test]
+    fn another_figure_taken_up_lets_go_of_what_the_bar_was_showing() {
+        let (mut e, mut doc) = shaping();
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 60.0));
+        assert!(e.shape_targeted(&doc));
+        e.choose_tool(Tool::Shape, &mut doc);
+        assert!(!e.shape_targeted(&doc), "the rectangle let go of");
+        assert_eq!(e.shape_look(&doc, INK).figure, Figure::Ellipse, "the bar shows what is drawn next");
+        let _ = drag(&mut e, &mut doc, (200.0, 0.0), (300.0, 60.0));
+        e.choose_figure(Figure::Line, &mut doc);
+        assert!(!e.shape_targeted(&doc));
+        let _ = drag(&mut e, &mut doc, (0.0, 200.0), (100.0, 200.0));
+        e.choose_figure(Figure::Line, &mut doc);
+        assert!(e.shape_targeted(&doc), "the same figure taken up again keeps it");
+    }
+
+    #[test]
+    fn a_figure_the_selection_cannot_become_lets_it_go() {
+        let (mut e, mut doc) = shaping();
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 60.0));
+        assert_eq!(e.set_figure(Figure::Line, &mut doc), Change::Selection);
+        assert!(!e.shape_targeted(&doc), "a rectangle is not a line");
+        assert_eq!(e.shape_look(&doc, INK).figure, Figure::Line);
+        assert_eq!(only(&doc).model, Model::Rectangle);
     }
 }
