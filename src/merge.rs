@@ -55,7 +55,7 @@ impl Document {
         let (owner, index) = self.locate(id)?;
         let upper = self.layer(id)?;
         let lower = self.stack(owner).get(index.checked_sub(1)?)?;
-        let fits = matches!(lower.kind, Kind::Raster | Kind::Vector) && upper.kind != Kind::Frame;
+        let fits = matches!(lower.kind, Kind::Raster | Kind::Vector | Kind::Text) && upper.kind != Kind::Frame;
         let free = !self.locked(id) && !self.holds_lock(upper) && !self.locked(&lower.id);
         (fits && free).then(|| Run {
             owner: owner.map(str::to_owned),
@@ -129,14 +129,17 @@ impl Document {
 
     /// Whether moving what `run` shows onto one layer draws the picture
     /// it drew: every layer that shows in it normal — or passing through,
-    /// for a group — and at full strength.
+    /// for a group — and at full strength, and none of it text. A text
+    /// stands only on a text layer and the kept one becomes a raster
+    /// layer, so a merge that takes text in draws it, as Photoshop
+    /// rasterizes a type layer that is merged.
     pub fn exact(&self, run: &Run) -> bool {
         run.members.iter().all(|id| {
             self.layer(id).is_some_and(|l| {
                 self.shown_subtree(l).into_iter().all(|l| {
                     let mode = l.blend == BlendMode::Normal
                         || (l.blend == BlendMode::PassThrough && l.kind == Kind::Group);
-                    mode && l.opacity >= 1.0
+                    mode && l.opacity >= 1.0 && l.kind != Kind::Text
                 })
             })
         })
@@ -297,6 +300,9 @@ pub fn raster_box(sub: &Document) -> Option<(Point, Point)> {
                 .filter_map(|s| s.stamp.as_ref())
                 .map(|s| s.scatter.size)
                 .fold(0.0, f64::max),
+            // A letter may reach past the advance it is set on — an
+            // italic's lean, a swash — and past the box with it.
+            Element::Text(t) => t.style.size / 4.0,
             _ => 0.0,
         };
         let pad = RASTER_PAD + thrown;
@@ -485,6 +491,32 @@ mod tests {
         doc.layer_mut("C").unwrap().visible = false;
         doc.layer_mut("C").unwrap().opacity = 0.2;
         assert!(doc.exact(&run), "what is hidden does not draw, and goes");
+    }
+
+    #[test]
+    fn a_text_is_rasterized_when_it_merges_as_every_editor_does() {
+        let layers = r#"{ "id": "L1", "name": "Layer 1" }, { "id": "T", "name": "Words", "kind": "text" }"#;
+        let doc = Document::from_json(&format!(
+            r##"{{ "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                  "camera": {{ "x": 0, "y": 0, "zoom": 1 }}, "layers": [{layers}],
+                  "elements": [ {{ "id": "t", "type": "text", "layer": "T", "x": 0, "y": 0,
+                      "w": 40, "h": 20, "text": "hi", "size": 16, "color": "#000" }} ] }}"##
+        ))
+        .unwrap();
+        let run = doc.merges(&Merge::Down("T".into())).remove(0);
+        assert!(!doc.exact(&run), "a text's words cannot stand on a raster layer");
+        // And one layer merged down into a text layer is drawn too.
+        let under = r#"{ "id": "T", "name": "Words", "kind": "text" }, { "id": "L2", "name": "Layer 2" }"#;
+        let doc = Document::from_json(&format!(
+            r##"{{ "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+                  "camera": {{ "x": 0, "y": 0, "zoom": 1 }}, "layers": [{under}],
+                  "elements": [ {{ "id": "t", "type": "text", "layer": "T", "x": 0, "y": 0,
+                      "w": 40, "h": 20, "text": "hi", "size": 16, "color": "#000" }} ] }}"##
+        ))
+        .unwrap();
+        let runs = doc.merges(&Merge::Down("L2".into()));
+        assert_eq!(runs.len(), 1, "a text layer takes what is merged down into it");
+        assert!(!doc.exact(&runs[0]));
     }
 
     #[test]
