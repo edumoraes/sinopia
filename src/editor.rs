@@ -18,7 +18,7 @@ use crate::tree::{self, Arrange, Filter, Place};
 
 mod shaping;
 mod typing;
-pub use shaping::figure_for_key;
+pub use shaping::{Restyle, ShapeLook, figure_for_key};
 pub use typing::{Look, Move, TEXT_MAX, TextKey, Typing, fit_texts, step_size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
