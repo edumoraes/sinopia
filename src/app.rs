@@ -3575,10 +3575,7 @@ impl App {
             return false;
         }
         let ink = self.ink_hex().to_owned();
-        // A double click with the Select tool puts the caret where it
-        // landed, as Affinity's does; the word is the Text tool's.
-        let n = if tool == Tool::Text { clicks } else { 1 };
-        let change = self.with_text(|e, d, f| e.text_press(view, at, d, f, n, &ink));
+        let change = self.with_text(|e, d, f| e.text_press(view, at, d, f, clicks, &ink));
         self.text_input();
         self.apply(change);
         // A press away from the text, with a tool that is not the Text

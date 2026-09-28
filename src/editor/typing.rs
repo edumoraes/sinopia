@@ -364,8 +364,9 @@ impl Editor {
     /// tool: `clicks` counts the presses in a row. Inside the text being
     /// typed, it puts the caret there — a double click takes the word, a
     /// triple the paragraph, Shift carries the selection. On another
-    /// text it types into that one. Anywhere else it leaves the text
-    /// being typed, and with the Text tool starts a new one there.
+    /// text it types into that one, where it landed — with another tool,
+    /// only on a double click. Anywhere else it leaves the text being
+    /// typed, and with the Text tool starts a new one there.
     pub fn text_press(
         &mut self,
         view: &View,
@@ -387,9 +388,14 @@ impl Editor {
             return Change::Selection;
         }
         let left = self.end_typing(doc);
-        if let Some(id) = self.text_at(doc, view, screen) {
+        // Another text is typed into by the Text tool, or by a double
+        // click with any other — a single press with the Select tool is a
+        // selection, and the tool's own to make.
+        let texting = self.tool == Tool::Text;
+        if let Some(id) = self.text_at(doc, view, screen).filter(|_| texting || clicks >= 2) {
             let opened = self.edit_text(&id, doc, fonts, Some(world));
-            if clicks > 1
+            if texting
+                && clicks > 1
                 && let Some(i) = self.place_at(doc, world)
             {
                 self.caret_by(i, clicks);
@@ -1599,5 +1605,22 @@ mod tests {
         e.put_fonts_back(&mut doc, &fonts(), &was);
         assert_eq!(only(&doc).style.font, DEFAULT_FONT);
         assert!(only(&doc).w > w, "only the family goes back");
+    }
+
+    #[test]
+    fn with_another_tool_a_press_on_another_text_only_leaves_the_one_typed() {
+        let (mut e, mut doc) = with_text("first");
+        click(&mut e, &mut doc, 300.0, 0.0);
+        typed(&mut e, &mut doc, "second");
+        e.end_typing(&mut doc);
+        let first = texts(&doc)[0].clone();
+        e.set_tool(Tool::Select, &mut doc);
+        let second = texts(&doc)[1].id.clone();
+        e.edit_text(&second, &mut doc, &fonts(), None);
+        let f = fonts();
+        e.text_press(&view(), at(first.x + 2.0, first.y + 2.0), &mut doc, &f, 1, INK);
+        assert!(e.typing().is_none(), "a single press with the Select tool types into nothing");
+        e.text_press(&view(), at(first.x + 2.0, first.y + 2.0), &mut doc, &f, 2, INK);
+        assert_eq!(e.typing().map(|t| t.id.clone()), Some(first.id), "a double click does");
     }
 }
