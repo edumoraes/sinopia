@@ -44,6 +44,7 @@ mod text;
 mod theme;
 mod thumbs;
 mod tree;
+mod typeset;
 
 use anyhow::Context as _;
 
