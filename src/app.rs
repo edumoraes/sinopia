@@ -999,6 +999,11 @@ impl App {
         if index >= self.open.len() {
             return;
         }
+        // A text being typed is left first, as a press elsewhere leaves
+        // it: one emptied goes, rather than being kept as nothing.
+        if index == self.active {
+            self.end_typing();
+        }
         if self.owes_an_answer(index) {
             return self.ask_about(index, Then::Close);
         }
@@ -1039,6 +1044,7 @@ impl App {
 
     /// Starts closing the window: each dirty tab is asked about in turn.
     fn quit(&mut self) {
+        self.end_typing();
         self.quitting = true;
         self.step_quit();
     }
