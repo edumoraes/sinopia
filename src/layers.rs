@@ -29,16 +29,19 @@ pub const FOOTER: f32 = 34.0;
 /// they are, and whether they are locked.
 pub const PROPS: f32 = 30.0;
 /// The filter's bar, under the header while it is open: a row for the
-/// name to look for, and one of toggles — the four kinds, then the seven
+/// name to look for, and one of toggles — the five kinds, then the seven
 /// colours.
 pub const FILTER: f32 = SEARCH_ROW + CHIPS_ROW;
 const SEARCH_ROW: f32 = 30.0;
 const CHIPS_ROW: f32 = 28.0;
 const FIELD_H: f32 = 24.0;
 /// A colour's toggle, its dot, and the room between the kinds and them.
-const TAG_W: f32 = 18.0;
+const TAG_W: f32 = 17.0;
 const TAG_DOT: f32 = 5.0;
-const TAG_GAP: f32 = 8.0;
+const TAG_GAP: f32 = 6.0;
+/// A kind's toggle in the filter: narrower than a button, so five kinds
+/// and seven colours share one row of the panel.
+const KIND_W: f32 = 20.0;
 /// How much of a tag's colour the eye's cell takes.
 const TAG_TINT: f32 = 0.45;
 /// What an empty filter field says it is for.
@@ -705,7 +708,7 @@ impl Panel {
     }
 
     /// The filter's bar under `y`: the name's field across the panel, and
-    /// under it the four kinds' toggles and then the seven colours'.
+    /// under it the five kinds' toggles and then the seven colours'.
     #[allow(clippy::type_complexity)]
     fn filter_bar(
         x: f32,
@@ -714,6 +717,7 @@ impl Panel {
         s: f32,
     ) -> (Option<ScreenRect>, Vec<(ScreenRect, Kind)>, Vec<(ScreenRect, Tag)>) {
         let side = BUTTON * s;
+        let kind_w = KIND_W * s;
         let search = ScreenRect {
             x,
             y: y + (SEARCH_ROW - FIELD_H) / 2.0 * s,
@@ -721,14 +725,14 @@ impl Panel {
             h: FIELD_H * s,
         };
         let cy = y + SEARCH_ROW * s + (CHIPS_ROW - BUTTON) / 2.0 * s;
-        let kinds: Vec<(ScreenRect, Kind)> = [Kind::Raster, Kind::Vector, Kind::Group, Kind::Frame]
+        let kinds: Vec<(ScreenRect, Kind)> = [Kind::Raster, Kind::Vector, Kind::Text, Kind::Group, Kind::Frame]
             .into_iter()
             .enumerate()
             .map(|(i, k)| {
                 let r = ScreenRect {
-                    x: x + i as f32 * (side + BUTTON_GAP * s),
+                    x: x + i as f32 * (kind_w + BUTTON_GAP * s),
                     y: cy,
-                    w: side,
+                    w: kind_w,
                     h: side,
                 };
                 (r, k)
@@ -2827,7 +2831,7 @@ mod tests {
             let (x, y) = mid(search);
             assert_eq!(open.hit(x, y), Some(PanelHit::Search));
             let kinds: Vec<Kind> = open.kinds.iter().map(|(_, k)| *k).collect();
-            assert_eq!(kinds, [Kind::Raster, Kind::Vector, Kind::Group, Kind::Frame]);
+            assert_eq!(kinds, [Kind::Raster, Kind::Vector, Kind::Text, Kind::Group, Kind::Frame]);
             let tags: Vec<Tag> = open.tags.iter().map(|(_, t)| *t).collect();
             assert_eq!(tags, Tag::COLORS);
             let inner = open.rect.inset(PADDING * s);
