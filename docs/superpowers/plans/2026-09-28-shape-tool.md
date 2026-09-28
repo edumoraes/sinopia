@@ -58,17 +58,17 @@ shape into a path.
 
 Model and pure core:
 
-- [ ] `doc`: `Element::Shape` — a model fitted to a box, its fill, its
+- [x] `doc`: `Element::Shape` — a model fitted to a box, its fill, its
       stroke and width, a rectangle's radius, a polygon's sides and a
       star's inner radius — checked on the way in.
-- [ ] `shape`: the models' geometry — a polygon's and a star's unit
+- [x] `shape`: the models' geometry — a polygon's and a star's unit
       vertices and their fit to the box, the distance to an ellipse, to a
       polygon and to a rounded box, what is inside.
-- [ ] `select`: a shape's frame, its hit (filled inside, hollow on the
+- [x] `select`: a shape's frame, its hit (filled inside, hollow on the
       stroke) and its transform.
-- [ ] `scene` + `gfx`: an ellipse and a polygon as distance fields, and
+- [x] `scene` + `gfx`: an ellipse and a polygon as distance fields, and
       a ring — the stroke laid inside the edge — for them and the box.
-- [ ] `editor`: the Shape tool — the drag, Shift, Alt, the click, the
+- [x] `editor`: the Shape tool — the drag, Shift, Alt, the click, the
       layer named after the model, the shape selected, Esc.
 - [ ] `doc`: `Element::Line` — two ends, a stroke and its width, a head
       at either end.
@@ -84,11 +84,11 @@ Chrome:
 
 - [ ] `shapebar`: the bar — the models, the fill and stroke wells, the
       width, and each model's own sliders and buttons.
-- [ ] `dock`: the Shape tool, its illustration and its line icon, `U`.
+- [x] `dock`: the Shape tool, its illustration and its line icon, `U`.
 
 Shell:
 
-- [ ] `app`: the tool on the canvas — the shape being dragged out drawn,
+- [x] `app`: the tool on the canvas — the shape being dragged out drawn,
       the cursor, the keys, `Alt` held.
 - [ ] `app`: the shape bar, its colour menus tried as the pointer
       passes, a slider's drag as one step; the dock's ink on the shapes
