@@ -9,8 +9,8 @@
 //!
 //! Places are counted in characters, never bytes, as a field's caret is.
 
-use crate::doc::{Align, Text, TextMode, TextStyle, Valign};
-use crate::fonts::Fonts;
+use crate::doc::{Align, Run, Text, TextMode, TextStyle, Valign};
+use crate::fonts::{Face, Fonts};
 
 /// One line as it is set: characters `start..end` of the text — a line a
 /// newline ended does not hold the newline — and where it stands.
@@ -18,8 +18,11 @@ use crate::fonts::Fonts;
 pub struct Row {
     pub start: usize,
     pub end: usize,
-    /// The top of the line's own band, `leading` times the size tall.
+    /// The top of the line's own band, and how tall it is: `leading`
+    /// times the size of its tallest letters, the letters standing on one
+    /// baseline.
     pub top: f64,
+    pub height: f64,
     pub baseline: f64,
     /// Where each place of the line stands across the box: one more
     /// than the characters on it, the first before the first character
@@ -53,19 +56,58 @@ pub struct Laid {
     /// lines measure.
     pub w: f64,
     pub h: f64,
-    /// Baseline to baseline.
+    /// Baseline to baseline in the text's own style — what a line with
+    /// nothing set apart on it is.
     pub line_h: f64,
-    /// How far the face reaches above the baseline and below it.
+    /// How far the text's own face reaches above the baseline and below.
     pub ascent: f64,
     pub descent: f64,
+    /// How tall all the lines are together.
+    pub content: f64,
     /// The text, as characters.
     chars: Vec<char>,
+    /// Each character's style, as an index into `styles`, and its own
+    /// advance.
+    which: Vec<usize>,
+    styles: Vec<TextStyle>,
+    advance: Vec<f64>,
+    /// How far each style reaches above its baseline and below, the
+    /// leading shared out on both sides.
+    reach: Vec<(f64, f64)>,
+}
+
+/// One letter to draw: what it is, where its pen starts, the baseline it
+/// sits on, and how it is set.
+#[derive(Debug, Clone, Copy)]
+pub struct Glyph<'a> {
+    pub ch: char,
+    pub x: f64,
+    pub baseline: f64,
+    pub style: &'a TextStyle,
+}
+
+/// A rule under a stretch of letters, or through it: from `x0` to `x1`
+/// at `y` (the baseline, which the renderer offsets by the size), in the
+/// stretch's size and ink.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rule {
+    pub x0: f64,
+    pub x1: f64,
+    pub baseline: f64,
+    pub size: f64,
+    pub color: String,
+    pub strike: bool,
 }
 
 impl Laid {
     /// A text as it stands on the board.
     pub fn of(t: &Text, fonts: &Fonts) -> Laid {
-        lay(&t.text, &t.style, t.mode, t.w, t.h, fonts)
+        lay_with(&t.text, &t.style, &t.runs, t.mode, t.w, t.h, fonts)
+    }
+
+    /// How character `i` is set.
+    pub fn style_of(&self, i: usize) -> &TextStyle {
+        &self.styles[self.which.get(i).copied().unwrap_or(0)]
     }
 
     /// Whether a frame holds more than it shows: Affinity's red mark.
@@ -88,9 +130,24 @@ impl Laid {
 
     /// The caret at place `i`: its x, and the top and bottom of the band
     /// it stands in.
+    ///
+    /// The caret is as tall as the letter it follows — the one it comes
+    /// before at a line's start, the line's own style on an empty line —
+    /// standing on the line's baseline.
     pub fn caret(&self, i: usize) -> (f64, f64, f64) {
         let row = &self.rows[self.row_of(i)];
-        (row.x(i), row.top, row.top + self.line_h)
+        let of = if i > row.start {
+            Some(i - 1)
+        } else if i < row.end {
+            Some(i)
+        } else {
+            None
+        };
+        let (up, down) = match of {
+            Some(c) => self.reach[self.which[c]],
+            None => (row.baseline - row.top, row.top + row.height - row.baseline),
+        };
+        (row.x(i), row.baseline - up, row.baseline + down)
     }
 
     /// The furthest a caret goes along row `k`: its end — or, where the
@@ -119,9 +176,12 @@ impl Laid {
     /// The place nearest the point `(x, y)` in the box. Above the first
     /// line is the first, below the last is the last.
     pub fn index_at(&self, x: f64, y: f64) -> usize {
-        let top = self.rows[0].top;
-        let k = ((y - top) / self.line_h).floor().max(0.0) as usize;
-        self.index_on(k.min(self.rows.len() - 1), x)
+        let k = self
+            .rows
+            .iter()
+            .position(|r| y < r.top + r.height)
+            .unwrap_or(self.rows.len() - 1);
+        self.index_on(k, x)
     }
 
     /// The place a line up from `i`, as near `goal` across as that line
@@ -167,7 +227,7 @@ impl Laid {
             let newline = row.hard && b > row.end;
             let w = row.x(to) - row.x(from) + if newline { space } else { 0.0 };
             if w > 0.0 {
-                out.push((row.x(from), row.top, w, self.line_h));
+                out.push((row.x(from), row.top, w, row.height));
             }
         }
         out
@@ -220,14 +280,61 @@ impl Laid {
     }
 
     /// Every character there is ink for on the rows shown, where its pen
-    /// starts and the baseline it sits on. A space is not drawn.
-    pub fn glyphs(&self) -> impl Iterator<Item = (char, f64, f64)> + '_ {
+    /// starts, the baseline it sits on and how it is set. A space is not
+    /// drawn.
+    pub fn glyphs(&self) -> impl Iterator<Item = Glyph<'_>> + '_ {
         self.rows[..self.shown].iter().flat_map(move |row| {
             (row.start..row.end).filter_map(move |i| {
                 let c = self.chars[i];
-                (!c.is_whitespace()).then(|| (c, row.x(i), row.baseline))
+                (!c.is_whitespace()).then(|| Glyph {
+                    ch: c,
+                    x: row.x(i),
+                    baseline: row.baseline,
+                    style: self.style_of(i),
+                })
             })
         })
+    }
+
+    /// The rules the rows shown carry: one under — or through — each
+    /// stretch of letters set alike with underline — or strikethrough —
+    /// on, as far as the line's ink goes and no further.
+    pub fn rules(&self) -> Vec<Rule> {
+        let mut out = Vec::new();
+        for row in &self.rows[..self.shown] {
+            let ink_end = (row.start..row.end)
+                .rev()
+                .find(|&i| !self.chars[i].is_whitespace())
+                .map_or(row.start, |i| i + 1);
+            for strike in [false, true] {
+                // Stretches of letters set alike with the rule on, as
+                // `(from, to, style)`.
+                let mut stretches: Vec<(usize, usize, usize)> = Vec::new();
+                for i in row.start..ink_end {
+                    let st = self.which[i];
+                    let s = &self.styles[st];
+                    if !(if strike { s.strike } else { s.underline }) {
+                        continue;
+                    }
+                    match stretches.last_mut() {
+                        Some((_, to, style)) if *to == i && *style == st => *to = i + 1,
+                        _ => stretches.push((i, i + 1, st)),
+                    }
+                }
+                for (from, to, style) in stretches {
+                    let s = &self.styles[style];
+                    out.push(Rule {
+                        x0: row.x(from),
+                        x1: row.x(to - 1) + self.advance[to - 1],
+                        baseline: row.baseline,
+                        size: s.size,
+                        color: s.color.clone(),
+                        strike,
+                    });
+                }
+            }
+        }
+        out
     }
 }
 
@@ -235,29 +342,83 @@ impl Laid {
 /// `h`; artistic text breaks only at a newline, and its box is what its
 /// lines measure.
 pub fn lay(text: &str, style: &TextStyle, mode: TextMode, w: f64, h: f64, fonts: &Fonts) -> Laid {
-    let face = fonts.face(&style.font, style.bold, style.italic);
+    lay_with(text, style, &[], mode, w, h, fonts)
+}
+
+/// [`lay`], with stretches of the text set apart by `runs`: every letter
+/// in its own face and size, a line as tall as its tallest letters and
+/// all of them on one baseline.
+pub fn lay_with(
+    text: &str,
+    style: &TextStyle,
+    runs: &[Run],
+    mode: TextMode,
+    w: f64,
+    h: f64,
+    fonts: &Fonts,
+) -> Laid {
     let chars: Vec<char> = text.chars().collect();
-    let size = style.size;
-    let track = style.tracking / 1000.0 * size;
     let wraps = mode == TextMode::Frame;
     let limit = if wraps { w.max(0.0) } else { f64::INFINITY };
 
+    // Every style the text is set in, the text's own first, and which of
+    // them each character wears.
+    let mut styles: Vec<TextStyle> = vec![style.clone()];
+    let which: Vec<usize> = crate::spans::expand(runs, chars.len())
+        .iter()
+        .map(|r| {
+            let s = r.over(style);
+            match styles.iter().position(|known| *known == s) {
+                Some(k) => k,
+                None => {
+                    styles.push(s);
+                    styles.len() - 1
+                }
+            }
+        })
+        .collect();
+    let faces: Vec<std::rc::Rc<Face>> = styles
+        .iter()
+        .map(|s| fonts.face(&s.font, s.bold, s.italic))
+        .collect();
+    // How far each style reaches above its baseline and below it, the
+    // leading split evenly on both sides as CSS splits it.
+    let reach: Vec<(f64, f64)> = styles
+        .iter()
+        .zip(&faces)
+        .map(|(s, face)| {
+            let (up, down) = face.extents(s.size as f32);
+            let (up, down) = (f64::from(up), f64::from(down));
+            let half = (s.size * style.leading - (up + down)) / 2.0;
+            (up + half, down + half)
+        })
+        .collect();
+
     // Each character's own advance, and how far the pen moves past it on
     // its way to the next: the advance, the kerning to the character
-    // after it in the same paragraph, and the tracking.
+    // after it — in the same paragraph, face and size — and the tracking.
     let advance: Vec<f64> = chars
         .iter()
-        .map(|&c| if c == '\n' { 0.0 } else { f64::from(face.advance(c, size as f32)) })
+        .enumerate()
+        .map(|(i, &c)| {
+            if c == '\n' {
+                return 0.0;
+            }
+            let k = which[i];
+            f64::from(faces[k].advance(c, styles[k].size as f32))
+        })
         .collect();
     let step: Vec<f64> = (0..chars.len())
         .map(|i| {
+            let k = which[i];
+            let size = styles[k].size;
             let kern = match chars.get(i + 1) {
-                Some(&next) if chars[i] != '\n' && next != '\n' => {
-                    f64::from(face.kern(chars[i], next, size as f32))
+                Some(&next) if chars[i] != '\n' && next != '\n' && which[i + 1] == k => {
+                    f64::from(faces[k].kern(chars[i], next, size as f32))
                 }
                 _ => 0.0,
             };
-            advance[i] + kern + track
+            advance[i] + kern + styles[k].tracking / 1000.0 * size
         })
         .collect();
 
@@ -320,14 +481,31 @@ pub fn lay(text: &str, style: &TextStyle, mode: TextMode, w: f64, h: f64, fonts:
         inks.iter().copied().fold(0.0, f64::max)
     };
 
-    let (up, down) = face.extents(size as f32);
-    let (ascent, descent) = (f64::from(up), f64::from(down));
-    let line_h = size * style.leading;
-    let content_h = line_h * breaks.len() as f64;
+    // A line reaches as far above and below its baseline as its furthest
+    // reaching letter; an empty one as far as the letter before it — the
+    // newline that ended the line above — or the text's own style.
+    let reaches: Vec<(f64, f64)> = breaks
+        .iter()
+        .map(|&(a, b, _)| {
+            let own: Vec<(f64, f64)> = (a..b).filter(|&i| chars[i] != '\n').map(|i| reach[which[i]]).collect();
+            if own.is_empty() {
+                let before = a.checked_sub(1).map_or(0, |i| which[i]);
+                return reach[before];
+            }
+            own.iter().fold((0.0, 0.0), |(u, d), &(uu, dd)| (f64::max(u, uu), f64::max(d, dd)))
+        })
+        .collect();
+    let content_h: f64 = reaches.iter().map(|(u, d)| u + d).sum();
     let box_h = if wraps { h.max(0.0) } else { content_h };
     let shown = if wraps {
-        let fit = ((box_h + 1e-9) / line_h).floor() as usize;
-        fit.min(breaks.len())
+        let mut bottom = 0.0;
+        reaches
+            .iter()
+            .take_while(|(u, d)| {
+                bottom += u + d;
+                bottom <= box_h + 1e-9
+            })
+            .count()
     } else {
         breaks.len()
     };
@@ -337,13 +515,13 @@ pub fn lay(text: &str, style: &TextStyle, mode: TextMode, w: f64, h: f64, fonts:
         (true, Valign::Bottom) => box_h - content_h,
         _ => 0.0,
     };
-    let lift = (line_h - (ascent + descent)) / 2.0 + ascent;
 
+    let mut row_top = top;
     let rows = breaks
         .iter()
         .zip(&inks)
-        .enumerate()
-        .map(|(k, (&(a, b, hard), &width))| {
+        .zip(&reaches)
+        .map(|((&(a, b, hard), &width), &(up, down))| {
             let mut xs = pens(a, b);
             // A justified line that wrapped runs the full width: what it
             // lacks is shared out among the spaces inside its ink.
@@ -373,28 +551,36 @@ pub fn lay(text: &str, style: &TextStyle, mode: TextMode, w: f64, h: f64, fonts:
             };
             let justified = style.align == Align::Justify && !hard;
             let width = if justified { box_w.max(width) } else { width };
-            let row_top = top + k as f64 * line_h;
-            Row {
+            let row = Row {
                 start: a,
                 end: b,
                 top: row_top,
-                baseline: row_top + lift,
+                height: up + down,
+                baseline: row_top + up,
                 stops: xs.iter().map(|x| x + shift).collect(),
                 width,
                 hard,
-            }
+            };
+            row_top += up + down;
+            row
         })
         .collect();
 
+    let (up, down) = faces[0].extents(style.size as f32);
     Laid {
         rows,
         shown,
         w: box_w,
         h: box_h,
-        line_h,
-        ascent,
-        descent,
+        line_h: style.size * style.leading,
+        ascent: f64::from(up),
+        descent: f64::from(down),
+        content: content_h,
         chars,
+        which,
+        styles,
+        advance,
+        reach,
     }
 }
 
@@ -710,7 +896,7 @@ mod tests {
     #[test]
     fn only_ink_is_drawn() {
         let laid = artistic("a b\nc", &style());
-        let drawn: String = laid.glyphs().map(|(c, _, _)| c).collect();
+        let drawn: String = laid.glyphs().map(|g| g.ch).collect();
         assert_eq!(drawn, "abc");
     }
 
@@ -728,5 +914,99 @@ mod tests {
         assert_eq!(laid.row_of(laid.end(1)), 0, "End stays on the row it was asked on");
         let edge = laid.index_at(laid.rows[0].stops[4] + 1.0, laid.rows[0].top + 1.0);
         assert_eq!(laid.row_of(edge), 0, "a click at a row's right edge stays on it");
+    }
+
+    fn run(start: usize, end: usize, style: crate::doc::RunStyle) -> crate::doc::Run {
+        crate::doc::Run { start, end, style }
+    }
+
+    fn big() -> crate::doc::RunStyle {
+        crate::doc::RunStyle {
+            size: Some(SIZE * 2.0),
+            ..Default::default()
+        }
+    }
+
+    fn lay_runs(s: &str, runs: &[crate::doc::Run], mode: TextMode, w: f64) -> Laid {
+        lay_with(s, &style(), runs, mode, w, 500.0, &fonts())
+    }
+
+    #[test]
+    fn a_bigger_stretch_makes_its_line_taller_and_shares_its_baseline() {
+        let plain = artistic("ab\ncd", &style());
+        let laid = lay_runs("ab\ncd", &[run(1, 2, big())], TextMode::Artistic, 0.0);
+        let (first, second) = (&laid.rows[0], &laid.rows[1]);
+        assert!(close(first.height, 2.0 * plain.rows[0].height), "{} {}", first.height, plain.rows[0].height);
+        assert!(close(second.height, plain.rows[1].height), "the plain line is as tall as it was");
+        assert!(close(second.top, first.height));
+        assert!(close(laid.h, first.height + second.height));
+        assert!(first.baseline - first.top > plain.rows[0].baseline - plain.rows[0].top);
+        let glyphs: Vec<(char, f64)> = laid.glyphs().map(|g| (g.ch, g.baseline)).collect();
+        assert_eq!(glyphs[0].1, glyphs[1].1, "letters of one line stand on one baseline");
+    }
+
+    #[test]
+    fn a_letter_advances_by_its_own_face_and_size() {
+        let f = fonts();
+        let plain = artistic("mm", &style());
+        let bold = crate::doc::RunStyle {
+            bold: Some(true),
+            ..Default::default()
+        };
+        let laid = lay_runs("mm", &[run(0, 1, bold)], TextMode::Artistic, 0.0);
+        let bold_m = f64::from(f.face(crate::doc::DEFAULT_FONT, true, false).advance('m', SIZE as f32));
+        assert!(close(laid.rows[0].x(1), bold_m), "{} {bold_m}", laid.rows[0].x(1));
+        assert!(laid.w > plain.w);
+        let styles: Vec<bool> = laid.glyphs().map(|g| g.style.bold).collect();
+        assert_eq!(styles, [true, false]);
+    }
+
+    #[test]
+    fn the_caret_is_as_tall_as_the_letter_it_follows() {
+        let laid = lay_runs("aBc", &[run(1, 2, big())], TextMode::Artistic, 0.0);
+        let (_, t1, b1) = laid.caret(1);
+        let (_, t2, b2) = laid.caret(2);
+        assert!(b2 - t2 > 1.5 * (b1 - t1), "after the big letter the caret is big");
+        let baseline = laid.rows[0].baseline;
+        assert!(t2 < baseline && b2 > baseline && t1 < baseline && b1 > baseline);
+    }
+
+    #[test]
+    fn a_point_finds_its_line_whatever_the_lines_heights() {
+        let laid = lay_runs("aa\nbb\ncc", &[run(3, 5, big())], TextMode::Artistic, 0.0);
+        let mid = |k: usize| laid.rows[k].top + laid.rows[k].height / 2.0;
+        assert_eq!(laid.row_of(laid.index_at(0.0, mid(0))), 0);
+        assert_eq!(laid.row_of(laid.index_at(0.0, mid(1))), 1);
+        assert_eq!(laid.row_of(laid.index_at(0.0, mid(2))), 2);
+        assert_eq!(laid.row_of(laid.index_at(0.0, laid.h + 50.0)), 2);
+        let bands = laid.bands(0, 8, 1.0);
+        assert!(close(bands[1].3, laid.rows[1].height), "a band is as tall as its line");
+    }
+
+    #[test]
+    fn only_the_stretch_underlined_carries_a_rule() {
+        let under = crate::doc::RunStyle {
+            underline: Some(true),
+            ..Default::default()
+        };
+        let laid = lay_runs("one two three", &[run(4, 7, under)], TextMode::Artistic, 0.0);
+        let rules = laid.rules();
+        assert_eq!(rules.len(), 1);
+        let r = &rules[0];
+        assert!(close(r.x0, laid.rows[0].x(4)));
+        assert!(r.x1 > r.x0 && r.x1 <= laid.rows[0].x(7) + 1e-9);
+        assert!(!r.strike);
+        let everything = artistic("a b", &TextStyle {
+            strike: true,
+            ..style()
+        });
+        assert_eq!(everything.rules().len(), 1, "a whole line struck is one rule");
+    }
+
+    #[test]
+    fn a_frame_shows_the_lines_its_height_holds_whatever_their_heights() {
+        let laid = lay_with("a\nb\nc", &style(), &[run(0, 1, big())], TextMode::Frame, 200.0, SIZE * 1.2 * 2.5, &fonts());
+        assert_eq!(laid.shown, 1, "the big first line and one more do not fit");
+        assert!(laid.overflows());
     }
 }

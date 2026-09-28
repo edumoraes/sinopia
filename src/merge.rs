@@ -302,7 +302,10 @@ pub fn raster_box(sub: &Document) -> Option<(Point, Point)> {
                 .fold(0.0, f64::max),
             // A letter may reach past the advance it is set on — an
             // italic's lean, a swash — and past the box with it.
-            Element::Text(t) => t.style.size / 4.0,
+            Element::Text(t) => {
+                let largest = t.runs.iter().filter_map(|r| r.style.size).fold(t.style.size, f64::max);
+                largest / 4.0
+            }
             _ => 0.0,
         };
         let pad = RASTER_PAD + thrown;

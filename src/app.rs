@@ -476,7 +476,7 @@ enum Purpose {
     /// The text bar's families: each line's, and what every text the bar
     /// is looking at was set in — put back unless a line is taken, since
     /// the lines are tried on the text as the pointer passes over them.
-    Font { families: Vec<String>, was: Vec<(String, String)> },
+    Font { families: Vec<String>, was: crate::editor::Look },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -1362,6 +1362,7 @@ impl App {
             mode: crate::doc::TextMode::Artistic,
             text: words.chars().take(crate::editor::TEXT_MAX).collect(),
             style,
+            runs: Vec::new(),
         };
         let born = self.doc().stack_at([x, y]).map(str::to_owned);
         self.with_text(|e, d, f| e.place_text(d, f, text, born.as_deref()));
@@ -1968,7 +1969,7 @@ impl App {
         }
         if let Some((tried, was)) = font {
             self.with_text(|e, d, f| {
-                e.put_fonts_back(d, f, &was);
+                e.put_look_back(d, f, &was);
                 if let Some(family) = tried {
                     let _ = e.restyle(d, f, |s| s.font.clone_from(&family));
                 }
@@ -2007,7 +2008,7 @@ impl App {
         if let Purpose::Font { families, was } = &opened.purpose {
             let family = take.and_then(|i| families.get(i).cloned());
             let change = self.with_text(|e, d, f| {
-                e.put_fonts_back(d, f, was);
+                e.put_look_back(d, f, was);
                 match family {
                     Some(family) => e.restyle(d, f, |s| s.font.clone_from(&family)),
                     None => Change::None,
@@ -2503,6 +2504,7 @@ impl App {
                     },
                     text: String::new(),
                     style,
+                    runs: Vec::new(),
                 };
                 spec.apply(&mut text);
                 text.style.checked().map_err(anyhow::Error::msg)?;
@@ -2515,7 +2517,7 @@ impl App {
                     // A frame with no height is as tall as what it holds.
                     if spec.h.is_none() {
                         let laid = crate::typeset::lay(&text.text, &text.style, text.mode, text.w, f64::MAX, &self.fonts);
-                        text.h = laid.line_h * laid.rows.len() as f64;
+                        text.h = laid.content;
                     }
                 }
                 let placed = self.with_text(|e, d, f| e.place_text(d, f, text, born.as_deref()));
@@ -2523,6 +2525,23 @@ impl App {
                 Ok(placed)
             }
             Request::SetText { id, spec } => {
+                // A stretch is measured in what the text says once the
+                // change lands: past its end is a stretch of nothing.
+                if let Some((_, end)) = spec.range {
+                    let said = match &spec.text {
+                        Some(words) => words.chars().count(),
+                        None => self
+                            .doc()
+                            .elements
+                            .iter()
+                            .find_map(|el| match el {
+                                crate::doc::Element::Text(t) if t.id == id => Some(t.text.chars().count()),
+                                _ => None,
+                            })
+                            .unwrap_or(0),
+                    };
+                    anyhow::ensure!(end <= said, "the range runs to {end}, and the text is {said} characters long");
+                }
                 let change = self
                     .with_text(|e, d, f| e.change_text(d, f, &id, |t| spec.apply(t)))
                     .map_err(anyhow::Error::msg)?;
@@ -2931,7 +2950,7 @@ impl App {
             .iter()
             .map(|f| menu::Item::new(f).checked(*f == current))
             .collect();
-        let was = editor.text_fonts(doc);
+        let was = editor.text_look(doc);
         let chrome = self.view().map_or(1.0, |v| self.chrome(&v)) as f32;
         let at_line = families.iter().position(|f| *f == current).unwrap_or(0);
         self.menu = Some(Opened {

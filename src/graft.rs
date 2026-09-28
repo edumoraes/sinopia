@@ -599,6 +599,7 @@ mod tests {
             mode: crate::doc::TextMode::Artistic,
             text: "Label".into(),
             style: crate::doc::TextStyle::default(),
+            runs: Vec::new(),
         }));
         plant(&mut b, &frag).unwrap();
         let (frame, text) = (

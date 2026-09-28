@@ -38,6 +38,7 @@ mod select;
 mod send;
 mod skills;
 mod slots;
+mod spans;
 mod store;
 mod tablet;
 mod tabs;

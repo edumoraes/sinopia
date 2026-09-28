@@ -1872,39 +1872,46 @@ const RULE: f64 = 0.07;
 /// screen to be anything but a smudge draws nothing.
 pub fn text_prims(t: &crate::doc::Text, view: &View, letters: &Letters) -> Vec<Prim> {
     let k = view.px_per_world();
-    let wanted = (t.style.size * k) as f32;
-    let Some(rung) = crate::glyphs::ladder(wanted).map(|r| r.min(letters.glyphs.ceiling())) else {
-        return Vec::new();
-    };
     let laid = crate::typeset::Laid::of(t, letters.fonts);
-    let face = letters.fonts.face(&t.style.font, t.style.bold, t.style.italic);
-    let color = parse_color(&t.style.color);
     let (sx, sy) = view.world_to_screen(t.x, t.y);
     let pivot = (
         (sx + t.w * k / 2.0) as f32,
         (sy + t.h * k / 2.0) as f32,
     );
     let angle = t.rotation.to_radians() as f32;
-    let scale = wanted / rung as f32;
     let at = |x: f64, y: f64| ((sx + x * k) as f32, (sy + y * k) as f32);
-    let mut out = Vec::new();
     // A letter whose em, turned with the text, stands wholly off the
     // window is neither drawn nor rasterized: zoomed into a line, the
     // rest of it would otherwise fill the sheet with what nobody sees.
     let (sin, cos) = angle.sin_cos();
-    let reach = 1.5 * wanted;
     let (vw, vh) = (view.viewport.w as f32, view.viewport.h as f32);
-    let seen = |px: f32, py: f32| {
+    let seen = |px: f32, py: f32, wanted: f32| {
+        let reach = 1.5 * wanted;
         let (dx, dy) = (px + wanted / 2.0 - pivot.0, py - wanted / 3.0 - pivot.1);
         let (cx, cy) = (pivot.0 + cos * dx - sin * dy, pivot.1 + sin * dx + cos * dy);
         cx > -reach && cy > -reach && cx < vw + reach && cy < vh + reach
     };
-    for (ch, x, baseline) in laid.glyphs() {
-        let (px, py) = at(x, baseline);
-        if !seen(px, py) {
+    let mut out = Vec::new();
+    // The face, the rung and the ink of the style last drawn: most
+    // letters stand next to one set the same way.
+    let mut last: Option<(*const crate::doc::TextStyle, std::rc::Rc<crate::fonts::Face>, u32, f32, Rgba)> = None;
+    for g in laid.glyphs() {
+        let wanted = (g.style.size * k) as f32;
+        let (px, py) = at(g.x, g.baseline);
+        if !seen(px, py, wanted) {
             continue;
         }
-        let Some(cell) = letters.glyphs.cell(&face, ch, rung) else {
+        let key = g.style as *const crate::doc::TextStyle;
+        if last.as_ref().is_none_or(|l| l.0 != key) {
+            let Some(rung) = crate::glyphs::ladder(wanted).map(|r| r.min(letters.glyphs.ceiling())) else {
+                last = None;
+                continue;
+            };
+            let face = letters.fonts.face(&g.style.font, g.style.bold, g.style.italic);
+            last = Some((key, face, rung, wanted / rung as f32, parse_color(&g.style.color)));
+        }
+        let Some((_, face, rung, scale, color)) = &last else { continue };
+        let Some(cell) = letters.glyphs.cell(face, g.ch, *rung) else {
             continue;
         };
         let r = ScreenRect {
@@ -1913,27 +1920,24 @@ pub fn text_prims(t: &crate::doc::Text, view: &View, letters: &Letters) -> Vec<P
             w: cell.w * scale,
             h: cell.h * scale,
         };
-        out.push(Prim::glyph(r, cell.uv, letters.slot, color).transformed(pivot, 1.0, angle, (0.0, 0.0)));
+        out.push(Prim::glyph(r, cell.uv, letters.slot, *color).transformed(pivot, 1.0, angle, (0.0, 0.0)));
     }
-    let rules = [(t.style.underline, UNDERLINE_AT), (t.style.strike, STRIKE_AT)];
-    let thick = (t.style.size * RULE * k).max(1.0) as f32;
-    for row in &laid.rows[..laid.shown] {
-        if row.width <= 0.0 {
+    for rule in laid.rules() {
+        // A rule too thin to see at this zoom is still a pixel, as a
+        // letter too small to read is not drawn at all.
+        if crate::glyphs::ladder((rule.size * k) as f32).is_none() {
             continue;
         }
-        for (on, offset) in rules {
-            if !on {
-                continue;
-            }
-            let (x, y) = at(row.x(row.start), row.baseline + offset * t.style.size);
-            let r = ScreenRect {
-                x,
-                y: y - thick / 2.0,
-                w: (row.width * k) as f32,
-                h: thick,
-            };
-            out.push(Prim::turned(r, pivot, angle, color));
-        }
+        let offset = if rule.strike { STRIKE_AT } else { UNDERLINE_AT };
+        let thick = (rule.size * RULE * k).max(1.0) as f32;
+        let (x, y) = at(rule.x0, rule.baseline + offset * rule.size);
+        let r = ScreenRect {
+            x,
+            y: y - thick / 2.0,
+            w: ((rule.x1 - rule.x0) * k) as f32,
+            h: thick,
+        };
+        out.push(Prim::turned(r, pivot, angle, parse_color(&rule.color)));
     }
     out
 }
@@ -4753,6 +4757,7 @@ mod tests {
             mode: crate::doc::TextMode::Artistic,
             text: s.into(),
             style: crate::doc::TextStyle::with_size(size, "#ff0000"),
+            runs: Vec::new(),
         }
     }
 
@@ -4859,5 +4864,30 @@ mod tests {
         assert!(inked > 0);
         drop(sheet);
         assert!(letters.glyphs.take_dirty().is_some());
+    }
+
+    #[test]
+    fn a_stretch_set_apart_is_drawn_in_its_own_ink_and_size() {
+        let v = view(0.0, 0.0, 1.0);
+        let mut t = a_text("ab", 16.0);
+        t.runs = vec![crate::doc::Run {
+            start: 1,
+            end: 2,
+            style: crate::doc::RunStyle {
+                color: Some("#00ff00".into()),
+                size: Some(32.0),
+                underline: Some(true),
+                ..Default::default()
+            },
+        }];
+        let f = document_prims(&text_board(t, &v), &v, &ImageSlots::new(), &no_sheet(), &no_letters(), EDGE, None);
+        let glyphs = glyph_prims(&f);
+        assert_eq!(glyphs.len(), 2);
+        assert_eq!(glyphs[0].color, parse_color("#ff0000"));
+        assert_eq!(glyphs[1].color, parse_color("#00ff00"));
+        assert!(glyphs[1].geom[3] > glyphs[0].geom[3] * 1.5, "the second letter is the bigger");
+        let rules: Vec<&Prim> = f.prims.iter().filter(|p| p.kind == KIND_BOX).collect();
+        assert_eq!(rules.len(), 1, "only the stretch underlined");
+        assert_eq!(rules[0].color, parse_color("#00ff00"));
     }
 }
