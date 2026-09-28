@@ -29,7 +29,7 @@ pub enum Origin {
     File(PathBuf),
     /// A board in the XDG store, by id. `--open`, `op: open` and `--new`
     /// all land here: they write to the store before the window sees the
-    /// document, and `index.json` is the only file the plugin reads (§5).
+    /// document, and `index.json` is what the plugin reads (§5).
     Board(String),
     /// Never written anywhere. The `+` button answers to nobody, so its
     /// first `Ctrl+S` has to ask for a name.

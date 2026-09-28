@@ -286,7 +286,7 @@ XDG directory:
   thumbs/<id>.png     # small preview, no session metadata
 ```
 
-`index.json` is the only file the plugin reads. Title and paths are treated as untrusted text (even though it's the user themself: the index is the surface between two processes).
+`index.json`, and the previews under `thumbs/` it names, are the only files the plugin reads. Title and paths are treated as untrusted text (even though it's the user themself: the index is the surface between two processes).
 
 ### 6.1 Document
 

@@ -9,10 +9,11 @@ import "recents.js" as Recents
 // board — a new one, or one of the recent projects.
 //
 // The plugin speaks intent and nothing else (§3). It does not interpret a
-// document: it reads `index.json`, which is the one file it is allowed to
-// read (§6), and every gesture leaves through the CLI that mirrors the
-// socket (§5). The child is launched detached, so it owns its own window
-// (§4.1) and killing it cannot take the shell down with it (§11).
+// document: it reads `index.json` and the previews it names, which are
+// the files it is allowed to read (§6), and every gesture leaves through
+// the CLI that mirrors the socket (§5). The child is launched detached,
+// so it owns its own window (§4.1) and killing it cannot take the shell
+// down with it (§11).
 //
 // Ui/Panel hands over the whole popout contract: open, close, toggle,
 // opened, switchPanel, setting and the IpcHandler.

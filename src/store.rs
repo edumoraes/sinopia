@@ -3,7 +3,7 @@
 //! On-disk layout:
 //! ```text
 //! <root>/            0700
-//!   index.json       0600  — the only file the plugin reads
+//!   index.json       0600  — what the plugin reads, with the previews
 //!   boards/<id>.json 0600  — document
 //!   thumbs/<id>.png  0600  — the recents' preview of a project
 //!   blobs/<sha256>   0600  — images (later phase)
