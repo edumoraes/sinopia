@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use anyhow::Context as _;
-use image::ImageEncoder as _;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -1272,8 +1271,7 @@ impl App {
         let mut rgba = self.render_onto(&sub, &view, w, h, [0.0; 4])?;
         let srgb = self.gfx.as_ref().is_some_and(Gfx::is_srgb);
         bitmap::unpremultiply(&mut rgba, srgb);
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)?;
+        let png = bitmap::encode(&rgba, w, h)?;
         let blob = self.store.write_blob(&png)?;
         let gfx = self.gfx.as_mut().context("there is no window to draw with")?;
         gfx.upload_image(&blob, &Bitmap { w, h, rgba })?;
@@ -1964,13 +1962,7 @@ impl App {
         let most = self.gfx.as_ref().map_or(1, Gfx::max_dimension);
         let (view, w, h) = export::view_for(&bounds, most);
         let rgba = self.render_sub(&sub, &view, w, h)?;
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png).write_image(
-            &rgba,
-            w,
-            h,
-            image::ExtendedColorType::Rgba8,
-        )?;
+        let png = bitmap::encode(&rgba, w, h)?;
         export::write(dir, slug, &png, &sub, &md, &blobs)
     }
 
