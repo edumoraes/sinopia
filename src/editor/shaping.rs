@@ -218,16 +218,31 @@ impl Editor {
                 Restyle::Radius(r) => style.radius = r,
                 Restyle::Sides(n) => style.sides = n,
                 Restyle::Inner(i) => style.inner = i,
-                Restyle::Start(h) => style.start = h,
-                Restyle::End(h) => style.end = h,
-            }
-            // A head asked of the next line makes it an arrow, and an
-            // arrow left with none is a line: the figure is what it wears.
-            let bare = style.start == Head::None && style.end == Head::None;
-            match (self.figure, bare) {
-                (Figure::Line, false) => self.figure = Figure::Arrow,
-                (Figure::Arrow, true) => self.figure = Figure::Line,
-                _ => {}
+                Restyle::Start(h) | Restyle::End(h) => {
+                    // The next line wears no heads, whatever the arrow's
+                    // style keeps for when an arrow is next: asked for
+                    // none it is as it was, and a head asked of it is that
+                    // head alone — the other end as the bar showed it.
+                    if self.figure == Figure::Line {
+                        if h == Head::None {
+                            return Change::Selection;
+                        }
+                        (style.start, style.end) = (Head::None, Head::None);
+                    }
+                    match change {
+                        Restyle::Start(_) => style.start = h,
+                        _ => style.end = h,
+                    }
+                    // A head makes the next line an arrow, and an arrow
+                    // left with none is a line: the figure is what it
+                    // wears.
+                    let bare = style.start == Head::None && style.end == Head::None;
+                    match (self.figure, bare) {
+                        (Figure::Line, false) => self.figure = Figure::Arrow,
+                        (Figure::Arrow, true) => self.figure = Figure::Line,
+                        _ => {}
+                    }
+                }
             }
             return Change::Selection;
         }
@@ -1004,5 +1019,21 @@ mod tests {
         let _ = e.restyle_shapes(&mut doc, Restyle::End(Head::None));
         e.choose_figure(Figure::Arrow, &mut doc);
         assert_eq!(e.shape_look(&doc, INK).end, Head::Arrow);
+    }
+
+    #[test]
+    fn the_next_line_stays_a_line_whatever_else_the_bar_sets() {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Line, &mut doc);
+        let _ = e.restyle_shapes(&mut doc, Restyle::Width(6.0));
+        let _ = e.restyle_shapes(&mut doc, Restyle::Stroke(Some(INK.into())));
+        let _ = e.restyle_shapes(&mut doc, Restyle::Start(Head::None));
+        assert_eq!(e.figure, Figure::Line, "a width, an ink and no head are no arrow");
+        // A head asked of it is that head alone: the other end stays as
+        // the bar showed it.
+        let _ = e.restyle_shapes(&mut doc, Restyle::Start(Head::Triangle));
+        assert_eq!(e.figure, Figure::Arrow);
+        let look = e.shape_look(&doc, INK);
+        assert_eq!((look.start, look.end), (Head::Triangle, Head::None));
     }
 }
