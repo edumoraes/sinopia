@@ -13,7 +13,7 @@ use crate::doc::{BlendMode, Camera, Document, Element, Envelope, Image, Kind, La
 use crate::geom::{Affine, Corner, Frame, Point};
 use crate::merge::{Merge, Run};
 use crate::scene::View;
-use crate::select::{self, Handle};
+use crate::select::{self, End, Handle};
 use crate::tree::{self, Arrange, Filter, Place};
 
 mod shaping;
@@ -180,6 +180,12 @@ enum Drag {
         origin: Point,
         frame: Frame,
         map: Affine,
+        snapshot: Snapshot,
+    },
+    /// One end of a lone line being dragged; the snapshot is the line as
+    /// it was at the press.
+    End {
+        end: End,
         snapshot: Snapshot,
     },
     /// Rubber band between two screen points; `base` is what Shift keeps
@@ -606,10 +612,27 @@ impl Editor {
         matches!(self.drag, Some(Drag::Move { moved: true, .. }))
     }
 
-    /// The selection handle under `screen`, for the cursor.
+    /// The selection handle under `screen`, for the cursor: a lone
+    /// line's ends, or the frame's corners and rings.
     pub fn hover(&self, doc: &Document, view: &View, screen: (f64, f64)) -> Option<Handle> {
+        if let Some(line) = self.lone_line(doc) {
+            return select::line_handle_at(line, view, screen);
+        }
         let frame = self.selection_frame(doc)?;
         self.handle_at(doc, &frame, view, screen)
+    }
+
+    /// The line selected, when it is the whole of the selection: it wears
+    /// its two ends as its handles rather than a frame, as a line does in
+    /// every drawing tool.
+    pub fn lone_line<'a>(&self, doc: &'a Document) -> Option<&'a crate::doc::Line> {
+        let [id] = self.selection.as_slice() else {
+            return None;
+        };
+        doc.elements.iter().find_map(|el| match el {
+            Element::Line(l) if l.id == *id => Some(l),
+            _ => None,
+        })
     }
 
     /// The handle under `screen`, less the ones the selection cannot
@@ -1658,25 +1681,26 @@ impl Editor {
     /// the base.
     fn select_press(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
-        if let Some(frame) = self.selection_frame(doc)
-            && let Some(handle) = self.handle_at(doc, &frame, view, screen)
-        {
+        if let Some(handle) = self.hover(doc, view, screen) {
             let snapshot = self.snapshot(doc);
             let map = Affine::IDENTITY;
-            self.drag = Some(match handle {
-                Handle::Resize(corner) => Drag::Resize {
+            let frame = self.selection_frame(doc);
+            self.drag = match (handle, frame) {
+                (Handle::End(end), _) => Some(Drag::End { end, snapshot }),
+                (Handle::Resize(corner), Some(frame)) => Some(Drag::Resize {
                     corner,
                     frame,
                     map,
                     snapshot,
-                },
-                Handle::Rotate(_) => Drag::Rotate {
+                }),
+                (Handle::Rotate(_), Some(frame)) => Some(Drag::Rotate {
                     origin: world,
                     frame,
                     map,
                     snapshot,
-                },
-            });
+                }),
+                _ => None,
+            };
             return Change::None;
         }
         let slop = HIT_SLOP_PX * view.scale / view.px_per_world();
@@ -1974,6 +1998,34 @@ impl Editor {
                 apply(doc, snapshot, map);
                 Change::Scene
             }
+            Some(Drag::End { end, snapshot }) => {
+                let Some((i, Element::Line(was))) = snapshot.first() else {
+                    return Change::None;
+                };
+                let mut line = was.clone();
+                let fixed = match end {
+                    End::From => line.to,
+                    End::To => line.from,
+                };
+                let mut at = world;
+                // Turned about the end that stays, in the rotation ring's
+                // own steps, as a line is drawn under Shift.
+                if shift {
+                    let d = [at[0] - fixed[0], at[1] - fixed[1]];
+                    let step = ROTATE_SNAP_DEG.to_radians();
+                    let angle = (d[1].atan2(d[0]) / step).round() * step;
+                    let length = d[0].hypot(d[1]);
+                    at = [fixed[0] + length * angle.cos(), fixed[1] + length * angle.sin()];
+                }
+                match end {
+                    End::From => line.from = at,
+                    End::To => line.to = at,
+                }
+                if let Some(slot) = doc.elements.get_mut(*i) {
+                    *slot = Element::Line(line);
+                }
+                Change::Scene
+            }
             Some(Drag::Marquee {
                 origin,
                 current,
@@ -2200,7 +2252,7 @@ impl Editor {
                     self.rehome_moved(doc);
                     Change::Scene
                 }
-                Drag::Resize { .. } | Drag::Rotate { .. } => Change::Scene,
+                Drag::Resize { .. } | Drag::Rotate { .. } | Drag::End { .. } => Change::Scene,
             };
         }
         match self.nav {
@@ -2274,7 +2326,8 @@ impl Editor {
             Some(
                 Drag::Move { snapshot, .. }
                 | Drag::Resize { snapshot, .. }
-                | Drag::Rotate { snapshot, .. },
+                | Drag::Rotate { snapshot, .. }
+                | Drag::End { snapshot, .. },
             ) => {
                 for (i, el) in snapshot {
                     if let Some(slot) = doc.elements.get_mut(i) {

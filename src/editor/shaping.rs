@@ -524,4 +524,68 @@ mod tests {
         assert_eq!((s.fill.as_deref(), s.stroke.as_deref()), (Some("#e5484d"), None));
         assert_eq!((s.width, s.radius, s.sides, s.inner), (6.0, 12.0, 8, 0.6));
     }
+
+    /// A board with one line from `from` to `to`, drawn and left selected.
+    fn with_line(from: (f64, f64), to: (f64, f64)) -> (Editor, Document) {
+        let (mut e, mut doc) = shaping();
+        e.choose_figure(Figure::Line, &mut doc);
+        let _ = drag(&mut e, &mut doc, from, to);
+        (e, doc)
+    }
+
+    #[test]
+    fn dragging_an_end_of_a_lone_line_moves_that_end_alone() {
+        let (mut e, mut doc) = with_line((0.0, 0.0), (100.0, 0.0));
+        assert!(e.lone_line(&doc).is_some());
+        // With the Shape tool still in hand, an end answers as a handle.
+        assert_eq!(e.pointer_tool(&doc, &view(), at(100.0, 0.0)), Tool::Select);
+        let _ = e.press(Button::Left, &view(), at(100.0, 0.0), &mut doc, &Tip::PENCIL);
+        let _ = e.moved(&view(), at(120.0, 70.0), &mut doc);
+        let _ = e.release(Button::Left, &view(), at(120.0, 70.0), &mut doc, INK);
+        let l = only_line(&doc);
+        assert_eq!((l.from, l.to), ([0.0, 0.0], [120.0, 70.0]));
+        assert_eq!(e.selection(), std::slice::from_ref(&l.id), "still the one selected");
+    }
+
+    #[test]
+    fn shift_turns_a_dragged_end_in_fifteen_degree_steps_about_the_other() {
+        let (mut e, mut doc) = with_line((0.0, 0.0), (100.0, 0.0));
+        e.hold_shift(true);
+        let _ = e.press(Button::Left, &view(), at(0.0, 0.0), &mut doc, &Tip::PENCIL);
+        let _ = e.moved(&view(), at(0.0, 95.0), &mut doc);
+        let l = only_line(&doc);
+        // From (100, 0) the pointer is at 136.5 degrees: 135 it is.
+        let a = 135f64.to_radians();
+        let length = 100f64.hypot(95.0);
+        assert!(close(l.from, [100.0 + length * a.cos(), length * a.sin()]), "{:?}", l.from);
+        assert_eq!(l.to, [100.0, 0.0]);
+    }
+
+    #[test]
+    fn esc_puts_a_dragged_end_back() {
+        let (mut e, mut doc) = with_line((0.0, 0.0), (100.0, 0.0));
+        let _ = e.press(Button::Left, &view(), at(100.0, 0.0), &mut doc, &Tip::PENCIL);
+        let _ = e.moved(&view(), at(50.0, 90.0), &mut doc);
+        assert_ne!(only_line(&doc).to, [100.0, 0.0]);
+        assert!(e.escape(&mut doc));
+        assert_eq!(only_line(&doc).to, [100.0, 0.0]);
+    }
+
+    #[test]
+    fn lines_selected_with_something_else_are_framed_as_a_box() {
+        let (mut e, mut doc) = with_line((0.0, 0.0), (100.0, 0.0));
+        let first = only_line(&doc).id.clone();
+        let _ = drag(&mut e, &mut doc, (0.0, 50.0), (100.0, 80.0));
+        let second = doc.elements[1].id().to_owned();
+        e.set_tool(Tool::Select, &mut doc);
+        e.go(super::super::Spot {
+            selection: vec![first, second],
+            ..Default::default()
+        });
+        assert!(e.lone_line(&doc).is_none());
+        let f = e.selection_frame(&doc).unwrap();
+        let corner = f.corner(crate::geom::Corner::BottomRight);
+        let (x, y) = view().world_to_screen(corner[0], corner[1]);
+        assert!(matches!(e.hover(&doc, &view(), (x, y)), Some(crate::select::Handle::Resize(_))));
+    }
 }

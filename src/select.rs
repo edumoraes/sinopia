@@ -31,6 +31,16 @@ pub enum Handle {
     Resize(Corner),
     /// Sits outside a corner; turns the selection about its center.
     Rotate(Corner),
+    /// One end of a lone line selected, which wears its ends in place of
+    /// a frame: dragging it moves that end and nothing else.
+    End(End),
+}
+
+/// Which end of a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    From,
+    To,
 }
 
 /// The oriented box an element occupies, in world units: a rect's own box
@@ -429,13 +439,53 @@ pub fn handle_at(f: &Frame, view: &View, screen: (f64, f64)) -> Option<Handle> {
         .into_iter()
         .find(|(h, p)| {
             let size = match h {
-                Handle::Resize(_) => HANDLE_PX,
+                Handle::Resize(_) | Handle::End(_) => HANDLE_PX,
                 Handle::Rotate(_) => ROTATE_HANDLE_PX,
             };
             let reach = f64::from(size / 2.0 + HANDLE_SLOP_PX) * view.scale;
             (p[0] - screen.0).abs() <= reach && (p[1] - screen.1).abs() <= reach
         })
         .map(|(h, _)| h)
+}
+
+/// A lone line's handles: its two ends, where they are on screen.
+pub fn line_handles(l: &Line, view: &View) -> [(Handle, Point); 2] {
+    let at = |p: Point| {
+        let (x, y) = view.world_to_screen(p[0], p[1]);
+        [x, y]
+    };
+    [(Handle::End(End::From), at(l.from)), (Handle::End(End::To), at(l.to))]
+}
+
+/// The end of a lone line under `screen` (physical px), if any — the
+/// nearer, where the two are close enough to share the pointer.
+pub fn line_handle_at(l: &Line, view: &View, screen: (f64, f64)) -> Option<Handle> {
+    let reach = f64::from(HANDLE_PX / 2.0 + HANDLE_SLOP_PX) * view.scale;
+    line_handles(l, view)
+        .into_iter()
+        .filter(|(_, p)| (p[0] - screen.0).abs() <= reach && (p[1] - screen.1).abs() <= reach)
+        .min_by(|(_, a), (_, b)| {
+            let d = |p: &Point| (p[0] - screen.0).hypot(p[1] - screen.1);
+            d(a).total_cmp(&d(b))
+        })
+        .map(|(h, _)| h)
+}
+
+/// A lone line selected: a hairline along it, and on each end a round
+/// mark bordered as a resize handle is — the two things there are to
+/// drag it by.
+pub fn end_prims(l: &Line, view: &View, theme: &Theme) -> Vec<Prim> {
+    let s = view.scale as f32;
+    let [(_, a), (_, b)] = line_handles(l, view);
+    let at = |p: Point| (p[0] as f32, p[1] as f32);
+    let mut out = vec![Prim::segment(at(a), at(b), OUTLINE_PX / 2.0 * s, theme.selection)];
+    for p in [a, b] {
+        let (x, y) = at(p);
+        let radius = HANDLE_PX / 2.0 * s;
+        out.push(Prim::circle(x, y, radius, theme.selection));
+        out.push(Prim::circle(x, y, radius - HANDLE_BORDER_PX * s, theme.handle));
+    }
+    out
 }
 
 /// Selection overlay: the outline through the corners, a bordered square
@@ -480,6 +530,8 @@ pub fn prims(f: &Frame, view: &View, theme: &Theme) -> Vec<Prim> {
                 out.push(Prim::circle(x, y, radius, theme.selection));
                 out.push(Prim::circle(x, y, radius - RING_PX * s, theme.handle));
             }
+            // A frame's handles are its corners and its rings.
+            Handle::End(_) => {}
         }
     }
     out
@@ -1585,5 +1637,36 @@ mod tests {
         let d = doc(vec![el]);
         assert_eq!(element_at(&d, [95.0, 2.5], 0.0), Some("l"), "on its head, off its shaft");
         assert_eq!(element_at(&d, [40.0, 2.5], 0.0), None, "the shaft is as wide as it is");
+    }
+
+    #[test]
+    fn a_lone_lines_handles_are_its_two_ends() {
+        let el = line([-100.0, 0.0], [100.0, 40.0], 2.0);
+        let l = line_of(&el);
+        let v = view();
+        let at = |p: Point| v.world_to_screen(p[0], p[1]);
+        assert_eq!(line_handle_at(l, &v, at(l.from)), Some(Handle::End(End::From)));
+        let near_to = at(l.to);
+        assert_eq!(line_handle_at(l, &v, (near_to.0 + 5.0, near_to.1 - 5.0)), Some(Handle::End(End::To)));
+        assert_eq!(line_handle_at(l, &v, at([0.0, 20.0])), None, "its middle is the line itself");
+    }
+
+    #[test]
+    fn a_lone_line_is_drawn_selected_as_a_hairline_with_its_ends_marked() {
+        let el = line([0.0, 0.0], [100.0, 0.0], 8.0);
+        let prims = end_prims(line_of(&el), &view(), &Theme::light());
+        let segments: Vec<&Prim> = prims.iter().filter(|p| p.kind == KIND_SEGMENT).collect();
+        assert_eq!(segments.len(), 1, "a hairline along it");
+        let marks: Vec<&Prim> = prims.iter().filter(|p| p.kind == KIND_BOX).collect();
+        assert_eq!(marks.len(), 4, "a bordered mark on each end");
+        let v = view();
+        for end in [[0.0, 0.0], [100.0, 0.0]] {
+            let (x, y) = v.world_to_screen(end[0], end[1]);
+            assert!(
+                marks.iter().any(|m| (m.geom[0] + m.geom[2] / 2.0 - x as f32).abs() < 1e-3
+                    && (m.geom[1] + m.geom[3] / 2.0 - y as f32).abs() < 1e-3),
+                "a mark centred on {end:?}"
+            );
+        }
     }
 }

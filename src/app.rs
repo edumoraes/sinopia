@@ -3303,7 +3303,10 @@ impl App {
             Some(Element::Line(line)) => frame.extend(scene::line_prims(&line, view)),
             _ => {}
         }
-        if let Some(selection) = self.editor().selection_frame(self.doc()) {
+        // A lone line wears its ends; anything else, its frame.
+        if let Some(line) = self.editor().lone_line(self.doc()) {
+            frame.extend(select::end_prims(line, view, &self.theme));
+        } else if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
         }
         if let Some((a, b)) = self.editor().marquee() {
@@ -4646,7 +4649,7 @@ impl App {
                     CursorIcon::NwseResize
                 }
                 (Tool::Select, Some(Handle::Resize(_))) => CursorIcon::NeswResize,
-                (Tool::Select, Some(Handle::Rotate(_))) => CursorIcon::Crosshair,
+                (Tool::Select, Some(Handle::Rotate(_) | Handle::End(_))) => CursorIcon::Crosshair,
                 (Tool::Select, None) => CursorIcon::Default,
                 (Tool::Hand, _) => CursorIcon::Grab,
                 (Tool::Pencil | Tool::Brush | Tool::Frame | Tool::Shape, _) => CursorIcon::Crosshair,
