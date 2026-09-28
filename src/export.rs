@@ -460,6 +460,25 @@ pub fn fit_view(bounds: &Frame, max_w: u32, max_h: u32, ceiling: f64) -> (View, 
     (view, w, h)
 }
 
+/// The box a project's preview is fitted into, in px: what the recents
+/// draw it at, twice over for a screen at scale 2.
+pub const PREVIEW_W: u32 = 256;
+pub const PREVIEW_H: u32 = 160;
+
+/// The camera and the size a preview of the whole board is taken with —
+/// the picture the recents show beside its name. It is of what the board
+/// shows, so what is hidden neither appears nor stretches the box, and a
+/// board with nothing on show has none.
+pub fn preview(doc: &Document) -> Option<(View, u32, u32)> {
+    let corners: Vec<[f64; 2]> = doc
+        .painted()
+        .filter_map(|p| select::frame(p.element))
+        .flat_map(|f| f.corners())
+        .collect();
+    let bounds = Frame::around(&corners)?;
+    Some(fit_view(&bounds, PREVIEW_W, PREVIEW_H, EXPORT_SCALE))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1005,5 +1024,49 @@ mod tests {
         let b = Frame::spanning([5.0, 5.0], [5.0, 5.0]);
         let (_, w, h) = view_for(&b, 4096);
         assert!(w >= 1 && h >= 1);
+    }
+
+    #[test]
+    fn an_empty_board_has_no_preview() {
+        // Nothing to picture: the recents show the kind's glyph rather
+        // than a blank card of the board's ground.
+        assert!(preview(&Document::new("empty")).is_none());
+    }
+
+    #[test]
+    fn a_preview_fits_the_box_and_keeps_the_board_s_shape() {
+        let (view, w, h) = preview(&board()).expect("a board with ink has a preview");
+        assert!(w <= PREVIEW_W && h <= PREVIEW_H, "{w}×{h}");
+        assert!(w == PREVIEW_W || h == PREVIEW_H, "as large as fits: {w}×{h}");
+        assert_eq!((view.viewport.w, view.viewport.h), (w, h));
+    }
+
+    #[test]
+    fn a_preview_is_of_the_whole_board_and_not_one_frame() {
+        // The frame spans 0..100 and the loose rect sits at 500..510, so
+        // the middle of the two is well past the frame.
+        let (view, _, _) = preview(&board()).unwrap();
+        assert!((view.camera.x - 255.0).abs() < 1e-9, "{}", view.camera.x);
+        assert!((view.camera.y - 255.0).abs() < 1e-9, "{}", view.camera.y);
+    }
+
+    #[test]
+    fn what_is_hidden_is_not_in_the_preview() {
+        // A preview is what the board shows, so a layer the person put
+        // away neither appears in it nor stretches the box it is taken of.
+        let mut doc = board();
+        doc.layers[0].visible = false;
+        let (view, _, _) = preview(&doc).unwrap();
+        assert!((view.camera.x - 50.0).abs() < 1e-9, "{}", view.camera.x);
+        assert!((view.camera.y - 25.0).abs() < 1e-9, "{}", view.camera.y);
+    }
+
+    #[test]
+    fn a_board_whose_only_ink_is_hidden_has_no_preview() {
+        let mut doc = Document::new("plan");
+        doc.elements
+            .push(Element::Rect(rect("r", &doc.layers[0].id.clone(), 0.0, 0.0, 10.0, 10.0)));
+        doc.layers[0].visible = false;
+        assert!(preview(&doc).is_none());
     }
 }
