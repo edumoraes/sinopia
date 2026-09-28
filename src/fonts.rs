@@ -192,6 +192,21 @@ pub fn families_from(listing: &str) -> Vec<String> {
     std::iter::once(DEFAULT_FONT.to_owned()).chain(names).collect()
 }
 
+/// A family's name as a fontconfig pattern writes it: the characters a
+/// pattern gives meaning to — `-` before a size, `:` before a property,
+/// `,` between names, `\` itself — escaped, so a family with one of them
+/// in its name is asked for by that name.
+pub fn pattern_family(family: &str) -> String {
+    let mut out = String::with_capacity(family.len());
+    for c in family.chars() {
+        if matches!(c, '\\' | '-' | ':' | ',') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// What fontconfig answers a pattern with: the file, then the family it
 /// actually is. The family is how a match is told from fontconfig's
 /// habit of answering the default sans for a family it does not have.
@@ -215,7 +230,7 @@ pub fn machine() -> Fonts {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     let locate: Locate = Box::new(|family, bold, italic| {
-        let family_only = family.replace(['-', ':', ','], " ");
+        let family_only = pattern_family(family);
         let ask = |pattern: &str| {
             let out = std::process::Command::new("fc-match")
                 .args(["--format", "%{file}\n%{family[0]}\n", pattern])
@@ -331,5 +346,13 @@ mod tests {
         );
         assert_eq!(matched("/x/DejaVuSans.ttf\nDejaVu Sans\n", "Nowhere"), None);
         assert_eq!(matched("", "Noto Serif"), None);
+    }
+
+    #[test]
+    fn a_family_is_asked_for_by_its_own_name_whatever_it_holds() {
+        assert_eq!(pattern_family("Noto Sans"), "Noto Sans");
+        assert_eq!(pattern_family("Source-Code Pro"), "Source\\-Code Pro");
+        assert_eq!(pattern_family("A:B,C"), "A\\:B\\,C");
+        assert_eq!(pattern_family("back\\slash"), "back\\\\slash");
     }
 }
