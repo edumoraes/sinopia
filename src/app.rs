@@ -2525,6 +2525,23 @@ impl App {
                 Ok(placed)
             }
             Request::SetText { id, spec } => {
+                // A stretch is measured in what the text says once the
+                // change lands: past its end is a stretch of nothing.
+                if let Some((_, end)) = spec.range {
+                    let said = match &spec.text {
+                        Some(words) => words.chars().count(),
+                        None => self
+                            .doc()
+                            .elements
+                            .iter()
+                            .find_map(|el| match el {
+                                crate::doc::Element::Text(t) if t.id == id => Some(t.text.chars().count()),
+                                _ => None,
+                            })
+                            .unwrap_or(0),
+                    };
+                    anyhow::ensure!(end <= said, "the range runs to {end}, and the text is {said} characters long");
+                }
                 let change = self
                     .with_text(|e, d, f| e.change_text(d, f, &id, |t| spec.apply(t)))
                     .map_err(anyhow::Error::msg)?;

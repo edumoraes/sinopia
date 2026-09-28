@@ -110,6 +110,9 @@ pub enum TextVerb {
         /// What it says from now on
         #[arg(long = "to", value_name = "WORDS")]
         says: Option<String>,
+        /// Set the style on characters START..END alone, not the whole text
+        #[arg(long, value_name = "START:END", value_parser = stretch)]
+        range: Option<(usize, usize)>,
         /// Artistic text, or a text frame
         #[arg(long, value_parser = text_mode)]
         kind: Option<TextMode>,
@@ -320,6 +323,15 @@ fn point(s: &str) -> Result<(f64, f64), String> {
     match (num(x), num(y)) {
         (Some(x), Some(y)) => Ok((x, y)),
         _ => Err(format!("{s:?} is not two numbers")),
+    }
+}
+
+/// `START:END` as a stretch of characters, the start before the end.
+fn stretch(s: &str) -> Result<(usize, usize), String> {
+    let (a, b) = s.split_once(':').ok_or_else(|| format!("{s:?} is not START:END"))?;
+    match (a.trim().parse::<usize>(), b.trim().parse::<usize>()) {
+        (Ok(a), Ok(b)) if a < b => Ok((a, b)),
+        _ => Err(format!("{s:?} is not two places with the start before the end")),
     }
 }
 
@@ -552,6 +564,7 @@ pub fn text_request(
         TextVerb::Set {
             text: which,
             says,
+            range,
             kind,
             at,
             width,
@@ -563,6 +576,7 @@ pub fn text_request(
                 style,
                 TextSpec {
                     text: says.clone(),
+                    range: *range,
                     mode: *kind,
                     x: at.map(|p| p.0),
                     y: at.map(|p| p.1),
@@ -1067,6 +1081,19 @@ mod tests {
                 },
             }
         );
+        assert_eq!(
+            texted(&text(&["set", "Title", "--range", "2:5", "--bold"])),
+            Request::SetText {
+                id: "t:Title".into(),
+                spec: TextSpec {
+                    bold: Some(true),
+                    range: Some((2, 5)),
+                    ..TextSpec::default()
+                },
+            }
+        );
+        assert!(parse(&["text", "set", "T", "--range", "5:2", "--bold"]).is_err());
+        assert!(parse(&["text", "set", "T", "--range", "2", "--bold"]).is_err());
         assert!(parse(&["text", "add"]).is_err(), "a text says something");
         assert!(parse(&["text", "add", "x", "--align", "middle"]).is_err());
         assert!(parse(&["text", "add", "x", "--at", "10"]).is_err());

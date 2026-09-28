@@ -175,25 +175,48 @@ impl TextSpec {
                 *to = v.clone();
             }
         }
-        set(&mut t.text, &self.text);
+        // New words carry the runs with them, as typing them would.
+        if let Some(words) = &self.text {
+            let n = t.text.chars().count();
+            let edit = crate::spans::edit_between(&t.text, words);
+            t.runs = crate::spans::edit(&t.runs, n, &t.style, edit, None);
+            words.clone_into(&mut t.text);
+        }
         set(&mut t.mode, &self.mode);
         set(&mut t.x, &self.x);
         set(&mut t.y, &self.y);
         set(&mut t.w, &self.w);
         set(&mut t.h, &self.h);
         set(&mut t.rotation, &self.rotation);
-        let s = &mut t.style;
-        set(&mut s.font, &self.font);
-        set(&mut s.size, &self.size);
-        set(&mut s.bold, &self.bold);
-        set(&mut s.italic, &self.italic);
-        set(&mut s.underline, &self.underline);
-        set(&mut s.strike, &self.strike);
-        set(&mut s.align, &self.align);
-        set(&mut s.valign, &self.valign);
-        set(&mut s.leading, &self.leading);
-        set(&mut s.tracking, &self.tracking);
-        set(&mut s.color, &self.color);
+        set(&mut t.style.align, &self.align);
+        set(&mut t.style.valign, &self.valign);
+        set(&mut t.style.leading, &self.leading);
+        // What a run may set: over the range, or the whole text's — the
+        // stretches no longer set apart in it.
+        let patch = self.patch();
+        let n = t.text.chars().count();
+        match self.range {
+            Some((a, b)) => t.runs = crate::spans::apply(&t.runs, n, &t.style, a.min(n), b.min(n), &patch),
+            None => {
+                t.style = patch.over(&t.style);
+                t.runs = crate::spans::strip(&t.runs, n, &t.style, &patch);
+            }
+        }
+        t.runs = crate::spans::tidy(&t.runs, n, &t.style);
+    }
+
+    /// What of it a run may carry.
+    pub fn patch(&self) -> crate::doc::RunStyle {
+        crate::doc::RunStyle {
+            font: self.font.clone(),
+            size: self.size,
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            strike: self.strike,
+            color: self.color.clone(),
+            tracking: self.tracking,
+        }
     }
 }
 
@@ -220,6 +243,9 @@ pub struct TextSpec {
     pub leading: Option<f64>,
     pub tracking: Option<f64>,
     pub color: Option<String>,
+    /// For `set_text`: the stretch, characters `start..end`, that what a
+    /// run may carry is set on — the rest of the text left as it is.
+    pub range: Option<(usize, usize)>,
 }
 
 impl Request {
@@ -489,6 +515,7 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         "add_text" => {
             let frame = take_optional_string(&mut map, "frame")?;
             let spec = take_spec(&mut map)?;
+            anyhow::ensure!(spec.range.is_none(), "field range is set_text's: a new text is set as a whole");
             anyhow::ensure!(
                 spec.text.as_deref().is_some_and(|t| !t.is_empty()),
                 "field text missing: a text has to say something"
@@ -499,6 +526,10 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
             let id = take_string(&mut map, "id")?;
             let spec = take_spec(&mut map)?;
             anyhow::ensure!(spec != TextSpec::default(), "set_text says nothing to change");
+            anyhow::ensure!(
+                spec.range.is_none() || !spec.patch().is_empty(),
+                "field range names a stretch, and nothing that a stretch may carry is set on it"
+            );
             anyhow::ensure!(
                 spec.text.as_deref() != Some(""),
                 "field text is empty: a text has to say something — remove its layer to take it away"
@@ -700,6 +731,7 @@ fn put_spec(map: &mut Map<String, Value>, spec: &TextSpec) {
     put("leading", spec.leading.map(Value::from));
     put("tracking", spec.tracking.map(Value::from));
     put("color", spec.color.clone().map(Value::from));
+    put("range", spec.range.map(|(a, b)| Value::from(vec![a, b])));
 }
 
 /// How far from the world's origin, in world units, a text the socket
@@ -788,6 +820,20 @@ fn take_spec(map: &mut Map<String, Value>) -> anyhow::Result<TextSpec> {
         leading: number(map, "leading", Some((crate::doc::MIN_LEADING, crate::doc::MAX_LEADING)))?,
         tracking: number(map, "tracking", Some((crate::doc::MIN_TRACKING, crate::doc::MAX_TRACKING)))?,
         color,
+        range: match map.remove("range") {
+            None => None,
+            Some(Value::Array(pair)) => match pair.as_slice() {
+                [Value::Number(a), Value::Number(b)] => {
+                    let (a, b) = (a.as_u64(), b.as_u64());
+                    match (a, b) {
+                        (Some(a), Some(b)) if a < b => Some((a as usize, b as usize)),
+                        _ => anyhow::bail!("field range must be [start, end], two places with start before end"),
+                    }
+                }
+                _ => anyhow::bail!("field range must be [start, end]"),
+            },
+            Some(other) => anyhow::bail!("field range must be [start, end], got {other}"),
+        },
     };
     Ok(spec)
 }
@@ -1526,12 +1572,21 @@ mod tests {
                     leading: Some(1.5),
                     tracking: Some(-20.0),
                     color: Some("#ff8800".into()),
+                    range: None,
                 },
             },
             Request::SetText {
                 id: "T1".into(),
                 spec: TextSpec {
                     size: Some(40.0),
+                    ..TextSpec::default()
+                },
+            },
+            Request::SetText {
+                id: "T1".into(),
+                spec: TextSpec {
+                    bold: Some(true),
+                    range: Some((2, 5)),
                     ..TextSpec::default()
                 },
             },
@@ -1572,6 +1627,12 @@ mod tests {
             r#"{ "v": 1, "op": "set_text", "size": 12 }"#,
             r#"{ "v": 1, "op": "set_text", "id": "T" }"#,
             r#"{ "v": 1, "op": "set_text", "id": "T", "text": "" }"#,
+            r#"{ "v": 1, "op": "set_text", "id": "T", "bold": true, "range": [3, 3] }"#,
+            r#"{ "v": 1, "op": "set_text", "id": "T", "bold": true, "range": [4, 1] }"#,
+            r#"{ "v": 1, "op": "set_text", "id": "T", "bold": true, "range": [1] }"#,
+            r#"{ "v": 1, "op": "set_text", "id": "T", "bold": true, "range": [-1, 2] }"#,
+            r#"{ "v": 1, "op": "set_text", "id": "T", "range": [0, 2] }"#,
+            r#"{ "v": 1, "op": "add_text", "text": "a", "range": [0, 1] }"#,
             r#"{ "v": 1, "op": "add_text", "text": "a", "x": 1e308 }"#,
             r#"{ "v": 1, "op": "add_text", "text": "a", "y": -1e12 }"#,
             r#"{ "v": 1, "op": "add_text", "text": "a", "w": 1.7e308 }"#,
@@ -1635,5 +1696,44 @@ mod tests {
         assert_eq!((t.text.as_str(), t.style.size, t.style.italic), ("now", 40.0, true));
         assert_eq!((t.x, t.y, t.w, t.h), (1.0, 2.0, 3.0, 4.0));
         assert!(!t.style.bold);
+    }
+
+    #[test]
+    fn a_spec_with_a_range_sets_that_stretch_and_the_words_carry_the_runs() {
+        let mut t = crate::doc::Text {
+            id: "T".into(),
+            layer: "L".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 1.0,
+            h: 1.0,
+            rotation: 0.0,
+            mode: TextMode::Artistic,
+            text: "hello world".into(),
+            style: crate::doc::TextStyle::default(),
+            runs: Vec::new(),
+        };
+        TextSpec {
+            bold: Some(true),
+            align: Some(Align::Center),
+            range: Some((6, 11)),
+            ..TextSpec::default()
+        }
+        .apply(&mut t);
+        assert_eq!(t.style.align, Align::Center, "a paragraph's setting is the whole text's");
+        assert!(!t.style.bold);
+        assert_eq!((t.runs[0].start, t.runs[0].end, t.runs[0].style.bold), (6, 11, Some(true)));
+        TextSpec {
+            text: Some("hi world".into()),
+            ..TextSpec::default()
+        }
+        .apply(&mut t);
+        assert_eq!((t.runs[0].start, t.runs[0].end), (3, 8), "the stretch follows its words");
+        TextSpec {
+            bold: Some(false),
+            ..TextSpec::default()
+        }
+        .apply(&mut t);
+        assert!(t.runs.is_empty(), "with no range, the whole text");
     }
 }
