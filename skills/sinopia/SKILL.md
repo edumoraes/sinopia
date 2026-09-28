@@ -176,6 +176,19 @@ machine), `bold`, `italic`, `underline`, `strike`, `align` (`left`,
 `bottom`), `leading` (line spacing as a share of the size, default 1.2),
 `tracking` (thousandths of an em), `rotation` (degrees).
 
+A stretch of a text can be set apart — a bold word, a red name, a
+bigger first line — with `runs`: each `{ "start": 0, "end": 5, … }` in
+characters, carrying only what it sets differently among `font`, `size`,
+`bold`, `italic`, `underline`, `strike`, `color` and `tracking`. Runs
+stand in order, inside the text, and never overlap; alignment, a frame's
+vertical alignment and leading are the whole text's.
+
+```json
+{ "type": "text", "id": "T2", "layer": "LT2", "x": 40, "y": 160, "w": 0, "h": 0,
+  "text": "Deploy on Friday", "size": 18, "color": "#333333",
+  "runs": [ { "start": 10, "end": 16, "bold": true, "color": "#c0392b" } ] }
+```
+
 So a diagram that reads itself is boxes (`rect`), arrows (`path`) and
 their labels (`text`), all in one fragment. Render a picture only for
 what is not words.
@@ -193,6 +206,7 @@ sinopia text add "Login → Token" --frame "Auth Flow" --at 20,30   # in a frame
 sinopia text add "A longer note that wraps." --width 240 --align justify
 sinopia text set "Deploy on Friday" --to "Deploy on Monday" --italic
 sinopia text set 01M3… --size 18 --bold false --at 100,-40
+sinopia text set "Deploy on Monday" --range 10:16 --bold --color "#c0392b"   # one stretch
 ```
 
 `add` answers `{"ev":"texted","id":…,"layer":…}`. Without `--frame` or
@@ -202,8 +216,10 @@ its lines). A text is named by its id, its layer's id, or the name its
 layer goes by — which is what it says, until the person renames it. `set`
 takes `--to` for the words, `--kind artistic|frame`, `--at X,Y` on the
 board, `--width`, `--height`, and every style flag `add` takes; a toggle
-given alone is on, `--bold false` turns it off. A text a lock keeps is
-refused.
+given alone is on, `--bold false` turns it off. With `--range START:END`
+the style lands on those characters alone (counted from 0, the end left
+out); without it, on the whole text — and any stretch set apart in what
+changed stops being set apart. A text a lock keeps is refused.
 
 ## The layers, when the person asks
 

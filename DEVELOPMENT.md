@@ -14,7 +14,7 @@ selection, navigation, pasted images, projects in tabs, frames, text,
 export to the agent, the CLI an agent asks the board through, and the
 packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1208 tests, and the plugin's
+- `cargo build` clean, `cargo test` with 1242 tests, and the plugin's
   own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,
@@ -467,7 +467,12 @@ packaging that distributes it (item 7):
   Sans in four styles, the default and the fallback — the size, bold,
   italic, underline, strikethrough, alignment (left, centre, right,
   justify), a frame's vertical alignment, line spacing, letter spacing
-  and the dock's ink. The **text bar** sets them, centred under the
+  and the dock's ink — and **a stretch of a text can be set apart** in
+  family, size, the four toggles, ink and letter spacing: styled from
+  the bar while it is selected in a text being typed (with nothing
+  selected, the bar sets the next letters typed), carried by what is
+  typed after it, and set on a line as tall as its tallest letters, all
+  of them on one baseline. The **text bar** sets them, centred under the
   strip like the brush's (which moved there too); its family is a menu
   that tries each face on the text as the pointer passes. `Ctrl+B`,
   `Ctrl+I`, `Ctrl+U`, Adobe's `Ctrl+Shift+L/C/R/J` and
@@ -496,7 +501,7 @@ packaging that distributes it (item 7):
   frames`, `agent read <frame> [--to <dir>]`, `agent add <file>` — and
   the `text` verb — `text list`, `text add <words> [--frame F] [--at
   X,Y] [--width W]` with the style's flags, and `text set <text> [--to
-  <words>]` with the same — and
+  <words>] [--range A:B]` with the same — and
   the `layer` verb, which drives every layer of the open board: `list`,
   `add`, `remove`, `rename`, `move` (into, above, below, or along the
   stack), `show`/`hide`, `lock`/`unlock`, `opacity`, `blend`, `color`,
@@ -526,8 +531,7 @@ packaging that distributes it (item 7):
   menu rows carry their own letters, and a selection nobody is shown is
   one nobody meant.
 
-Not yet: styling part of a text apart from the rest of it, a
-per-character fallback face, shaping past kerning pairs, shapes, export,
+Not yet: a per-character fallback face, shaping past kerning pairs, shapes, export,
 layer opacity and renaming, frames that nest or turn or come
 in more than the one basic kind, and the six sliders that stay
 muted — three randomness amounts whose scale the sets contradict, and
@@ -731,7 +735,8 @@ src/merge.rs     which siblings merge, whether exactly, and merging them either 
 src/editor.rs    active tool, held keys, stroke and its tip, pan/zoom gesture, selection and its drag, the active layer and the pick, the layer commands (pure, tested)
 src/editor/typing.rs  the Text tool and a text being typed into: placing, the session, keys, the pointer, its undo, the style where the bar looks (pure, tested)
 src/fonts.rs     faces by family and style: the bundled four, the machine's through fontconfig (pure but the two subprocesses, tested)
-src/typeset.rs   a text set: lines, alignment, justification, leading, tracking, kerning, and every caret place (pure, tested)
+src/typeset.rs   a text set: every letter in its own style, lines, alignment, justification, leading, tracking, kerning, and every caret place (pure, tested)
+src/spans.rs     a text's runs: resolved, laid over a stretch, following an edit, tidy (pure, tested)
 src/glyphs.rs    the board's glyph sheet: letters rasterized at the size seen, packed, the region owed the GPU (pure, tested)
 src/textbar.rs   the text properties bar, centred: kind, family, size, B I U S, alignment, and the paragraph it drops (pure, tested)
 src/dock.rs      bottom tool dock: layout, hit-test, illustrated icons + line fallback (pure, tested)
