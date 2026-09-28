@@ -45,7 +45,8 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick
+            qt6-declarative-dev-tools qml6-module-qttest qml6-module-qtquick \
+            qml6-module-qtqml-workerscript
       - run: /usr/lib/qt6/bin/qmltestrunner -input tests/plugin
         env:
           QT_QPA_PLATFORM: offscreen
