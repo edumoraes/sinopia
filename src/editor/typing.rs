@@ -591,7 +591,10 @@ impl Editor {
             if value.is_empty() {
                 return Change::Selection;
             }
-            let born = t.born.clone();
+            // The frame the press was in, while it is still on the board:
+            // one taken away since — an undo, the command line — leaves
+            // the text on the board where it was, as a stroke's does.
+            let born = t.born.clone().filter(|id| doc.frame_on(id).is_some());
             let mut text = t.pending.take().expect("pending");
             let layer = self.fresh_layer(doc, Kind::Text, born.as_deref());
             if let (Some(l), Some(name)) = (doc.layer_mut(&layer), name_of(&text.text)) {
@@ -799,6 +802,7 @@ impl Editor {
         text.id = new_id();
         let laid = Laid::of(&text, fonts);
         refit(&mut text, &laid);
+        let born = born.filter(|id| doc.frame_on(id).is_some());
         let layer = self.fresh_layer(doc, Kind::Text, born);
         if let (Some(l), Some(name)) = (doc.layer_mut(&layer), name_of(&text.text)) {
             l.name = name;
@@ -1744,5 +1748,25 @@ mod tests {
         });
         assert!(bad.is_err());
         assert_eq!(only(&doc).text, "after, and longer", "nothing of a refused change lands");
+    }
+
+    #[test]
+    fn a_text_whose_frame_went_before_its_first_letter_lands_on_the_board() {
+        let mut e = Editor::new();
+        let mut doc = Document::new("t");
+        e.set_tool(Tool::Frame, &mut doc);
+        let _ = e.press(Button::Left, &view(), at(0.0, 0.0), &mut doc, &crate::brush::Tip::PENCIL);
+        let _ = e.moved(&view(), at(200.0, 200.0), &mut doc);
+        let _ = e.release(Button::Left, &view(), at(200.0, 200.0), &mut doc, INK);
+        e.set_tool(Tool::Text, &mut doc);
+        let _ = click(&mut e, &mut doc, 50.0, 50.0);
+        // The frame is taken away — an undo, the command line — before
+        // anything is typed.
+        let frame_layer = doc.layers.last().unwrap().id.clone();
+        let (stack, i) = doc.locate(&frame_layer).map(|(s, i)| (s.map(str::to_owned), i)).unwrap();
+        doc.remove_layer(stack.as_deref(), i);
+        let _ = typed(&mut e, &mut doc, "still here");
+        let t = only(&doc);
+        assert_eq!(doc.context(&t.layer), None, "on the board, where its frame was");
     }
 }
