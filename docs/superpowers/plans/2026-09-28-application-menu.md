@@ -55,4 +55,4 @@ Wrap-up:
 - [x] `cargo build`, `cargo clippy --all-targets` with zero warnings;
       `cargo test`.
 - [x] Seen working in a window: every menu opens, a line runs.
-- [ ] PR stacked on #13; CI green.
+- [x] PR stacked on #13 (#14); CI green.
