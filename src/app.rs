@@ -211,6 +211,11 @@ struct App {
     /// uploaded. Empty until then, and a stroke that names a shape lays
     /// a plain round nib meanwhile.
     shapes: Shapes,
+    /// The faces the board's text is set in, and the sheet its letters
+    /// are rasterized into — with the slot that sheet is uploaded to.
+    fonts: crate::fonts::Fonts,
+    glyphs: crate::glyphs::Glyphs,
+    letters_slot: u32,
     /// The brush the palette last brought into sight. A change of hand
     /// glides the list to it; scrolling away from it does not snap back.
     shown_brush: Option<(usize, usize)>,
@@ -2102,14 +2107,17 @@ impl App {
         let frame = {
             let none = ImageSlots::new();
             let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
-            scene::document_prims(sub, view, images, &shapes, edge, None)
+            scene::document_prims(sub, view, images, &shapes, &self.letters(), edge, None)
         };
         self.shapes = shapes;
         let gfx = self
             .gfx
             .as_mut()
             .context("there is no window to draw with")?;
-        gfx.render_offscreen(w, h, ground, &frame)
+        gfx.sync_letters(&self.glyphs);
+        let drawn = gfx.render_offscreen(w, h, ground, &frame);
+        self.start_letters_over();
+        drawn
     }
 
     /// Takes the panel's thumbnails again when what they show may have
@@ -2150,7 +2158,15 @@ impl App {
                 frame.extend(sheet.checker(i));
                 let subject = thumbs::subject(self.doc(), id);
                 if let Some(content) = merge::raster_box(&subject) {
-                    let mut picture = scene::document_prims(&subject, &sheet.view(i, content), images, &shapes, edge, None);
+                    let mut picture = scene::document_prims(
+                        &subject,
+                        &sheet.view(i, content),
+                        images,
+                        &shapes,
+                        &self.letters(),
+                        edge,
+                        None,
+                    );
                     picture.cut(sheet.rect(i));
                     frame.append(picture);
                 }
@@ -2158,7 +2174,9 @@ impl App {
         }
         self.shapes = shapes;
         let Some(gfx) = self.gfx.as_mut() else { return };
+        gfx.sync_letters(&self.glyphs);
         let slot = gfx.render_thumbs(sheet.size(), &frame);
+        self.start_letters_over();
         self.thumbs = Some((sheet, slot));
         self.thumbs_stale = false;
     }
@@ -2540,6 +2558,27 @@ impl App {
         true
     }
 
+    /// What a text on the board is drawn with.
+    fn letters(&self) -> scene::Letters<'_> {
+        scene::Letters {
+            fonts: &self.fonts,
+            glyphs: &self.glyphs,
+            slot: self.letters_slot,
+        }
+    }
+
+    /// Starts the glyph sheet over when a frame found it full, and says
+    /// so: the glyphs that did not fit were left out of what was just
+    /// drawn, and the next frame rasterizes what it needs into a clean
+    /// sheet.
+    fn start_letters_over(&self) -> bool {
+        let full = self.glyphs.is_full();
+        if full {
+            self.glyphs.clear();
+        }
+        full
+    }
+
     /// The four image sheets the binary ships: illustrated dock tools,
     /// brush icons for the library, the agents' logos for the export
     /// dialog, and nib shapes for the canvas. They are raster art, the
@@ -2662,6 +2701,7 @@ impl App {
             view,
             images,
             &self.shapes,
+            &self.letters(),
             edge,
             live,
         ));
@@ -3860,7 +3900,8 @@ impl ApplicationHandler<UserEvent> for App {
             Err(e) => return self.fail(event_loop, anyhow::anyhow!("creating window: {e}")),
         };
         match Gfx::new(window.clone()) {
-            Ok(gfx) => {
+            Ok(mut gfx) => {
+                self.letters_slot = gfx.letters_slot();
                 self.gfx = Some(gfx);
                 let proxy = self.proxy.clone();
                 let sink = move |g| proxy.send_event(UserEvent::Gesture(g)).is_ok();
@@ -4072,7 +4113,12 @@ impl App {
                 let Some(view) = self.view() else { return };
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
-                match gfx.render(self.theme.bg, &frame) {
+                gfx.sync_letters(&self.glyphs);
+                let drawn = gfx.render(self.theme.bg, &frame);
+                if self.start_letters_over() {
+                    self.redraw();
+                }
+                match drawn {
                     Ok(presented) => {
                         if let Some(n) = &mut self.smoke_frames_left {
                             if presented {
@@ -4427,6 +4473,9 @@ pub fn run(
         icon_slot: 0,
         agent_logo_slot: None,
         shapes: Shapes::default(),
+        fonts: crate::fonts::machine(),
+        glyphs: crate::glyphs::Glyphs::default(),
+        letters_slot: 0,
         shown_brush: None,
         carry: None,
         pressed: None,

@@ -89,9 +89,6 @@ pub struct Glyphs {
     shelf: Cell<Shelf>,
     dirty: Cell<Option<Region>>,
     full: Cell<bool>,
-    /// Counts the times the sheet started over, so the renderer can tell
-    /// a sheet it has to upload whole from one it holds already.
-    generation: Cell<u64>,
 }
 
 impl Default for Glyphs {
@@ -119,7 +116,6 @@ impl Glyphs {
             }),
             dirty: Cell::new(None),
             full: Cell::new(false),
-            generation: Cell::new(0),
         }
     }
 
@@ -230,11 +226,6 @@ impl Glyphs {
         self.dirty
             .set((!sheet.rgba.is_empty()).then_some((0, 0, self.side, self.side)));
         self.full.set(false);
-        self.generation.set(self.generation.get() + 1);
-    }
-
-    pub fn generation(&self) -> u64 {
-        self.generation.get()
     }
 
     /// The sheet as it stands — empty until the first glyph lands.
@@ -319,10 +310,8 @@ mod tests {
         let g = Glyphs::with_side(128);
         let placed = "ABCDEFGH".chars().filter_map(|c| g.cell(&face, c, 60)).count();
         assert!(placed < 8 && g.is_full(), "{placed} of 8 fit");
-        let before = g.generation();
         g.clear();
         assert!(!g.is_full());
-        assert_eq!(g.generation(), before + 1);
         assert_eq!(g.take_dirty(), Some((0, 0, 128, 128)), "the whole sheet is owed");
         assert!(g.bitmap().rgba.iter().all(|&b| b == 0));
         assert!(g.cell(&face, 'A', 60).is_some());
