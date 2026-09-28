@@ -121,15 +121,22 @@ impl Menu {
             .map(|i| if i.rule { (ITEM + RULE) * s } else { ITEM * s })
             .sum();
         let margin = PADDING * s;
-        let room = (viewport.h as f32 - 2.0 * margin).max(0.0);
-        let h = (content + 2.0 * PADDING * s).min(room);
+        let full = content + 2.0 * PADDING * s;
         let below = at.y + at.h + GAP * s;
-        let y = if below + h <= viewport.h as f32 - margin {
-            below
-        } else if at.y - GAP * s - h >= margin {
-            at.y - GAP * s - h
+        let under = (viewport.h as f32 - margin - below).max(0.0);
+        let over = (at.y - GAP * s - margin).max(0.0);
+        // Under what opened it when it fits there, over it when it fits
+        // there instead; too tall for either, it hangs on the side with
+        // more room, cut to it and scrolling — never over the thing it
+        // was opened from, which is what a pointer goes back to.
+        let (y, h) = if full <= under {
+            (below, full)
+        } else if full <= over {
+            (at.y - GAP * s - full, full)
+        } else if under >= over {
+            (below, under)
         } else {
-            (viewport.h as f32 - margin - h).max(margin)
+            (margin, over)
         };
         let x = at.x.min(viewport.w as f32 - margin - w).max(margin);
         let rect = ScreenRect { x, y, w, h };
@@ -326,6 +333,23 @@ mod tests {
         let far = Menu::layout(VP, 1.0, button(100.0, 100.0), &a, &items(60), 1e6);
         assert_eq!(far.scroll(), far.max_scroll());
         assert_eq!(far.rows.last().unwrap().1, 59, "the last item comes into sight");
+    }
+
+    #[test]
+    fn a_menu_too_tall_for_either_side_hangs_on_the_roomier_one_and_scrolls() {
+        let a = atlas();
+        // A button near the top: there is more room under it, and the
+        // menu hangs there cut to it, never over the button.
+        let at = button(100.0, 40.0);
+        let m = Menu::layout(VP, 1.0, at, &a, &items(300), 0.0);
+        assert!(m.rect.y >= at.y + at.h, "under what opened it");
+        assert!(m.rect.y + m.rect.h <= 800.0);
+        assert!(m.max_scroll() > 0.0);
+        // Near the bottom, over it.
+        let at = button(100.0, 700.0);
+        let m = Menu::layout(VP, 1.0, at, &a, &items(300), 0.0);
+        assert!(m.rect.y + m.rect.h <= at.y, "over what opened it");
+        assert!(m.rect.y >= 0.0);
     }
 
     #[test]
