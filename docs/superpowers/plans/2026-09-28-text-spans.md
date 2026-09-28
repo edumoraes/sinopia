@@ -40,4 +40,4 @@ runs saying the same are one, and a run saying nothing is dropped.
       --range A:B`.
 - [x] Skill, AGENTS.md, DEVELOPMENT.md.
 - [x] Zero warnings, `cargo test`, seen working in a window.
-- [ ] PR stacked on #15; CI green.
+- [x] PR stacked on #15 (#16); CI green.
