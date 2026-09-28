@@ -21,38 +21,38 @@ away.
 
 Pure half (`menubar`, tested):
 
-- [ ] `Action`: what a line does — New, Open, Save, Save As, Export,
+- [x] `Action`: what a line does — New, Open, Save, Save As, Export,
       Close, Quit; Undo, Redo, Cut, Copy, Paste, Delete; the layers
       panel and the brush library; New Layer, New Group, Rename, and
       every layer `Command`.
-- [ ] `menubar::shortcut`: the `Ctrl` keys, one mapping for the window
+- [x] `menubar::shortcut`: the `Ctrl` keys, one mapping for the window
       and the menu — `layer_key` moves in, so a hint cannot disagree
       with the key it names.
-- [ ] `menubar::items(title, &State)`: each menu's lines, enabled only
+- [x] `menubar::items(title, &State)`: each menu's lines, enabled only
       where the thing would happen (undo with a past, redo with a
       future, paste with something to paste, a layer command where
       `Editor::can` says so), the checks on what is shown, and every
       hint answering to `shortcut`.
-- [ ] `History::can_undo` / `can_redo` public: a line greyed out is the
+- [x] `History::can_undo` / `can_redo` public: a line greyed out is the
       question the comment said nobody asked yet.
-- [ ] `Tabs::layout` takes where the row starts, so the titles have room.
-- [ ] `Bar::layout` / `hit` / `prims`: the titles measured with the
+- [x] `Tabs::layout` takes where the row starts, so the titles have room.
+- [x] `Bar::layout` / `hit` / `prims`: the titles measured with the
       atlas, the open one lit.
 
 Shell (`app`):
 
-- [ ] The key handler asks `menubar::shortcut` and runs the action.
-- [ ] `Ctrl+N` opens a new board and `Ctrl+Q` quits — the two keys every
+- [x] The key handler asks `menubar::shortcut` and runs the action.
+- [x] `Ctrl+N` opens a new board and `Ctrl+Q` quits — the two keys every
       desktop app has, for things the board already does.
-- [ ] The bar is drawn in the strip; a press on a title opens its menu
+- [x] The bar is drawn in the strip; a press on a title opens its menu
       (and closes it when it is the one open); passing to another title
       switches; a line taken runs its action.
-- [ ] Hit order: menu bar before the tab strip.
+- [x] Hit order: menu bar before the tab strip.
 
 Wrap-up:
 
-- [ ] AGENTS.md (module list, hit order), DEVELOPMENT.md, README keys.
-- [ ] `cargo build`, `cargo clippy --all-targets` with zero warnings;
+- [x] AGENTS.md (module list, hit order), DEVELOPMENT.md.
+- [x] `cargo build`, `cargo clippy --all-targets` with zero warnings;
       `cargo test`.
-- [ ] Seen working in a window: every menu opens, a line runs.
+- [x] Seen working in a window: every menu opens, a line runs.
 - [ ] PR stacked on #13; CI green.
