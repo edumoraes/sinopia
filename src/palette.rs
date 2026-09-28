@@ -327,7 +327,8 @@ const DRAWN_SPANS: usize = 16;
 /// wide as the brush is — a hairline for a liner, a band for an airbrush,
 /// on a scale that keeps both inside the box — its edge as soft as the
 /// brush's, its ends thinned as far as the pen thins it, laid at its own
-/// strength. An eraser is the same wave in the muted ink with a block
+/// strength. A flattened nib swells and thins with the way the wave runs
+/// across it, as a chisel does. An eraser is the same wave in the muted ink with a block
 /// over its end. The ink is mixed with the panel rather than laid
 /// translucent, so the spans that meet at every joint do not bead.
 fn drawn(brush: &Brush, r: ScreenRect, theme: &Theme) -> Vec<Prim> {
@@ -336,8 +337,8 @@ fn drawn(brush: &Brush, r: ScreenRect, theme: &Theme) -> Vec<Prim> {
     let color = scene::mix(theme.panel, ink, brush.opacity.clamp(0.35, 1.0) as f32);
     // Sizes run over two decades; the width follows their logarithm.
     let reach = (brush.size.max(1.0).ln() / 100f64.ln()).clamp(0.0, 1.0) as f32;
-    let half = r.w * (0.03 + 0.09 * reach);
-    let feather = (1.0 - brush.hardness as f32) * half * 2.0;
+    let half = r.w * (0.02 + 0.13 * reach);
+    let feather = (1.0 - brush.hardness as f32) * half * 1.2;
     let drive = brush.pressure.size.clamp(0.0, 1.0) as f32;
     let (cy, amp) = (r.y + r.h / 2.0, r.h * 0.16);
     let at = |t: f32| {
@@ -355,8 +356,14 @@ fn drawn(brush: &Brush, r: ScreenRect, theme: &Theme) -> Vec<Prim> {
             // Full in the middle of the stroke, thinned toward both ends
             // by as much of the width as the pen takes away.
             let swell = (std::f32::consts::PI * (t0 + t1) / 2.0).sin();
-            let w = (half * (1.0 - drive * (1.0 - swell))).max(0.6);
-            Prim::soft_segment(at(t0), at(t1), w, feather, color)
+            let (a, b) = (at(t0), at(t1));
+            // How far the nib reaches across the way this span runs: all
+            // of its length side-on, only its thickness edge-on.
+            let across = (b.1 - a.1).atan2(b.0 - a.0) - (brush.rotation as f32).to_radians();
+            let round = brush.roundness.clamp(0.0, 1.0) as f32;
+            let nib = (across.sin().powi(2) + (round * across.cos()).powi(2)).sqrt();
+            let w = (half * nib * (1.0 - drive * (1.0 - swell))).max(0.6);
+            Prim::soft_segment(a, b, w, feather, color)
         })
         .collect();
     if erases {
@@ -525,6 +532,14 @@ mod tests {
             brush_icon(find("Eraser"), r, None, &theme).len() > liner.len(),
             "an eraser wears its block"
         );
+        let widths: Vec<f32> = brush_icon(find("Marker"), r, None, &theme)
+            .iter()
+            .map(|q| q.radius)
+            .collect();
+        let (thin, thick) = widths
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(lo, hi), &w| (lo.min(w), hi.max(w)));
+        assert!(thick > 2.0 * thin, "a chisel swells and thins: {thin}..{thick}");
     }
 
     #[test]
