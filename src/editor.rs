@@ -27,18 +27,20 @@ pub enum Tool {
     Pencil,
     Brush,
     Frame,
+    Shape,
     Text,
     Zoom,
 }
 
 impl Tool {
     /// Dock order.
-    pub const ALL: [Tool; 7] = [
+    pub const ALL: [Tool; 8] = [
         Tool::Select,
         Tool::Hand,
         Tool::Pencil,
         Tool::Brush,
         Tool::Frame,
+        Tool::Shape,
         Tool::Text,
         Tool::Zoom,
     ];
@@ -50,6 +52,8 @@ impl Tool {
             Tool::Pencil => 'p',
             Tool::Brush => 'b',
             Tool::Frame => 'f',
+            // Photoshop's, whose shapes all share it.
+            Tool::Shape => 'u',
             Tool::Text => 't',
             Tool::Zoom => 'z',
         }
@@ -3504,6 +3508,7 @@ mod tests {
         assert_eq!(Tool::from_hotkey('h'), Some(Tool::Hand));
         assert_eq!(Tool::from_hotkey('z'), Some(Tool::Zoom));
         assert_eq!(Tool::from_hotkey('b'), Some(Tool::Brush));
+        assert_eq!(Tool::from_hotkey('u'), Some(Tool::Shape), "Photoshop's key for its shapes");
         assert_eq!(Tool::from_hotkey('x'), None);
         for t in Tool::ALL {
             assert_eq!(Tool::from_hotkey(t.hotkey()), Some(t));
@@ -3511,7 +3516,7 @@ mod tests {
     }
 
     #[test]
-    fn dock_order_is_select_hand_pencil_brush_frame_text_zoom() {
+    fn dock_order_is_select_hand_pencil_brush_frame_shape_text_zoom() {
         assert_eq!(
             Tool::ALL,
             [
@@ -3520,6 +3525,7 @@ mod tests {
                 Tool::Pencil,
                 Tool::Brush,
                 Tool::Frame,
+                Tool::Shape,
                 Tool::Text,
                 Tool::Zoom
             ]
