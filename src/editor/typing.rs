@@ -15,7 +15,8 @@
 //! where a letter is drawn.
 
 use super::{CLICK_SLOP_PX, Change, Editor, HIT_SLOP_PX, MIN_FRAME_PX, Tool, point};
-use crate::doc::{Document, Element, Kind, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Text, TextMode, TextStyle, new_id};
+use crate::doc::{Document, Element, Kind, MAX_TEXT_SIZE, MIN_TEXT_SIZE, Run, RunStyle, Text, TextMode, TextStyle, new_id};
+use crate::spans;
 use crate::field::Field;
 use crate::fonts::Fonts;
 use crate::geom::{Frame, Point};
@@ -101,6 +102,7 @@ struct Snap {
     value: String,
     caret: usize,
     anchor: Option<usize>,
+    runs: Vec<Run>,
 }
 
 /// A text being typed into.
@@ -126,6 +128,21 @@ pub struct Typing {
     last: Option<(Edit, bool)>,
     /// A drag through the text, and the span its press took.
     dragging: Option<(Unit, usize, usize)>,
+    /// What the bar set with nothing selected: the next letters typed
+    /// wear it, and a move of the caret forgets it.
+    carry: Option<RunStyle>,
+    /// The runs an undo put back, for the next write to lay down as they
+    /// were rather than follow the edit it undid.
+    restore: Option<Vec<Run>>,
+}
+
+/// How the texts the bar looks at are set — what the font menu puts back
+/// when it is left without a line taken: each text's style and runs, and
+/// what was set for the next letters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Look {
+    texts: Vec<(String, TextStyle, Vec<Run>)>,
+    carry: Option<RunStyle>,
 }
 
 /// The sizes `Ctrl+Shift+>` and `<` step through: Adobe's own list,
@@ -459,6 +476,7 @@ impl Editor {
         }
         t.goal = None;
         t.last = None;
+        t.carry = None;
     }
 
     /// The press of a Text tool gesture came back up: a text opens where
@@ -538,6 +556,8 @@ impl Editor {
             redo: Vec::new(),
             last: None,
             dragging: None,
+            carry: None,
+            restore: None,
         });
         self.folding = Some(session);
         self.selection.clear();
@@ -590,21 +610,25 @@ impl Editor {
     /// Takes a state the typing's undo can come back to, before an edit
     /// of `edit`'s kind — unless it carries on the run the last one
     /// started. A run of inserts is cut where a word starts after a space.
-    fn before(&mut self, edit: Edit, spaced: bool) {
+    fn before(&mut self, doc: &Document, edit: Option<Edit>, spaced: bool) {
+        let runs = self.typed(doc).map(|t| t.runs.clone()).unwrap_or_default();
         let Some(t) = self.typing.as_mut() else { return };
-        let starts = match t.last {
-            Some((last, was_space)) => last != edit || (edit == Edit::Insert && was_space && !spaced),
-            None => true,
+        let starts = match (t.last, edit) {
+            (Some((last, was_space)), Some(edit)) => {
+                last != edit || (edit == Edit::Insert && was_space && !spaced)
+            }
+            _ => true,
         };
         if starts {
             t.undo.push(Snap {
                 value: t.field.value().to_owned(),
                 caret: t.field.caret(),
                 anchor: t.field.anchor(),
+                runs,
             });
         }
         t.redo.clear();
-        t.last = Some((edit, spaced));
+        t.last = edit.map(|e| (e, spaced));
     }
 
     /// Writes what the field holds into the text, putting a new one on
@@ -621,8 +645,28 @@ impl Editor {
         };
         t.goal = None;
         let value = t.field.value().to_owned();
+        let (carry, restore) = (t.carry.clone(), t.restore.take());
+        // The runs follow the edit — what is typed wears the style of the
+        // letter before it, and what the bar set for it — or are what an
+        // undo put back. What was set for the next letters is spent once
+        // a letter wears it.
+        let follow = |text: &mut Text| -> bool {
+            if text.text == value && restore.is_none() {
+                return false;
+            }
+            let n = text.text.chars().count();
+            let edit = spans::edit_between(&text.text, &value);
+            text.runs = match &restore {
+                Some(runs) => runs.clone(),
+                None => spans::edit(&text.runs, n, &text.style, edit, carry.as_ref()),
+            };
+            value.clone_into(&mut text.text);
+            edit.2 > 0
+        };
         if let Some(pending) = t.pending.as_mut() {
-            pending.text = value.clone();
+            if follow(pending) {
+                t.carry = None;
+            }
             let laid = Laid::of(pending, fonts);
             refit(pending, &laid);
             t.laid = laid;
@@ -646,15 +690,19 @@ impl Editor {
         let Some(text) = text_mut(doc, &id) else {
             return Change::None;
         };
-        if text.text == value {
+        let was = text.text.clone();
+        let (runs_were, inserted) = (text.runs.clone(), follow(text));
+        if text.text == was && text.runs == runs_were {
             return Change::Selection;
         }
-        let was = std::mem::replace(&mut text.text, value);
         let laid = Laid::of(text, fonts);
         refit(text, &laid);
         let (layer, now) = (text.layer.clone(), text.text.clone());
         if let Some(t) = self.typing.as_mut() {
             t.laid = laid;
+            if inserted {
+                t.carry = None;
+            }
         }
         rename_after(doc, &layer, &was, &now);
         Change::Scene
@@ -669,7 +717,7 @@ impl Editor {
             return Change::None;
         }
         let spaced = clean.chars().last().is_some_and(char::is_whitespace);
-        self.before(Edit::Insert, spaced);
+        self.before(doc, Some(Edit::Insert), spaced);
         if let Some(t) = self.typing.as_mut() {
             t.field.insert_str(&clean);
         }
@@ -682,7 +730,7 @@ impl Editor {
         if self.typing.is_none() {
             return Change::None;
         }
-        self.before(Edit::Insert, true);
+        self.before(doc, Some(Edit::Insert), true);
         if let Some(t) = self.typing.as_mut() {
             t.field.paste(s);
             t.last = None;
@@ -701,6 +749,7 @@ impl Editor {
                     return Change::None;
                 };
                 t.last = None;
+                t.carry = None;
                 let caret = t.field.caret();
                 let goal = t.goal.unwrap_or_else(|| t.laid.caret(caret).0);
                 let mut keep_goal = false;
@@ -726,7 +775,7 @@ impl Editor {
                 Change::Selection
             }
             TextKey::Backspace | TextKey::WordBackspace | TextKey::Delete | TextKey::WordDelete => {
-                self.before(Edit::Delete, false);
+                self.before(doc, Some(Edit::Delete), false);
                 if let Some(t) = self.typing.as_mut() {
                     let word = matches!(key, TextKey::WordBackspace | TextKey::WordDelete);
                     let back = matches!(key, TextKey::Backspace | TextKey::WordBackspace);
@@ -746,7 +795,7 @@ impl Editor {
                 self.write(doc, fonts)
             }
             TextKey::Newline => {
-                self.before(Edit::Insert, true);
+                self.before(doc, Some(Edit::Insert), true);
                 if let Some(t) = self.typing.as_mut() {
                     t.field.newline();
                 }
@@ -756,10 +805,12 @@ impl Editor {
                 if let Some(t) = self.typing.as_mut() {
                     t.field.select_all();
                     t.last = None;
+                    t.carry = None;
                 }
                 Change::Selection
             }
             TextKey::Undo | TextKey::Redo => {
+                let runs = self.typed(doc).map(|t| t.runs.clone()).unwrap_or_default();
                 let Some(t) = self.typing.as_mut() else {
                     return Change::None;
                 };
@@ -775,8 +826,11 @@ impl Editor {
                     value: t.field.value().to_owned(),
                     caret: t.field.caret(),
                     anchor: t.field.anchor(),
+                    runs,
                 });
                 t.field.restore(&snap.value, snap.caret, snap.anchor);
+                t.restore = Some(snap.runs);
+                t.carry = None;
                 t.last = None;
                 self.write(doc, fonts)
             }
@@ -794,7 +848,7 @@ impl Editor {
         let Some(text) = self.copied_text() else {
             return (None, Change::None);
         };
-        self.before(Edit::Delete, false);
+        self.before(doc, Some(Edit::Delete), false);
         if let Some(t) = self.typing.as_mut() {
             t.field.cut();
             t.last = None;
@@ -903,12 +957,24 @@ impl Editor {
             .collect()
     }
 
-    /// How text is set where the text bar is looking: the text being
-    /// typed, else the first text selected, else what the next text is
-    /// born with.
+    /// How text is set where the text bar is looking: in the text being
+    /// typed, the start of the selection — or with nothing selected, the
+    /// letter before the caret, with what was set for the next letters on
+    /// top; else the first text selected; else what the next text is born
+    /// with.
     pub fn text_style(&self, doc: &Document) -> TextStyle {
-        if let Some(t) = self.typing.as_ref().and_then(|t| t.pending.as_ref()) {
-            return t.style.clone();
+        if let (Some(t), Some(text)) = (self.typing.as_ref(), self.typed(doc)) {
+            let n = text.text.chars().count();
+            let at = match t.field.selection() {
+                Some((a, _)) => Some(a),
+                None if n == 0 => None,
+                None => Some(t.field.caret().saturating_sub(1).min(n - 1)),
+            };
+            let style = at.map_or_else(|| text.style.clone(), |i| spans::style_at(&text.style, &text.runs, i));
+            return match (&t.carry, t.field.selection()) {
+                (Some(carry), None) => carry.over(&style),
+                _ => style,
+            };
         }
         self.targets(doc)
             .first()
@@ -933,9 +999,16 @@ impl Editor {
         self.typing.is_some() || !self.targets(doc).is_empty()
     }
 
-    /// Changes how text is set where the bar is looking — the text being
-    /// typed, or every text selected, or the next one — and fits every
-    /// artistic text it changed to its new measure.
+    /// Changes how text is set where the bar is looking, and fits every
+    /// artistic text it changed to its new measure:
+    ///
+    /// - in a text being typed, what a run may set goes to the stretch
+    ///   selected — or, with nothing selected, to the next letters typed —
+    ///   while what a paragraph is goes to the whole text; a text that
+    ///   says nothing yet takes all of it as its own;
+    /// - on texts selected, the whole of each: their own style, and the
+    ///   stretches set apart in them no longer set apart in what changed;
+    /// - with neither, the next text.
     pub fn restyle(&mut self, doc: &mut Document, fonts: &Fonts, change: impl Fn(&mut TextStyle)) -> Change {
         let settle = |s: &mut TextStyle| {
             change(s);
@@ -943,14 +1016,8 @@ impl Editor {
             s.leading = s.leading.clamp(crate::doc::MIN_LEADING, crate::doc::MAX_LEADING);
             s.tracking = s.tracking.clamp(crate::doc::MIN_TRACKING, crate::doc::MAX_TRACKING);
         };
-        if let Some(t) = self.typing.as_mut()
-            && let Some(pending) = t.pending.as_mut()
-        {
-            settle(&mut pending.style);
-            let laid = Laid::of(pending, fonts);
-            refit(pending, &laid);
-            t.laid = laid;
-            return Change::Selection;
+        if self.typing.is_some() {
+            return self.restyle_typing(doc, fonts, &settle);
         }
         let targets = self.targets(doc);
         if targets.is_empty() {
@@ -962,51 +1029,114 @@ impl Editor {
             let Some(text) = text_mut(doc, id) else { continue };
             let was = text.style.clone();
             settle(&mut text.style);
-            if text.style == was {
+            let patch = spans::diff(&was, &text.style);
+            let runs = spans::strip(&text.runs, text.text.chars().count(), &text.style, &patch);
+            if text.style == was && runs == text.runs {
                 continue;
             }
+            text.runs = runs;
             changed = true;
             let laid = Laid::of(text, fonts);
             refit(text, &laid);
-            if let Some(t) = self.typing.as_mut().filter(|t| &t.id == id) {
-                t.laid = laid;
-            }
         }
         if changed { Change::Scene } else { Change::Selection }
     }
 
-    /// Every text the bar is looking at, with the family it is set in: what
-    /// the font menu puts back when it is left without a line taken.
-    pub fn text_fonts(&self, doc: &Document) -> Vec<(String, String)> {
-        if let Some(pending) = self.typing.as_ref().and_then(|t| t.pending.as_ref()) {
-            return vec![(pending.id.clone(), pending.style.font.clone())];
+    /// [`Editor::restyle`] on the text being typed.
+    fn restyle_typing(&mut self, doc: &mut Document, fonts: &Fonts, settle: &impl Fn(&mut TextStyle)) -> Change {
+        let Some(text) = self.typed(doc).cloned() else {
+            return Change::None;
+        };
+        let Some(t) = self.typing.as_ref() else {
+            return Change::None;
+        };
+        let selection = t.field.selection();
+        let before = self.text_style(doc);
+        let mut after = before.clone();
+        settle(&mut after);
+        let patch = spans::diff(&before, &after);
+        let mut next = text.clone();
+        // What a paragraph is, the whole text's.
+        next.style.align = after.align;
+        next.style.valign = after.valign;
+        next.style.leading = after.leading;
+        let n = text.text.chars().count();
+        let mut carry = t.carry.clone();
+        match selection {
+            // A text that says nothing yet is set as a whole.
+            _ if n == 0 => {
+                settle(&mut next.style);
+                carry = None;
+            }
+            Some((a, b)) => next.runs = spans::apply(&text.runs, n, &next.style, a, b, &patch),
+            None if !patch.is_empty() => carry = Some(spans::merge(&carry.unwrap_or_default(), &patch)),
+            None => {}
         }
-        self.targets(doc)
-            .into_iter()
-            .filter_map(|id| text_of(doc, &id).map(|t| (id.clone(), t.style.font.clone())))
-            .collect()
+        if next == text && carry == t.carry {
+            return Change::Selection;
+        }
+        // A style laid over a stretch is a step of the typing's own undo.
+        if next.runs != text.runs {
+            self.before(doc, None, false);
+        }
+        let laid = Laid::of(&next, fonts);
+        refit(&mut next, &laid);
+        let Some(t) = self.typing.as_mut() else {
+            return Change::None;
+        };
+        t.carry = carry;
+        t.laid = laid;
+        if let Some(pending) = t.pending.as_mut() {
+            *pending = next;
+            return Change::Selection;
+        }
+        if next == text {
+            return Change::Selection;
+        }
+        if let Some(on_board) = text_mut(doc, &t.id) {
+            *on_board = next;
+        }
+        Change::Scene
     }
 
-    /// Sets every text in `was` back in the family it names, fitting
-    /// artistic text to it again.
-    pub fn put_fonts_back(&mut self, doc: &mut Document, fonts: &Fonts, was: &[(String, String)]) {
-        for (id, family) in was {
+    /// How the texts the bar is looking at are set, whole: what the font
+    /// menu puts back when it is left without a line taken.
+    pub fn text_look(&self, doc: &Document) -> Look {
+        let texts = match self.typing.as_ref().and_then(|t| t.pending.as_ref()) {
+            Some(pending) => vec![pending.clone()],
+            None => self.targets(doc).iter().filter_map(|id| text_of(doc, id).cloned()).collect(),
+        };
+        Look {
+            texts: texts.into_iter().map(|t| (t.id, t.style, t.runs)).collect(),
+            carry: self.typing.as_ref().and_then(|t| t.carry.clone()),
+        }
+    }
+
+    /// Sets every text in `look` back as it was — style, stretches and
+    /// what was set for the next letters — fitting artistic text again.
+    pub fn put_look_back(&mut self, doc: &mut Document, fonts: &Fonts, look: &Look) {
+        if let Some(t) = self.typing.as_mut() {
+            t.carry.clone_from(&look.carry);
+        }
+        for (id, style, runs) in &look.texts {
+            let put = |text: &mut Text| {
+                text.style.clone_from(style);
+                text.runs.clone_from(runs);
+                let laid = Laid::of(text, fonts);
+                refit(text, &laid);
+                laid
+            };
             if let Some(t) = self.typing.as_mut()
                 && let Some(pending) = t.pending.as_mut().filter(|p| &p.id == id)
             {
-                family.clone_into(&mut pending.style.font);
-                let laid = Laid::of(pending, fonts);
-                refit(pending, &laid);
-                t.laid = laid;
+                t.laid = put(pending);
                 continue;
             }
             let Some(text) = text_mut(doc, id) else { continue };
-            if text.style.font == *family {
+            if text.style == *style && text.runs == *runs {
                 continue;
             }
-            family.clone_into(&mut text.style.font);
-            let laid = Laid::of(text, fonts);
-            refit(text, &laid);
+            let laid = put(text);
             if let Some(t) = self.typing.as_mut().filter(|t| &t.id == id) {
                 t.laid = laid;
             }
@@ -1691,14 +1821,13 @@ mod tests {
     #[test]
     fn a_family_tried_from_the_menu_is_put_back_as_it_was() {
         let (mut e, mut doc) = with_text("try me");
-        let was = e.text_fonts(&doc);
-        assert_eq!(was, [(only(&doc).id.clone(), DEFAULT_FONT.to_owned())]);
+        let was = e.text_look(&doc);
         let w = only(&doc).w;
         let _ = e.restyle(&mut doc, &fonts(), |s| s.font = "Elsewhere".into());
         let _ = e.restyle(&mut doc, &fonts(), |s| s.size = 60.0);
-        e.put_fonts_back(&mut doc, &fonts(), &was);
+        e.put_look_back(&mut doc, &fonts(), &was);
         assert_eq!(only(&doc).style.font, DEFAULT_FONT);
-        assert!(only(&doc).w > w, "only the family goes back");
+        assert!((only(&doc).w - w).abs() < 1e-9, "the text is as it was, and fits it");
     }
 
     #[test]
@@ -1845,5 +1974,138 @@ mod tests {
         let _ = e.edit_text(&t.id, &mut doc, &fonts(), None);
         assert!(!e.leaves_text(&view(), at(t.x + 2.0, t.y + 2.0), &doc));
         assert!(e.leaves_text(&view(), at(t.x + 300.0, t.y + 300.0), &doc));
+    }
+
+    fn bold_on(s: &mut TextStyle) {
+        s.bold = true;
+    }
+
+    fn select(e: &mut Editor, doc: &mut Document, a: usize, b: usize) {
+        let _ = key(e, doc, TextKey::Go(Move::Home, false));
+        for _ in 0..a {
+            let _ = key(e, doc, TextKey::Go(Move::Right, false));
+        }
+        for _ in a..b {
+            let _ = key(e, doc, TextKey::Go(Move::Right, true));
+        }
+    }
+
+    #[test]
+    fn a_style_set_while_a_stretch_is_selected_sets_that_stretch_alone() {
+        let mut e = texting();
+        let mut doc = Document::new("t");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "one two three");
+        select(&mut e, &mut doc, 4, 7);
+        let w = only(&doc).w;
+        assert_eq!(e.restyle(&mut doc, &fonts(), bold_on), Change::Scene);
+        let t = only(&doc);
+        assert!(!t.style.bold, "the text's own style stays");
+        assert_eq!(t.runs.len(), 1);
+        assert_eq!((t.runs[0].start, t.runs[0].end, t.runs[0].style.bold), (4, 7, Some(true)));
+        assert!(t.w > w, "artistic text fits its bolder word");
+        assert!(e.text_style(&doc).bold, "the bar shows the selection's style");
+        // A paragraph's own settings are the whole text's even so.
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.align = Align::Center);
+        assert_eq!(only(&doc).style.align, Align::Center);
+    }
+
+    #[test]
+    fn what_is_typed_takes_the_style_of_the_letter_before_it() {
+        let mut e = texting();
+        let mut doc = Document::new("t");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "ab");
+        select(&mut e, &mut doc, 0, 2);
+        let _ = e.restyle(&mut doc, &fonts(), bold_on);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::End, false));
+        let _ = typed(&mut e, &mut doc, "cd");
+        let t = only(&doc);
+        assert_eq!((t.runs[0].start, t.runs[0].end), (0, 4), "bold carries on");
+        let _ = key(&mut e, &mut doc, TextKey::Backspace);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Home, false));
+        let _ = key(&mut e, &mut doc, TextKey::Delete);
+        let t = only(&doc);
+        assert_eq!(t.text, "bc");
+        assert_eq!((t.runs[0].start, t.runs[0].end), (0, 2), "and goes where the letters go");
+    }
+
+    #[test]
+    fn a_style_set_with_nothing_selected_is_the_next_letters_until_the_caret_moves() {
+        let mut e = texting();
+        let mut doc = Document::new("t");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "plain ");
+        assert_eq!(e.restyle(&mut doc, &fonts(), bold_on), Change::Selection, "nothing changes yet");
+        assert!(only(&doc).runs.is_empty());
+        assert!(e.text_style(&doc).bold, "the bar says what is coming");
+        let _ = typed(&mut e, &mut doc, "bold");
+        let t = only(&doc);
+        assert_eq!((t.runs[0].start, t.runs[0].end), (6, 10));
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.italic = true);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Left, false));
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::Right, false));
+        let _ = typed(&mut e, &mut doc, "!");
+        let t = only(&doc);
+        assert!(t.runs.iter().all(|r| r.style.italic.is_none()), "a move forgot the italic");
+        assert_eq!(t.runs.last().unwrap().end, 11, "the bold carried on");
+    }
+
+    #[test]
+    fn the_typings_undo_puts_the_styles_back_too() {
+        let mut e = texting();
+        let mut doc = Document::new("t");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "word ");
+        select(&mut e, &mut doc, 0, 4);
+        let _ = e.restyle(&mut doc, &fonts(), bold_on);
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::End, false));
+        let _ = typed(&mut e, &mut doc, "next");
+        let _ = key(&mut e, &mut doc, TextKey::Undo);
+        let t = only(&doc);
+        assert_eq!(t.text, "word ");
+        assert_eq!((t.runs[0].start, t.runs[0].end), (0, 4));
+        let _ = key(&mut e, &mut doc, TextKey::Undo);
+        assert!(only(&doc).runs.is_empty(), "the bold was a step of its own");
+        let _ = key(&mut e, &mut doc, TextKey::Redo);
+        assert_eq!(only(&doc).runs.len(), 1);
+    }
+
+    #[test]
+    fn a_style_set_on_a_selected_text_is_the_whole_text() {
+        let (mut e, mut doc) = with_text("mixed words");
+        let id = only(&doc).id.clone();
+        let _ = e.edit_text(&id, &mut doc, &fonts(), None);
+        select(&mut e, &mut doc, 0, 5);
+        let _ = e.restyle(&mut doc, &fonts(), |s| {
+            s.bold = true;
+            s.color = "#ff0000".into();
+        });
+        let _ = e.end_typing(&mut doc);
+        assert_eq!(e.restyle(&mut doc, &fonts(), bold_on), Change::Scene);
+        let t = only(&doc);
+        assert!(t.style.bold);
+        assert_eq!(t.runs.len(), 1, "the red stays the stretch's");
+        assert_eq!(t.runs[0].style.bold, None);
+        assert_eq!(t.runs[0].style.color.as_deref(), Some("#ff0000"));
+    }
+
+    #[test]
+    fn what_the_font_menu_tried_is_put_back_stretches_and_all() {
+        let mut e = texting();
+        let mut doc = Document::new("t");
+        let _ = click(&mut e, &mut doc, 0.0, 0.0);
+        let _ = typed(&mut e, &mut doc, "try this");
+        select(&mut e, &mut doc, 4, 8);
+        let was = e.text_look(&doc);
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.font = "Elsewhere".into());
+        assert_eq!(only(&doc).runs.len(), 1);
+        e.put_look_back(&mut doc, &fonts(), &was);
+        assert!(only(&doc).runs.is_empty());
+        let _ = key(&mut e, &mut doc, TextKey::Go(Move::End, false));
+        let was = e.text_look(&doc);
+        let _ = e.restyle(&mut doc, &fonts(), |s| s.font = "Elsewhere".into());
+        e.put_look_back(&mut doc, &fonts(), &was);
+        assert_eq!(e.text_style(&doc).font, DEFAULT_FONT, "what was coming is put back too");
     }
 }

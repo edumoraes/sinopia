@@ -476,7 +476,7 @@ enum Purpose {
     /// The text bar's families: each line's, and what every text the bar
     /// is looking at was set in — put back unless a line is taken, since
     /// the lines are tried on the text as the pointer passes over them.
-    Font { families: Vec<String>, was: Vec<(String, String)> },
+    Font { families: Vec<String>, was: crate::editor::Look },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -1969,7 +1969,7 @@ impl App {
         }
         if let Some((tried, was)) = font {
             self.with_text(|e, d, f| {
-                e.put_fonts_back(d, f, &was);
+                e.put_look_back(d, f, &was);
                 if let Some(family) = tried {
                     let _ = e.restyle(d, f, |s| s.font.clone_from(&family));
                 }
@@ -2008,7 +2008,7 @@ impl App {
         if let Purpose::Font { families, was } = &opened.purpose {
             let family = take.and_then(|i| families.get(i).cloned());
             let change = self.with_text(|e, d, f| {
-                e.put_fonts_back(d, f, was);
+                e.put_look_back(d, f, was);
                 match family {
                     Some(family) => e.restyle(d, f, |s| s.font.clone_from(&family)),
                     None => Change::None,
@@ -2933,7 +2933,7 @@ impl App {
             .iter()
             .map(|f| menu::Item::new(f).checked(*f == current))
             .collect();
-        let was = editor.text_fonts(doc);
+        let was = editor.text_look(doc);
         let chrome = self.view().map_or(1.0, |v| self.chrome(&v)) as f32;
         let at_line = families.iter().position(|f| *f == current).unwrap_or(0);
         self.menu = Some(Opened {

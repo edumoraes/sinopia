@@ -17,7 +17,7 @@ use crate::select::{self, Handle};
 use crate::tree::{self, Arrange, Filter, Place};
 
 mod typing;
-pub use typing::{Move, TEXT_MAX, TextKey, Typing, fit_texts, step_size};
+pub use typing::{Look, Move, TEXT_MAX, TextKey, Typing, fit_texts, step_size};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
