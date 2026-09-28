@@ -42,18 +42,23 @@ packaging that distributes it (item 7):
   frame at the current zoom.
 - Brush (`B`): the same stroke with a body — a size, an opacity and a
   hardness — and, as in Sketchbook, a name and a shelf to live on. The
-  binary ships **Sketchbook's own seventeen sets, 211 brushes**: Basic,
-  Legacy, Markers, Fine Art, Traditional, Designer, Artist, Pastel,
-  Half Tone, Texture Essentials, Texture, Shape, Synthetic Paint,
-  Splatter, Glow, Smudge and Colorless, converted from the
-  `.skbrushes` files by `tools/import-skbrushes.py`. One brush is in
+  binary ships **one shelf of its own, "Sinopia"**: nine round brushes
+  (pencil, fine liner, ink pen, chisel marker, airbrush, hard and soft
+  rounds, two erasers) whose numbers are this project's, each pictured
+  by a stroke drawn from its own body. **Sketchbook's sets are imported,
+  never shipped** — they are Sketchbook's, published for its own app:
+  `sinopia brushes import` reads the `.skbrushes` files the person
+  downloaded (or a folder of them, or the Mega Set zip) into
+  `~/.local/share/sinopia/brushes/`, where the seventeen standard sets
+  become 211 brushes with their icons, nibs and papers, shelved after
+  the shipped one the next time the board starts. One brush is in
   the hand at a time and an edit belongs to it: `[` `]` step the size (Photoshop's steps, 1–500 world
   units), `{` `}` the hardness by a quarter, `1`–`9` and `0` set the
   opacity to 10%–90% and 100% — all of them writing into the brush that
   is painting, which keeps the change when another is picked up and
   put down again — and which outlives the window: what was changed is
   kept in `brushes.json` beside the boards, as a list of exceptions, so
-  a brush nobody touched is still whatever the shipped sets say. A brush is a **nib stamped along the stroke**, never
+  a brush nobody touched is still whatever its shelf says. A brush is a **nib stamped along the stroke**, never
   a swept line: its `spacing`, `roundness` and `rotation` are what one
   dab is and how far apart they sit — the gap in Sketchbook's own
   spacing units, each a quarter of the nib's width, which is what makes
@@ -748,13 +753,12 @@ XDG_DATA_HOME=/tmp/sinopia-smoke cargo run -- \
 src/main.rs      CLI dispatch → forward to the live instance, or become it
 src/cli.rs       flags (clap), mutually exclusive actions
 src/doc.rs       document §6.1 (pure data, serde): layers and frames, rect, path, image, text, shape, line
-src/store.rs     ~/.local/share/sinopia: boards/, blobs/, index.json, perms §9.3
+src/store.rs     ~/.local/share/sinopia: boards/, blobs/, brushes/, index.json, perms §9.3
 src/ipc/         §5: proto (strict parser), client (forward), server (socket 0600)
 src/bitmap.rs    decode PNG/JPEG/WebP to RGBA8, paste size (pure, tested)
 src/curve.rs     simplify, cubic Bézier fit and flatten (pure, tested)
-src/brush.rs     the brush library: sets, presets, a brush's body, its properties, the tip a stroke carries, the pointer's ring (pure, tested)
-tools/import-skbrushes.py  Sketchbook `.skbrushes` -> assets/brushes/ (parameters + icon sheet)
-assets/brushes/  library.json (17 sets, 211 brushes) and icons.png (211 cells), built into the binary
+src/brush.rs     the brush library: the shipped shelf, the imported ones, presets, a brush's body, its properties, the tip a stroke carries, the pointer's ring (pure, tested)
+src/skbrushes.rs `sinopia brushes import`: Sketchbook sets the person downloaded -> brushes/ in the data dir (tested)
 assets/dock/     eight RGBA tool illustrations and their 8 x 1 icon sheet, built into the binary
 assets/agents/   the five agents' own marks and the sheet of them, built into the binary
 tools/agent-logos.sh  the marks -> assets/agents/logos.png

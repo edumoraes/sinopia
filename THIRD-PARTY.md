@@ -7,5 +7,9 @@ and that license does not cover it:
 | What | Where | Terms |
 | --- | --- | --- |
 | Liberation Sans, the chrome's fallback face and the board's default text face, in its four styles | `assets/fonts/LiberationSans-{Regular,Bold,Italic,BoldItalic}.ttf` | SIL Open Font License 1.1, with Reserved Font Name Liberation — [its license](assets/fonts/LiberationSans-LICENSE.txt) travels with every package. |
-| Sketchbook's brush sets: the 211 brush definitions, their icons, nib shapes and papers | `assets/brushes/` | Converted by `tools/import-skbrushes.py` from the `.skbrushes` files Sketchbook publishes for its own app. They are Sketchbook's work and stay Sketchbook's. |
 | Each agent's mark in the export dialog | `assets/agents/` | Trademarks of Anthropic, OpenAI, Anomaly, Charm and Google, used unaltered and only to name the product each belongs to. Where each one came from is in [assets/agents/README.md](assets/agents/README.md). |
+
+Sketchbook's brush sets are not among them. They are Sketchbook's,
+published for use with its own app, so Sinopia ships none of them:
+`sinopia brushes import` reads a copy the person downloaded into their
+own data directory.
