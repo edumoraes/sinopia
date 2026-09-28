@@ -156,6 +156,25 @@ impl Typing {
     }
 }
 
+/// The sizes `Ctrl+Shift+>` and `<` step through: Adobe's own list,
+/// which is the one hands have learnt.
+const SIZES: [f64; 27] = [
+    6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 48.0, 56.0, 64.0,
+    72.0, 80.0, 96.0, 120.0, 144.0, 192.0, 288.0, 400.0,
+];
+
+/// The next size up or down the list from `size` — a size between two
+/// steps to the one it is between — and past either end a quarter more or
+/// less, within what a text may be set at.
+pub fn step_size(size: f64, up: bool) -> f64 {
+    let next = if up {
+        SIZES.iter().copied().find(|&s| s > size).unwrap_or(size * 1.25)
+    } else {
+        SIZES.iter().rev().copied().find(|&s| s < size).unwrap_or(size / 1.25)
+    };
+    next.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE)
+}
+
 /// What a text layer is named from what it says: its first line with
 /// anything written on it, cut short with an ellipsis — or nothing, for a
 /// text that says nothing yet.
@@ -855,6 +874,44 @@ impl Editor {
         if changed { Change::Scene } else { Change::Selection }
     }
 
+    /// Every text the bar is looking at, with the family it is set in: what
+    /// the font menu puts back when it is left without a line taken.
+    pub fn text_fonts(&self, doc: &Document) -> Vec<(String, String)> {
+        if let Some(pending) = self.typing.as_ref().and_then(|t| t.pending.as_ref()) {
+            return vec![(pending.id.clone(), pending.style.font.clone())];
+        }
+        self.targets(doc)
+            .into_iter()
+            .filter_map(|id| text_of(doc, &id).map(|t| (id.clone(), t.style.font.clone())))
+            .collect()
+    }
+
+    /// Sets every text in `was` back in the family it names, fitting
+    /// artistic text to it again.
+    pub fn put_fonts_back(&mut self, doc: &mut Document, fonts: &Fonts, was: &[(String, String)]) {
+        for (id, family) in was {
+            if let Some(t) = self.typing.as_mut()
+                && let Some(pending) = t.pending.as_mut().filter(|p| &p.id == id)
+            {
+                family.clone_into(&mut pending.style.font);
+                let laid = Laid::of(pending, fonts);
+                refit(pending, &laid);
+                t.laid = laid;
+                continue;
+            }
+            let Some(text) = text_mut(doc, id) else { continue };
+            if text.style.font == *family {
+                continue;
+            }
+            family.clone_into(&mut text.style.font);
+            let laid = Laid::of(text, fonts);
+            refit(text, &laid);
+            if let Some(t) = self.typing.as_mut().filter(|t| &t.id == id) {
+                t.laid = laid;
+            }
+        }
+    }
+
     /// The bar's kind switch: the texts it is looking at become that kind
     /// — a frame keeps the box it had, artistic text fits its lines — or,
     /// with none, the tool makes that kind from now on.
@@ -1517,5 +1574,30 @@ mod tests {
         let t = only(&doc);
         let layer: &Layer = doc.layer(&t.layer).unwrap();
         assert_eq!(layer.name, "Live name");
+    }
+
+    #[test]
+    fn a_size_steps_through_the_sizes_type_is_set_in() {
+        assert_eq!(step_size(12.0, true), 14.0);
+        assert_eq!(step_size(13.0, true), 14.0, "from between two, to the next");
+        assert_eq!(step_size(14.0, false), 12.0);
+        assert_eq!(step_size(13.0, false), 12.0);
+        assert_eq!(step_size(400.0, true), 500.0, "past the list, a quarter again");
+        assert_eq!(step_size(4.0, false), 3.2, "below the list, a quarter less");
+        assert!(step_size(MAX_TEXT_SIZE, true) <= MAX_TEXT_SIZE);
+        assert!(step_size(MIN_TEXT_SIZE, false) >= MIN_TEXT_SIZE);
+    }
+
+    #[test]
+    fn a_family_tried_from_the_menu_is_put_back_as_it_was() {
+        let (mut e, mut doc) = with_text("try me");
+        let was = e.text_fonts(&doc);
+        assert_eq!(was, [(only(&doc).id.clone(), DEFAULT_FONT.to_owned())]);
+        let w = only(&doc).w;
+        e.restyle(&mut doc, &fonts(), |s| s.font = "Elsewhere".into());
+        e.restyle(&mut doc, &fonts(), |s| s.size = 60.0);
+        e.put_fonts_back(&mut doc, &fonts(), &was);
+        assert_eq!(only(&doc).style.font, DEFAULT_FONT);
+        assert!(only(&doc).w > w, "only the family goes back");
     }
 }

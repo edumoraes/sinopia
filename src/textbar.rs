@@ -129,13 +129,20 @@ impl Toggle {
 
     /// Turns it the other way.
     pub fn flip(self, style: &mut TextStyle) {
+        let on = self.on(style);
+        self.set(style, !on);
+    }
+
+    /// Turns it on or off: what a press on the bar does to every text it
+    /// is looking at, all of them the same way.
+    pub fn set(self, style: &mut TextStyle, on: bool) {
         let at = match self {
             Toggle::Bold => &mut style.bold,
             Toggle::Italic => &mut style.italic,
             Toggle::Underline => &mut style.underline,
             Toggle::Strike => &mut style.strike,
         };
-        *at = !*at;
+        *at = on;
     }
 }
 
@@ -395,7 +402,7 @@ impl TextBar {
             Prim::rounded(self.rect, corner, theme.panel),
         ];
         let lit = |r: ScreenRect| Prim::rounded(r, theme.corner(BUTTON_RADIUS, s), theme.active_bg);
-        let mut text = |out: &mut Vec<Prim>, words: &str, r: ScreenRect, color: Rgba| {
+        let text = |out: &mut Vec<Prim>, words: &str, r: ScreenRect, color: Rgba| {
             let baseline = atlas.baseline_in(r);
             let cut = atlas.truncate(words, r.w);
             for g in atlas.layout(&cut, r.x, baseline) {

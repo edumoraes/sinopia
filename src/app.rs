@@ -60,6 +60,7 @@ use crate::tablet::{self, Pen};
 use crate::tabs::{self, TabHit, Tabs};
 use crate::tree::Place;
 use crate::text::{self, Atlas, Font};
+use crate::textbar::{self, TextBar};
 use crate::theme::{INKS, Theme};
 
 /// The longest step the panel's easing takes in one frame. A window
@@ -79,6 +80,13 @@ const SAFETY_DELAY: std::time::Duration = std::time::Duration::from_millis(1200)
 
 /// How close two presses on one card have to be to be a double click.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// How long the caret of a text being typed shows, and then hides.
+const BLINK: std::time::Duration = std::time::Duration::from_millis(530);
+
+/// How far apart, in logical px, two presses may land and still count
+/// as a double click.
+const CLICK_REACH: f64 = 4.0;
 
 /// How long the socket thread waits for the loop to answer one of an
 /// agent's three (§8). Generous, because the answer is real work — a
@@ -227,6 +235,17 @@ struct App {
     /// The layers bar's strength is being dragged: the pointer is its
     /// until the button comes up, and the board is not at rest.
     fading: bool,
+    /// Whether the text bar has dropped the paragraph's settings, and the
+    /// slider of it being dragged — the board is not at rest while one
+    /// is, since every step of it restyles the text.
+    text_bar_open: bool,
+    text_grab: Option<textbar::Slider>,
+    /// When the text being typed last heard from the hand: the caret
+    /// blinks from there, and shows solid while the hand is at it.
+    typed_at: Instant,
+    /// The last press on the canvas, where, and how many in a row it
+    /// made: two are a double click, three a triple.
+    last_press: Option<(Instant, (f64, f64), u32)>,
     /// A menu standing over the window, and what it is for.
     menu: Option<Opened>,
     /// The panel's thumbnails as last taken, and the slot they are in;
@@ -436,6 +455,10 @@ enum Purpose {
     Row { id: String, lines: Vec<layers::RowLine> },
     /// One of the application menu's: its title, and what each line does.
     Bar { title: Title, actions: Vec<Action> },
+    /// The text bar's families: each line's, and what every text the bar
+    /// is looking at was set in — put back unless a line is taken, since
+    /// the lines are tried on the text as the pointer passes over them.
+    Font { families: Vec<String>, was: Vec<(String, String)> },
 }
 
 /// A press on a card that may yet be a drag. Nothing is lifted until the
@@ -671,6 +694,7 @@ impl App {
         !self.editor().busy()
             && !self.carry.as_ref().is_some_and(|c| c.held)
             && !self.fading
+            && self.text_grab.is_none()
             && self.menu.is_none()
     }
 
@@ -692,7 +716,10 @@ impl App {
         } = &mut self.open[self.active];
         let spot = editor.at();
         match settled {
-            true => history.keep(&project.doc, spot),
+            true => {
+                history.keep_as(&project.doc, spot, editor.fold());
+                editor.let_go_of_fold();
+            }
             false => history.mark(spot),
         }
     }
@@ -1075,6 +1102,9 @@ impl App {
         if index >= self.open.len() {
             return;
         }
+        if index != self.active {
+            self.end_typing();
+        }
         self.active = index;
         let mods = self.modifiers.state();
         let (editor, _) = self.active();
@@ -1174,7 +1204,10 @@ impl App {
 
     /// Whether a field has the keyboard.
     fn typing(&self) -> bool {
-        self.sending.is_some() || self.renaming.is_some() || self.searching.is_some()
+        self.sending.is_some()
+            || self.renaming.is_some()
+            || self.searching.is_some()
+            || self.editor().typing().is_some()
     }
 
     /// The field the keyboard is writing into, if one is: the export
@@ -1248,6 +1281,11 @@ impl App {
     /// Clipboard text came back. The field that asked for it may have
     /// closed since, and then the text has nowhere to go and goes nowhere.
     fn pasted_text(&mut self, text: &str) {
+        if self.field_in_hand().is_none() && self.editor().typing().is_some() {
+            let change = self.with_text(|editor, doc, fonts| editor.paste_text(text, doc, fonts));
+            self.text_input();
+            return self.apply(change);
+        }
         if let Some(field) = self.field_in_hand() {
             field.paste(text);
             if let Some(sending) = self.sending.as_mut() {
@@ -1567,6 +1605,7 @@ impl App {
             || self.handle(view).is_some_and(|h| h.hit(x, y))
             || self.panel(view).and_then(|p| p.hit(x, y)).is_some()
             || self.props(view).and_then(|b| b.hit(x, y)).is_some()
+            || self.text_bar(view).and_then(|b| b.hit(x, y)).is_some()
             || self.strip(view).and_then(|s| s.hit(x, y)).is_some()
             || self.library(view).and_then(|p| p.hit(x, y)).is_some()
             || self.dock(view).hit(x, y).is_some()
@@ -1834,8 +1873,15 @@ impl App {
             return;
         }
         opened.hover = hover;
-        // Only a blend mode is tried on the board: a tag is read in the
-        // panel, and the line lit under the pointer already says it.
+        // A blend mode is tried on the board — a tag is read in the panel,
+        // and the line lit under the pointer already says it.
+        // A family is tried on the texts the bar is looking at, as a blend
+        // mode is on the layers: set in it as the pointer passes over it,
+        // and put back when it leaves.
+        let font = match &opened.purpose {
+            Purpose::Font { families, was } => Some((hover.and_then(|i| families.get(i).cloned()), was.clone())),
+            _ => None,
+        };
         if let Purpose::Blend { modes, was } = &opened.purpose {
             let tried = hover.and_then(|i| modes.get(i).copied());
             let was = was.clone();
@@ -1844,6 +1890,14 @@ impl App {
             if let Some(mode) = tried {
                 let _ = editor.set_blend(doc, mode);
             }
+        }
+        if let Some((tried, was)) = font {
+            self.with_text(|e, d, f| {
+                e.put_fonts_back(d, f, &was);
+                if let Some(family) = tried {
+                    let _ = e.restyle(d, f, |s| s.font.clone_from(&family));
+                }
+            });
         }
         self.redraw();
     }
@@ -1875,6 +1929,19 @@ impl App {
                 _ => {}
             }
         }
+        if let Purpose::Font { families, was } = &opened.purpose {
+            let family = take.and_then(|i| families.get(i).cloned());
+            let change = self.with_text(|e, d, f| {
+                e.put_fonts_back(d, f, was);
+                match family {
+                    Some(family) => e.restyle(d, f, |s| s.font.clone_from(&family)),
+                    None => Change::None,
+                }
+            });
+            self.text_input();
+            self.apply(change);
+            return self.redraw();
+        }
         let (editor, doc) = self.active();
         let change = match opened.purpose {
             Purpose::Blend { modes, was } => {
@@ -1894,6 +1961,7 @@ impl App {
                 _ => Change::None,
             },
             Purpose::Bar { .. } => Change::None,
+            Purpose::Font { .. } => Change::None,
         };
         self.apply(change);
         self.redraw();
@@ -2589,6 +2657,269 @@ impl App {
         }
     }
 
+    /// Runs `f` on the tab's editor and board with the faces in hand: the
+    /// three live in different parts of the window, and a text needs all
+    /// of them at once.
+    fn with_text<R>(
+        &mut self,
+        f: impl FnOnce(&mut Editor, &mut Document, &crate::fonts::Fonts) -> R,
+    ) -> R {
+        let Open { project, editor, .. } = &mut self.open[self.active];
+        f(editor, &mut project.doc, &self.fonts)
+    }
+
+    /// Leaves the text being typed, when one is, and writes down what
+    /// leaving did: a text that says nothing goes with its layer.
+    fn end_typing(&mut self) {
+        let (editor, doc) = self.active();
+        let change = editor.end_typing(doc);
+        self.apply(change);
+    }
+
+    /// The hand did something to the text being typed: the caret shows,
+    /// solid, from now.
+    fn text_input(&mut self) {
+        self.typed_at = Instant::now();
+    }
+
+    /// Whether the caret is showing this frame: solid for a moment after
+    /// the hand, then on and off.
+    fn caret_on(&self) -> bool {
+        (self.typed_at.elapsed().as_millis() / BLINK.as_millis()).is_multiple_of(2)
+    }
+
+    /// When the caret next turns on or off, while a text is being typed.
+    fn next_blink(&self) -> Option<Instant> {
+        self.editor().typing()?;
+        let n = self.typed_at.elapsed().as_millis() / BLINK.as_millis() + 1;
+        Some(self.typed_at + BLINK * n as u32)
+    }
+
+    /// The text's own bar: with the Text tool in hand, and wherever a
+    /// text is being typed or is selected — with any tool but the brush,
+    /// whose bar stands in the same place.
+    fn text_bar(&self, view: &View) -> Option<TextBar> {
+        let editor = self.editor();
+        let shown = editor.tool() == Tool::Text || editor.text_targeted(self.doc());
+        if !shown || editor.tool() == Tool::Brush {
+            return None;
+        }
+        Some(TextBar::layout(
+            view.viewport,
+            self.chrome(view),
+            self.strip_top(view),
+            self.text_bar_open,
+        ))
+    }
+
+    /// A click on the text bar.
+    fn text_bar_hit(&mut self, bar: &TextBar, hit: textbar::Hit, x: f64) {
+        let style = self.editor().text_style(self.doc());
+        let change = match hit {
+            textbar::Hit::Kind(mode) => self.with_text(|e, d, f| e.set_text_kind(mode, d, f)),
+            textbar::Hit::Font => {
+                self.open_font_menu(bar.font);
+                return;
+            }
+            textbar::Hit::Toggle(t) => {
+                let on = !t.on(&style);
+                self.with_text(|e, d, f| e.restyle(d, f, |s| t.set(s, on)))
+            }
+            textbar::Hit::Align(a) => self.with_text(|e, d, f| e.restyle(d, f, |s| s.align = a)),
+            textbar::Hit::Valign(v) => self.with_text(|e, d, f| e.restyle(d, f, |s| s.valign = v)),
+            textbar::Hit::Slider(slider) => {
+                self.text_grab = Some(slider);
+                self.drag_text_field(bar, slider, x);
+                return;
+            }
+            textbar::Hit::More => {
+                self.text_bar_open = !self.text_bar_open;
+                Change::Selection
+            }
+            textbar::Hit::Bar => Change::None,
+        };
+        self.apply(change);
+    }
+
+    /// A text slider follows the pointer's x.
+    fn drag_text_field(&mut self, bar: &TextBar, slider: textbar::Slider, x: f64) {
+        let f = bar.fraction(slider, x);
+        let change = self.with_text(|e, d, fonts| e.restyle(d, fonts, |s| slider.set(s, f)));
+        self.apply(change);
+    }
+
+    /// Opens the families under the text bar's button, on the one the
+    /// bar is showing, remembering what every text it is looking at was
+    /// set in.
+    fn open_font_menu(&mut self, at: ScreenRect) {
+        let doc = self.doc();
+        let editor = self.editor();
+        let current = editor.text_style(doc).font;
+        let families: Vec<String> = self.fonts.families().to_vec();
+        let items: Vec<menu::Item> = families
+            .iter()
+            .map(|f| menu::Item::new(f).checked(*f == current))
+            .collect();
+        let was = editor.text_fonts(doc);
+        let chrome = self.view().map_or(1.0, |v| self.chrome(&v)) as f32;
+        let at_line = families.iter().position(|f| *f == current).unwrap_or(0);
+        self.menu = Some(Opened {
+            purpose: Purpose::Font { families, was },
+            items,
+            at,
+            hover: None,
+            // The family in use stands a few lines from the top.
+            scroll: ((at_line as f32 - 3.0) * menu::ITEM * chrome).max(0.0),
+        });
+        self.redraw();
+    }
+
+    /// `Ctrl` with a letter while a text is being typed: the text's own
+    /// commands, and the window's for the rest.
+    fn typing_command(&mut self, c: &str, shift: bool) -> bool {
+        use crate::editor::TextKey;
+        let key = c.to_ascii_lowercase();
+        let change = match (key.as_str(), shift) {
+            ("a", false) => self.with_text(|e, d, f| e.text_key(TextKey::SelectAll, d, f)),
+            ("z", false) => self.with_text(|e, d, f| e.text_key(TextKey::Undo, d, f)),
+            ("z", true) | ("y", false) => self.with_text(|e, d, f| e.text_key(TextKey::Redo, d, f)),
+            ("c", false) => {
+                self.copy_text();
+                Change::None
+            }
+            ("x", false) => {
+                let (text, change) = self.with_text(|e, d, f| e.cut_text(d, f));
+                if let (Some(text), Some(clipboard)) = (text, &self.clipboard) {
+                    clipboard.copy_text(&text);
+                }
+                change
+            }
+            ("v", false) => {
+                self.paste_text();
+                Change::None
+            }
+            // Bold, italic and underline, as every text box has them.
+            ("b", false) | ("i", false) | ("u", false) => {
+                let t = match key.as_str() {
+                    "b" => textbar::Toggle::Bold,
+                    "i" => textbar::Toggle::Italic,
+                    _ => textbar::Toggle::Underline,
+                };
+                let on = !t.on(&self.editor().text_style(self.doc()));
+                self.with_text(|e, d, f| e.restyle(d, f, |s| t.set(s, on)))
+            }
+            // Adobe's: the alignment under Ctrl+Shift, and the size a
+            // step up or down with the angle brackets.
+            ("l", true) | ("c", true) | ("r", true) | ("j", true) => {
+                let a = match key.as_str() {
+                    "l" => crate::doc::Align::Left,
+                    "c" => crate::doc::Align::Center,
+                    "r" => crate::doc::Align::Right,
+                    _ => crate::doc::Align::Justify,
+                };
+                self.with_text(|e, d, f| e.restyle(d, f, |s| s.align = a))
+            }
+            (">" | ".", true) | ("<" | ",", true) => {
+                let up = matches!(key.as_str(), ">" | ".");
+                self.with_text(|e, d, f| {
+                    e.restyle(d, f, |s| s.size = crate::editor::step_size(s.size, up))
+                })
+            }
+            _ => return false,
+        };
+        self.text_input();
+        self.apply(change);
+        true
+    }
+
+    /// `Ctrl+C` in a text: what is selected in it goes to the clipboard.
+    fn copy_text(&self) {
+        if let (Some(text), Some(clipboard)) = (self.editor().copied_text(), &self.clipboard) {
+            clipboard.copy_text(&text);
+        }
+    }
+
+    /// A key while a text is being typed: it takes the keyboard whole,
+    /// as a field does.
+    fn typing_key(&mut self, key: &Key, text: Option<&str>) {
+        use crate::editor::{Move, TextKey};
+        let mods = self.modifiers.state();
+        let (ctrl, shift) = (mods.control_key(), mods.shift_key());
+        let go = |m: Move| Some(TextKey::Go(m, shift));
+        let text_key = match key {
+            Key::Named(NamedKey::Escape) => {
+                self.end_typing();
+                return self.redraw();
+            }
+            // Ctrl+Enter leaves the text, as Esc does: Enter alone is a
+            // new line.
+            Key::Named(NamedKey::Enter) if ctrl => {
+                self.end_typing();
+                return self.redraw();
+            }
+            Key::Named(NamedKey::Enter) => Some(TextKey::Newline),
+            Key::Named(NamedKey::Backspace) if ctrl => Some(TextKey::WordBackspace),
+            Key::Named(NamedKey::Backspace) => Some(TextKey::Backspace),
+            Key::Named(NamedKey::Delete) if ctrl => Some(TextKey::WordDelete),
+            Key::Named(NamedKey::Delete) => Some(TextKey::Delete),
+            Key::Named(NamedKey::ArrowLeft) if ctrl => go(Move::WordLeft),
+            Key::Named(NamedKey::ArrowLeft) => go(Move::Left),
+            Key::Named(NamedKey::ArrowRight) if ctrl => go(Move::WordRight),
+            Key::Named(NamedKey::ArrowRight) => go(Move::Right),
+            Key::Named(NamedKey::ArrowUp) => go(Move::Up),
+            Key::Named(NamedKey::ArrowDown) => go(Move::Down),
+            Key::Named(NamedKey::Home) if ctrl => go(Move::Home),
+            Key::Named(NamedKey::Home) => go(Move::LineHome),
+            Key::Named(NamedKey::End) if ctrl => go(Move::End),
+            Key::Named(NamedKey::End) => go(Move::LineEnd),
+            Key::Named(NamedKey::Space) if !ctrl => {
+                let change = self.with_text(|e, d, f| e.type_str(" ", d, f));
+                self.text_input();
+                return self.apply(change);
+            }
+            Key::Character(c) if ctrl => {
+                if !self.typing_command(c, shift) {
+                    // Anything else under Ctrl is the window's; the text is
+                    // left first unless it is a save, which keeps it open.
+                    let action = menubar::shortcut(&c.to_ascii_lowercase(), shift, mods.alt_key());
+                    if let Some(action) = action {
+                        self.run_action(action);
+                    }
+                }
+                return;
+            }
+            Key::Character(c) if !mods.super_key() => {
+                let typed = text.unwrap_or(c).to_owned();
+                let change = self.with_text(|e, d, f| e.type_str(&typed, d, f));
+                self.text_input();
+                return self.apply(change);
+            }
+            _ => None,
+        };
+        if let Some(k) = text_key {
+            let change = self.with_text(|e, d, f| e.text_key(k, d, f));
+            self.text_input();
+            self.apply(change);
+        }
+    }
+
+    /// How many presses in a row a press at `(x, y)` makes: one more than
+    /// the last when it lands soon enough after it and near enough to it.
+    fn count_clicks(&mut self, x: f64, y: f64) -> u32 {
+        let now = Instant::now();
+        let reach = CLICK_REACH * self.view().map_or(1.0, |v| v.scale);
+        let n = match self.last_press {
+            Some((at, (px, py), n))
+                if now.duration_since(at) < DOUBLE_CLICK && (x - px).hypot(y - py) <= reach =>
+            {
+                n % 3 + 1
+            }
+            _ => 1,
+        };
+        self.last_press = Some((now, (x, y), n));
+        n
+    }
+
     /// Starts the glyph sheet over when a frame found it full, and says
     /// so: the glyphs that did not fit were left out of what was just
     /// drawn, and the next frame rasterizes what it needs into a clean
@@ -2733,6 +3064,18 @@ impl App {
         if let Some((a, b)) = self.editor().marquee() {
             frame.extend(select::marquee_prims(a, b, &self.theme));
         }
+        // What the text being typed shows over it: its box, what is
+        // selected, and the caret while it is on.
+        frame.extend(
+            self.editor()
+                .typing_prims(self.doc(), view, &self.theme, self.caret_on()),
+        );
+        // The area a press with the Text tool is dragging out.
+        if let Some((from, to)) = self.editor().placing() {
+            let a = view.world_to_screen(from[0], from[1]);
+            let b = view.world_to_screen(to[0], to[1]);
+            frame.extend(select::marquee_prims(a, b, &self.theme));
+        }
         // The area the Frame tool is dragging out, drawn the way a
         // marquee is: the same hairline rectangle, so the two cannot
         // drift apart.
@@ -2810,6 +3153,15 @@ impl App {
                 self.atlas_slot,
                 &self.theme,
             ));
+        }
+        if let (Some(bar), Some(atlas)) = (self.text_bar(view), self.atlas.as_ref()) {
+            let doc = self.doc();
+            let style = self.editor().text_style(doc);
+            let showing = textbar::Showing {
+                style: &style,
+                kind: self.editor().text_kind(doc),
+            };
+            frame.extend(bar.prims(&showing, atlas, self.atlas_slot, &self.theme));
         }
         if let (Some(handle), Some(atlas)) = (self.handle(view), self.atlas.as_ref()) {
             frame.extend(handle.prims(atlas, self.atlas_slot, &self.theme));
@@ -3110,6 +3462,15 @@ impl App {
             }
             return self.update_cursor_icon();
         }
+        if let Some(bar) = self.text_bar(&view)
+            && let Some(hit) = bar.hit(x, y)
+        {
+            if button == Button::Left {
+                self.text_bar_hit(&bar, hit, x);
+                self.redraw();
+            }
+            return self.update_cursor_icon();
+        }
         if let Some(strip) = self.strip(&view)
             && let Some(hit) = strip.hit(x, y)
         {
@@ -3146,8 +3507,9 @@ impl App {
         match self.dock(&view).hit(x, y) {
             Some(Hit::Tool(tool)) => {
                 if button == Button::Left {
+                    self.end_typing();
                     let (editor, doc) = self.active();
-                    editor.set_tool(tool, doc);
+                    editor.choose_tool(tool, doc);
                     self.redraw();
                 }
             }
@@ -3158,6 +3520,14 @@ impl App {
                     // frame's ground, and otherwise it is the ink new
                     // strokes are laid in.
                     let hex = INKS[i].to_owned();
+                    // A text being typed or selected takes the ink as its
+                    // colour, and it is the ink in the hand from then on.
+                    if self.editor().text_targeted(self.doc()) {
+                        self.ink = i;
+                        let change = self.with_text(|e, d, f| e.restyle(d, f, |s| s.color.clone_from(&hex)));
+                        self.apply(change);
+                        return self.update_cursor_icon();
+                    }
                     let (editor, doc) = self.active();
                     let selected: Vec<String> = editor.selection().to_vec();
                     let mut painted = false;
@@ -3177,6 +3547,9 @@ impl App {
             }
             Some(Hit::Panel) => {}
             None => {
+                if button == Button::Left && self.text_press(&view, (x, y)) {
+                    return self.update_cursor_icon();
+                }
                 let tip = self.brushes.tip();
                 let (editor, doc) = self.active();
                 let change = editor.press(button, &view, (x, y), doc, &tip);
@@ -3184,6 +3557,33 @@ impl App {
             }
         }
         self.update_cursor_icon();
+    }
+
+    /// A left press on the canvas, as far as text is concerned: with the
+    /// Text tool it places a text or types into one; with any tool it
+    /// puts the caret in the text being typed, or leaves it; and a double
+    /// click on a text with the Select tool types into it. True when the
+    /// press was the text's, and nothing else is to see it.
+    fn text_press(&mut self, view: &View, at: (f64, f64)) -> bool {
+        let clicks = self.count_clicks(at.0, at.1);
+        let editor = self.editor();
+        let doc = self.doc();
+        let tool = editor.pointer_tool(doc, view, at);
+        let typing = editor.typing().is_some();
+        let double = clicks >= 2 && tool == Tool::Select && editor.text_at(doc, view, at).is_some();
+        if !(tool == Tool::Text || typing || double) || matches!(tool, Tool::Hand | Tool::Zoom) {
+            return false;
+        }
+        let ink = self.ink_hex().to_owned();
+        // A double click with the Select tool puts the caret where it
+        // landed, as Affinity's does; the word is the Text tool's.
+        let n = if tool == Tool::Text { clicks } else { 1 };
+        let change = self.with_text(|e, d, f| e.text_press(view, at, d, f, n, &ink));
+        self.text_input();
+        self.apply(change);
+        // A press away from the text, with a tool that is not the Text
+        // tool, only left it: the press is that tool's too.
+        tool == Tool::Text || self.editor().typing().is_some()
     }
 
     fn pointer_released(&mut self, button: Button) {
@@ -3208,6 +3608,13 @@ impl App {
         }
         // A brush edit is over when the pointer that made it comes up.
         self.keep_brushes();
+        // The text's slider let go of is where the text rests: one step
+        // back undoes the whole drag.
+        if button == Button::Left && self.text_grab.take().is_some() {
+            self.remember();
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A slider let go of is just let go of: the canvas never saw the
         // press, so there is nothing under it to end.
         if button == Button::Left && self.grab.take().is_some() {
@@ -3252,6 +3659,13 @@ impl App {
         let (editor, doc) = self.active();
         let change = editor.release(button, &view, (x, y), doc, &ink);
         self.apply(change);
+        // A text opened at the release is set in its own faces now: the
+        // release had none in hand.
+        if self.editor().typing().is_some() {
+            self.with_text(|e, d, f| e.relay_text(d, f));
+            self.text_input();
+            self.redraw();
+        }
         self.update_cursor_icon();
     }
 
@@ -3355,6 +3769,16 @@ impl App {
             self.redraw();
             return self.update_cursor_icon();
         }
+        // So does the text bar's slider.
+        if let Some(slider) = self.text_grab {
+            if let Some(view) = self.view()
+                && let Some(bar) = self.text_bar(&view)
+            {
+                self.drag_text_field(&bar, slider, x);
+            }
+            self.redraw();
+            return self.update_cursor_icon();
+        }
         // A slider has the pointer to itself, wherever it wanders to.
         if let Some(field) = self.grab {
             if let Some(view) = self.view()
@@ -3449,7 +3873,7 @@ impl App {
     /// are read off `key`, which follows the layout the way a hotkey
     /// should; a seat's digit has to come off `bare`, because `Shift+1`
     /// arrives as a different character on every layout there is.
-    fn key(&mut self, key: &Key, bare: &Key, state: ElementState) {
+    fn key(&mut self, key: &Key, bare: &Key, text: Option<&str>, state: ElementState) {
         let pressed = state == ElementState::Pressed;
         match key {
             // The clipboard's keys come first for whichever field has the
@@ -3590,7 +4014,20 @@ impl App {
                 self.sync_search();
                 self.redraw();
             }
+            // A text being typed takes the keyboard whole, as a field does:
+            // a letter is written, not a tool taken up.
+            _ if pressed && self.editor().typing().is_some() => {
+                self.typing_key(key, text);
+                self.redraw();
+            }
             Key::Named(NamedKey::Space) => self.active().0.hold_space(pressed),
+            // Enter on one selected text types into it, all of it
+            // selected, as every design tool's Enter does.
+            Key::Named(NamedKey::Enter) if pressed && self.menu.is_none() => {
+                let change = self.with_text(|e, d, f| e.edit_selected_text(d, f));
+                self.text_input();
+                self.apply(change);
+            }
             // A menu goes away, leaving the board as it found it.
             Key::Named(NamedKey::Escape) if pressed && self.menu.is_some() => {
                 self.close_menu(None);
@@ -3658,6 +4095,32 @@ impl App {
         // were written for the board as it was, and a new tab or a step
         // back would leave them answering for another.
         self.close_menu(None);
+        // With a text being typed, the edits are the text's own; a save
+        // keeps it open, and anything else leaves it first.
+        if self.editor().typing().is_some() {
+            use crate::editor::TextKey;
+            let key = match action {
+                Action::Undo => Some(TextKey::Undo),
+                Action::Redo => Some(TextKey::Redo),
+                Action::Delete => Some(TextKey::Delete),
+                _ => None,
+            };
+            if let Some(k) = key {
+                let change = self.with_text(|e, d, f| e.text_key(k, d, f));
+                self.text_input();
+                return self.apply(change);
+            }
+            match action {
+                Action::Copy => return self.copy_text(),
+                Action::Cut => {
+                    self.typing_command("x", false);
+                    return;
+                }
+                Action::Paste => return self.paste_text(),
+                Action::Save => {}
+                _ => self.end_typing(),
+            }
+        }
         let change = match action {
             Action::New => return self.open_project(Project::untitled()),
             Action::Open => return self.ask_open(),
@@ -3750,8 +4213,9 @@ impl App {
         } else if shift && c.eq_ignore_ascii_case(&'b') {
             self.run_action(Action::Library);
         } else if let Some(tool) = Tool::from_hotkey(c) {
+            self.end_typing();
             let (editor, doc) = self.active();
-            editor.set_tool(tool, doc);
+            editor.choose_tool(tool, doc);
             self.redraw();
         } else if self.brush_key(c) {
             self.redraw();
@@ -3868,7 +4332,16 @@ impl App {
             }
             _ => None,
         };
-        let icon = if over_text == Some(true) {
+        // Over the text being typed the pointer is the I-beam whatever the
+        // tool, since a press there puts the caret down.
+        let over_typed = match (self.cursor, self.view()) {
+            (Some(at), Some(view)) if self.editor().typing().is_some() && !over_chrome => {
+                self.editor().text_at(self.doc(), &view, at).as_deref()
+                    == self.editor().typing().map(|t| t.id.as_str())
+            }
+            _ => false,
+        };
+        let icon = if over_text == Some(true) || over_typed {
             CursorIcon::Text
         } else if over_text == Some(false) {
             CursorIcon::Default
@@ -4015,6 +4488,17 @@ impl ApplicationHandler<UserEvent> for App {
     /// debt asks for `WaitUntil` instead — and nothing else here does,
     /// which is why the sleep goes back to `Wait` once it is paid.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The caret of a text being typed blinks: the loop wakes when it
+        // is next due to turn, whatever else it is waiting for.
+        if let Some(blink) = self.next_blink() {
+            if self.owed.is_none() {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(blink));
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+        }
         let Some(due) = self.owed else { return };
         // A board in the middle of a gesture — or of a menu trying modes
         // on it — is not what the person has. The debt waits for the rest,
@@ -4117,7 +4601,12 @@ impl App {
                     || (self.typing()
                         && repeats(&event.logical_key, self.modifiers.state().shift_key())) =>
             {
-                self.key(&event.logical_key, &event.key_without_modifiers(), event.state);
+                self.key(
+                    &event.logical_key,
+                    &event.key_without_modifiers(),
+                    event.text.as_deref(),
+                    event.state,
+                );
             }
             WindowEvent::RedrawRequested => {
                 self.tick();
@@ -4497,6 +4986,10 @@ pub fn run(
         agent_logo_slot: None,
         shapes: Shapes::default(),
         fonts: crate::fonts::machine(),
+        text_bar_open: false,
+        text_grab: None,
+        typed_at: Instant::now(),
+        last_press: None,
         glyphs: crate::glyphs::Glyphs::default(),
         letters_slot: 0,
         shown_brush: None,
