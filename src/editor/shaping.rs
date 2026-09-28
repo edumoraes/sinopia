@@ -11,11 +11,12 @@
 
 use super::{CLICK_SLOP_PX, Change, Editor, ROTATE_SNAP_DEG, Tool};
 use crate::doc::{
-    DEFAULT_INNER, DEFAULT_SHAPE_WIDTH, DEFAULT_SIDES, Document, Element, Head, Kind, Line, Shape, new_id,
+    DEFAULT_INNER, DEFAULT_SHAPE_WIDTH, DEFAULT_SIDES, Document, Element, Head, Kind, Line, MAX_SIDES,
+    MIN_SIDES, Shape, new_id,
 };
 use crate::geom::Point;
 use crate::scene::View;
-use crate::shape::Figure;
+use crate::shape::{Figure, MAX_INNER, MIN_INNER};
 
 /// How many world units a click lays a figure: a shape this many a side,
 /// Figma's own, and a line this long.
@@ -56,7 +57,211 @@ impl Default for ShapeStyle {
     }
 }
 
+/// A change the shape bar asks for: to the shapes and lines selected, as
+/// far as each can take it, or to how the next one is drawn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Restyle {
+    Fill(Option<String>),
+    /// A colour, or none; a line keeps its ink whatever it is asked, and
+    /// for the next figure the colour is the window's ink, set apart.
+    Stroke(Option<String>),
+    Width(f64),
+    Radius(f64),
+    Sides(u32),
+    Inner(f64),
+    Start(Head),
+    End(Head),
+}
+
+impl Restyle {
+    /// The change held to what a board can hold — sides and depth to
+    /// their ranges, a radius to none below nothing — or none at all for
+    /// a number that is not one, or a width of nothing.
+    fn held(self) -> Option<Restyle> {
+        Some(match self {
+            Restyle::Width(w) if !(w.is_finite() && w > 0.0) => return None,
+            Restyle::Radius(r) if !r.is_finite() => return None,
+            Restyle::Inner(i) if !i.is_finite() => return None,
+            Restyle::Radius(r) => Restyle::Radius(r.max(0.0)),
+            Restyle::Sides(n) => Restyle::Sides(n.clamp(MIN_SIDES, MAX_SIDES)),
+            Restyle::Inner(i) => Restyle::Inner(i.clamp(MIN_INNER, MAX_INNER)),
+            other => other,
+        })
+    }
+
+    /// Makes it on `el`, as far as `el` can take it: true when anything
+    /// changed.
+    fn onto(&self, el: &mut Element) -> bool {
+        fn set<T: PartialEq>(at: &mut T, to: T) -> bool {
+            let changed = *at != to;
+            *at = to;
+            changed
+        }
+        match (el, self) {
+            (Element::Shape(s), Restyle::Fill(c)) => set(&mut s.fill, c.clone()),
+            (Element::Shape(s), Restyle::Stroke(c)) => set(&mut s.stroke, c.clone()),
+            (Element::Shape(s), Restyle::Width(w)) => set(&mut s.width, *w),
+            (Element::Shape(s), Restyle::Radius(r)) => set(&mut s.radius, *r),
+            (Element::Shape(s), Restyle::Sides(n)) => set(&mut s.sides, *n),
+            (Element::Shape(s), Restyle::Inner(i)) => set(&mut s.inner, *i),
+            (Element::Line(l), Restyle::Stroke(Some(c))) => set(&mut l.stroke, c.clone()),
+            (Element::Line(l), Restyle::Width(w)) => set(&mut l.width, *w),
+            (Element::Line(l), Restyle::Start(h)) => set(&mut l.start, *h),
+            (Element::Line(l), Restyle::End(h)) => set(&mut l.end, *h),
+            _ => false,
+        }
+    }
+}
+
+/// What the shape bar shows: the figure lit, and how the first shape or
+/// line it is looking at is drawn — or how the next one will be.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapeLook {
+    pub figure: Figure,
+    pub fill: Option<String>,
+    pub stroke: Option<String>,
+    pub width: f64,
+    pub radius: f64,
+    pub sides: u32,
+    pub inner: f64,
+    pub start: Head,
+    pub end: Head,
+}
+
 impl Editor {
+    /// The shapes and lines the bar is looking at: every one selected
+    /// that no lock keeps.
+    fn shape_targets(&self, doc: &Document) -> Vec<String> {
+        self.selection
+            .iter()
+            .filter(|id| {
+                doc.elements.iter().any(|el| {
+                    el.id() == id.as_str()
+                        && matches!(el, Element::Shape(_) | Element::Line(_))
+                        && !doc.locked(el.layer())
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether the bar is looking at a shape or a line rather than at how
+    /// the next one is drawn.
+    pub fn shape_targeted(&self, doc: &Document) -> bool {
+        !self.shape_targets(doc).is_empty()
+    }
+
+    /// What the bar shows: the first shape or line it is looking at, or
+    /// the next figure as the style says, stroked in `ink` — the ink in
+    /// the hand, which the next one is born in.
+    pub fn shape_look(&self, doc: &Document, ink: &str) -> ShapeLook {
+        let style = &self.shape_style;
+        let first = self
+            .shape_targets(doc)
+            .first()
+            .and_then(|id| doc.elements.iter().find(|el| el.id() == id.as_str()));
+        match first {
+            Some(Element::Shape(s)) => ShapeLook {
+                figure: Figure::of(s.model),
+                fill: s.fill.clone(),
+                stroke: s.stroke.clone(),
+                width: s.width,
+                radius: s.radius,
+                sides: s.sides,
+                inner: s.inner,
+                start: style.start,
+                end: style.end,
+            },
+            Some(Element::Line(l)) => ShapeLook {
+                figure: Figure::of_line(l),
+                fill: None,
+                stroke: Some(l.stroke.clone()),
+                width: l.width,
+                radius: style.radius,
+                sides: style.sides,
+                inner: style.inner,
+                start: l.start,
+                end: l.end,
+            },
+            _ => {
+                let line = self.figure == Figure::Line;
+                ShapeLook {
+                    figure: self.figure,
+                    fill: style.fill.clone(),
+                    stroke: (style.outline || self.figure.model().is_none()).then(|| ink.to_owned()),
+                    width: style.width,
+                    radius: style.radius,
+                    sides: style.sides,
+                    inner: style.inner,
+                    start: if line { Head::None } else { style.start },
+                    end: if line { Head::None } else { style.end },
+                }
+            }
+        }
+    }
+
+    /// Makes `change` where the bar is looking: on every shape and line
+    /// selected, as far as each can take it — a line keeps its ink and
+    /// has no fill, a shape has no heads — or, with none selected, on how
+    /// the next one is drawn.
+    pub fn restyle_shapes(&mut self, doc: &mut Document, change: Restyle) -> Change {
+        let Some(change) = change.held() else {
+            return Change::None;
+        };
+        let targets = self.shape_targets(doc);
+        if targets.is_empty() {
+            let style = &mut self.shape_style;
+            match change {
+                Restyle::Fill(c) => style.fill = c,
+                Restyle::Stroke(c) => style.outline = c.is_some(),
+                Restyle::Width(w) => style.width = w,
+                Restyle::Radius(r) => style.radius = r,
+                Restyle::Sides(n) => style.sides = n,
+                Restyle::Inner(i) => style.inner = i,
+                Restyle::Start(h) => style.start = h,
+                Restyle::End(h) => style.end = h,
+            }
+            return Change::Selection;
+        }
+        let mut changed = false;
+        for el in doc.elements.iter_mut().filter(|el| targets.iter().any(|t| t == el.id())) {
+            changed |= change.onto(el);
+        }
+        if changed { Change::Scene } else { Change::Selection }
+    }
+
+    /// The bar's figure: the tool draws it from now on, and what is
+    /// selected becomes it within its kind — a shape another model, a
+    /// line an arrow or a bare line again. A shape is not made a line,
+    /// nor a line a shape.
+    pub fn set_figure(&mut self, figure: Figure, doc: &mut Document) -> Change {
+        self.figure = figure;
+        let targets = self.shape_targets(doc);
+        let mut changed = false;
+        for el in doc.elements.iter_mut().filter(|el| targets.iter().any(|t| t == el.id())) {
+            match (el, figure.model()) {
+                (Element::Shape(s), Some(model)) if s.model != model => {
+                    s.model = model;
+                    changed = true;
+                }
+                (Element::Line(l), None) => {
+                    let bare = l.start == Head::None && l.end == Head::None;
+                    let heads = match figure {
+                        Figure::Line => (Head::None, Head::None),
+                        _ if bare => (Head::None, Head::Arrow),
+                        _ => (l.start, l.end),
+                    };
+                    if (l.start, l.end) != heads {
+                        (l.start, l.end) = heads;
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if changed { Change::Scene } else { Change::Selection }
+    }
+
     /// Takes the Shape tool up with `figure` in hand.
     pub fn choose_figure(&mut self, figure: Figure, doc: &mut Document) {
         self.set_tool(Tool::Shape, doc);
@@ -587,5 +792,119 @@ mod tests {
         let corner = f.corner(crate::geom::Corner::BottomRight);
         let (x, y) = view().world_to_screen(corner[0], corner[1]);
         assert!(matches!(e.hover(&doc, &view(), (x, y)), Some(crate::select::Handle::Resize(_))));
+    }
+
+    /// A rectangle and an arrow, both drawn and both selected.
+    fn two_selected() -> (Editor, Document) {
+        let (mut e, mut doc) = shaping();
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 60.0));
+        e.choose_figure(Figure::Arrow, &mut doc);
+        let _ = drag(&mut e, &mut doc, (0.0, 100.0), (100.0, 100.0));
+        let ids: Vec<String> = doc.elements.iter().map(|el| el.id().to_owned()).collect();
+        e.set_tool(Tool::Select, &mut doc);
+        e.go(super::super::Spot {
+            selection: ids,
+            ..Default::default()
+        });
+        (e, doc)
+    }
+
+    #[test]
+    fn the_bar_looks_at_the_first_selected_else_at_the_next_figure() {
+        let (mut e, mut doc) = shaping();
+        assert!(!e.shape_targeted(&doc));
+        let next = e.shape_look(&doc, INK);
+        assert_eq!(next.figure, Figure::Rectangle);
+        assert_eq!((next.fill.as_deref(), next.stroke.as_deref()), (None, Some(INK)));
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 60.0));
+        assert!(e.shape_targeted(&doc), "the shape just drawn is selected");
+        let (e, doc) = two_selected();
+        let look = e.shape_look(&doc, "#999999");
+        assert_eq!(look.figure, Figure::Rectangle, "the first of them");
+        assert_eq!(look.stroke.as_deref(), Some(INK), "its own ink, not the hand's");
+    }
+
+    #[test]
+    fn a_change_goes_to_every_one_selected_that_can_take_it() {
+        let (mut e, mut doc) = two_selected();
+        assert_eq!(e.restyle_shapes(&mut doc, Restyle::Fill(Some("#e5484d".into()))), Change::Scene);
+        assert_eq!(e.restyle_shapes(&mut doc, Restyle::Width(5.0)), Change::Scene);
+        assert_eq!(e.restyle_shapes(&mut doc, Restyle::Start(Head::Triangle)), Change::Scene);
+        assert_eq!(e.restyle_shapes(&mut doc, Restyle::Stroke(None)), Change::Scene);
+        let s = only(&doc);
+        assert_eq!((s.fill.as_deref(), s.stroke.as_deref(), s.width), (Some("#e5484d"), None, 5.0));
+        let l = only_line(&doc);
+        assert_eq!((l.stroke.as_str(), l.width, l.start), (INK, 5.0, Head::Triangle), "a line keeps its ink");
+        assert_eq!(
+            e.restyle_shapes(&mut doc, Restyle::Width(5.0)),
+            Change::Selection,
+            "what is as asked already is no change"
+        );
+    }
+
+    #[test]
+    fn with_nothing_selected_the_bar_sets_how_the_next_is_drawn() {
+        let (mut e, mut doc) = shaping();
+        let _ = e.restyle_shapes(&mut doc, Restyle::Fill(Some("#30a46c".into())));
+        let _ = e.restyle_shapes(&mut doc, Restyle::Stroke(None));
+        let _ = e.restyle_shapes(&mut doc, Restyle::Radius(9.0));
+        let _ = e.restyle_shapes(&mut doc, Restyle::End(Head::Triangle));
+        assert!(doc.elements.is_empty());
+        let look = e.shape_look(&doc, INK);
+        assert_eq!((look.fill.as_deref(), look.stroke), (Some("#30a46c"), None));
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (50.0, 50.0));
+        let s = only(&doc);
+        assert_eq!((s.fill.as_deref(), s.stroke.as_deref(), s.radius), (Some("#30a46c"), None, 9.0));
+        assert!(e.escape(&mut doc), "nothing selected again");
+        let _ = e.restyle_shapes(&mut doc, Restyle::Stroke(Some("#ffffff".into())));
+        assert_eq!(e.shape_look(&doc, INK).stroke.as_deref(), Some(INK), "a stroke is back, in the hand's ink");
+        e.choose_figure(Figure::Arrow, &mut doc);
+        let _ = drag(&mut e, &mut doc, (0.0, 100.0), (50.0, 100.0));
+        assert_eq!(only_line(&doc).end, Head::Triangle);
+    }
+
+    #[test]
+    fn the_bar_switches_the_model_of_what_is_selected_within_its_kind() {
+        let (mut e, mut doc) = two_selected();
+        assert_eq!(e.set_figure(Figure::Star, &mut doc), Change::Scene);
+        assert_eq!(only(&doc).model, Model::Star);
+        assert_eq!(only_line(&doc).end, Head::Arrow, "a line is not a star");
+        let _ = e.set_figure(Figure::Line, &mut doc);
+        assert_eq!((only_line(&doc).start, only_line(&doc).end), (Head::None, Head::None));
+        assert_eq!(only(&doc).model, Model::Star, "nor a star a line");
+        let _ = e.set_figure(Figure::Arrow, &mut doc);
+        assert_eq!(only_line(&doc).end, Head::Arrow, "a bare line made an arrow grows its head");
+        assert_eq!(e.figure, Figure::Arrow, "and the tool draws it next");
+        let (mut e, mut doc) = shaping();
+        assert_eq!(e.set_figure(Figure::Diamond, &mut doc), Change::Selection);
+        assert_eq!(e.figure, Figure::Diamond);
+    }
+
+    #[test]
+    fn a_locked_shape_is_neither_looked_at_nor_restyled() {
+        let (mut e, mut doc) = shaping();
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 60.0));
+        let layer = only(&doc).layer.clone();
+        if let Some(l) = doc.layer_mut(&layer) {
+            l.locked = true;
+        }
+        assert!(!e.shape_targeted(&doc));
+        let _ = e.restyle_shapes(&mut doc, Restyle::Fill(Some("#000000".into())));
+        assert_eq!(only(&doc).fill, None);
+    }
+
+    #[test]
+    fn what_the_board_cannot_hold_is_held_to_what_it_can() {
+        let (mut e, mut doc) = shaping();
+        let _ = e.shape_look(&doc, INK);
+        let _ = drag(&mut e, &mut doc, (0.0, 0.0), (100.0, 60.0));
+        let _ = e.restyle_shapes(&mut doc, Restyle::Sides(2));
+        assert_eq!(only(&doc).sides, crate::doc::MIN_SIDES);
+        let _ = e.restyle_shapes(&mut doc, Restyle::Sides(500));
+        assert_eq!(only(&doc).sides, crate::doc::MAX_SIDES);
+        let _ = e.restyle_shapes(&mut doc, Restyle::Inner(1.5));
+        assert!(only(&doc).inner < 1.0);
+        assert_eq!(e.restyle_shapes(&mut doc, Restyle::Width(0.0)), Change::None, "no width is no stroke");
+        assert_eq!(e.restyle_shapes(&mut doc, Restyle::Radius(f64::NAN)), Change::None);
     }
 }

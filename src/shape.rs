@@ -42,6 +42,28 @@ impl Figure {
         Figure::Arrow,
     ];
 
+    /// The figure a closed model is drawn by.
+    pub fn of(model: Model) -> Figure {
+        match model {
+            Model::Rectangle => Figure::Rectangle,
+            Model::Ellipse => Figure::Ellipse,
+            Model::Triangle => Figure::Triangle,
+            Model::Diamond => Figure::Diamond,
+            Model::Polygon => Figure::Polygon,
+            Model::Star => Figure::Star,
+        }
+    }
+
+    /// The figure a line is: an arrow while it wears a head at either
+    /// end, a line otherwise.
+    pub fn of_line(l: &Line) -> Figure {
+        if l.start == Head::None && l.end == Head::None {
+            Figure::Line
+        } else {
+            Figure::Arrow
+        }
+    }
+
     /// The closed model it is, or none for a line.
     pub fn model(self) -> Option<Model> {
         match self {
@@ -64,6 +86,11 @@ impl Figure {
         }
     }
 }
+
+/// How far in a star may be cut, as a fraction of its outer radius: past
+/// either end it is a polygon of twice its points, or a burst of lines.
+pub const MIN_INNER: f64 = 0.05;
+pub const MAX_INNER: f64 = 0.95;
 
 /// Where a polygon model's corners stand. Every one of them is walked
 /// from straight up, clockwise, evenly round a circle of radius 1 — every
