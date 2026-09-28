@@ -14,7 +14,7 @@
 //! Pure — `app` asks where a click landed and what to draw.
 
 use crate::brush::{Brush, SLOTS, Set};
-use crate::palette::icon_uv;
+use crate::palette::{IconSheet, brush_icon};
 use crate::scene::{self, Prim, Rgba, ScreenRect, Viewport, with_alpha};
 use crate::text::Atlas;
 use crate::theme::Theme;
@@ -212,7 +212,7 @@ impl Strip {
     /// `slots` is what each seat holds, `selected` the brush in the hand
     /// and `brush` its body, which the dab is drawn with. `over` is the
     /// seat a brush is being dragged onto, which stands out. `icons` is
-    /// the slot the icon sheet was uploaded to.
+    /// the imported icon sheet, when there is one on the GPU.
     #[allow(clippy::too_many_arguments)]
     pub fn prims(
         &self,
@@ -223,7 +223,7 @@ impl Strip {
         over: Option<usize>,
         atlas: &Atlas,
         slot: u32,
-        icons: u32,
+        icons: Option<IconSheet>,
         theme: &Theme,
     ) -> Vec<Prim> {
         let s = self.scale;
@@ -254,7 +254,7 @@ impl Strip {
         brush: &Brush,
         atlas: &Atlas,
         slot: u32,
-        icons: u32,
+        icons: Option<IconSheet>,
         theme: &Theme,
         out: &mut Vec<Prim>,
     ) {
@@ -274,7 +274,7 @@ impl Strip {
             w: side,
             h: side,
         };
-        out.push(Prim::sprite(icon_box, icon_uv(preset.icon), icons));
+        out.extend(brush_icon(preset, icon_box, icons, theme));
 
         // The name on one line, the shelf under it in the muted color.
         let tx = icon_box.x + side + LABEL_GAP * s;
@@ -334,7 +334,7 @@ impl Strip {
         over: Option<usize>,
         atlas: &Atlas,
         slot: u32,
-        icons: u32,
+        icons: Option<IconSheet>,
         theme: &Theme,
         out: &mut Vec<Prim>,
     ) {
@@ -366,7 +366,11 @@ impl Strip {
                     w: art_side,
                     h: art_side,
                 };
-                out.push(Prim::sprite(art, icon_uv(preset.icon), icons).clipped(self.band));
+                out.extend(
+                    brush_icon(preset, art, icons, theme)
+                        .into_iter()
+                        .map(|p| p.clipped(self.band)),
+                );
             }
 
             // The key is read, never clicked, so it is drawn muted —
@@ -435,7 +439,11 @@ mod tests {
             over,
             &atlas(),
             7,
-            9,
+            Some(IconSheet {
+                slot: 9,
+                cols: lib.icon_grid().0,
+                count: lib.icon_grid().1,
+            }),
             &Theme::light(),
         )
     }
@@ -495,7 +503,11 @@ mod tests {
     #[test]
     fn prims_paint_the_panel_the_seats_and_the_brush_in_hand() {
         let theme = Theme::light();
-        let lib = Library::default();
+        // One seat given an imported brush, which wears its sheet's art;
+        // the rest hold the shipped shelf, which is drawn.
+        let mut lib = Library::acquired();
+        let stamp = (2, 0);
+        assert!(lib.assign_slot(3, stamp));
         let s = strip(TALL, 1.0);
         let held = lib.slots()[1].expect("the first seat ships filled");
         let prims = paint(&s, &lib, held, None);
@@ -517,10 +529,20 @@ mod tests {
         assert!(seat.rect.contains_rect(&ringed[0]));
 
         let sprites = prims.iter().filter(|q| q.slot == 9).count();
+        assert_eq!(sprites, 1, "the imported brush's cell, and nothing else");
+        for seat in s.seats.iter().filter(|q| q.n != 0 && q.n != 3) {
+            assert!(
+                prims.iter().any(|q| q.kind == scene::KIND_SEGMENT
+                    && seat.art.contains_rect(&q.bounds())),
+                "seat {} draws its brush",
+                seat.n
+            );
+        }
+        let with_it = paint(&s, &lib, stamp, None);
         assert_eq!(
-            sprites,
-            SLOTS - 1 + 1,
-            "a sprite per filled seat, and one more for the header"
+            with_it.iter().filter(|q| q.slot == 9).count(),
+            2,
+            "held, the header wears the cell too"
         );
     }
 
@@ -594,9 +616,13 @@ mod tests {
         let dab = prims
             .iter()
             .find(|q| {
+                // Under the header's icon, which is drawn in segments too,
+                // and clear of the buttons and the seats.
                 q.kind == scene::KIND_SEGMENT
+                    && q.bounds().y >= s.header.y + HEADER_ICON
                     && q.bounds().intersect(&s.properties).is_none()
                     && q.bounds().intersect(&s.library).is_none()
+                    && q.bounds().intersect(&s.band).is_none()
             })
             .expect("the header draws a dab");
         assert!(dab.radius > 0.0);

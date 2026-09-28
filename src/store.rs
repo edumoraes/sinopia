@@ -79,6 +79,26 @@ pub fn left_behind(root: &Path) -> Option<PathBuf> {
     dir.is_dir().then_some(old)
 }
 
+/// The directory under the root the imported brushes live in, and the
+/// three files an import writes there.
+pub const IMPORTED_DIR: &str = "brushes";
+pub const IMPORTED_LIBRARY: &str = "library.json";
+pub const IMPORTED_ICONS: &str = "icons.png";
+pub const IMPORTED_SHAPES: &str = "shapes.png";
+
+/// What an import left on the disk: the library, and its art.
+pub struct ImportedBrushes {
+    pub library: String,
+    pub sheets: BrushSheets,
+}
+
+/// The two sheets an import draws: the icons, and the nibs with the
+/// papers under them. Encoded PNG, as they were written.
+pub struct BrushSheets {
+    pub icons: Option<Vec<u8>>,
+    pub shapes: Option<Vec<u8>>,
+}
+
 impl Store {
     /// Opens (creating if needed) the layout under `root`, directories at
     /// 0700.
@@ -259,6 +279,29 @@ impl Store {
 
     fn brushes_path(&self) -> PathBuf {
         self.root.join("brushes.json")
+    }
+
+    /// Where `sinopia brushes import` keeps what it made: the library,
+    /// its two sheets, and the sets it was made from.
+    pub fn imported_dir(&self) -> PathBuf {
+        self.root.join(IMPORTED_DIR)
+    }
+
+    /// The brushes `sinopia brushes import` wrote, if it ever has. Read
+    /// whole, since the window needs every byte of it before its first
+    /// frame; a sheet that is missing is left out rather than refused,
+    /// since the brushes still paint without their art.
+    pub fn imported_brushes(&self) -> Option<ImportedBrushes> {
+        let dir = self.imported_dir();
+        let library = std::fs::read_to_string(dir.join(IMPORTED_LIBRARY)).ok()?;
+        let read = |name: &str| std::fs::read(dir.join(name)).ok();
+        Some(ImportedBrushes {
+            library,
+            sheets: BrushSheets {
+                icons: read(IMPORTED_ICONS),
+                shapes: read(IMPORTED_SHAPES),
+            },
+        })
     }
 
     /// Index entries, most recent first.

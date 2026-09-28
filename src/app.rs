@@ -46,7 +46,7 @@ use crate::layers::{self, Panel, PanelHit};
 use crate::menu;
 use crate::menubar::{self, Action, Bar, Title};
 use crate::omarchy::{self, Style};
-use crate::palette::{self, Palette};
+use crate::palette::{self, IconSheet, Palette};
 use crate::slots::{self, Strip};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
@@ -220,8 +220,12 @@ struct App {
     /// Where the dock's illustrated RGBA sheet was uploaded. `None`
     /// keeps its built-in line-art fallback alive until the upload lands.
     dock_icon_slot: Option<u32>,
-    /// Where the brush icon sheet was uploaded, once it has been.
-    icon_slot: u32,
+    /// The imported brushes' icon sheet: where it was uploaded, once it
+    /// has been, and how it is cut up.
+    icon_sheet: Option<IconSheet>,
+    /// The imported brushes' two sheets as they were read off the disk,
+    /// held until `ensure_sheets` hands them to the GPU.
+    imported_sheets: Option<store::BrushSheets>,
     /// Where the agents' logos were uploaded, once they have been.
     agent_logo_slot: Option<u32>,
     /// Where each nib shape sits on the shape sheet, once it has been
@@ -416,9 +420,8 @@ impl Sending {
 /// The brush is taken up at the press either way, as it always was: a
 /// drag that ends nowhere leaves the hand where a click would have.
 struct Dragging {
+    /// The brush, whose icon is carried behind the pointer.
     at: (usize, usize),
-    /// The brush's cell of the icon sheet, carried behind the pointer.
-    icon: u16,
     /// Where the press landed, and where the pointer is now, in
     /// physical px.
     from: (f32, f32),
@@ -3342,11 +3345,12 @@ impl App {
         full
     }
 
-    /// The four image sheets the binary ships: illustrated dock tools,
-    /// brush icons for the library, the agents' logos for the export
-    /// dialog, and nib shapes for the canvas. They are raster art, the
-    /// same at every scale, so each is uploaded once into a slot of its
-    /// own and never replaced like the glyph atlas is.
+    /// The image sheets: the two the binary ships — illustrated dock
+    /// tools, the agents' logos for the export dialog — and the two an
+    /// import wrote, brush icons for the library and nib shapes for the
+    /// canvas. They are raster art, the same at every scale, so each is
+    /// uploaded once into a slot of its own and never replaced like the
+    /// glyph atlas is.
     fn ensure_sheets(&mut self) {
         if self.dock_icon_slot.is_none() {
             const DOCK_ICONS: &[u8] = include_bytes!("../assets/dock/icons.png");
@@ -3358,14 +3362,21 @@ impl App {
                 |app, slot| app.dock_icon_slot = Some(slot),
             );
         }
-        if self.icon_slot == 0 {
-            const ICONS: &[u8] = include_bytes!("../assets/brushes/icons.png");
-            // Without it the palette draws no icons and the grid is
-            // bare; the names and the preview's dab still say what is
-            // what.
-            self.upload_sheet("brush icons", ICONS, Gfx::upload_icons, |app, slot| {
-                app.icon_slot = slot;
-            });
+        // The imported brushes' art, read off the disk at startup. Without
+        // the icons every brush is drawn from its own body; without the
+        // shapes every one lays a plain round nib.
+        if let Some(sheets) = self.imported_sheets.take() {
+            if let Some(icons) = &sheets.icons {
+                self.upload_sheet("brush icons", icons, Gfx::upload_icons, |app, slot| {
+                    let (cols, count) = app.brushes.icon_grid();
+                    app.icon_sheet = Some(IconSheet { slot, cols, count });
+                });
+            }
+            if let Some(shapes) = &sheets.shapes {
+                self.upload_sheet("nib shapes", shapes, Gfx::upload_shapes, |app, slot| {
+                    app.shapes = app.brushes.sheet(slot);
+                });
+            }
         }
         if self.agent_logo_slot.is_none() {
             const LOGOS: &[u8] = include_bytes!("../assets/agents/logos.png");
@@ -3376,14 +3387,6 @@ impl App {
                 Gfx::upload_agent_logos,
                 |app, slot| app.agent_logo_slot = Some(slot),
             );
-        }
-        if self.shapes.cells.is_empty() {
-            const SHAPES: &[u8] = include_bytes!("../assets/brushes/shapes.png");
-            // Without it every brush lays a plain round nib, which is
-            // what two thirds of them lay anyway.
-            self.upload_sheet("nib shapes", SHAPES, Gfx::upload_shapes, |app, slot| {
-                app.shapes = app.brushes.sheet(slot);
-            });
         }
     }
 
@@ -3530,7 +3533,7 @@ impl App {
                 self.brushes.selected(),
                 atlas,
                 self.atlas_slot,
-                self.icon_slot,
+                self.icon_sheet,
                 &self.theme,
             ));
         }
@@ -3543,24 +3546,31 @@ impl App {
                 self.drag.as_ref().and_then(|d| d.over),
                 atlas,
                 self.atlas_slot,
-                self.icon_slot,
+                self.icon_sheet,
                 &self.theme,
             ));
         }
         // The brush in the pointer's hand, drawn last: it passes over
         // every panel between the shelf it came off and its seat.
-        if let Some(drag) = self.drag.as_ref().filter(|d| d.carried) {
+        if let Some(drag) = self.drag.as_ref().filter(|d| d.carried)
+            && let Some(preset) = self
+                .brushes
+                .sets()
+                .get(drag.at.0)
+                .and_then(|q| q.presets.get(drag.at.1))
+        {
             let side = palette::ICON * self.chrome(view) as f32;
-            frame.extend([Prim::sprite(
+            frame.extend(palette::brush_icon(
+                preset,
                 ScreenRect {
                     x: drag.to.0 - side / 2.0,
                     y: drag.to.1 - side / 2.0,
                     w: side,
                     h: side,
                 },
-                palette::icon_uv(drag.icon),
-                self.icon_slot,
-            )]);
+                self.icon_sheet,
+                &self.theme,
+            ));
         }
         if let (Some(bar), Some(atlas)) = (self.props(view), self.atlas.as_ref()) {
             frame.extend(bar.prims(
@@ -3929,12 +3939,9 @@ impl App {
                 self.palette_hit(hit);
                 // The same press may yet turn out to be a drag onto a
                 // seat. Nothing is carried until it has moved.
-                if let palette::Hit::Brush(set, index) = hit
-                    && let Some(cell) = pal.cells.iter().find(|c| (c.set, c.index) == (set, index))
-                {
+                if let palette::Hit::Brush(set, index) = hit {
                     self.drag = Some(Dragging {
                         at: (set, index),
-                        icon: cell.icon,
                         from: (x as f32, y as f32),
                         to: (x as f32, y as f32),
                         carried: false,
@@ -5463,6 +5470,7 @@ pub fn run(
     // a first run with nothing behind it — an untitled one that has not
     // been written anywhere yet, and will not be until it is drawn on.
     let store_brushes = store.brushes();
+    let imported = store.imported_brushes();
     // What the desktop is wearing, where the desktop is Omarchy. Every
     // piece falls back on its own, so a machine without it opens the
     // board in the colours it has always had.
@@ -5491,10 +5499,11 @@ pub fn run(
         style,
         home,
         brushes: {
-            // The shipped sets, dressed in whatever the person kept of
-            // them: a library file is a list of exceptions, so a brush
-            // nobody touched is still whatever the assets now say.
-            let mut lib = Library::default();
+            // The shipped shelf and whatever was imported, dressed in
+            // what the person kept of them: a library file is a list of
+            // exceptions, so a brush nobody touched is still whatever the
+            // shelf now says.
+            let mut lib = Library::with_imported(imported.as_ref().map(|i| i.library.as_str()));
             lib.apply(&store_brushes);
             lib
         },
@@ -5507,7 +5516,8 @@ pub fn run(
         brushes_dirty: false,
         grab: None,
         dock_icon_slot: None,
-        icon_slot: 0,
+        icon_sheet: None,
+        imported_sheets: imported.map(|i| i.sheets),
         agent_logo_slot: None,
         shapes: Shapes::default(),
         fonts: crate::fonts::machine(),
