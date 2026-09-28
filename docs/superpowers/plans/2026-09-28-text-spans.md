@@ -20,24 +20,24 @@ runs saying the same are one, and a run saying nothing is dropped.
 
 ## Tasks
 
-- [ ] `spans` (pure): runs — resolving the style at a place, applying a
+- [x] `spans` (pure): runs — resolving the style at a place, applying a
       change to a range, following an edit (a stretch replaced by new
       characters that take the style of the one before), tidying.
-- [ ] `doc`: `Text.runs`, checked; `TextStyle` split into what a run
+- [x] `doc`: `Text.runs`, checked; `TextStyle` split into what a run
       may set and what only the text sets.
-- [ ] `typeset`: every character in its own face and size — advances,
+- [x] `typeset`: every character in its own face and size — advances,
       kerning only within one face and size, a line as tall as its
       tallest letters, baselines aligned, the caret as tall as the
       letter before it.
-- [ ] `scene`: each glyph in its own face, size and ink; underline and
+- [x] `scene`: each glyph in its own face, size and ink; underline and
       strike in stretches.
-- [ ] `select`: scaling artistic text scales every run's size too.
-- [ ] `editor::typing`: runs follow every edit, the typing's undo keeps
+- [x] `select`: scaling artistic text scales every run's size too.
+- [x] `editor::typing`: runs follow every edit, the typing's undo keeps
       them, the bar styles the selection while typing (or the next
       letters when nothing is selected), the whole text otherwise; what
       the bar shows is the style where the caret is.
-- [ ] `ipc` / `cli`: `set_text` takes a `range`; `sinopia text set
+- [x] `ipc` / `cli`: `set_text` takes a `range`; `sinopia text set
       --range A:B`.
-- [ ] Skill, AGENTS.md, DEVELOPMENT.md.
-- [ ] Zero warnings, `cargo test`, seen working in a window.
+- [x] Skill, AGENTS.md, DEVELOPMENT.md.
+- [x] Zero warnings, `cargo test`, seen working in a window.
 - [ ] PR stacked on #15; CI green.
