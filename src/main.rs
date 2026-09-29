@@ -39,6 +39,7 @@ mod select;
 mod send;
 mod shape;
 mod shapebar;
+mod skbrushes;
 mod skills;
 mod slots;
 mod spans;
@@ -71,6 +72,9 @@ fn main() -> anyhow::Result<()> {
 
     let action = cli.action();
     let request = match &action {
+        // The person's files into the person's data directory: nothing a
+        // live board is asked.
+        Action::ImportBrushes(files) => return import_brushes(files),
         Action::Default => Request::Raise,
         Action::New => Request::New,
         Action::Open(id) => Request::Open { id: id.clone() },
@@ -140,6 +144,7 @@ fn main() -> anyhow::Result<()> {
         Action::Frames | Action::Read { .. } | Action::Add(_) | Action::Layer(_) | Action::Text(_) => {
             anyhow::bail!("no sinopia instance running; open the board first")
         }
+        Action::ImportBrushes(_) => unreachable!("imported before the socket was asked"),
         Action::Shutdown => {
             log::info!("no instance running; nothing to shut down");
             Ok(())
@@ -303,6 +308,17 @@ fn open_default_store() -> anyhow::Result<Store> {
         log::info!("brought the boards over from {old:?} to {root:?}");
     }
     Store::open(root)
+}
+
+/// `sinopia brushes import`: the sets into the library, and what came of
+/// it. A board that is open read its brushes when it started, so it sees
+/// these the next time it does.
+fn import_brushes(files: &[std::path::PathBuf]) -> anyhow::Result<()> {
+    let store = open_default_store()?;
+    let report = skbrushes::import(&store, files)?;
+    print!("{}", skbrushes::describe(&report, &store.imported_dir()));
+    println!("Sinopia shows them the next time it starts.");
+    Ok(())
 }
 
 /// Whether an instance under the working name answers on its socket. A

@@ -75,6 +75,24 @@ pub enum Command {
         #[command(subcommand)]
         verb: TextVerb,
     },
+    /// Bring in brush sets you downloaded for Sketchbook
+    Brushes {
+        #[command(subcommand)]
+        verb: BrushVerb,
+    },
+}
+
+/// What can be done with the brush library. The sets are the person's
+/// own copies: the binary ships none of Sketchbook's brushes.
+#[derive(Debug, Clone, PartialEq, Subcommand)]
+pub enum BrushVerb {
+    /// Import Sketchbook sets — .skbrushes files, folders of them, or the
+    /// Mega Set zip — into the library, beside any imported before
+    Import {
+        /// The sets to import
+        #[arg(required = true, value_name = "PATH")]
+        files: Vec<PathBuf>,
+    },
 }
 
 /// What can be done with the board's text. A text is named by its id,
@@ -640,6 +658,10 @@ pub enum Action {
     Layer(LayerVerb),
     /// Something done with the open board's text, on the same terms.
     Text(TextVerb),
+    /// Sketchbook sets to bring into the brush library. The person's own
+    /// files into the person's own data directory: nothing a live board
+    /// is asked, and nothing a window is opened for.
+    ImportBrushes(Vec<PathBuf>),
 }
 
 impl Cli {
@@ -672,6 +694,7 @@ impl Cli {
             Some(Command::Agent { .. }) => "agent",
             Some(Command::Layer { .. }) => "layer",
             Some(Command::Text { .. }) => "text",
+            Some(Command::Brushes { .. }) => "brushes",
             None => return Ok(self),
         };
         match flag {
@@ -699,6 +722,9 @@ impl Cli {
             }
             Some(Command::Layer { verb }) => return Action::Layer(verb.clone()),
             Some(Command::Text { verb }) => return Action::Text(verb.clone()),
+            Some(Command::Brushes {
+                verb: BrushVerb::Import { files },
+            }) => return Action::ImportBrushes(files.clone()),
             None => {}
         }
         if self.new {
@@ -1129,5 +1155,16 @@ mod tests {
         let two = resolve_text(&listing, "Note").unwrap_err().to_string();
         assert!(two.contains("T2") && two.contains("T3"), "{two}");
         assert!(resolve_text(&listing, "Nobody").is_err());
+    }
+
+    #[test]
+    fn brushes_are_imported_from_one_path_or_more_and_never_with_a_flag() {
+        let cli = parse(&["brushes", "import", "Basic.skbrushes", "sets/"]).expect("parses");
+        assert_eq!(
+            cli.action(),
+            Action::ImportBrushes(vec!["Basic.skbrushes".into(), "sets/".into()])
+        );
+        assert!(parse(&["brushes", "import"]).is_err(), "a path is required");
+        assert!(parse(&["--new", "brushes", "import", "x"]).is_err());
     }
 }

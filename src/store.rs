@@ -79,6 +79,26 @@ pub fn left_behind(root: &Path) -> Option<PathBuf> {
     dir.is_dir().then_some(old)
 }
 
+/// The directory under the root the imported brushes live in, and the
+/// three files an import writes there.
+pub const IMPORTED_DIR: &str = "brushes";
+pub const IMPORTED_LIBRARY: &str = "library.json";
+pub const IMPORTED_ICONS: &str = "icons.png";
+pub const IMPORTED_SHAPES: &str = "shapes.png";
+
+/// What an import left on the disk: the library, and its art.
+pub struct ImportedBrushes {
+    pub library: String,
+    pub sheets: BrushSheets,
+}
+
+/// The two sheets an import draws: the icons, and the nibs with the
+/// papers under them. Encoded PNG, as they were written.
+pub struct BrushSheets {
+    pub icons: Option<Vec<u8>>,
+    pub shapes: Option<Vec<u8>>,
+}
+
 impl Store {
     /// Opens (creating if needed) the layout under `root`, directories at
     /// 0700.
@@ -261,6 +281,29 @@ impl Store {
         self.root.join("brushes.json")
     }
 
+    /// Where `sinopia brushes import` keeps what it made: the library,
+    /// its two sheets, and the sets it was made from.
+    pub fn imported_dir(&self) -> PathBuf {
+        self.root.join(IMPORTED_DIR)
+    }
+
+    /// The brushes `sinopia brushes import` wrote, if it ever has. Read
+    /// whole, since the window needs every byte of it before its first
+    /// frame; a sheet that is missing is left out rather than refused,
+    /// since the brushes still paint without their art.
+    pub fn imported_brushes(&self) -> Option<ImportedBrushes> {
+        let dir = self.imported_dir();
+        let library = std::fs::read_to_string(dir.join(IMPORTED_LIBRARY)).ok()?;
+        let read = |name: &str| std::fs::read(dir.join(name)).ok();
+        Some(ImportedBrushes {
+            library,
+            sheets: BrushSheets {
+                icons: read(IMPORTED_ICONS),
+                shapes: read(IMPORTED_SHAPES),
+            },
+        })
+    }
+
     /// Index entries, most recent first.
     pub fn index(&self) -> anyhow::Result<Vec<IndexEntry>> {
         let mut index = self.read_index()?;
@@ -394,7 +437,7 @@ fn validate_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
@@ -409,7 +452,7 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Atomic write at 0600: what everything under the root gets (§9.3).
-fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     write_atomic(path, bytes, Some(0o600))
 }
 

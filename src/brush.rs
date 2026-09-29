@@ -8,8 +8,8 @@
 //! shipped as. The library is the window's, not any board's: a brush
 //! belongs to the person drawing. What they changed about it outlives
 //! the process as [`Edits`] — a list of exceptions, named rather than
-//! numbered, so the shipped sets stay the source of truth for every
-//! brush nobody touched.
+//! numbered, so the shelf this build ships and the ones imported stay
+//! the source of truth for every brush nobody touched.
 //!
 //! Its body is the whole of Brush Properties. Three of it reach the
 //! canvas — [`Property::honored`] is the list — and the rest are the
@@ -23,7 +23,7 @@ use crate::scene::{Blend, NIB_MIN_PX, Prim, Rgba, Shapes, polyline_prims};
 
 /// Brush size in world units (logical px at zoom 1): the diameter. The
 /// top is the widest brush Sketchbook's own sets carry — a 350-unit
-/// radius — so nothing that ships is clamped on the way in.
+/// radius — so none of them is clamped on the way in when imported.
 pub const SIZE_MIN: f64 = 1.0;
 pub const SIZE_MAX: f64 = 700.0;
 /// What `{` and `}` change the hardness by.
@@ -671,19 +671,18 @@ pub struct Edits {
 pub const SLOTS: usize = 10;
 
 /// What seats 1..=9 hold on a machine that has never been drawn on: the
-/// shelf Sketchbook puts first, which covers pencil, marker, airbrush,
-/// pen, ink, watercolour, blur and eraser — a whole hand without anybody
-/// picking one out.
+/// shelf this build ships, whole — pencil, pens, marker, airbrush, two
+/// rounds and two erasers, a hand without anybody picking one out.
 pub const SLOT_DEFAULTS: [(&str, &str); SLOTS - 1] = [
-    ("Basic", "Textured Pencil"),
-    ("Basic", "Textured Marker"),
-    ("Basic", "Pressure Airbrush"),
-    ("Basic", "Technical Pen"),
-    ("Basic", "80% Inking Pen"),
-    ("Basic", "Textured Watercolor"),
-    ("Basic", "Textured Inker"),
-    ("Basic", "Natural Blur"),
-    ("Basic", "Auto Eraser Soft"),
+    (OWN_SET, "Pencil"),
+    (OWN_SET, "Fine Liner"),
+    (OWN_SET, "Ink Pen"),
+    (OWN_SET, "Marker"),
+    (OWN_SET, "Airbrush"),
+    (OWN_SET, "Hard Round"),
+    (OWN_SET, "Soft Round"),
+    (OWN_SET, "Eraser"),
+    (OWN_SET, "Soft Eraser"),
 ];
 
 /// Which brush was in the hand, by name.
@@ -707,8 +706,8 @@ pub struct Edit {
 pub struct Preset {
     pub name: String,
     pub brush: Brush,
-    /// Its cell of the icon sheet: the art Sketchbook draws it with.
-    pub icon: u16,
+    /// What pictures it in the library and the strip.
+    pub icon: Icon,
     /// The nib image it carries, by the name the sheet gives it: a
     /// shape it stamps in place of a round dab, or a grain it wears
     /// over one. Not part of the body: no slider addresses it, and
@@ -765,6 +764,16 @@ impl Preset {
     }
 }
 
+/// What pictures a brush in the library and the strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Icon {
+    /// Drawn from the brush's own body, in the chrome's ink: what the
+    /// brushes this build ships wear, since they carry no art.
+    Drawn,
+    /// A cell of the imported sheet, which carries its own colours.
+    Sheet(u16),
+}
+
 /// A shelf of the library. The palette shows one of these at a time —
 /// Sketchbook's pinned set.
 #[derive(Debug, Clone, PartialEq)]
@@ -776,11 +785,16 @@ pub struct Set {
 /// Every brush there is, in sets, plus which one the palette shows and
 /// which one is in the hand. Session state (§6.2), global to the window
 /// like the brush it replaced — a brush belongs to the person drawing,
-/// not to the board. Nothing of it reaches disk yet: an edit lasts as
-/// long as the process.
+/// not to the board. What was changed about it reaches the disk as
+/// [`Edits`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Library {
     sets: Vec<Set>,
+    /// How the imported icon sheet is cut up: how many cells stand
+    /// across it, and how many there are. Nothing when nothing was
+    /// imported.
+    icon_cols: u16,
+    icons: u16,
     /// The nib shapes the sheet carries, in its own order: a name's
     /// place here is the cell it is in.
     shapes: Vec<String>,
@@ -934,6 +948,12 @@ impl Library {
         }
     }
 
+    /// How the imported icon sheet is cut up: cells across, and cells
+    /// in all. `(0, 0)` when nothing was imported.
+    pub fn icon_grid(&self) -> (u16, u16) {
+        (self.icon_cols, self.icons)
+    }
+
     pub fn edited(&self) -> bool {
         self.preset().edited()
     }
@@ -980,10 +1000,11 @@ impl Library {
         }
     }
 
-    /// Dresses the shipped brushes in what was kept of them. A name this
-    /// build no longer carries is passed over rather than refused: sets
-    /// are rebuilt from the assets, and a brush that has gone is one the
-    /// person can no longer be holding either. Every value goes through
+    /// Dresses the brushes in what was kept of them. A name this library
+    /// no longer carries is passed over rather than refused: the shipped
+    /// shelf changes with the build and the imported ones with each
+    /// import, and a brush that has gone is one the person can no longer
+    /// be holding either. Every value goes through
     /// its own `Property::set`, as `library.json` does — a file edited
     /// by hand must not seat a number the sliders could never reach.
     pub fn apply(&mut self, edits: &Edits) {
@@ -1024,24 +1045,131 @@ impl Library {
     }
 }
 
-/// Sketchbook's own sets, converted by `tools/import-skbrushes.py` and
-/// built into the binary. The originals are 34 MB of zip and 438 MB of
-/// shape and texture TIFFs once opened; this is the 73 KB of it the
-/// canvas can act on, plus a sheet of the icons.
-const SHIPPED: &str = include_str!("../assets/brushes/library.json");
+/// The shelf this build ships, and the name it goes by in `brushes.json`.
+/// None of Sketchbook's sets is called this, so an imported shelf never
+/// shadows it.
+pub const OWN_SET: &str = "Sinopia";
 
-/// How many cells the icon sheet has. The palette needs it to cut the
-/// sheet up, and a brush pointing past it is an asset built wrong.
-#[allow(dead_code)] // the palette's grid cuts the sheet by it
-pub const ICONS: u16 = 211;
+/// The brushes this build ships. Every one is a round nib — no shape,
+/// no grain, no paper — and every number is this project's own: the art
+/// Sketchbook draws its brushes with is Sketchbook's, and comes in only
+/// through `sinopia brushes import`, from a copy the person downloaded.
+/// Between them they reach every profile, both marks the canvas lays,
+/// a flattened nib and what the pen can drive.
+fn own_set() -> Set {
+    let brush = |name: &str, brush: Brush| Preset {
+        name: name.to_owned(),
+        brush: settled(brush),
+        factory: settled(brush),
+        icon: Icon::Drawn,
+        shape: None,
+        grain: None,
+        paper: None,
+    };
+    let driven = |size: f64, opacity: f64, flow: f64| Pressure {
+        size,
+        opacity,
+        flow,
+    };
+    let round = Brush {
+        spacing: 0.4,
+        ..Brush::default()
+    };
+    Set {
+        name: OWN_SET.to_owned(),
+        presets: vec![
+            brush("Pencil", Brush {
+                size: 4.0,
+                opacity: 0.9,
+                flow: 0.7,
+                hardness: 0.8,
+                profile: Profile::Sharp,
+                pressure: driven(0.5, 0.5, 0.0),
+                ..round
+            }),
+            brush("Fine Liner", Brush {
+                size: 3.0,
+                spacing: 0.5,
+                hardness: 1.0,
+                profile: Profile::HardSolid,
+                pressure: driven(0.25, 0.0, 0.0),
+                ..round
+            }),
+            brush("Ink Pen", Brush {
+                size: 10.0,
+                hardness: 0.95,
+                profile: Profile::HardSolid,
+                pressure: driven(0.9, 0.0, 0.0),
+                ..round
+            }),
+            brush("Marker", Brush {
+                size: 24.0,
+                opacity: 0.7,
+                flow: 0.4,
+                spacing: 0.3,
+                roundness: 0.3,
+                rotation: 45.0,
+                hardness: 0.85,
+                pressure: Pressure::NONE,
+                ..round
+            }),
+            brush("Airbrush", Brush {
+                size: 90.0,
+                opacity: 0.9,
+                flow: 0.06,
+                spacing: 0.3,
+                hardness: 0.0,
+                profile: Profile::Airbrush,
+                pressure: driven(0.0, 0.0, 0.8),
+                ..round
+            }),
+            brush("Hard Round", Brush {
+                size: 20.0,
+                hardness: 0.9,
+                pressure: driven(1.0, 0.0, 0.0),
+                ..round
+            }),
+            brush("Soft Round", Brush {
+                size: 50.0,
+                flow: 0.25,
+                spacing: 0.3,
+                hardness: 0.1,
+                pressure: driven(0.3, 0.0, 0.6),
+                ..round
+            }),
+            brush("Eraser", Brush {
+                size: 24.0,
+                hardness: 0.95,
+                profile: Profile::HardSolid,
+                mark: Mark::Erase,
+                pressure: Pressure::NONE,
+                ..round
+            }),
+            brush("Soft Eraser", Brush {
+                size: 70.0,
+                flow: 0.4,
+                spacing: 0.3,
+                hardness: 0.1,
+                profile: Profile::Airbrush,
+                mark: Mark::Erase,
+                pressure: driven(0.0, 0.0, 0.6),
+                ..round
+            }),
+        ],
+    }
+}
 
-/// What `library.json` looks like. It is built, not typed, but it is
-/// still read through a door: every number is put through its own
-/// `Property`, so an asset built wrong cannot seat a value the sliders
-/// could never reach.
+/// What an imported `library.json` looks like — what `sinopia brushes
+/// import` writes. It is built, not typed, but it is still read through
+/// a door: every number is put through its own `Property`, so a file
+/// built wrong or edited by hand cannot seat a value the sliders could
+/// never reach.
 #[derive(Deserialize)]
 struct LibraryOnDisk {
+    #[serde(default)]
     icons: u16,
+    #[serde(default)]
+    icon_cols: u16,
     /// The nib shapes the sheet carries, in its own order.
     #[serde(default)]
     shapes: Vec<String>,
@@ -1066,7 +1194,10 @@ struct SetOnDisk {
 #[derive(Deserialize)]
 struct PresetOnDisk {
     name: String,
-    icon: u16,
+    /// Its cell of the icon sheet; absent when the set shipped no icon
+    /// for it, and then it is drawn like the brushes this build ships.
+    #[serde(default)]
+    icon: Option<u16>,
     brush: Brush,
     /// Absent when the brush ships at its factory settings, which is
     /// every brush in the sets that came with it.
@@ -1100,92 +1231,12 @@ fn settled(mut brush: Brush) -> Brush {
 }
 
 impl Default for Library {
-    /// The brushes the binary ships with: Sketchbook's seventeen sets.
-    ///
-    /// The asset is built from the sets in `brushes/` and checked by the
-    /// tests, so a failure here is a broken build rather than bad input
-    /// — but it still costs nothing to be strict, and an asset that does
-    /// not parse leaves one plain brush to draw with instead of no
-    /// window at all.
+    /// The brushes this build ships, and nothing imported.
     fn default() -> Library {
-        let disk: LibraryOnDisk = match serde_json::from_str(SHIPPED) {
-            Ok(d) => d,
-            Err(e) => {
-                log::error!("brush library did not parse: {e}");
-                return Library::bare();
-            }
-        };
-        let sets: Vec<Set> = disk
-            .sets
-            .into_iter()
-            .map(|s| Set {
-                name: s.name,
-                presets: s
-                    .brushes
-                    .into_iter()
-                    .map(|p| {
-                        let brush = settled(p.brush);
-                        Preset {
-                            name: p.name,
-                            factory: p.factory.map_or(brush, settled),
-                            brush,
-                            icon: p.icon.min(disk.icons.saturating_sub(1)),
-                            // A nib the sheet does not carry is no nib:
-                            // an asset built wrong must not seat one
-                            // the renderer cannot find.
-                            shape: p.shape.filter(|n| disk.shapes.contains(n)),
-                            grain: p.grain.filter(|n| disk.shapes.contains(n)),
-                            paper: p
-                                .paper
-                                .filter(|q| {
-                                    disk.papers.contains(&q.name)
-                                        && q.period.is_finite()
-                                        && q.period > 0.0
-                                })
-                                .map(|q| Paper {
-                                    name: q.name,
-                                    period: q.period,
-                                }),
-                        }
-                    })
-                    .collect(),
-            })
-            .filter(|s: &Set| !s.presets.is_empty())
-            .collect();
-        if sets.is_empty() {
-            return Library::bare();
-        }
         Library {
-            sets,
-            shapes: disk.shapes,
-            shape_cols: disk.shape_cols,
-            shape_px: disk.shape_px,
-            papers: disk.papers,
-            paper_px: disk.paper_px,
-            selected: (0, 0),
-            slots: Vec::new(),
-        }
-        .seed_slots()
-    }
-}
-
-impl Library {
-    /// The one brush there is when the shipped sets cannot be read. Never
-    /// empty: every accessor assumes a brush in the hand.
-    fn bare() -> Library {
-        Library {
-            sets: vec![Set {
-                name: "Basic".to_owned(),
-                presets: vec![Preset {
-                    name: "Round".to_owned(),
-                    brush: Brush::default(),
-                    factory: Brush::default(),
-                    icon: 0,
-                    shape: None,
-                    grain: None,
-                    paper: None,
-                }],
-            }],
+            sets: vec![own_set()],
+            icon_cols: 0,
+            icons: 0,
             shapes: Vec::new(),
             shape_cols: 0,
             shape_px: 0,
@@ -1194,9 +1245,151 @@ impl Library {
             selected: (0, 0),
             slots: Vec::new(),
         }
-        // None of the nine is in a library this bare, so every seat but
-        // the one brush there is comes up empty — which is the truth.
         .seed_slots()
+    }
+}
+
+impl Library {
+    /// The brushes this build ships, then the shelves `sinopia brushes
+    /// import` wrote into `json`. A library that will not parse is
+    /// logged and left out: the brushes are a convenience, never a
+    /// reason for the window not to open.
+    pub fn with_imported(json: Option<&str>) -> Library {
+        let mut lib = Library::default();
+        let Some(json) = json else { return lib };
+        let disk: LibraryOnDisk = match serde_json::from_str(json) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("the imported brushes did not parse: {e}");
+                return lib;
+            }
+        };
+        let imported = disk.sets.into_iter().map(|s| Set {
+            name: s.name,
+            presets: s
+                .brushes
+                .into_iter()
+                .map(|p| {
+                    let brush = settled(p.brush);
+                    Preset {
+                        name: p.name,
+                        factory: p.factory.map_or(brush, settled),
+                        brush,
+                        // An icon off the sheet is no icon: the brush is
+                        // drawn instead of showing a stranger's cell.
+                        icon: p
+                            .icon
+                            .filter(|&i| i < disk.icons && disk.icon_cols > 0)
+                            .map_or(Icon::Drawn, Icon::Sheet),
+                        // A nib the sheet does not carry is no nib: a
+                        // library built wrong must not seat one the
+                        // renderer cannot find.
+                        shape: p.shape.filter(|n| disk.shapes.contains(n)),
+                        grain: p.grain.filter(|n| disk.shapes.contains(n)),
+                        paper: p
+                            .paper
+                            .filter(|q| {
+                                disk.papers.contains(&q.name)
+                                    && q.period.is_finite()
+                                    && q.period > 0.0
+                            })
+                            .map(|q| Paper {
+                                name: q.name,
+                                period: q.period,
+                            }),
+                    }
+                })
+                .collect(),
+        });
+        // A shelf going by a name already taken would be one nobody can
+        // seat a brush from: a seat names its shelf, and the first of a
+        // name answers.
+        for set in imported {
+            if set.presets.is_empty() || lib.sets.iter().any(|s| s.name == set.name) {
+                continue;
+            }
+            lib.sets.push(set);
+        }
+        lib.icon_cols = disk.icon_cols;
+        lib.icons = disk.icons;
+        lib.shapes = disk.shapes;
+        lib.shape_cols = disk.shape_cols;
+        lib.shape_px = disk.shape_px;
+        lib.papers = disk.papers;
+        lib.paper_px = disk.paper_px;
+        lib
+    }
+}
+
+#[cfg(test)]
+impl Library {
+    /// A library as an import leaves it, for the tests: the shelf this
+    /// build ships, then four made-up shelves wearing every kind of art
+    /// an import carries — stamped shapes, worn grains, papers, one
+    /// brush with no icon of its own — and enough brushes that the
+    /// palette has to scroll. Nothing in it is anybody's but this
+    /// file's.
+    pub fn acquired() -> Library {
+        use serde_json::json;
+        let mut icon = 0u16;
+        let mut next = || {
+            icon += 1;
+            icon - 1
+        };
+        let shelf = |name: &str, count: usize, dress: &dyn Fn(usize, &mut serde_json::Value), next: &mut dyn FnMut() -> u16| {
+            json!({
+                "name": name,
+                "brushes": (0..count).map(|i| {
+                    let mut b = json!({
+                        "name": format!("{name} {}", i + 1),
+                        "icon": next(),
+                        "brush": { "size": 4.0 + 3.0 * i as f64, "spacing": 0.5 },
+                    });
+                    dress(i, &mut b);
+                    b
+                }).collect::<Vec<_>>(),
+            })
+        };
+        let sets = vec![
+            shelf("Splatter", 150, &|i, b| {
+                b["brush"]["jitter"] = json!({ "size": 2.0 + i as f64, "rotation": 30.0 });
+                b["brush"]["mark"] = json!(if i == 0 { "smudge" } else { "normal" });
+                b["brush"]["strength"] = json!(if i == 0 { 0.6 } else { 0.0 });
+                if i == 149 {
+                    b.as_object_mut().expect("a brush").remove("icon");
+                }
+            }, &mut next),
+            shelf("Stamps", 14, &|i, b| {
+                b["shape"] = json!(if i % 2 == 0 { "star" } else { "leaf" });
+                b["brush"]["dynamics"] = json!("ToStroke");
+            }, &mut next),
+            shelf("Grains", 10, &|i, b| {
+                b["grain"] = json!("sand");
+                b["brush"]["hardness"] = json!(0.1 * i as f64);
+            }, &mut next),
+            shelf("Papers", 12, &|i, b| {
+                b["paper"] = json!({
+                    "name": if i % 3 == 0 { "canvas~i" } else { "canvas" },
+                    "period": 250.0 + 50.0 * i as f64,
+                });
+                b["brush"]["texture_depth"] = json!(0.8);
+                if i % 4 == 0 {
+                    b["shape"] = json!("leaf");
+                }
+            }, &mut next),
+        ];
+        let library = json!({
+            "icon_px": 80,
+            "icon_cols": 16,
+            "icons": icon,
+            "shape_px": 128,
+            "shape_cols": 12,
+            "shapes": ["star", "leaf", "sand"],
+            "paper_px": 192,
+            "papers": ["canvas", "canvas~i"],
+            "sets": sets,
+        });
+        Library::with_imported(Some(&library.to_string()))
     }
 }
 
@@ -1416,7 +1609,7 @@ mod tests {
 
     #[test]
     fn a_brush_with_a_nib_of_its_own_names_one_the_sheet_has() {
-        let lib = Library::default();
+        let lib = Library::acquired();
         let sheet = lib.sheet(3);
         let (mut shapes, mut grains) = (0, 0);
         for set in lib.sets() {
@@ -1444,8 +1637,8 @@ mod tests {
                 );
             }
         }
-        assert_eq!(shapes, 103, "the shipped brushes that stamp a nib of their own");
-        assert_eq!(grains, 42, "and those that wear a grain over a round one");
+        assert_eq!(shapes, 17, "the brushes that stamp a nib of their own");
+        assert_eq!(grains, 10, "and those that wear a grain over a round one");
         assert!(
             lib.sets()
                 .iter()
@@ -1454,12 +1647,12 @@ mod tests {
             "and the rest lay a plain round nib"
         );
         assert!(sheet.cell("no such nib").is_none());
-        assert_eq!(sheet.rows, 10, "114 nibs, 12 across");
+        assert_eq!(sheet.rows, 1, "three nibs, twelve across");
     }
 
     #[test]
     fn the_brush_in_the_hand_hands_its_shape_to_the_tip() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         let (set, index) = lib
             .sets()
             .iter()
@@ -1470,7 +1663,7 @@ mod tests {
                     .position(|p| p.shape.is_some())
                     .map(|i| (s, i))
             })
-            .expect("a shipped brush stamps a shape");
+            .expect("an imported brush stamps a shape");
         lib.select(set, index);
         let want = lib.sets()[set].presets[index].shape.clone();
         let nib = lib.tip().stamp.expect("a brush stamps");
@@ -1506,21 +1699,11 @@ mod tests {
         assert!(!Property::JitterOpacity.honored());
         assert!(!Property::JitterFlow.honored());
         assert!(!Property::JitterSpacing.honored());
-        let noisier = Library::default()
-            .sets()
-            .iter()
-            .flat_map(|s| &s.presets)
-            .filter(|p| p.brush.jitter.spacing > p.brush.spacing)
-            .count();
-        assert!(
-            noisier > 10,
-            "{noisier} brushes name a gap noise larger than their gap"
-        );
     }
 
     #[test]
     fn only_what_the_person_changed_is_kept() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         assert_eq!(lib.edits().brushes, vec![], "a library nobody touched");
         let held = lib.edits().held.expect("a brush is always in the hand");
 
@@ -1532,9 +1715,9 @@ mod tests {
         assert_eq!(edits.brushes[0].name, lib.name());
         assert_ne!(edits.held, Some(held), "and the hand moved too");
 
-        // The shipped sets, dressed in what was kept: same brush in the
+        // The same library, dressed in what was kept: same brush in the
         // hand, same size on it, and nothing else touched.
-        let mut opened = Library::default();
+        let mut opened = Library::acquired();
         opened.apply(&edits);
         assert_eq!(opened.selected(), (2, 3));
         assert_eq!(opened.brush().size, 42.0);
@@ -1591,28 +1774,7 @@ mod tests {
     }
 
     #[test]
-    fn the_smudge_and_colorless_shelves_are_made_of_what_the_canvas_cannot_read() {
-        let lib = Library::default();
-        for shelf in ["Smudge", "Colorless"] {
-            let set = lib
-                .sets()
-                .iter()
-                .find(|s| s.name == shelf)
-                .unwrap_or_else(|| panic!("no {shelf} shelf"));
-            for p in &set.presets {
-                assert!(
-                    p.brush.strength > 0.0,
-                    "{} pulls at the paint under it",
-                    p.name
-                );
-                assert!(!p.brush.mark.painted(), "{} is not ink", p.name);
-            }
-        }
-        // And the properties that say so are read off the real sets.
-        let all: Vec<&Preset> = lib.sets().iter().flat_map(|s| &s.presets).collect();
-        assert_eq!(all.iter().filter(|p| p.brush.strength > 0.0).count(), 56);
-        assert_eq!(all.iter().filter(|p| p.brush.blending > 0.0).count(), 50);
-        assert_eq!(all.iter().filter(|p| p.brush.dilution > 0.0).count(), 14);
+    fn what_works_on_the_paint_underneath_is_carried_and_not_painted() {
         // None of the three is painted: a dab that works on the paint
         // under it needs the layer kept as pixels, and every stroke here
         // is redrawn from its curves each frame.
@@ -1620,8 +1782,22 @@ mod tests {
             assert!(!p.honored(), "{:?} promises a read the canvas cannot do", p);
             assert_eq!(p.section(), Section::Paint);
         }
+        // An imported brush that asks for it keeps asking, so the
+        // library can say what it is not painting.
+        let lib = Library::acquired();
+        let smudge = lib
+            .sets()
+            .iter()
+            .flat_map(|s| &s.presets)
+            .find(|p| p.brush.mark == Mark::Smudge)
+            .expect("the fixture carries a smudge");
+        assert!(smudge.brush.strength > 0.0 && !smudge.brush.mark.painted());
+        // And nothing this build ships promises it.
+        for p in &Library::default().sets()[0].presets {
+            assert!(p.brush.mark.painted(), "{} is ink or an eraser", p.name);
+            assert_eq!(p.brush.strength, 0.0, "{}", p.name);
+        }
     }
-
     #[test]
     fn an_eraser_is_never_laid_straight_onto_the_board() {
         let rubber = Brush {
@@ -1650,24 +1826,20 @@ mod tests {
     }
 
     #[test]
-    fn the_eight_erasers_erase_and_the_rest_of_the_marks_are_named() {
+    fn the_shipped_shelf_has_two_erasers_and_the_rest_lay_ink() {
         let lib = Library::default();
-        let all: Vec<&Preset> = lib.sets.iter().flat_map(|s| &s.presets).collect();
-        assert_eq!(all.len(), 211);
-        let erasers = all.iter().filter(|p| p.tip().erases()).count();
-        assert_eq!(erasers, 8, "Sketchbook's own eight");
-        // The rest of its stamp blend styles read the paint underneath,
-        // which the canvas cannot do: those brushes lay plain ink and
-        // the library says as much rather than promising a mixture.
-        let owed = all.iter().filter(|p| !p.brush.mark.painted()).count();
-        assert_eq!(owed, 83, "acrylic, marker, pastel, smudge, colorless, glow");
+        let own = &lib.sets()[0].presets;
+        let erasers: Vec<&str> = own
+            .iter()
+            .filter(|p| p.tip().erases())
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(erasers, ["Eraser", "Soft Eraser"]);
         assert_eq!(
-            all.iter().filter(|p| p.brush.mark == Mark::Ink).count(),
-            120,
-            "and the rest lay ink over what is there"
+            own.iter().filter(|p| p.brush.mark == Mark::Ink).count(),
+            own.len() - 2
         );
     }
-
     #[test]
     fn a_nib_the_pen_thins_the_ink_of_has_to_be_composited() {
         let solid = Brush {
@@ -1971,42 +2143,97 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_library_is_sketchbooks_own() {
+    fn the_shipped_library_is_one_shelf_of_its_own() {
         let lib = Library::default();
-        assert_eq!(lib.sets().len(), 17, "every set that came with it");
-        let total: usize = lib.sets().iter().map(|s| s.presets.len()).sum();
-        assert_eq!(total, 211);
-        assert_eq!(lib.sets()[0].name, "Basic", "the shelf it opens on");
-        assert_eq!(lib.selected(), (0, 0), "the first brush of the first set");
+        assert_eq!(lib.sets().len(), 1, "nothing imported, nothing else");
+        assert_eq!(lib.sets()[0].name, OWN_SET);
+        assert_eq!(lib.sets()[0].presets.len(), SLOTS - 1, "one to a seat");
+        assert_eq!(lib.selected(), (0, 0), "the first brush of the shelf");
         assert_eq!(*lib.brush(), lib.sets()[0].presets[0].brush);
-        assert!(!lib.name().is_empty());
-        for name in ["Legacy", "Markers", "Fine Art", "Half Tone", "Smudge"] {
-            assert!(
-                lib.sets().iter().any(|s| s.name == name),
-                "{name} did not come through"
-            );
+        assert_eq!(lib.icon_grid(), (0, 0), "and no sheet to cut");
+        for p in &lib.sets()[0].presets {
+            assert_eq!(p.icon, Icon::Drawn, "{} carries no art", p.name);
+            assert_eq!(p.face(), Face::Round, "{}", p.name);
+            assert!(p.paper.is_none(), "{}", p.name);
         }
     }
 
     #[test]
-    fn every_shipped_brush_names_an_icon_of_its_own() {
-        let lib = Library::default();
-        let icons: Vec<u16> = lib
-            .sets()
-            .iter()
-            .flat_map(|s| s.presets.iter().map(|p| p.icon))
-            .collect();
-        let mut seen = icons.clone();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), icons.len(), "two brushes share an icon");
-        assert_eq!(seen.len(), ICONS as usize, "the sheet has cells to spare");
-        assert!(icons.iter().all(|&i| i < ICONS), "an icon off the sheet");
+    fn an_import_comes_after_the_shipped_shelf() {
+        let lib = Library::acquired();
+        let names: Vec<&str> = lib.sets().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, [OWN_SET, "Splatter", "Stamps", "Grains", "Papers"]);
+        assert_eq!(lib.selected(), (0, 0), "the hand opens on the shipped shelf");
+        assert_eq!(lib.slots(), Library::default().slots(), "and so do the seats");
+        assert_eq!(lib.icon_grid(), (16, 186), "a cell for every brush the sets drew");
     }
 
     #[test]
+    fn nothing_imported_or_nothing_readable_is_the_shipped_shelf() {
+        assert_eq!(Library::with_imported(None), Library::default());
+        assert_eq!(Library::with_imported(Some("{ not json")), Library::default());
+        assert_eq!(
+            Library::with_imported(Some(r#"{"sets": []}"#)),
+            Library::default()
+        );
+    }
+
+    #[test]
+    fn an_imported_shelf_cannot_take_a_name_already_on_the_library() {
+        let json = serde_json::json!({
+            "sets": [
+                { "name": OWN_SET, "brushes": [{ "name": "Pencil", "brush": { "size": 99.0 } }] },
+                { "name": "Twice", "brushes": [{ "name": "A", "brush": {} }] },
+                { "name": "Twice", "brushes": [{ "name": "B", "brush": {} }] },
+            ],
+        });
+        let lib = Library::with_imported(Some(&json.to_string()));
+        let names: Vec<&str> = lib.sets().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, [OWN_SET, "Twice"], "the first of a name stands");
+        assert_ne!(lib.sets()[0].presets[0].brush.size, 99.0);
+    }
+
+    #[test]
+    fn an_imported_brush_is_held_inside_the_bands_its_sliders_run_over() {
+        let json = serde_json::json!({
+            "sets": [{ "name": "Wide", "brushes": [{
+                "name": "Huge",
+                "brush": { "size": 5000.0, "opacity": -3.0 },
+                "shape": "not on the sheet",
+                "paper": { "name": "nor this", "period": 100.0 },
+            }] }],
+        });
+        let lib = Library::with_imported(Some(&json.to_string()));
+        let huge = &lib.sets()[1].presets[0];
+        assert_eq!((huge.brush.size, huge.brush.opacity), (SIZE_MAX, 0.0));
+        assert_eq!(huge.face(), Face::Round, "a nib the sheet lacks is no nib");
+        assert!(huge.paper.is_none(), "nor a paper");
+        assert_eq!(huge.icon, Icon::Drawn, "and no icon is drawn");
+    }
+    #[test]
+    fn every_imported_brush_wears_a_cell_of_its_own_or_is_drawn() {
+        let lib = Library::acquired();
+        let (_, count) = lib.icon_grid();
+        let mut cells: Vec<u16> = lib
+            .sets()
+            .iter()
+            .flat_map(|s| &s.presets)
+            .filter_map(|p| match p.icon {
+                Icon::Sheet(cell) => Some(cell),
+                Icon::Drawn => None,
+            })
+            .collect();
+        let all = cells.len();
+        cells.sort_unstable();
+        cells.dedup();
+        assert_eq!(cells.len(), all, "two brushes share an icon");
+        assert!(cells.iter().all(|&i| i < count), "an icon off the sheet");
+        let drawn = lib.sets()[1].presets.last().expect("a brush");
+        assert_eq!(drawn.icon, Icon::Drawn, "one the set gave no icon is drawn");
+    }
+    #[test]
     fn a_brush_dragged_over_a_paper_names_one_the_sheet_has() {
-        let lib = Library::default();
+        let lib = Library::acquired();
         let sheet = lib.sheet(3);
         let mut widest: f64 = 0.0;
         for set in lib.sets() {
@@ -2037,7 +2264,7 @@ mod tests {
 
     #[test]
     fn a_preset_hands_the_tip_its_paper_and_the_body_says_how_deep() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         let papered = lib
             .sets()
             .iter()
@@ -2046,7 +2273,7 @@ mod tests {
                 let i = set.presets.iter().position(|p| p.paper.is_some())?;
                 Some((s, i))
             })
-            .expect("some shipped brush is dragged over a paper");
+            .expect("some imported brush is dragged over a paper");
         lib.select(papered.0, papered.1);
         let paper = lib.sets()[papered.0].presets[papered.1]
             .paper
@@ -2073,29 +2300,17 @@ mod tests {
     }
 
     #[test]
-    fn two_thirds_of_the_acquired_brushes_lay_a_nib_and_a_quarter_a_paper() {
-        let lib = Library::default();
+    fn a_paper_and_a_nib_are_not_alternatives() {
+        let lib = Library::acquired();
         let all: Vec<&Preset> = lib.sets().iter().flat_map(|s| s.presets.iter()).collect();
-        let nibbed = all.iter().filter(|p| p.face() != Face::Round).count();
-        assert!(nibbed > all.len() / 2, "{nibbed} of {} lay a nib", all.len());
-        let papered = all.iter().filter(|p| p.paper.is_some()).count();
-        assert_eq!(papered, 49, "dragged over a paper of their own");
-        // The two are not alternatives: most of the papered brushes
-        // carry a nib as well, and one dab wears both.
         let both = all
             .iter()
             .filter(|p| p.paper.is_some() && p.face() != Face::Round)
             .count();
-        assert_eq!(both, 30, "a nib and a paper at once");
-        assert!(
-            all.iter()
-                .any(|p| p.paper.is_none() && p.face() == Face::Round),
-            "some are the plain round nib they look like"
-        );
+        assert_eq!(both, 3, "a nib and a paper at once, one dab wearing both");
     }
-
     #[test]
-    fn every_shipped_brush_carries_one_of_sketchbooks_four_profiles() {
+    fn the_shipped_shelf_carries_every_one_of_the_four_profiles() {
         let lib = Library::default();
         for s in lib.sets() {
             for p in &s.presets {
@@ -2115,8 +2330,8 @@ mod tests {
     }
 
     #[test]
-    fn every_built_in_brush_is_named_and_inside_its_own_ranges() {
-        let lib = Library::default();
+    fn every_brush_is_named_and_inside_its_own_ranges() {
+        let lib = Library::acquired();
         for set in lib.sets() {
             assert!(!set.name.is_empty());
             let mut seen = Vec::new();
@@ -2138,7 +2353,7 @@ mod tests {
         // Every brush counts now: a tip names the nib it stamps, the
         // grain it wears and the paper it is dragged over, and the
         // canvas lays all three.
-        let lib = Library::default();
+        let lib = Library::acquired();
         for s in lib.sets() {
             let mut tips: Vec<String> = s
                 .presets
@@ -2150,22 +2365,6 @@ mod tests {
             tips.dedup();
             assert_eq!(tips.len(), all, "{} has two brushes painting alike", s.name);
         }
-    }
-
-    #[test]
-    fn the_size_range_reaches_the_widest_brush_that_came() {
-        let lib = Library::default();
-        let widest = lib
-            .sets()
-            .iter()
-            .flat_map(|s| s.presets.iter())
-            .map(|p| p.brush.size)
-            .fold(0.0, f64::max);
-        assert!(widest > 500.0, "the acquired sets go wider than that");
-        assert!(
-            widest <= SIZE_MAX,
-            "{widest} would be clamped on the way in"
-        );
     }
 
     #[test]
@@ -2194,7 +2393,7 @@ mod tests {
 
     #[test]
     fn a_brush_can_be_taken_off_any_shelf() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         let last = lib.sets().len() - 1;
         lib.select(last, 0);
         assert_eq!(lib.selected(), (last, 0));
@@ -2245,11 +2444,11 @@ mod tests {
             .iter()
             .position(|s| s.name == "Splatter")
             .map(|s| (s, index))
-            .expect("the shipped library has a Splatter shelf")
+            .expect("the acquired library has a Splatter shelf")
     }
 
     #[test]
-    fn the_slots_ship_with_the_first_nine_of_basic() {
+    fn the_slots_ship_with_the_shelf_this_build_ships() {
         let lib = Library::default();
         let slots = lib.slots();
         assert_eq!(slots.len(), SLOTS);
@@ -2263,7 +2462,7 @@ mod tests {
 
     #[test]
     fn a_brush_taken_from_outside_the_slots_lands_in_slot_zero() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         let far = outside(&lib, 0);
         lib.select(far.0, far.1);
         assert_eq!(lib.slots()[0], Some(far), "the last one used, kept to hand");
@@ -2289,7 +2488,7 @@ mod tests {
 
     #[test]
     fn assigning_a_brush_to_a_seat_clears_the_overflow_it_came_from() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         let far = outside(&lib, 0);
         lib.select(far.0, far.1);
         assert_eq!(lib.slots()[0], Some(far));
@@ -2305,7 +2504,7 @@ mod tests {
 
     #[test]
     fn the_slots_go_to_disk_by_name_and_come_back() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         let far = outside(&lib, 2);
         assert!(lib.assign_slot(2, far));
         let edits = lib.edits();
@@ -2314,7 +2513,7 @@ mod tests {
         assert_eq!(held.set, lib.sets()[far.0].name);
         assert_eq!(held.name, lib.sets()[far.0].presets[far.1].name);
 
-        let mut fresh = Library::default();
+        let mut fresh = Library::acquired();
         fresh.apply(&edits);
         assert_eq!(fresh.slots(), lib.slots());
     }
@@ -2330,7 +2529,7 @@ mod tests {
 
     #[test]
     fn seats_nobody_rearranged_are_not_written_down() {
-        let mut lib = Library::default();
+        let mut lib = Library::acquired();
         assert!(
             lib.edits().slots.is_empty(),
             "the shipped nine are not a change"

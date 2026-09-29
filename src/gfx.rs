@@ -1122,7 +1122,7 @@ impl Gfx {
         Ok(slot)
     }
 
-    /// A sheet the binary ships: a slot of its own, uploaded once and
+    /// An image sheet: a slot of its own, uploaded once and
     /// never replaced, unlike the glyph atlas which is rebuilt whenever
     /// the scale factor changes.
     fn upload_sheet(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
