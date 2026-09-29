@@ -1,0 +1,17 @@
+# What `cargo about` accepts for THIRD-PARTY-CRATES.md: the licences the
+# crates the binary is built from are under today. A crate that brings in
+# anything else fails the generation rather than slipping in unread.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Zlib",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "0BSD",
+]
+targets = ["x86_64-unknown-linux-gnu"]
+ignore-dev-dependencies = true

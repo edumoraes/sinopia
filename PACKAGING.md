@@ -74,8 +74,20 @@ which is what the compositor and the launcher match it by.
 ## Cutting a release
 
 1. Set the version in `Cargo.toml` and in `plugin/manifest.json`, which
-   follows it (§10.3), and write `packaging/release-notes/vX.Y.Z.md`. Commit.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
+   follows it (§10.3), and write `packaging/release-notes/vX.Y.Z.md`.
+2. If `Cargo.lock` changed since the last release, write the crates'
+   notices again — every package installs them beside the licence:
+
+   ```sh
+   cargo install --locked cargo-about --features cli   # once
+   cargo about generate --locked -c packaging/about.toml packaging/about.hbs \
+     -o THIRD-PARTY-CRATES.md
+   ```
+
+   A crate under a licence `packaging/about.toml` does not accept stops the
+   generation, and is a question to answer before the release, not after.
+   Commit.
+3. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 A release whose packaging failed can be packaged again without a new tag:
 run **Packaging** by hand from the Actions tab with the version, and

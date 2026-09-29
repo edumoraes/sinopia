@@ -30,7 +30,7 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/$name" "$out"
 install -m755 "$bin" "$work/$name/sinopia"
 (cd "$here" && cp --parents -R \
-	LICENSE THIRD-PARTY.md README.md \
+	LICENSE THIRD-PARTY.md THIRD-PARTY-CRATES.md README.md \
 	packaging/install.sh packaging/applications/sinopia.desktop \
 	assets/logo/app-icon.svg assets/fonts/LiberationSans-LICENSE.txt \
 	contrib/omarchy/sinopia plugin skills/sinopia \

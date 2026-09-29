@@ -1,0 +1,17 @@
+# The crates Sinopia is built from
+
+The `sinopia` binary is built from the Rust crates below. Each is used
+under the licence named for it, whose text follows the list of crates
+that use it. This file is generated from `Cargo.lock` by
+[cargo-about](https://github.com/EmbarkStudios/cargo-about); PACKAGING.md
+says how.
+
+{{#each licenses}}
+## {{{name}}}
+
+{{#each used_by}}- {{crate.name}} {{crate.version}}
+{{/each}}
+```
+{{{text}}}
+```
+{{/each}}

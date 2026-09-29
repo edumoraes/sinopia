@@ -33,7 +33,8 @@ install -Dm644 "$here/assets/logo/app-icon.svg" \
 	"$share/icons/hicolor/scalable/apps/sinopia.svg"
 
 install -Dm644 -t "$share/licenses/$name" "$here/LICENSE" \
-	"$here/THIRD-PARTY.md" "$here/assets/fonts/LiberationSans-LICENSE.txt"
+	"$here/THIRD-PARTY.md" "$here/THIRD-PARTY-CRATES.md" \
+	"$here/assets/fonts/LiberationSans-LICENSE.txt"
 install -Dm644 -t "$share/doc/$name" "$here/README.md"
 
 install -Dm755 -t "$share/sinopia/omarchy" "$here/contrib/omarchy/sinopia"
