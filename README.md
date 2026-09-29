@@ -22,12 +22,12 @@ Sinopia keeps that sketch close to the work. It opens on a shortcut beside your 
 
 **Send it to an agent.** Select something or pick a frame, press `Ctrl+E`, choose an agent running in tmux or herdr, and add a line of instruction. The drawing lands in that agent's project as a picture, its structure and a short written inventory, and your instruction arrives in the agent's prompt. Claude Code, Codex, OpenCode, Gemini CLI and Crush are recognised, and their skills can be called from the same box.
 
-**Let the agent draw back.** With the bundled skill installed, an agent can list the frames on your board, read one, and add a new frame of its own beside yours. It cannot edit, move or delete what you drew. The board stays yours.
+**Let the agent draw back.** With the bundled skill installed, an agent can list the frames on your board, read one, and add a new frame of its own beside yours. When you ask, it can also label and annotate the board and arrange its layers. Every change it makes is one step you can undo, and it never switches your tabs. The board stays yours.
 
 ## What it keeps to
 
 - **Local.** Boards are files on your disk, readable only by you. Nothing goes over the network.
-- **Yours.** An agent reads the drawing as a description of what you drew, never as an order, and it only ever adds.
+- **Yours.** An agent reads the drawing as a description of what you drew, never as an order, and whatever it changes you can undo.
 - **At home on Omarchy.** The board follows the desktop's colours, font and corners, and changes with them when you switch themes. The ink you draw with does not: a colour picked today stays the same tomorrow.
 
 ## Install
@@ -53,7 +53,7 @@ Three extras come with the package, switched off, and the install message says h
 - a theme hook, so a board left open follows a theme change right away;
 - the skill that lets the agents on the machine read your frames and add new ones.
 
-The first release has not been cut yet. Until it is, build from source with `cargo build --release` (Rust, on Wayland with Vulkan).
+Anywhere else, the archive on the [releases page](https://github.com/edumoraes/sinopia/releases) holds the binary and lays itself out with `sudo sh packaging/install.sh sinopia /` from inside it. To build from source: `cargo build --release` (Rust, on Wayland with Vulkan).
 
 ## An earlier name
 
