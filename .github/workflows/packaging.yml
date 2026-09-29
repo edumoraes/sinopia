@@ -117,7 +117,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The token goes to native-packages through GH_TOKEN, for the one
+      # step that attaches the recipes, and is not left in .git/config for
+      # everything else this job runs.
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
