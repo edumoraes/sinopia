@@ -142,10 +142,12 @@ enum UserEvent {
     PastedLayers(Box<Document>),
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
-    /// What the camera saw: the hands in one frame, and the frame itself
-    /// while the presenter's card wants it.
+    /// What the hands' thread says — the camera opened or lost, or what
+    /// it saw in one frame — and which tracker it is, by the count it
+    /// was started with: a tracker let go of may still be opening, and
+    /// what it says is not about the one that came after it.
     #[cfg(feature = "hands")]
-    Hands(hands::camera::Reading),
+    Hands(u64, hands::camera::News),
 }
 
 /// Hand gestures while they are on: the thread reading the camera, what
@@ -153,6 +155,8 @@ enum UserEvent {
 /// camera on the GPU — its slot and size, and how far it has faded in.
 #[cfg(feature = "hands")]
 struct HandsOn {
+    /// Which tracker this is: what `UserEvent::Hands` says it is about.
+    started: u64,
     tracker: hands::camera::Tracker,
     gestures: hands::gesture::Gestures,
     origin: Instant,
@@ -377,6 +381,9 @@ struct App {
     /// Hand gestures through the webcam, while they are on.
     #[cfg(feature = "hands")]
     hands: Option<HandsOn>,
+    /// How many trackers have been started: each one's count.
+    #[cfg(feature = "hands")]
+    hands_started: u64,
 }
 
 /// A send being composed. It holds the agents as they were when the
@@ -1115,11 +1122,14 @@ impl App {
         let models = self.store.root().join("models");
         let camera = std::env::var("SINOPIA_CAMERA").unwrap_or_else(|_| "0".into());
         let proxy = self.proxy.clone();
-        let sink = move |reading| proxy.send_event(UserEvent::Hands(reading)).is_ok();
+        self.hands_started += 1;
+        let started = self.hands_started;
+        let sink = move |news| proxy.send_event(UserEvent::Hands(started, news)).is_ok();
         match hands::camera::Tracker::start(&models, &camera, sink) {
             Ok(tracker) => {
-                log::info!("hands: on, camera {camera}");
+                log::info!("hands: opening camera {camera}");
                 self.hands = Some(HandsOn {
+                    started,
                     tracker,
                     gestures: hands::gesture::Gestures::default(),
                     origin: Instant::now(),
@@ -1146,6 +1156,25 @@ impl App {
     #[cfg(not(feature = "hands"))]
     fn hands_on(&self) -> bool {
         false
+    }
+
+    /// What the hands' thread says about the tracker that is on: the
+    /// camera opened, or could not be had, or stopped giving frames —
+    /// which turns the hands off — or one more reading.
+    #[cfg(feature = "hands")]
+    fn hands_news(&mut self, started: u64, news: hands::camera::News) {
+        if self.hands.as_ref().is_none_or(|on| on.started != started) {
+            return;
+        }
+        match news {
+            hands::camera::News::Opened(Ok(())) => log::info!("hands: on"),
+            hands::camera::News::Opened(Err(e)) | hands::camera::News::Lost(e) => {
+                log::error!("hands: {e}");
+                self.hands = None;
+                self.redraw();
+            }
+            hands::camera::News::Read(reading) => self.hands_read(reading),
+        }
     }
 
     /// One reading of the camera: the hands move what they move, a sweep
@@ -5634,7 +5663,7 @@ impl App {
             UserEvent::PastedLayers(clip) => return self.pasted_layers(*clip),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
             #[cfg(feature = "hands")]
-            UserEvent::Hands(reading) => return self.hands_read(reading),
+            UserEvent::Hands(started, news) => return self.hands_news(started, news),
         };
         match req {
             Request::Raise => {
@@ -6018,6 +6047,8 @@ pub fn run(
         show_camera: false,
         #[cfg(feature = "hands")]
         hands: None,
+        #[cfg(feature = "hands")]
+        hands_started: 0,
     };
     // The first tab is built before the theme is in hand, so it is told
     // what a new frame's ground is once the window owns both.

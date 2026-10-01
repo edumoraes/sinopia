@@ -11,8 +11,8 @@
 //! is followed, and every few frames while fewer than two are.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -58,55 +58,65 @@ pub struct Reading {
     pub card: Option<(u32, u32, Vec<u8>)>,
 }
 
+/// What the thread tells the loop.
+#[derive(Debug, Clone)]
+pub enum News {
+    /// The models are loaded and the camera is open — or why not, and
+    /// then the thread is over.
+    Opened(Result<(), String>),
+    /// What the camera saw in one frame.
+    Read(Reading),
+    /// The camera stopped giving frames, and why: the thread is over.
+    Lost(String),
+}
+
 /// The thread reading the camera, while there is one: dropping it stops
 /// the thread and lets go of the camera.
 pub struct Tracker {
     stop: Arc<AtomicBool>,
     card: Arc<AtomicBool>,
+    /// The camera has opened, or failed to: past that the thread only
+    /// ever waits a frame, and dropping the tracker waits for it.
+    settled: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl Tracker {
-    /// Opens `camera` — a device index, or a video file played as one,
-    /// looped — loads the models from `models`, and starts reading,
-    /// handing every reading to `sink` until it says no. An error if the
-    /// camera or the models cannot be had, before any thread is left
-    /// running.
-    pub fn start(models: &Path, camera: &str, sink: impl Fn(Reading) -> bool + Send + 'static) -> anyhow::Result<Tracker> {
+    /// Starts a thread that loads the models from `models`, opens
+    /// `camera` — a device index, or a video file played as one, looped
+    /// — and reads it, telling `sink` what happens until it says no.
+    /// Answers at once: a camera can take a second or more to open, and
+    /// the window does not wait for it. `News::Opened` says when it has,
+    /// or why it did not.
+    pub fn start(models: &Path, camera: &str, sink: impl Fn(News) -> bool + Send + 'static) -> anyhow::Result<Tracker> {
         let stop = Arc::new(AtomicBool::new(false));
         let card = Arc::new(AtomicBool::new(false));
-        let (ready, opened) = mpsc::channel::<anyhow::Result<()>>();
+        let settled = Arc::new(AtomicBool::new(false));
         let (models, camera) = (models.to_owned(), camera.to_owned());
-        let (halt, want) = (stop.clone(), card.clone());
+        let (halt, want, done) = (stop.clone(), card.clone(), settled.clone());
         let thread = std::thread::Builder::new().name("hands".into()).spawn(move || {
             let had = Models::load(&models).and_then(|m| Ok((m, open(&camera)?)));
+            done.store(true, Ordering::Release);
             let (mut models, mut cap) = match had {
                 Ok(had) => had,
                 Err(e) => {
-                    let _ = ready.send(Err(e));
+                    sink(News::Opened(Err(format!("{e:#}"))));
                     return;
                 }
             };
-            let _ = ready.send(Ok(()));
+            if halt.load(Ordering::Relaxed) || !sink(News::Opened(Ok(()))) {
+                return;
+            }
             if let Err(e) = run(&mut models, &mut cap, &camera, &halt, &want, &sink) {
-                log::error!("hands: {e:#}");
+                sink(News::Lost(format!("{e:#}")));
             }
         })?;
-        match opened.recv_timeout(Duration::from_secs(15)) {
-            Ok(Ok(())) => Ok(Tracker {
-                stop,
-                card,
-                thread: Some(thread),
-            }),
-            Ok(Err(e)) => {
-                let _ = thread.join();
-                Err(e)
-            }
-            Err(_) => {
-                stop.store(true, Ordering::Relaxed);
-                anyhow::bail!("the camera did not open in time")
-            }
-        }
+        Ok(Tracker {
+            stop,
+            card,
+            settled,
+            thread: Some(thread),
+        })
     }
 
     /// Whether the readings carry the frame for the presenter's card.
@@ -116,9 +126,16 @@ impl Tracker {
 }
 
 impl Drop for Tracker {
+    /// Stops the thread. Once the camera has opened it stops within a
+    /// frame and is waited for, so the camera is let go of before another
+    /// tracker asks for it; a camera still opening is not waited on —
+    /// the window would hang on it for as long as the driver does — and
+    /// the thread ends on its own when the open comes back.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = self.thread.take()
+            && self.settled.load(Ordering::Acquire)
+        {
             let _ = thread.join();
         }
     }
@@ -262,7 +279,7 @@ fn run(
     camera: &str,
     stop: &AtomicBool,
     card: &AtomicBool,
-    sink: &impl Fn(Reading) -> bool,
+    sink: &impl Fn(News) -> bool,
 ) -> anyhow::Result<()> {
     let file = camera.parse::<i32>().is_err();
     let (mut frame, mut mirror, mut rgb) = (Mat::default(), Mat::default(), Mat::default());
@@ -316,11 +333,11 @@ fn run(
         } else {
             None
         };
-        if !sink(Reading {
+        if !sink(News::Read(Reading {
             hands,
             size: (w as u32, h as u32),
             card,
-        }) {
+        })) {
             break;
         }
         n += 1;
