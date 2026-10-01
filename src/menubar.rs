@@ -182,7 +182,7 @@ pub struct State {
     pub hidden: bool,
     /// What a merge would be called: `Editor::merge_name`.
     pub merge: &'static str,
-    /// The board has a frame on show to present.
+    /// The board has a stop on show to present.
     pub present: bool,
     /// Whether hand gestures are on, in a build that has them; `None` in
     /// one that does not, which offers no line for them.

@@ -5567,8 +5567,8 @@ impl App {
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
-        // A link is pulled out of a frame's handle, and carried to the
-        // frame it is let go of over.
+        // A link is pulled out of a stop's handle, and carried to the stop
+        // it is let go of over.
         let linking = self.editor().linking().is_some()
             || match (self.view(), self.cursor) {
                 (Some(view), Some(at)) => !over_chrome && self.editor().over_link(self.doc(), &view, at),
