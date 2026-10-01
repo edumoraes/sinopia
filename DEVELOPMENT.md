@@ -667,6 +667,19 @@ anywhere.
 | `Shift` + `L` | Show / hide the layers panel |
 | Left drag (Frame) | Drag out a frame; what its area covers joins it |
 | Click an ink with a frame selected | Paint the frame's ground |
+| Drag the handle out of a selected frame's right edge | Link it to the frame let go of over: the next slide; over nothing, unlink |
+| Drag a link's arrow (Select) | Pull the link onto another frame, or off into nothing to unlink; a click changes nothing |
+| Pull a link onto a frame another one already leads to | Refused: a slide comes after one slide at most |
+| `F5`, View → Present | Present the frames: from the one selected, or the head of a deck of links |
+| `→` `↓` `Space` `Enter` `PageDown`, click (presenting) | Next slide |
+| `←` `↑` `Backspace` `PageUp`, right-click (presenting) | Slide before |
+| `Home` / `End` (presenting) | First / last slide |
+| `Esc` / `F5` (presenting) | End the show |
+| `C` (presenting, hands on) | The presenter's camera in the bottom right corner, on or off |
+| `Ctrl` + `Shift` + `H`, View → Hand Gestures | Hand gestures through the webcam on or off (a build with `--features hands`) |
+| Pinch thumb and index, move (hands) | Drag the board; two pinches pulled apart or together zoom |
+| Point the index, the other three folded (hands) | A laser over the board, with a fading trail |
+| Sweep an open hand sideways (hands, presenting) | Next slide (to the left), the one before (to the right) |
 | Click / `Ctrl`+click / `Shift`+click a layer card | Pick it / take it in or out of the pick / pick the range |
 | Click a card's eye / its own lock / its chevron | Show or hide it / open the lock / open or fold a group or frame in place |
 | Drag a layer card | Lift it and drop it above or below a row, or into a group or frame |
@@ -740,6 +753,18 @@ QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/plugin
                                # the plugin's reading of the index
 ```
 
+Hand gestures through the webcam are an experiment behind the `hands`
+feature, off by default: it links the system's OpenCV (5.x here, found
+through pkg-config) and needs clang to generate the bindings. The models
+are fetched once into the data directory:
+
+```sh
+experiments/hands/fetch-models.sh        # the two ONNX models, checked against their sums
+cargo run --features hands               # then Ctrl+Shift+H or View → Hand Gestures
+SINOPIA_CAMERA=clip.avi cargo run --features hands   # a video played as the camera, looped
+cargo test --features hands              # the suite with the hands' own tests
+```
+
 Smoke test (opens the window, renders 3 frames, exits):
 
 ```sh
@@ -791,6 +816,12 @@ src/props.rs     brush properties bar, centred under the strip: the basic pair, 
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, word wrap, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
+src/present.rs   a presentation: frames linked one to the next, the fit, the hold on the camera, the flight, the veil, the arrows and the link handle (pure, tested)
+src/hands/       hand gestures through the webcam, behind the `hands` feature:
+  model.rs       the palm and hand models' arithmetic: anchors, letterbox, palms, the turned square, the way back (pure, tested)
+  camera.rs      the camera and the two models through OpenCV's dnn, on a thread of their own; a hand followed from its own points
+  gesture.rs     pinch, drag, zoom, laser, sweep, coast, springs and filters (pure, tested)
+  marks.rs       the laser and its trail, the pinches, a turned slide's chevron, the presenter's card (pure, tested)
 src/field.rs     an editable value, one line or several: the caret, the selection, the lines a box shows (pure, tested)
 src/export.rs    what leaves the board: the scope, its box, its sub-document, the slug, the inventory, the write (pure, tested)
 src/graft.rs     what comes back: the fragment, the ids minted anew, the free spot, the graft (pure, tested)
