@@ -270,6 +270,10 @@ pub const KIND_ELLIPSE: u32 = 4;
 /// A box whose field is a polygon or a star fitted to it, its corners
 /// walked in the shader from what [`Prim::polygon`] puts in `uv`.
 pub const KIND_POLYGON: u32 = 5;
+/// A box whose field is the blob inscribed in it — `shape::blob` — its
+/// outline moved on by the phase in `paper[0]`. With `paper[1]` set it
+/// samples its slot as an image does, the picture cut to the blob.
+pub const KIND_BLOB: u32 = 6;
 
 /// Which texture slot the renderer has uploaded for each blob hash. An
 /// image the renderer has not caught up with yet is missing from the map.
@@ -700,7 +704,10 @@ impl Prim {
     /// it is otherwise. Everything else is a flat colour and does not
     /// care which texture is bound behind it.
     fn samples(&self) -> bool {
-        self.kind == KIND_IMAGE || self.kind == KIND_GRAIN || self.weave[3] > 0.0
+        self.kind == KIND_IMAGE
+            || self.kind == KIND_GRAIN
+            || (self.kind == KIND_BLOB && self.paper[1] > 0.0)
+            || self.weave[3] > 0.0
     }
 
     /// The same dab, dragged over a paper: its coverage is eaten into
@@ -5093,6 +5100,28 @@ mod tests {
         assert_eq!(triangle.uv[..2], [3.0, 1.0], "three corners, none cut in");
         let diamond = shape_prims(&a_shape(Model::Diamond), &v)[0];
         assert_eq!(diamond.uv, [4.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_blob_is_a_box_that_samples_only_when_it_carries_a_picture() {
+        let r = ScreenRect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let edge = Prim {
+            kind: KIND_BLOB,
+            paper: [2.5, 0.0, 0.0, 0.0],
+            ..Prim::rect(r, [1.0, 1.0, 1.0, 0.5])
+        };
+        assert!(!edge.samples(), "a flat blob reads no texture");
+        let picture = Prim {
+            paper: [2.5, 1.0, 0.0, 0.0],
+            slot: 9,
+            ..edge
+        };
+        assert!(picture.samples(), "and one with a picture does, so it starts its own run");
     }
 
     #[test]

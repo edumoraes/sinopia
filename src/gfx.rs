@@ -193,6 +193,18 @@ fn sd_polygon(p: vec2<f32>, half: vec2<f32>, fit: vec4<f32>) -> f32 {
     return s * sqrt(d);
 }
 
+// The blob inscribed in a box of half extents `half` at `phase`: the
+// distance to its outline along the ray from the middle, over how steeply
+// that changes — `shape::blob`, line for line, its waves written in from
+// `shape::BLOB_WAVES` as `blob_waves`.
+fn sd_blob(p: vec2<f32>, half: vec2<f32>, phase: f32) -> f32 {
+    let radius = min(half.x, half.y) / (1.0 + BLOB_DEPTH);
+    let len = length(p);
+    let waves = blob_waves(atan2(p.y, p.x), phase);
+    let steep = radius * BLOB_DEPTH * waves.y / max(len, 1e-4);
+    return (len - radius * (1.0 + BLOB_DEPTH * waves.x)) / sqrt(1.0 + steep * steep);
+}
+
 // Straight alpha: what the window is blended with.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -232,6 +244,8 @@ fn shade(in: VsOut) -> vec4<f32> {
             d = sd_ellipse(local, half);
         } else if (in.kind == KIND_POLYGON) {
             d = sd_polygon(local, half, in.uv);
+        } else if (in.kind == KIND_BLOB) {
+            d = sd_blob(local, half, in.paper.x);
         } else {
             d = sd_box(local, half, r);
         }
@@ -243,7 +257,8 @@ fn shade(in: VsOut) -> vec4<f32> {
         } else if (in.line < 0.0) {
             d = d - in.line;
         }
-        if (in.kind == KIND_IMAGE || in.kind == KIND_GRAIN) {
+        let pictured = in.kind == KIND_BLOB && in.paper.y > 0.0;
+        if (in.kind == KIND_IMAGE || in.kind == KIND_GRAIN || pictured) {
             // The box's own axes are already the texture's: the corner at
             // -half is (0, 0). An image maps onto the whole sheet, a
             // glyph onto its cell of the atlas. There is no mip chain to
@@ -504,10 +519,21 @@ fn shader() -> String {
         ("GRAIN", scene::KIND_GRAIN),
         ("ELLIPSE", scene::KIND_ELLIPSE),
         ("POLYGON", scene::KIND_POLYGON),
+        ("BLOB", scene::KIND_BLOB),
     ] {
         out.push_str(&format!("const KIND_{name}: u32 = {kind}u;\n"));
     }
     out.push_str(&format!("const MAX_CORNERS: u32 = {}u;\n", crate::shape::MAX_CORNERS));
+    // A blob's waves, summed the way `shape::blob_reach` sums them, and
+    // their slope the way `shape::blob` does: how far out and how steep.
+    out.push_str(&format!("const BLOB_DEPTH: f32 = {:?};\n", crate::shape::BLOB_DEPTH));
+    out.push_str("fn blob_waves(a: f32, phase: f32) -> vec2<f32> {\n    var w = vec2<f32>(0.0, 0.0);\n");
+    for (lobes, share, turn) in crate::shape::BLOB_WAVES {
+        out.push_str(&format!(
+            "    w += vec2<f32>({share:?} * sin({lobes:?} * a + {turn:?} * phase), {share:?} * {lobes:?} * cos({lobes:?} * a + {turn:?} * phase));\n"
+        ));
+    }
+    out.push_str("    return w;\n}\n");
     for mode in BlendMode::ALL {
         out.push_str(&format!(
             "const MODE_{}: u32 = {}u;\n",
@@ -1815,6 +1841,7 @@ mod tests {
             ("GRAIN", scene::KIND_GRAIN),
             ("ELLIPSE", scene::KIND_ELLIPSE),
             ("POLYGON", scene::KIND_POLYGON),
+            ("BLOB", scene::KIND_BLOB),
         ] {
             let line = format!("const KIND_{name}: u32 = {kind}u;");
             assert!(source.contains(&line), "{line}");
