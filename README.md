@@ -20,9 +20,13 @@ Sinopia keeps that sketch close to the work. It opens on a shortcut beside your 
 
 **Arrange.** Layers and groups, as in any drawing app, with blend modes, opacity, locks and colour tags. Frames mark out an area of the board and give it a name. Several boards live in tabs, and undo walks back through every change.
 
+**Present.** Link a frame, a group or any object on the board to the next, press `F5`, and the camera flies through them full screen: into a detail, back out to the whole, across the board to the next idea. Frames show as slides; anything else shows on the board around it. Every stop wears its number while you build.
+
+**Present with your hands.** Built with hand gestures, Sinopia reads your webcam: sweep an open hand to turn the slide, pinch to move the board, pinch with both hands to zoom, point a finger for a laser. Your own camera can sit in the corner of the show, cut round, square or as a slowly moving blob.
+
 **Send it to an agent.** Select something or pick a frame, press `Ctrl+E`, choose an agent running in tmux or herdr, and add a line of instruction. The drawing lands in that agent's project as a picture, its structure and a short written inventory, and your instruction arrives in the agent's prompt. Claude Code, Codex, OpenCode, Gemini CLI and Crush are recognised, and their skills can be called from the same box.
 
-**Let the agent draw back.** With the bundled skill installed, an agent can list the frames on your board, read one, and add a new frame of its own beside yours. When you ask, it can also label and annotate the board and arrange its layers. Every change it makes is one step you can undo, and it never switches your tabs. The board stays yours.
+**Let the agent draw back.** With the bundled skill installed, an agent can list the frames on your board, read one, and add a new frame of its own beside yours. When you ask, it can also label and annotate the board, arrange its layers, and build a whole presentation: frames laid out in space, linked into a deck, ready for you to present. Every change it makes is one step you can undo, and it never switches your tabs. The board stays yours.
 
 ## What it keeps to
 
@@ -53,7 +57,7 @@ Three extras come with the package, switched off, and the install message says h
 - a theme hook, so a board left open follows a theme change right away;
 - the skill that lets the agents on the machine read your frames and add new ones.
 
-Anywhere else, the archive on the [releases page](https://github.com/edumoraes/sinopia/releases) holds the binary and lays itself out with `sudo sh packaging/install.sh sinopia /` from inside it. To build from source: `cargo build --release` (Rust, on Wayland with Vulkan).
+Anywhere else, the archive on the [releases page](https://github.com/edumoraes/sinopia/releases) holds the binary and lays itself out with `sudo sh packaging/install.sh sinopia /` from inside it. To build from source: `cargo build --release` (Rust, on Wayland with Vulkan). Hand gestures and the presenter's camera are a build of their own, on OpenCV 5: `cargo build --release --features hands`, then `experiments/hands/fetch-models.sh` once for the hand models.
 
 ## An earlier name
 

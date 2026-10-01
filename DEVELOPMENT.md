@@ -11,11 +11,11 @@ a **draft**: the real architecture emerges from development.
 
 Scaffold (§15 items 1–2), the pencil (item 4), the brush and layers,
 selection, navigation, pasted images, projects in tabs, frames, text,
-shapes and arrows, export to the agent, the CLI an agent asks the board through, and the
-packaging that distributes it (item 7):
+shapes and arrows, export to the agent, the CLI an agent asks the board through,
+presentations, hand gestures, and the packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1345 tests, and the plugin's
-  own suite under `qmltestrunner`.
+- `cargo build` clean, `cargo test` with 1439 tests — 1465 with
+  `--features hands` — and the plugin's own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,
   `sinopia` and `sinopia-git` — which are built and installed on a
@@ -283,13 +283,19 @@ packaging that distributes it (item 7):
   board can be handed straight back, and it arrives as a new frame
   rather than over the one it came from, since every id is minted
   again. The board picks where it lands, to the right of everything,
-  because an agent cannot see the board it is drawing on; the frame's
-  size is the agent's. What it can draw is what the canvas already
+  unless the agent says — `--at X,Y`, which is how a presentation is
+  laid out in space — and the answer says what every layer of the
+  fragment became, so the agent can link them. The frame's size is the
+  agent's. What it can draw is what the canvas already
   draws — shapes and arrows, texts, rects, ink paths, and images whose
   bytes ride in `blobs/` beside the json — so a diagram an agent writes
   is boxes, arrows and labels the person can select and set from the
   same bars as their own. It lands as one undo step:
-  `Ctrl+Z` takes an agent's frame back off. All three need the board to
+  `Ctrl+Z` takes an agent's frame back off. `sinopia present` builds a
+  presentation the same way — `list` the decks, `link`, `unlink` and
+  `path` the stops, `start`, step and `stop` the show, and set how the
+  presenter's camera is cut — and `sinopia hands on|off` turns the
+  gestures on a build that has them. All of them need the board to
   be **open** — it is the live document, unsaved work included, and the
   tab in front where several are — and
   their answer is real work rather than an ack, so they go over the
@@ -357,6 +363,33 @@ packaging that distributes it (item 7):
   `layers`: they get `Layer 1` on load and their elements join it; every
   property a layer can have is on disk only when it is not the default,
   so a board written before any of them reads back as it was.
+- Presentations: any layer can be linked to the next — a frame, a
+  group, the layer of one object — and the links make a deck the
+  camera flies through. A frame is shown as a slide, filling the screen
+  with everything round it covered black; a group or an object is shown
+  on the board with some room round it, inside its slide when it stands
+  in one. The flight between two stops takes the shortest way for
+  zooming and panning together (van Wijk and Nuij's): straight in to
+  something already in sight, out only as far as it takes to reach what
+  is not, so an overview, a zoom into a part of it and a flight to the
+  next idea read as one movement. Select a stop and pull the handle off
+  its right edge onto the next one — `Alt` takes the group, a frame's
+  ground the frame — or take hold of an arrow to move or drop a link;
+  every stop wears its number on the board, and View → Presentation Path
+  puts the numbers and arrows away. `F5` presents. A copy, a paste or a
+  graft brings the deck inside it, and an agent builds a whole one from
+  the command line (`sinopia present`).
+- The presenter's camera: in a build with hand gestures, `C` while
+  presenting puts the presenter in the bottom right corner of the show,
+  cut the way the board says — rounded (the camera's own shape), round,
+  square or an irregular blob whose outline slowly moves; `Shift+C`
+  steps through them, and the board keeps the choice. It opens the
+  camera for itself when the gestures have not.
+- Hand gestures (the `hands` build): the webcam reads the presenter's
+  hands — a pinch drags the board, two pinches zoom about the middle of
+  them, a pointed index finger is a laser with a fading trail, and an
+  open hand swept sideways turns the slide. They work over the board and
+  in a show, held inside the slide like every other camera change.
 - Frames: an area that holds objects, drawn with the Frame tool (`F`) by
   dragging it out. What is inside it is cut to its boundary — ink that
   runs past the edge stops there, and stops being clickable there too. It
@@ -667,16 +700,19 @@ anywhere.
 | `Shift` + `L` | Show / hide the layers panel |
 | Left drag (Frame) | Drag out a frame; what its area covers joins it |
 | Click an ink with a frame selected | Paint the frame's ground |
-| Drag the handle out of a selected frame's right edge | Link it to the frame let go of over: the next slide; over nothing, unlink |
-| Drag a link's arrow (Select) | Pull the link onto another frame, or off into nothing to unlink; a click changes nothing |
-| Pull a link onto a frame another one already leads to | Refused: a slide comes after one slide at most |
-| `F5`, View → Present | Present the frames: from the one selected, or the head of a deck of links |
-| `→` `↓` `Space` `Enter` `PageDown`, click (presenting) | Next slide |
-| `←` `↑` `Backspace` `PageUp`, right-click (presenting) | Slide before |
-| `Home` / `End` (presenting) | First / last slide |
+| Drag the handle out of a selected stop's right edge | Link it to the stop let go of over: an object's layer, with `Alt` its outermost group, a frame's ground the frame; over nothing, unlink |
+| Select a group in the panel, then drag the handle | The group is the stop: the camera zooms to everything it holds |
+| Drag a link's arrow (Select) | Pull the link onto another stop, or off into nothing to unlink; a click changes nothing |
+| Pull a link onto a stop another one already leads to | Refused: a stop comes after one stop at most |
+| View → Presentation Path | The decks' numbers and arrows on the board, or put away |
+| `F5`, View → Present | Present: from the stop selected, or the head of a deck of links |
+| `→` `↓` `Space` `Enter` `PageDown`, click (presenting) | Next stop |
+| `←` `↑` `Backspace` `PageUp`, right-click (presenting) | Stop before |
+| `Home` / `End` (presenting) | First / last stop |
 | `Esc` / `F5` (presenting) | End the show |
-| `C` (presenting, hands on) | The presenter's camera in the bottom right corner, on or off |
-| `Ctrl` + `Shift` + `H`, View → Hand Gestures | Hand gestures through the webcam on or off (a build with `--features hands`) |
+| `C` (presenting, hands build) | The presenter's camera in the bottom right corner, on or off |
+| `Shift` + `C` (presenting, hands build) | The camera's next shape: rounded, round, square, blob |
+| `Ctrl` + `Shift` + `H`, View → Hand Gestures | Hand gestures through the webcam on or off (a build with `--features hands`), in a show too |
 | Pinch thumb and index, move (hands) | Drag the board; two pinches pulled apart or together zoom |
 | Point the index, the other three folded (hands) | A laser over the board, with a fading trail |
 | Sweep an open hand sideways (hands, presenting) | Next slide (to the left), the one before (to the right) |
@@ -753,10 +789,11 @@ QT_QPA_PLATFORM=offscreen /usr/lib/qt6/bin/qmltestrunner -input tests/plugin
                                # the plugin's reading of the index
 ```
 
-Hand gestures through the webcam are an experiment behind the `hands`
-feature, off by default: it links the system's OpenCV (5.x here, found
-through pkg-config) and needs clang to generate the bindings. The models
-are fetched once into the data directory:
+Hand gestures and the presenter's camera are behind the `hands` feature,
+off by default: it links the system's OpenCV (5.x, found through
+pkg-config) and needs clang to generate the bindings; CI builds, lints and
+tests it in an Arch container. The models are fetched once into the data
+directory — the presenter's camera works without them:
 
 ```sh
 experiments/hands/fetch-models.sh        # the two ONNX models, checked against their sums
@@ -816,15 +853,15 @@ src/props.rs     brush properties bar, centred under the strip: the basic pair, 
 src/tabs.rs      top tab strip: layout, hit-test, what a narrow tab drops (pure, tested)
 src/text.rs      glyph atlas, measure, layout, word wrap, ellipsis truncation (pure, tested)
 src/project.rs   a document's origin (file, board, untitled) and dirty flag (pure, tested)
-src/present.rs   a presentation: frames linked one to the next, the fit, the hold on the camera, the flight, the veil, the arrows and the link handle (pure, tested)
+src/present.rs   a presentation: any layer a stop, the decks their links make, what a stop shows, the fit, the hold on the camera, the flight along van Wijk and Nuij's path, the veil, the arrows, the numbers, the link handle, and the changes the command line makes (pure, tested)
 src/hands/       hand gestures through the webcam, behind the `hands` feature:
   model.rs       the palm and hand models' arithmetic: anchors, letterbox, palms, the turned square, the way back (pure, tested)
-  camera.rs      the camera and the two models through OpenCV's dnn, on a thread of their own; a hand followed from its own points
+  camera.rs      the camera on a thread of its own, for the gestures or the presenter's card; the two models through OpenCV's dnn, loaded when the gestures want them; a hand followed from its own points
   gesture.rs     pinch, drag, zoom, laser, sweep, coast, springs and filters (pure, tested)
-  marks.rs       the laser and its trail, the pinches, a turned slide's chevron, the presenter's card (pure, tested)
+  marks.rs       the laser and its trail, the pinches, a turned slide's chevron, the presenter's card in each shape (pure, tested)
 src/field.rs     an editable value, one line or several: the caret, the selection, the lines a box shows (pure, tested)
 src/export.rs    what leaves the board: the scope, its box, its sub-document, the slug, the inventory, the write (pure, tested)
-src/graft.rs     what comes back: the fragment, the ids minted anew, the free spot, the graft (pure, tested)
+src/graft.rs     what comes back: the fragment, the ids minted anew and the deck carried to them, the free spot or the one asked, the graft (pure, tested)
 src/agents.rs    the agents running here: herdr, tmux and /proc parsed into one list, and reaching one (pure, tested)
 src/skills.rs    each harness's skills: where they live, which may be called, how a call is written (pure, tested)
 src/send.rs      the export dialog: the rows, the folder, the instruction box, the skills menu, the picture (pure, tested)
