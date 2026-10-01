@@ -80,6 +80,23 @@ impl Area {
         }
     }
 
+    /// Moved as little as it takes to lie inside `bounds` on every axis it
+    /// fits on, and centred on `bounds` on one it does not.
+    fn inside(self, bounds: &Area) -> Area {
+        let fit = |at: f64, size: f64, from: f64, room: f64| {
+            if size <= room {
+                at.clamp(from, from + room - size)
+            } else {
+                from + (room - size) / 2.0
+            }
+        };
+        Area {
+            x: fit(self.x, self.w, bounds.x, bounds.w),
+            y: fit(self.y, self.h, bounds.y, bounds.h),
+            ..self
+        }
+    }
+
     /// Whether `other` is wholly inside it.
     fn holds(&self, other: &Area) -> bool {
         other.x >= self.x
@@ -101,8 +118,9 @@ impl Area {
 /// window's edges.
 const ROOM: f64 = 0.08;
 
-/// What a stop shows: the box of what it paints, and whether it is a
-/// slide — a frame, shown with the window round it covered.
+/// What a stop shows: the box of what it paints, whether it is a slide —
+/// a frame, shown with the window round it covered — and the frame a stop
+/// that is no frame stands in, if it stands in one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stop {
     /// A frame's own box; else the box round the ink of everything the
@@ -110,13 +128,20 @@ pub struct Stop {
     /// lets it show.
     pub ink: Area,
     pub slide: bool,
+    /// The box of the frame it stands in: it is part of that slide, so it
+    /// is shown inside it and the window past it is covered as the
+    /// slide's is.
+    pub within: Option<Area>,
 }
 
 impl Stop {
     /// What a show fits to a window of `viewport`'s shape: a slide's own
     /// box; anything else its ink with room round it, made as wide or as
     /// tall as it takes to have the window's shape — so nothing round it
-    /// is covered, and a pan inside it can reach every part of the window.
+    /// is covered, and a pan inside it can reach every part of the window
+    /// — and moved, inside a frame, as little as it takes to keep inside
+    /// that frame, so a zoom into part of a slide shows the slide round
+    /// it and not the board past its edge.
     pub fn area(&self, viewport: Viewport) -> Area {
         if self.slide {
             return self.ink;
@@ -126,18 +151,28 @@ impl Stop {
         let shape = aspect(viewport);
         let (w, h) = if w / h < shape { (h * shape, h) } else { (w, w / shape) };
         let (cx, cy) = self.ink.center();
-        Area {
+        let area = Area {
             x: cx - w / 2.0,
             y: cy - h / 2.0,
             w,
             h,
+        };
+        match self.within {
+            Some(frame) => area.inside(&frame),
+            None => area,
         }
     }
 
+    /// What the window is not covered past: a slide's own box, or the
+    /// frame a stop stands in — none for a stop out on the board.
+    fn bounds(&self) -> Option<Area> {
+        if self.slide { Some(self.ink) } else { self.within }
+    }
+
     /// How strongly the window round its area is covered: all of it for
-    /// a slide, none of it for anything else.
+    /// a slide and for what stands in one, none for a stop on the board.
     pub fn veil(&self) -> f64 {
-        if self.slide { 1.0 } else { 0.0 }
+        if self.bounds().is_some() { 1.0 } else { 0.0 }
     }
 }
 
@@ -159,8 +194,10 @@ pub fn stop(doc: &Document, id: &str) -> Option<Stop> {
         return doc.frame_on(id).map(|f| Stop {
             ink: Area::of(f),
             slide: true,
+            within: None,
         });
     }
+    let within = doc.frame_holding(id).map(Area::of);
     let held = doc.subtree(layer);
     doc.painted()
         .filter(|p| held.iter().any(|h| h == p.element.layer()))
@@ -179,7 +216,11 @@ pub fn stop(doc: &Document, id: &str) -> Option<Stop> {
             }
         })
         .reduce(|a, b| a.union(&b))
-        .map(|ink| Stop { ink, slide: false })
+        .map(|ink| Stop {
+            ink,
+            slide: false,
+            within,
+        })
 }
 
 /// The layer `id` leads to, when that is another layer on the board. A
@@ -571,19 +612,19 @@ impl Show {
 
     /// What is shown, and how strongly the window round it is covered:
     /// the area flown through, and the veil on its way, during a flight;
-    /// else a slide as far as `view` shows it, covered round, or the
-    /// whole window for a stop on the board.
+    /// else a slide — or the slide a stop stands in — as far as `view`
+    /// shows it, covered round, or the whole window for a stop out on
+    /// the board.
     pub fn shown(&self, doc: &Document, view: &View) -> Option<(Area, f64)> {
         if let Some(f) = &self.flight {
             return Some((f.area(), f.veil()));
         }
         let stop = self.stop(doc)?;
         let seen = Area::seen(view);
-        if !stop.slide {
-            return Some((seen, 0.0));
-        }
-        let area = stop.area(view.viewport);
-        Some((seen.meet(&area).unwrap_or(area), 1.0))
+        Some(match stop.bounds() {
+            Some(bounds) => (seen.meet(&bounds).unwrap_or(bounds), 1.0),
+            None => (seen, 0.0),
+        })
     }
 
     /// The camera the show asks for: the one that fits the area flown
@@ -1221,6 +1262,66 @@ mod tests {
         assert!(same(area, Area { x: -6.0, y: 2.0, w: 132.0, h: 66.0 }), "{area:?}");
         let tall = s.area(Viewport { w: 500, h: 1000 });
         assert!(same(tall, Area { x: 2.0, y: -81.0, w: 116.0, h: 232.0 }), "{tall:?}");
+    }
+
+    #[test]
+    fn a_stop_in_a_frame_is_shown_inside_it_and_covered_round_as_its_slide_is() {
+        // A 16:9 frame, and a rect low in it: with its room, in the
+        // window's shape, the rect's area would run past the frame's foot.
+        let mut doc = Document::new("t");
+        doc.layers.push(Layer {
+            id: "a".into(),
+            ..Layer::of("a", Kind::Frame)
+        });
+        doc.elements.push(Element::Frame(Frame {
+            id: "a-f".into(),
+            layer: "a".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 1600.0,
+            h: 900.0,
+            background: None,
+            layers: vec![Layer {
+                id: "a-in".into(),
+                ..Layer::new("Layer 1")
+            }],
+        }));
+        rect(&mut doc, Some("a"), "r", "r-el", (600.0, 760.0, 400.0, 120.0));
+        let s = stop(&doc, "r").unwrap();
+        let frame = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 1600.0,
+            h: 900.0,
+        };
+        assert_eq!(s.within, Some(frame));
+        assert_eq!(s.veil(), 1.0, "it is part of its slide");
+        let wide = Viewport { w: 1600, h: 900 };
+        let area = s.area(wide);
+        assert!(frame.holds(&area), "inside its frame: {area:?}");
+        assert!(area.holds(&s.ink), "with all of it in sight: {area:?}");
+        assert!(close(area.y + area.h, 900.0), "moved up only as far as it had to: {area:?}");
+        // A rect on the board stands in no frame.
+        rect(&mut doc, None, "out", "out-el", (0.0, 2000.0, 10.0, 10.0));
+        assert_eq!(stop(&doc, "out").unwrap().within, None);
+        assert_eq!(stop(&doc, "out").unwrap().veil(), 0.0);
+    }
+
+    #[test]
+    fn what_is_shown_of_a_stop_in_a_frame_is_covered_past_the_frame() {
+        let mut doc = deck(&["a"]);
+        rect(&mut doc, Some("a"), "r", "r-el", (10.0, 10.0, 40.0, 20.0));
+        tie(&mut doc, "a", "r");
+        let v = view(fit(stop(&doc, "a").unwrap().ink, VP, 1.0));
+        let mut show = Show::start(&doc, None, &v).unwrap();
+        show.tick(10.0);
+        assert!(show.step(&doc, &v, true));
+        show.tick(10.0);
+        let on = view(show.camera(&doc, &v, v.camera).unwrap());
+        let (area, veil) = show.shown(&doc, &on).unwrap();
+        assert_eq!(veil, 1.0);
+        let frame = stop(&doc, "a").unwrap().ink;
+        assert!(frame.holds(&area), "nothing past the frame is left uncovered: {area:?}");
     }
 
     #[test]
