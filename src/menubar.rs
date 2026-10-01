@@ -148,6 +148,8 @@ pub enum Action {
     Layers,
     /// The brush library shown or hidden.
     Library,
+    /// The board's frames presented, one slide at a time.
+    Present,
     NewLayer,
     NewGroup,
     Rename,
@@ -176,6 +178,8 @@ pub struct State {
     pub hidden: bool,
     /// What a merge would be called: `Editor::merge_name`.
     pub merge: &'static str,
+    /// The board has a frame on show to present.
+    pub present: bool,
 }
 
 /// The `Ctrl` shortcut for `key` — read lower case, with `Shift` and
@@ -258,6 +262,7 @@ pub fn items(
                 state.library.is_some(),
                 false,
             ),
+            ("Present", "F5", Action::Present, state.present, true),
         ],
         Title::Layer => {
             let run = |label, keys, command, rule| {
@@ -425,6 +430,7 @@ mod tests {
             locked: false,
             hidden: false,
             merge: "Merge Down",
+            present: true,
         }
     }
 
@@ -442,6 +448,7 @@ mod tests {
         match hint {
             "Del" => return Some(Action::Delete),
             "F2" => return Some(Action::Rename),
+            "F5" => return Some(Action::Present),
             "Shift+L" => return Some(Action::Layers),
             "Shift+B" => return Some(Action::Library),
             _ => {}

@@ -48,6 +48,13 @@ pub enum Request {
         colors: Option<ThemeColors>,
     },
     Shutdown,
+    /// The presentation of the open board: started from the frame
+    /// selected or the head of its deck, moved a slide on or back or to
+    /// either end, or stopped. Acked and forwarded: what it moves is on
+    /// screen, and a remote that turns a slide does not wait to be told.
+    Present {
+        action: Presenting,
+    },
     /// What frames the open board has. The three below are an agent's
     /// own door (§8): their answer *is* the work — the listing wants the
     /// live document and a picture wants the GPU — so unlike every op
@@ -257,6 +264,7 @@ impl Request {
             Request::New => "new",
             Request::Raise => "raise",
             Request::Shutdown => "shutdown",
+            Request::Present { .. } => "present",
             Request::Open { .. } => "open",
             Request::OpenFile { .. } => "open_file",
             Request::Export { .. } => "export",
@@ -305,7 +313,32 @@ impl Request {
                 | Request::Export { .. }
                 | Request::Theme { .. }
                 | Request::Shutdown
+                | Request::Present { .. }
         )
+    }
+}
+
+/// What `present` asks of the show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presenting {
+    Start,
+    Stop,
+    Next,
+    Prev,
+    First,
+    Last,
+}
+
+impl Presenting {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Presenting::Start => "start",
+            Presenting::Stop => "stop",
+            Presenting::Next => "next",
+            Presenting::Prev => "prev",
+            Presenting::First => "first",
+            Presenting::Last => "last",
+        }
     }
 }
 
@@ -423,6 +456,17 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         },
         "theme" => Request::Theme {
             colors: take_colors(&mut map)?,
+        },
+        "present" => Request::Present {
+            action: match take_string(&mut map, "action")?.as_str() {
+                "start" => Presenting::Start,
+                "stop" => Presenting::Stop,
+                "next" => Presenting::Next,
+                "prev" => Presenting::Prev,
+                "first" => Presenting::First,
+                "last" => Presenting::Last,
+                other => anyhow::bail!("a show starts, stops, goes next, prev, first or last, not {other:?}"),
+            },
         },
         "frames" => Request::Frames,
         // Absolute, unlike `export`'s: the caller's working directory is
@@ -577,6 +621,9 @@ pub fn request_line(req: &Request) -> String {
                 c.insert("accent".into(), colors.accent.clone().into());
                 map.insert("colors".into(), Value::Object(c));
             }
+        }
+        Request::Present { action } => {
+            map.insert("action".into(), action.as_str().into());
         }
         Request::ReadFrame { id, dir } => {
             map.insert("id".into(), id.clone().into());
@@ -1472,6 +1519,32 @@ mod tests {
         }
         for req in layer_ops() {
             assert!(req.is_asked(), "{}: the answer is the work", req.op());
+        }
+    }
+
+    #[test]
+    fn a_show_is_moved_by_an_action_that_is_acked_and_nothing_else() {
+        for action in [
+            Presenting::Start,
+            Presenting::Stop,
+            Presenting::Next,
+            Presenting::Prev,
+            Presenting::First,
+            Presenting::Last,
+        ] {
+            let present = Request::Present { action };
+            assert_eq!(parse_request(&request_line(&present)).unwrap(), present);
+            assert!(!present.is_asked(), "acked and forwarded");
+        }
+        for line in [
+            r#"{ "v": 1, "op": "present" }"#,
+            r#"{ "v": 1, "op": "present", "action": "rewind" }"#,
+            r#"{ "v": 1, "op": "present", "action": "next", "slide": 2 }"#,
+            r#"{ "v": 1, "op": "nudge", "dx": 0, "dy": 0, "factor": 1 }"#,
+            r#"{ "v": 1, "op": "pen", "phase": "down", "x": 0, "y": 0 }"#,
+            r#"{ "v": 1, "op": "showing" }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
         }
     }
 

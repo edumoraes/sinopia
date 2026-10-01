@@ -1,13 +1,21 @@
-//! A presentation's deck: the frames linked one to the next. A frame's
-//! `next` names the frame after it, wherever the two stand. The arrows
-//! between linked frames, and the handle a link is pulled out of, are
-//! drawn here, so the canvas and the press cannot disagree about where
-//! the handle is. Pure, like the rest of the core.
+//! A presentation: the frames linked one to the next, shown one at a
+//! time. A frame's `next` names the frame after it, wherever the two
+//! stand; a show walks those links from where it starts, fits each slide
+//! to the window and holds the camera inside it — zoom out stops at the
+//! whole slide, and a pan never looks past its edges. Between two slides
+//! the camera flies, from what is on screen to the next slide, opening
+//! out on the way as far as it takes to keep both in sight.
+//!
+//! Pure, like the rest of the core: `app` keeps a [`Show`] while
+//! presenting, ages it on its clock and asks it for the camera and for
+//! what to cover. The arrows between linked frames, and the handle a
+//! link is pulled out of, are drawn here too, so the canvas and the
+//! press cannot disagree about where the handle is.
 
 use std::f64::consts::PI;
 
-use crate::doc::{Document, Element, Frame};
-use crate::scene::{Prim, Rgba, ScreenRect, View, with_alpha};
+use crate::doc::{Camera, Document, Element, Frame};
+use crate::scene::{Prim, Rgba, ScreenRect, View, Viewport, with_alpha};
 
 /// A box in world units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,6 +34,32 @@ impl Area {
             w: f.w,
             h: f.h,
         }
+    }
+
+    pub fn center(&self) -> (f64, f64) {
+        (self.x + self.w / 2.0, self.y + self.h / 2.0)
+    }
+
+    /// What `view` shows of the world.
+    pub fn seen(view: &View) -> Area {
+        let k = view.px_per_world();
+        let w = f64::from(view.viewport.w) / k;
+        let h = f64::from(view.viewport.h) / k;
+        Area {
+            x: view.camera.x - w / 2.0,
+            y: view.camera.y - h / 2.0,
+            w,
+            h,
+        }
+    }
+
+    /// The part of both, if they meet.
+    pub fn meet(&self, other: &Area) -> Option<Area> {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let w = (self.x + self.w).min(other.x + other.w) - x;
+        let h = (self.y + self.h).min(other.y + other.h) - y;
+        (w > 0.0 && h > 0.0).then_some(Area { x, y, w, h })
     }
 
     /// Where it falls on screen, in physical px.
@@ -49,6 +83,303 @@ fn frames(doc: &Document) -> impl Iterator<Item = &Frame> {
         Element::Frame(f) => Some(f),
         _ => None,
     })
+}
+
+/// The slides from `start` on: it, then every frame its links lead to,
+/// each once — a deck that loops back ends where it would repeat. A
+/// hidden frame is passed through rather than shown: what is not painted
+/// is not a slide, and the frames after it still are.
+pub fn sequence(doc: &Document, start: &str) -> Vec<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    let mut at = doc.frame(start);
+    while let Some(f) = at {
+        if seen.contains(&f.id.as_str()) {
+            break;
+        }
+        seen.push(&f.id);
+        if doc.shown(&f.layer) {
+            out.push(f.id.clone());
+        }
+        at = next_of(doc, f);
+    }
+    out
+}
+
+/// Where a show starts: the frame selected, if one is; else the first
+/// frame that leads somewhere and that nothing leads to — the head of a
+/// deck; else the first frame that leads anywhere, since a deck that
+/// loops has no head; else the first frame there is.
+pub fn first(doc: &Document, selection: &[String]) -> Option<String> {
+    let selected = selection.iter().find_map(|id| doc.frame(id));
+    if let Some(f) = selected {
+        return Some(f.id.clone());
+    }
+    let led_to: Vec<&str> = frames(doc)
+        .filter_map(|f| next_of(doc, f))
+        .map(|n| n.id.as_str())
+        .collect();
+    let leads = |f: &&Frame| next_of(doc, f).is_some();
+    frames(doc)
+        .filter(leads)
+        .find(|f| !led_to.contains(&f.id.as_str()))
+        .or_else(|| frames(doc).find(leads))
+        .or_else(|| frames(doc).next())
+        .map(|f| f.id.clone())
+}
+
+/// Whether a show started with `selection` would have a slide to show.
+pub fn presentable(doc: &Document, selection: &[String]) -> bool {
+    first(doc, selection).is_some_and(|start| !sequence(doc, &start).is_empty())
+}
+
+/// The camera that shows `area` whole, as large as the window allows and
+/// in its middle.
+pub fn fit(area: Area, viewport: Viewport, scale: f64) -> Camera {
+    let (x, y) = area.center();
+    let zoom = (f64::from(viewport.w) / (area.w * scale)).min(f64::from(viewport.h) / (area.h * scale));
+    Camera { x, y, zoom }
+}
+
+/// `camera`, kept inside `area`: never further out than the whole of it,
+/// and never looking past its edges. On an axis the window shows more of
+/// than the area has — the bars a slide of another shape leaves — the
+/// area stands in the middle.
+pub fn hold(camera: Camera, area: Area, viewport: Viewport, scale: f64) -> Camera {
+    let least = fit(area, viewport, scale);
+    let zoom = if camera.zoom.is_finite() {
+        camera.zoom.max(least.zoom)
+    } else {
+        least.zoom
+    };
+    let k = zoom * scale;
+    let keep = |at: f64, from: f64, size: f64, window: f64| {
+        let half = window / k / 2.0;
+        // A hair of slack: at the fit, one axis shows exactly the
+        // area, and rounding must not turn that into a clamp that
+        // moves it.
+        if 2.0 * half >= size - size * 1e-9 {
+            from + size / 2.0
+        } else {
+            at.clamp(from + half, from + size - half)
+        }
+    };
+    Camera {
+        x: keep(camera.x, area.x, area.w, f64::from(viewport.w)),
+        y: keep(camera.y, area.y, area.h, f64::from(viewport.h)),
+        zoom,
+    }
+}
+
+/// How far a flight opens out at its middle, as a power of what it
+/// would take to keep both ends in sight: all of it would pull back to
+/// an overview between every pair of slides, none would slide flat
+/// across whatever is between them.
+const LIFT: f64 = 0.6;
+/// How long a flight takes at the least, and how much longer for every
+/// e-fold it opens out by.
+const FLIGHT_S: f64 = 0.7;
+const FLIGHT_PER_LIFT_S: f64 = 0.3;
+const FLIGHT_MAX_S: f64 = 1.6;
+
+/// The camera on its way from one area to another.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Flight {
+    from: Area,
+    to: Area,
+    /// Seconds flown, and how long the whole flight takes.
+    t: f64,
+    length: f64,
+    /// How many times larger than the plain blend of the two the area
+    /// shown is at the middle.
+    lift: f64,
+}
+
+impl Flight {
+    fn new(from: Area, to: Area) -> Flight {
+        let (a, b) = (from.center(), to.center());
+        let wide = (b.0 - a.0).abs() + from.w.max(to.w);
+        let tall = (b.1 - a.1).abs() + from.h.max(to.h);
+        let need = (wide / (from.w * to.w).sqrt()).max(tall / (from.h * to.h).sqrt());
+        let lift = need.max(1.0).powf(LIFT);
+        let length = (FLIGHT_S + FLIGHT_PER_LIFT_S * lift.ln()).min(FLIGHT_MAX_S);
+        Flight {
+            from,
+            to,
+            t: 0.0,
+            length,
+            lift,
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.t >= self.length
+    }
+
+    /// The area shown so far along: the middle eased across, the size
+    /// blended geometrically — a zoom feels even when it multiplies — and
+    /// opened out by the lift, most at the middle and not at all at
+    /// either end.
+    fn area(&self) -> Area {
+        let e = ease((self.t / self.length).clamp(0.0, 1.0));
+        let (a, b) = (self.from.center(), self.to.center());
+        let open = self.lift.powf((PI * e).sin());
+        let w = self.from.w.powf(1.0 - e) * self.to.w.powf(e) * open;
+        let h = self.from.h.powf(1.0 - e) * self.to.h.powf(e) * open;
+        let (x, y) = (a.0 + (b.0 - a.0) * e, a.1 + (b.1 - a.1) * e);
+        Area {
+            x: x - w / 2.0,
+            y: y - h / 2.0,
+            w,
+            h,
+        }
+    }
+}
+
+/// Slow out, fast through the middle, slow in.
+pub fn ease(t: f64) -> f64 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
+/// A presentation in progress: the slides it walks, the one it is on,
+/// the flight to it while there is one, and the camera to put back at
+/// the end.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Show {
+    slides: Vec<String>,
+    at: usize,
+    flight: Option<Flight>,
+    /// Where the board was looking before the show, put back after it.
+    pub before: Camera,
+}
+
+impl Show {
+    /// A show from [`first`], flying in from what `view` shows. None when
+    /// the board has no frame on show to present.
+    pub fn start(doc: &Document, selection: &[String], view: &View) -> Option<Show> {
+        let slides = sequence(doc, &first(doc, selection)?);
+        let to = Area::of(doc.frame(slides.first()?)?);
+        Some(Show {
+            slides,
+            at: 0,
+            flight: Some(Flight::new(Area::seen(view), to)),
+            before: view.camera,
+        })
+    }
+
+    /// The slide on show, and how many there are.
+    #[cfg(test)]
+    pub fn place(&self) -> (usize, usize) {
+        (self.at, self.slides.len())
+    }
+
+    /// The frame on show — none once it has gone from the board, which
+    /// ends the show.
+    pub fn slide<'a>(&self, doc: &'a Document) -> Option<&'a Frame> {
+        doc.frame(self.slides.get(self.at)?)
+    }
+
+    /// Goes to slide `to`, flying there from whatever is on screen. False
+    /// when that is where it already is, or past either end.
+    pub fn go(&mut self, doc: &Document, view: &View, to: usize) -> bool {
+        if to == self.at || to >= self.slides.len() {
+            return false;
+        }
+        let Some(target) = doc.frame(&self.slides[to]) else {
+            return false;
+        };
+        let Some(from) = self.shown(doc, view) else {
+            return false;
+        };
+        self.at = to;
+        self.flight = Some(Flight::new(from, Area::of(target)));
+        true
+    }
+
+    /// One slide on or back.
+    pub fn step(&mut self, doc: &Document, view: &View, forward: bool) -> bool {
+        let to = if forward {
+            self.at + 1
+        } else {
+            match self.at.checked_sub(1) {
+                Some(to) => to,
+                None => return false,
+            }
+        };
+        self.go(doc, view, to)
+    }
+
+    /// The last slide's place.
+    pub fn last(&self) -> usize {
+        self.slides.len().saturating_sub(1)
+    }
+
+    pub fn flying(&self) -> bool {
+        self.flight.is_some()
+    }
+
+    /// Ages the flight by `dt` seconds, landing it once it is over.
+    pub fn tick(&mut self, dt: f64) {
+        if let Some(f) = &mut self.flight {
+            f.t += dt;
+            if f.done() {
+                self.flight = None;
+            }
+        }
+    }
+
+    /// What is shown of the slide: the area flown through, during a
+    /// flight; else as much of the slide as `view` shows. The window
+    /// around it is covered.
+    pub fn shown(&self, doc: &Document, view: &View) -> Option<Area> {
+        if let Some(f) = &self.flight {
+            return Some(f.area());
+        }
+        let slide = Area::of(self.slide(doc)?);
+        Area::seen(view).meet(&slide).or(Some(slide))
+    }
+
+    /// The camera the show asks for: the one that fits the area flown
+    /// through, during a flight; else `camera` held inside the slide.
+    pub fn camera(&self, doc: &Document, view: &View, camera: Camera) -> Option<Camera> {
+        if let Some(f) = &self.flight {
+            return Some(fit(f.area(), view.viewport, view.scale));
+        }
+        let slide = Area::of(self.slide(doc)?);
+        Some(hold(camera, slide, view.viewport, view.scale))
+    }
+}
+
+/// The window less `area`: up to four bands, in physical px, that cover
+/// what is not the slide.
+pub fn veil(area: Area, view: &View) -> Vec<ScreenRect> {
+    let (vw, vh) = (f64::from(view.viewport.w), f64::from(view.viewport.h));
+    let (x0, y0, x1, y1) = area.on_screen(view);
+    // Rounded outwards from the slide by nothing and onto whole pixels,
+    // so no sliver of the board shows between a band and the slide.
+    let (x0, y0) = (x0.floor().clamp(0.0, vw), y0.floor().clamp(0.0, vh));
+    let (x1, y1) = (x1.ceil().clamp(0.0, vw), y1.ceil().clamp(0.0, vh));
+    let band = |x: f64, y: f64, w: f64, h: f64| {
+        (w > 0.0 && h > 0.0).then_some(ScreenRect {
+            x: x as f32,
+            y: y as f32,
+            w: w as f32,
+            h: h as f32,
+        })
+    };
+    [
+        band(0.0, 0.0, vw, y0),
+        band(0.0, y1, vw, vh - y1),
+        band(0.0, y0, x0, y1 - y0),
+        band(x1, y0, vw - x1, y1 - y0),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// How far out of a frame's right edge its link handle stands, and how
@@ -266,8 +597,7 @@ pub fn pulling(doc: &Document, view: &View, from: &str, to: [f64; 2], ink: Rgba)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{Camera, Kind, Layer};
-    use crate::scene::Viewport;
+    use crate::doc::{Kind, Layer};
 
     const VP: Viewport = Viewport { w: 1000, h: 500 };
 
@@ -306,6 +636,325 @@ mod tests {
 
     fn link(doc: &mut Document, from: &str, to: &str) {
         doc.frame_mut(from).unwrap().next = Some(to.into());
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    fn same(a: Area, b: Area) -> bool {
+        close(a.x, b.x) && close(a.y, b.y) && close(a.w, b.w) && close(a.h, b.h)
+    }
+
+    #[test]
+    fn a_sequence_follows_the_links_wherever_the_frames_stand() {
+        let mut doc = deck(&["a", "b", "c", "d"]);
+        link(&mut doc, "c", "a");
+        link(&mut doc, "a", "d");
+        assert_eq!(sequence(&doc, "c"), ["c", "a", "d"]);
+        assert_eq!(sequence(&doc, "b"), ["b"], "a frame linked to nothing is a deck of one");
+    }
+
+    #[test]
+    fn a_loop_ends_where_it_would_repeat_and_a_link_to_itself_goes_nowhere() {
+        let mut doc = deck(&["a", "b", "c"]);
+        link(&mut doc, "a", "b");
+        link(&mut doc, "b", "c");
+        link(&mut doc, "c", "a");
+        assert_eq!(sequence(&doc, "b"), ["b", "c", "a"]);
+        let mut doc = deck(&["a"]);
+        link(&mut doc, "a", "a");
+        assert_eq!(sequence(&doc, "a"), ["a"]);
+        assert!(next_of(&doc, doc.frame("a").unwrap()).is_none());
+    }
+
+    #[test]
+    fn a_link_to_a_frame_that_has_gone_goes_nowhere() {
+        let mut doc = deck(&["a", "b"]);
+        link(&mut doc, "a", "gone");
+        assert_eq!(sequence(&doc, "a"), ["a"]);
+    }
+
+    #[test]
+    fn a_hidden_frame_is_passed_through_and_not_shown() {
+        let mut doc = deck(&["a", "b", "c"]);
+        link(&mut doc, "a", "b");
+        link(&mut doc, "b", "c");
+        doc.layers.iter_mut().find(|l| l.id == "b-layer").unwrap().visible = false;
+        assert_eq!(sequence(&doc, "a"), ["a", "c"]);
+    }
+
+    #[test]
+    fn a_show_starts_at_the_frame_selected_then_at_the_head_of_a_deck() {
+        let mut doc = deck(&["a", "b", "c"]);
+        link(&mut doc, "c", "b");
+        link(&mut doc, "b", "a");
+        assert_eq!(first(&doc, &["b".into()]).as_deref(), Some("b"));
+        assert_eq!(first(&doc, &["not-a-frame".into()]).as_deref(), Some("c"), "the head");
+        assert_eq!(first(&doc, &[]).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn a_deck_that_loops_starts_at_its_first_frame_and_a_board_without_links_at_the_first() {
+        let mut doc = deck(&["a", "b", "c"]);
+        link(&mut doc, "b", "c");
+        link(&mut doc, "c", "b");
+        assert_eq!(first(&doc, &[]).as_deref(), Some("b"), "the first that leads anywhere");
+        assert_eq!(first(&deck(&["x", "y"]), &[]).as_deref(), Some("x"));
+        assert_eq!(first(&Document::new("t"), &[]), None, "nothing to present");
+        assert!(!presentable(&Document::new("t"), &[]));
+        let mut hidden = deck(&["x"]);
+        hidden.layers.iter_mut().find(|l| l.id == "x-layer").unwrap().visible = false;
+        assert!(!presentable(&hidden, &[]), "a hidden frame is no slide");
+        assert!(presentable(&deck(&["x"]), &[]));
+    }
+
+    #[test]
+    fn fit_shows_the_whole_area_in_the_middle_of_the_window() {
+        let area = Area {
+            x: 100.0,
+            y: 50.0,
+            w: 400.0,
+            h: 100.0,
+        };
+        let c = fit(area, VP, 1.0);
+        assert_eq!((c.x, c.y), (300.0, 100.0));
+        assert!(close(c.zoom, 2.5), "the width decides: {}", c.zoom);
+        let seen = Area::seen(&view(c));
+        assert!(close(seen.w, 400.0) && seen.h >= 100.0);
+        // At scale 2 the same area takes the same share of the window.
+        assert!(close(fit(area, VP, 2.0).zoom, 1.25));
+    }
+
+    #[test]
+    fn hold_stops_zooming_out_at_the_whole_slide() {
+        let area = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let out = Camera {
+            x: 999.0,
+            y: -999.0,
+            zoom: 0.1,
+        };
+        assert_eq!(hold(out, area, VP, 1.0), fit(area, VP, 1.0));
+    }
+
+    #[test]
+    fn hold_keeps_a_zoomed_in_view_inside_the_slide() {
+        let area = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        // At zoom 20 the window shows 50 by 25 of the world.
+        let held = hold(
+            Camera {
+                x: -500.0,
+                y: 500.0,
+                zoom: 20.0,
+            },
+            area,
+            VP,
+            1.0,
+        );
+        assert_eq!(held.zoom, 20.0, "zooming in is the person's");
+        assert!(close(held.x, 25.0) && close(held.y, 87.5), "{held:?}");
+        let inside = Camera {
+            x: 120.0,
+            y: 40.0,
+            zoom: 20.0,
+        };
+        assert_eq!(hold(inside, area, VP, 1.0), inside, "a view inside is left alone");
+    }
+
+    #[test]
+    fn hold_centres_the_slide_on_the_axis_the_window_has_room_to_spare_on() {
+        // A tall slide in a wide window: at the fit, the height decides,
+        // and across there is room either side.
+        let area = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 500.0,
+        };
+        let c = hold(
+            Camera {
+                x: 70.0,
+                y: 250.0,
+                zoom: 1.0,
+            },
+            area,
+            VP,
+            1.0,
+        );
+        assert_eq!(c.x, 50.0, "the middle, wherever it was panned to");
+        let nudged = hold(Camera { x: 60.0, ..c }, area, VP, 1.0);
+        assert_eq!(nudged, c);
+    }
+
+    #[test]
+    fn a_flight_leaves_from_one_area_and_lands_on_the_other() {
+        let from = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let to = Area {
+            x: 3000.0,
+            y: 400.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        let mut f = Flight::new(from, to);
+        assert!(same(f.area(), from));
+        f.t = f.length;
+        assert!(same(f.area(), to), "{:?}", f.area());
+    }
+
+    #[test]
+    fn a_flight_opens_out_on_the_way_further_the_further_it_goes() {
+        let a = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let near = Area { x: 300.0, ..a };
+        let far = Area { x: 3000.0, ..a };
+        let middle = |to| {
+            let mut f = Flight::new(a, to);
+            f.t = f.length / 2.0;
+            f.area().w
+        };
+        assert!(middle(near) > a.w, "even next door: {}", middle(near));
+        assert!(middle(far) > middle(near));
+        assert_eq!(Flight::new(a, a).lift, 1.0, "nowhere to go, nothing to open");
+        assert!(Flight::new(a, far).length > Flight::new(a, near).length);
+        assert!(Flight::new(a, far).length <= FLIGHT_MAX_S);
+    }
+
+    #[test]
+    fn ease_starts_and_ends_still_and_passes_the_middle_at_half() {
+        assert_eq!(ease(0.0), 0.0);
+        assert_eq!(ease(1.0), 1.0);
+        assert_eq!(ease(0.5), 0.5);
+        assert!(ease(0.1) < 0.1 && ease(0.9) > 0.9);
+    }
+
+    fn deck_of_three() -> Document {
+        let mut doc = deck(&["a", "b", "c"]);
+        link(&mut doc, "a", "b");
+        link(&mut doc, "b", "c");
+        doc
+    }
+
+    #[test]
+    fn a_show_flies_in_and_lands_on_its_first_slide() {
+        let doc = deck_of_three();
+        let v = view(Camera {
+            x: 5000.0,
+            y: 5000.0,
+            zoom: 1.0,
+        });
+        let mut show = Show::start(&doc, &[], &v).unwrap();
+        assert_eq!(show.place(), (0, 3));
+        assert_eq!(show.before, v.camera);
+        assert!(show.flying());
+        let leaving = show.camera(&doc, &v, v.camera).unwrap();
+        assert!(close(leaving.x, 5000.0) && close(leaving.zoom, 1.0), "it leaves from the view");
+        show.tick(10.0);
+        assert!(!show.flying());
+        let slide = Area::of(doc.frame("a").unwrap());
+        assert_eq!(show.camera(&doc, &v, v.camera), Some(fit(slide, VP, 1.0)));
+    }
+
+    #[test]
+    fn a_show_steps_on_and_back_and_stops_at_either_end() {
+        let doc = deck_of_three();
+        let v = view(Camera {
+            x: 100.0,
+            y: 50.0,
+            zoom: 1.0,
+        });
+        let mut show = Show::start(&doc, &[], &v).unwrap();
+        show.tick(10.0);
+        assert!(!show.step(&doc, &v, false), "nothing before the first");
+        assert!(show.step(&doc, &v, true));
+        assert_eq!(show.slide(&doc).unwrap().id, "b");
+        assert!(show.flying());
+        assert!(show.step(&doc, &v, true));
+        assert!(!show.step(&doc, &v, true), "nothing after the last");
+        assert_eq!(show.place(), (2, 3));
+        assert!(show.go(&doc, &v, 0));
+        assert_eq!(show.slide(&doc).unwrap().id, "a");
+        assert!(!show.go(&doc, &v, 7));
+    }
+
+    #[test]
+    fn a_step_mid_flight_leaves_from_where_the_camera_is() {
+        let doc = deck_of_three();
+        let v = view(fit(Area::of(doc.frame("a").unwrap()), VP, 1.0));
+        let mut show = Show::start(&doc, &[], &v).unwrap();
+        show.tick(10.0);
+        show.step(&doc, &v, true);
+        show.tick(0.3);
+        let midway = show.shown(&doc, &v).unwrap();
+        show.step(&doc, &v, true);
+        assert!(same(show.shown(&doc, &v).unwrap(), midway), "no jump");
+    }
+
+    #[test]
+    fn what_is_shown_is_the_slide_or_the_part_of_it_in_the_window() {
+        let doc = deck_of_three();
+        let slide = Area::of(doc.frame("a").unwrap());
+        let mut show = Show::start(&doc, &[], &view(fit(slide, VP, 1.0))).unwrap();
+        show.tick(10.0);
+        let at_fit = view(fit(slide, VP, 1.0));
+        assert!(same(show.shown(&doc, &at_fit).unwrap(), slide), "the whole slide");
+        let zoomed = view(Camera {
+            x: 50.0,
+            y: 50.0,
+            zoom: 20.0,
+        });
+        let part = show.shown(&doc, &zoomed).unwrap();
+        assert!(close(part.w, 50.0) && close(part.h, 25.0), "{part:?}");
+    }
+
+    #[test]
+    fn the_veil_covers_the_window_less_the_slide() {
+        let v = view(Camera {
+            x: 100.0,
+            y: 50.0,
+            zoom: 1.0,
+        });
+        // The area 0..200 by 0..100 lands on 400..600 by 200..300.
+        let bands = veil(
+            Area {
+                x: 0.0,
+                y: 0.0,
+                w: 200.0,
+                h: 100.0,
+            },
+            &v,
+        );
+        let covered: f32 = bands.iter().map(|b| b.w * b.h).sum();
+        assert_eq!(covered, 1000.0 * 500.0 - 200.0 * 100.0);
+        for b in &bands {
+            let inside = b.x < 600.0 && b.x + b.w > 400.0 && b.y < 300.0 && b.y + b.h > 200.0;
+            assert!(!inside, "{b:?} covers the slide");
+        }
+        let all = Area {
+            x: -1000.0,
+            y: -1000.0,
+            w: 5000.0,
+            h: 5000.0,
+        };
+        assert!(veil(all, &v).is_empty(), "a slide past every edge leaves nothing to cover");
     }
 
     #[test]

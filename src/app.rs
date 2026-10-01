@@ -17,7 +17,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::platform::wayland::WindowAttributesExtWayland as _;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 
 use crate::agents;
 use crate::bitmap::{self, Bitmap};
@@ -40,14 +40,14 @@ use crate::gfx::Gfx;
 use crate::graft;
 use crate::guest::Guest;
 use crate::grid;
-use crate::ipc::proto::{Event, Request};
+use crate::ipc::proto::{Event, Presenting, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::menu;
 use crate::menubar::{self, Action, Bar, Title};
 use crate::omarchy::{self, Style};
 use crate::palette::{self, IconSheet, Palette};
-use crate::present;
+use crate::present::{self, Show};
 use crate::slots::{self, Strip};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
@@ -70,6 +70,10 @@ use crate::theme::{INKS, Theme};
 /// that has been idle wakes with a huge gap since the last frame;
 /// without this, whatever just started would be over before it drew.
 const MAX_STEP: f32 = 0.05;
+
+/// What a show covers everything that is not the slide in, and clears the
+/// window to.
+const SHOW_GROUND: Rgba = [0.0, 0.0, 0.0, 1.0];
 
 /// How much of the ink the brush's ring is drawn with.
 const RING_ALPHA: f32 = 0.6;
@@ -337,6 +341,11 @@ struct App {
     /// Smoke-test mode: exit cleanly after N presented frames.
     smoke_frames_left: Option<u32>,
     exit_error: Option<anyhow::Error>,
+    /// The presentation of the active board, while there is one: the
+    /// slides, the one on show and the flight to it.
+    show: Option<Show>,
+    /// The show put the window in full screen, and ending it takes it out.
+    show_full: bool,
 }
 
 /// A send being composed. It holds the agents as they were when the
@@ -938,6 +947,145 @@ impl App {
         }
         self.follow_brush();
         self.follow_active();
+        if let Some(show) = &mut self.show {
+            show.tick(f64::from(dt));
+        }
+        self.hold_show();
+    }
+
+    /// Puts the camera where the show says: along the flight, or held
+    /// inside the slide — which is what keeps it there when the window
+    /// changes size. A slide that has gone from the board ends the show.
+    fn hold_show(&mut self) {
+        let Some(view) = self.view() else { return };
+        let Some(show) = &self.show else { return };
+        let doc = &self.open[self.active].project.doc;
+        match show.camera(doc, &view, view.camera) {
+            Some(camera) => self.open[self.active].project.doc.camera = camera,
+            None => self.end_show(),
+        }
+    }
+
+    /// Starts a presentation of the active board, from the frame selected
+    /// or the head of its deck, flying in from what is on screen. The
+    /// window goes full screen and every panel goes away; a board with no
+    /// frame on show has nothing to present, and nothing happens.
+    fn start_show(&mut self) {
+        if self.show.is_some() {
+            return;
+        }
+        let Some(view) = self.view() else { return };
+        self.end_typing();
+        self.close_menu(None);
+        self.sending = None;
+        self.renaming = None;
+        self.searching = None;
+        let (editor, doc) = self.active();
+        editor.cancel(doc);
+        let selection = editor.selection().to_vec();
+        let Some(show) = Show::start(self.doc(), &selection, &view) else {
+            log::info!("nothing to present: the board has no frame on show");
+            return;
+        };
+        self.show = Some(show);
+        if let Some(w) = &self.window
+            && w.fullscreen().is_none()
+        {
+            w.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            self.show_full = true;
+        }
+        self.redraw();
+        self.update_cursor_icon();
+    }
+
+    /// Ends the presentation: the board looks where it did before it, and
+    /// the window comes out of full screen if the show put it there.
+    fn end_show(&mut self) {
+        let Some(show) = self.show.take() else { return };
+        self.active().1.camera = show.before;
+        if std::mem::take(&mut self.show_full)
+            && let Some(w) = &self.window
+        {
+            w.set_fullscreen(None);
+        }
+        self.redraw();
+        self.update_cursor_icon();
+    }
+
+    /// What `present` asks, from the socket or the keys: the show started,
+    /// stopped, or moved a slide on or back or to either end.
+    fn present(&mut self, action: Presenting) {
+        if action == Presenting::Start {
+            return self.start_show();
+        }
+        if action == Presenting::Stop {
+            return self.end_show();
+        }
+        let Some(view) = self.view() else { return };
+        let doc = &self.open[self.active].project.doc;
+        let Some(show) = self.show.as_mut() else { return };
+        let moved = match action {
+            Presenting::Next => show.step(doc, &view, true),
+            Presenting::Prev => show.step(doc, &view, false),
+            Presenting::First => show.go(doc, &view, 0),
+            Presenting::Last => {
+                let last = show.last();
+                show.go(doc, &view, last)
+            }
+            Presenting::Start | Presenting::Stop => false,
+        };
+        if moved {
+            self.redraw();
+        }
+    }
+
+    /// A key while a show is on: the arrows, the page keys, Space and
+    /// Enter move it; Home and End go to either end; Esc and F5 end it.
+    /// Nothing else reaches the board.
+    fn show_key(&mut self, key: &Key) {
+        let action = match key {
+            Key::Named(
+                NamedKey::ArrowRight
+                | NamedKey::ArrowDown
+                | NamedKey::PageDown
+                | NamedKey::Space
+                | NamedKey::Enter,
+            ) => Presenting::Next,
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp | NamedKey::PageUp | NamedKey::Backspace) => {
+                Presenting::Prev
+            }
+            Key::Named(NamedKey::Home) => Presenting::First,
+            Key::Named(NamedKey::End) => Presenting::Last,
+            Key::Named(NamedKey::Escape | NamedKey::F5) => Presenting::Stop,
+            _ => return,
+        };
+        self.present(action);
+    }
+
+    /// What a show puts on screen: the board as it is, with nothing over
+    /// it but the bands that cover what is not the slide — no grid, no
+    /// panel, no selection, and no edge round the slide.
+    fn show_frame(&self, view: &View) -> Frame {
+        let none = ImageSlots::new();
+        let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
+        let mut frame = Frame::new();
+        frame.append(scene::document_prims(
+            self.doc(),
+            view,
+            images,
+            &self.shapes,
+            &self.letters(),
+            [0.0; 4],
+            None,
+        ));
+        if let Some(area) = self.show.as_ref().and_then(|s| s.shown(self.doc(), view)) {
+            frame.extend(
+                present::veil(area, view)
+                    .into_iter()
+                    .map(|band| Prim::rect(band, SHOW_GROUND)),
+            );
+        }
+        frame
     }
 
     /// Brings the active layer's card into the band when it has just
@@ -1003,6 +1151,7 @@ impl App {
         self.carry.as_ref().is_some_and(|c| !c.held || c.t < 1.0)
             || self.slides.moving()
             || self.scrolling.moving()
+            || self.show.as_ref().is_some_and(Show::flying)
     }
 
     fn redraw(&self) {
@@ -1159,6 +1308,10 @@ impl App {
         }
         if index != self.active {
             self.end_typing();
+            // A show is the board's that is on screen: another tab coming
+            // forward ends it, and the board it was showing looks where
+            // it did before.
+            self.end_show();
         }
         self.active = index;
         let mods = self.modifiers.state();
@@ -1931,6 +2084,7 @@ impl App {
             locked: !picked.is_empty() && picked.iter().all(|l| l.locked),
             hidden: !picked.is_empty() && picked.iter().all(|l| !l.visible),
             merge: editor.merge_name(doc),
+            present: present::presentable(doc, editor.selection()),
         }
     }
 
@@ -2530,7 +2684,8 @@ impl App {
             | Request::Raise
             | Request::Export { .. }
             | Request::Theme { .. }
-            | Request::Shutdown => Event::Denied {
+            | Request::Shutdown
+            | Request::Present { .. } => Event::Denied {
                 op: op.to_owned(),
                 reason: "not an op the board answers".into(),
             },
@@ -3440,6 +3595,9 @@ impl App {
     /// progress, the selection frame and marquee, the brush's ring, the
     /// dock, the layers handle and panel, the strip.
     fn frame(&self, view: &View) -> Frame {
+        if self.show.is_some() {
+            return self.show_frame(view);
+        }
         // Before the window exists there are no textures, so every image
         // is a placeholder — which is what an empty map says.
         let none = ImageSlots::new();
@@ -3733,6 +3891,13 @@ impl App {
                 self.redraw();
             }
             Change::Camera(camera) => {
+                // A show holds the camera inside the slide, and has it to
+                // itself for the length of a flight.
+                let camera = match (&self.show, self.view()) {
+                    (Some(show), _) if show.flying() => return,
+                    (Some(show), Some(view)) => show.camera(self.doc(), &view, camera).unwrap_or(camera),
+                    _ => camera,
+                };
                 self.active().1.camera = camera;
                 self.redraw();
             }
@@ -3740,6 +3905,16 @@ impl App {
     }
 
     fn pointer_pressed(&mut self, button: Button) {
+        // A show is clicked through: on with the left button, back with
+        // the right.
+        if self.show.is_some() {
+            match button {
+                Button::Left => self.present(Presenting::Next),
+                Button::Right => self.present(Presenting::Prev),
+                Button::Middle => {}
+            }
+            return;
+        }
         let (Some(view), Some((x, y))) = (self.view(), self.cursor) else {
             return;
         };
@@ -4060,6 +4235,9 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        if self.show.is_some() {
+            return;
+        }
         // The box's own drag: the canvas never saw its press.
         if let Some(s) = self.sending.as_mut().filter(|s| s.selecting) {
             s.selecting = false;
@@ -4150,6 +4328,9 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
+        if self.show.is_some() {
+            return;
+        }
         // A press in the instruction's box is selecting for as long as
         // it is held, wherever the pointer wanders — past the box's top
         // or bottom edge it runs on into the lines scrolled out of sight.
@@ -4303,6 +4484,13 @@ impl App {
             f64::from(view.viewport.w) / 2.0,
             f64::from(view.viewport.h) / 2.0,
         ));
+        // A show has no panels to scroll: the wheel moves the camera, and
+        // the show holds it inside the slide.
+        if self.show.is_some() {
+            let shift = self.modifiers.state().shift_key();
+            let camera = self.active().0.scroll(&view, cursor, delta, shift);
+            return self.apply(Change::Camera(camera));
+        }
         // The dialog is modal for the wheel as it is for everything else:
         // over the instruction the wheel moves its lines, and anywhere
         // else it moves nothing — least of all the board behind it.
@@ -4370,6 +4558,13 @@ impl App {
             self.apply(change);
         }
         match key {
+            // A show takes the keyboard whole: nothing is edited while
+            // one is on.
+            _ if self.show.is_some() => {
+                if pressed {
+                    self.show_key(key);
+                }
+            }
             // The clipboard's keys come first for whichever field has the
             // keyboard: they are the window's to answer, not the field's.
             Key::Character(c)
@@ -4550,6 +4745,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::F2) if pressed => self.rename_active(),
+            Key::Named(NamedKey::F5) if pressed => self.start_show(),
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
                 let (editor, doc) = self.active();
                 let change = editor.delete(doc);
@@ -4643,6 +4839,7 @@ impl App {
                 self.palette_shown = !self.palette_shown;
                 return self.redraw();
             }
+            Action::Present => return self.start_show(),
             Action::Layer(command) if command.merges() => return self.merge_layers(command),
             Action::Delete => {
                 let (editor, doc) = self.active();
@@ -4872,7 +5069,9 @@ impl App {
             }
             _ => false,
         };
-        let icon = if over_text == Some(true) || over_typed {
+        let icon = if self.show.is_some() {
+            CursorIcon::Default
+        } else if over_text == Some(true) || over_typed {
             CursorIcon::Text
         } else if over_text == Some(false) {
             CursorIcon::Default
@@ -5178,7 +5377,12 @@ impl App {
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
                 gfx.sync_letters(&self.glyphs);
-                let drawn = gfx.render(self.theme.bg, &frame);
+                let ground = if self.show.is_some() {
+                    SHOW_GROUND
+                } else {
+                    self.theme.bg
+                };
+                let drawn = gfx.render(ground, &frame);
                 if self.start_letters_over() {
                     self.redraw();
                 }
@@ -5260,6 +5464,7 @@ impl App {
                 }
             }
             Request::Shutdown => self.quit(),
+            Request::Present { action } => self.present(action),
             Request::Theme { colors } => match colors {
                 // The plugin's own three, which is how a host that is not
                 // Omarchy dresses the board.
@@ -5596,6 +5801,8 @@ pub fn run(
         cursor_icon: CursorIcon::Default,
         smoke_frames_left: smoke_frames,
         exit_error: None,
+        show: None,
+        show_full: false,
     };
     // The first tab is built before the theme is in hand, so it is told
     // what a new frame's ground is once the window owns both.
