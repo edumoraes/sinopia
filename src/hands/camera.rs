@@ -6,9 +6,11 @@
 //! as the tablet's and the trackpad's do.
 //!
 //! The frame is mirrored before anything reads it, so a hand moves the
-//! way the person sees it move. A hand found is followed from its own
-//! points; the palm detector, the heavier model, runs only when no hand
-//! is followed, and every few frames while fewer than two are.
+//! way the person sees it move. The models run only while the hands are
+//! wanted — the camera is opened for the presenter's card alone too — and
+//! are loaded the first time they are. A hand found is followed from its
+//! own points; the palm detector, the heavier model, runs only when no
+//! hand is followed, and every few frames while fewer than two are.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -61,13 +63,15 @@ pub struct Reading {
 /// What the thread tells the loop.
 #[derive(Debug, Clone)]
 pub enum News {
-    /// The models are loaded and the camera is open — or why not, and
-    /// then the thread is over.
+    /// The camera is open — or why not, and then the thread is over.
     Opened(Result<(), String>),
     /// What the camera saw in one frame.
     Read(Reading),
     /// The camera stopped giving frames, and why: the thread is over.
     Lost(String),
+    /// The hands were wanted and the models could not be had, and why:
+    /// the camera goes on, reading no hands, until they are wanted again.
+    Models(String),
 }
 
 /// The thread reading the camera, while there is one: dropping it stops
@@ -75,6 +79,7 @@ pub enum News {
 pub struct Tracker {
     stop: Arc<AtomicBool>,
     card: Arc<AtomicBool>,
+    hands: Arc<AtomicBool>,
     /// The camera has opened, or failed to: past that the thread only
     /// ever waits a frame, and dropping the tracker waits for it.
     settled: Arc<AtomicBool>,
@@ -82,38 +87,45 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// Starts a thread that loads the models from `models`, opens
-    /// `camera` — a device index, or a video file played as one, looped
-    /// — and reads it, telling `sink` what happens until it says no.
-    /// Answers at once: a camera can take a second or more to open, and
-    /// the window does not wait for it. `News::Opened` says when it has,
-    /// or why it did not.
+    /// Starts a thread that opens `camera` — a device index, or a video
+    /// file played as one, looped — and reads it, telling `sink` what
+    /// happens until it says no; the models are read from `models` the
+    /// first time the hands are wanted. Answers at once: a camera can take
+    /// a second or more to open, and the window does not wait for it.
+    /// `News::Opened` says when it has, or why it did not.
     pub fn start(models: &Path, camera: &str, sink: impl Fn(News) -> bool + Send + 'static) -> anyhow::Result<Tracker> {
         let stop = Arc::new(AtomicBool::new(false));
         let card = Arc::new(AtomicBool::new(false));
+        let hands = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(AtomicBool::new(false));
         let (models, camera) = (models.to_owned(), camera.to_owned());
-        let (halt, want, done) = (stop.clone(), card.clone(), settled.clone());
+        let wants = Wants {
+            stop: stop.clone(),
+            card: card.clone(),
+            hands: hands.clone(),
+        };
+        let done = settled.clone();
         let thread = std::thread::Builder::new().name("hands".into()).spawn(move || {
-            let had = Models::load(&models).and_then(|m| Ok((m, open(&camera)?)));
+            let had = open(&camera);
             done.store(true, Ordering::Release);
-            let (mut models, mut cap) = match had {
-                Ok(had) => had,
+            let mut cap = match had {
+                Ok(cap) => cap,
                 Err(e) => {
                     sink(News::Opened(Err(format!("{e:#}"))));
                     return;
                 }
             };
-            if halt.load(Ordering::Relaxed) || !sink(News::Opened(Ok(()))) {
+            if wants.stop.load(Ordering::Relaxed) || !sink(News::Opened(Ok(()))) {
                 return;
             }
-            if let Err(e) = run(&mut models, &mut cap, &camera, &halt, &want, &sink) {
+            if let Err(e) = run(&models, &mut cap, &camera, &wants, &sink) {
                 sink(News::Lost(format!("{e:#}")));
             }
         })?;
         Ok(Tracker {
             stop,
             card,
+            hands,
             settled,
             thread: Some(thread),
         })
@@ -123,6 +135,19 @@ impl Tracker {
     pub fn want_card(&self, on: bool) {
         self.card.store(on, Ordering::Relaxed);
     }
+
+    /// Whether the readings carry the hands — the models run only then.
+    pub fn want_hands(&self, on: bool) {
+        self.hands.store(on, Ordering::Relaxed);
+    }
+}
+
+/// What the loop wants of the thread, read every frame: to stop, the
+/// card's frame, the hands.
+struct Wants {
+    stop: Arc<AtomicBool>,
+    card: Arc<AtomicBool>,
+    hands: Arc<AtomicBool>,
 }
 
 impl Drop for Tracker {
@@ -273,20 +298,58 @@ fn card_of(mirror: &Mat) -> anyhow::Result<(u32, u32, Vec<u8>)> {
     Ok((CARD_W as u32, h as u32, rgba.data_bytes()?.to_vec()))
 }
 
+/// The hands in `rgb`: the ones `followed` first, then — when one is
+/// missing — what the detector finds that none of them already is.
+/// `followed` is left holding where each hand found will be looked for
+/// next.
+fn follow(models: &mut Models, rgb: &Mat, followed: &mut Vec<Roi>, n: u64) -> anyhow::Result<Vec<Hand>> {
+    let kept = followed.len();
+    let mut rois = std::mem::take(followed);
+    if rois.len() < 2 && (rois.is_empty() || n.is_multiple_of(SEARCH_EVERY)) {
+        for palm in models.palms(rgb)? {
+            let roi = Roi::of(&palm.keys, palm.middle());
+            if rois.len() < 2 && !rois.iter().any(|r| r.same_hand(&roi)) {
+                rois.push(roi);
+            }
+        }
+    }
+    let (w, h) = (rgb.cols() as f32, rgb.rows() as f32);
+    let mut hands = Vec::new();
+    for (i, roi) in rois.iter().enumerate() {
+        let (score, points) = models.hand(rgb, roi)?;
+        if score < if i < kept { KEEP } else { FIND } {
+            continue;
+        }
+        let (keys, pivot) = model::palm_of(&points);
+        let next = Roi::of(&keys, pivot);
+        // Two squares that came to rest on one hand are one hand.
+        if followed.iter().any(|r| r.same_hand(&next)) {
+            continue;
+        }
+        followed.push(next);
+        hands.push(Hand {
+            points: points.map(|p| [p[0] / w, p[1] / h, p[2] / w]),
+        });
+    }
+    Ok(hands)
+}
+
 fn run(
-    models: &mut Models,
+    dir: &Path,
     cap: &mut videoio::VideoCapture,
     camera: &str,
-    stop: &AtomicBool,
-    card: &AtomicBool,
+    wants: &Wants,
     sink: &impl Fn(News) -> bool,
 ) -> anyhow::Result<()> {
     let file = camera.parse::<i32>().is_err();
     let (mut frame, mut mirror, mut rgb) = (Mat::default(), Mat::default(), Mat::default());
     let mut followed: Vec<Roi> = Vec::new();
+    // Loaded the first time the hands are wanted; tried again the next
+    // time they are, after a failure.
+    let (mut models, mut refused): (Option<Models>, bool) = (None, false);
     let mut n: u64 = 0;
     let (mut spent, mut frames, mut since) = (Duration::ZERO, 0_u32, Instant::now());
-    while !stop.load(Ordering::Relaxed) {
+    while !wants.stop.load(Ordering::Relaxed) {
         let began = Instant::now();
         if !cap.read(&mut frame)? || frame.empty() {
             anyhow::ensure!(file, "the camera stopped giving frames");
@@ -298,37 +361,29 @@ fn run(
         core::flip(&frame, &mut mirror, 1)?;
         imgproc::cvt_color_def(&mirror, &mut rgb, imgproc::COLOR_BGR2RGB)?;
 
-        // The hands followed first, then — when one is missing — what
-        // the detector finds that none of them already is.
-        let kept = followed.len();
-        let mut rois = std::mem::take(&mut followed);
-        if rois.len() < 2 && (rois.is_empty() || n.is_multiple_of(SEARCH_EVERY)) {
-            for palm in models.palms(&rgb)? {
-                let roi = Roi::of(&palm.keys, palm.middle());
-                if rois.len() < 2 && !rois.iter().any(|r| r.same_hand(&roi)) {
-                    rois.push(roi);
+        let wanted = wants.hands.load(Ordering::Relaxed);
+        if !wanted {
+            refused = false;
+        } else if models.is_none() && !refused {
+            match Models::load(dir) {
+                Ok(m) => models = Some(m),
+                Err(e) => {
+                    refused = true;
+                    if !sink(News::Models(format!("{e:#}"))) {
+                        break;
+                    }
                 }
             }
         }
         let (w, h) = (rgb.cols() as f32, rgb.rows() as f32);
-        let mut hands = Vec::new();
-        for (i, roi) in rois.iter().enumerate() {
-            let (score, points) = models.hand(&rgb, roi)?;
-            if score < if i < kept { KEEP } else { FIND } {
-                continue;
+        let hands = match models.as_mut().filter(|_| wanted) {
+            Some(models) => follow(models, &rgb, &mut followed, n)?,
+            None => {
+                followed.clear();
+                Vec::new()
             }
-            let (keys, pivot) = model::palm_of(&points);
-            let next = Roi::of(&keys, pivot);
-            // Two squares that came to rest on one hand are one hand.
-            if followed.iter().any(|r| r.same_hand(&next)) {
-                continue;
-            }
-            followed.push(next);
-            hands.push(Hand {
-                points: points.map(|p| [p[0] / w, p[1] / h, p[2] / w]),
-            });
-        }
-        let card = if card.load(Ordering::Relaxed) {
+        };
+        let card = if wants.card.load(Ordering::Relaxed) {
             Some(card_of(&mirror)?)
         } else {
             None

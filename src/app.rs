@@ -151,11 +151,12 @@ enum UserEvent {
     Hands(u64, hands::camera::News),
 }
 
-/// Hand gestures while they are on: the thread reading the camera, what
-/// the hands are doing, the clock that is read on, and the presenter's
-/// camera on the GPU — its slot and size, and how far it has faded in.
+/// The webcam while it is open — for the hand gestures, the presenter's
+/// card, or both: the thread reading it, what the hands are doing, the
+/// clock that is read on, and the card on the GPU — its slot and size,
+/// and how far it has faded in.
 #[cfg(feature = "hands")]
-struct HandsOn {
+struct Webcam {
     /// Which tracker this is: what `UserEvent::Hands` says it is about.
     started: u64,
     tracker: hands::camera::Tracker,
@@ -378,16 +379,19 @@ struct App {
     /// Presentation Path puts them away while the board is drawn on.
     path_shown: bool,
     /// The presenter's camera is wanted in the corner while presenting:
-    /// `C` turns it on and off, and the hand gestures' camera is what is
-    /// drawn there.
+    /// `C` turns it on and off. It is the very camera the gestures read,
+    /// since only one process can hold a webcam.
     #[cfg(feature = "hands")]
     show_camera: bool,
-    /// Hand gestures through the webcam, while they are on.
+    /// The hand gestures are on: `Ctrl+Shift+H`.
     #[cfg(feature = "hands")]
-    hands: Option<HandsOn>,
-    /// How many trackers have been started: each one's count.
+    gesturing: bool,
+    /// The webcam, while the gestures or the card want it.
     #[cfg(feature = "hands")]
-    hands_started: u64,
+    webcam: Option<Webcam>,
+    /// How many times the webcam has been opened: each one's count.
+    #[cfg(feature = "hands")]
+    webcams: u64,
 }
 
 /// A send being composed. It holds the agents as they were when the
@@ -1037,6 +1041,8 @@ impl App {
             w.set_fullscreen(Some(Fullscreen::Borderless(None)));
             self.show_full = true;
         }
+        // The presenter's card, if it is wanted, wants the camera now.
+        self.sync_webcam();
         self.redraw();
         self.update_cursor_icon();
     }
@@ -1051,6 +1057,8 @@ impl App {
         {
             w.set_fullscreen(None);
         }
+        // And lets go of it, unless the hands still read it.
+        self.sync_webcam();
         self.redraw();
         self.update_cursor_icon();
     }
@@ -1084,9 +1092,9 @@ impl App {
 
     /// A key while a show is on: the arrows, the page keys, Space and
     /// Enter move it; Home and End go to either end; Esc and F5 end it;
-    /// with hand gestures, `C` turns the presenter's camera on or off and
-    /// `Shift+C` steps it through its shapes. Nothing else reaches the
-    /// board.
+    /// with hand gestures in the build, `C` turns the presenter's camera
+    /// on or off and `Shift+C` steps it through its shapes. Nothing else
+    /// reaches the board.
     fn show_key(&mut self, key: &Key) {
         #[cfg(feature = "hands")]
         if let Key::Character(c) = key
@@ -1099,9 +1107,7 @@ impl App {
                 return self.apply(Change::Scene);
             }
             self.show_camera = !self.show_camera;
-            // The card's frames are asked of the camera on the next frame
-            // of the screen, which nothing else may be asking for.
-            return self.redraw();
+            return self.sync_webcam();
         }
         let action = match key {
             Key::Named(
@@ -1122,38 +1128,14 @@ impl App {
         self.present(action);
     }
 
-    /// Turns hand gestures on — the camera opened, the models loaded from
-    /// the data directory's `models/` — or off, letting go of the camera.
-    /// The camera is `SINOPIA_CAMERA` when set: an index, or a video file
-    /// played as one.
+    /// Turns hand gestures on or off. The camera they read is opened when
+    /// they are turned on and let go of when nothing wants it any more —
+    /// the presenter's card in a show may still want it.
     #[cfg(feature = "hands")]
     fn toggle_hands(&mut self) {
-        if self.hands.take().is_some() {
-            log::info!("hands: off");
-            return self.redraw();
-        }
-        let models = self.store.root().join("models");
-        let camera = std::env::var("SINOPIA_CAMERA").unwrap_or_else(|_| "0".into());
-        let proxy = self.proxy.clone();
-        self.hands_started += 1;
-        let started = self.hands_started;
-        let sink = move |news| proxy.send_event(UserEvent::Hands(started, news)).is_ok();
-        match hands::camera::Tracker::start(&models, &camera, sink) {
-            Ok(tracker) => {
-                log::info!("hands: opening camera {camera}");
-                self.hands = Some(HandsOn {
-                    started,
-                    tracker,
-                    gestures: hands::gesture::Gestures::default(),
-                    origin: Instant::now(),
-                    last_tick: 0.0,
-                    card: None,
-                    card_alpha: 0.0,
-                });
-            }
-            Err(e) => log::error!("hands: {e:#}"),
-        }
-        self.redraw();
+        self.gesturing = !self.gesturing;
+        log::info!("hands: {}", if self.gesturing { "on" } else { "off" });
+        self.sync_webcam();
     }
 
     #[cfg(not(feature = "hands"))]
@@ -1163,7 +1145,7 @@ impl App {
 
     #[cfg(feature = "hands")]
     fn hands_on(&self) -> bool {
-        self.hands.is_some()
+        self.gesturing
     }
 
     #[cfg(not(feature = "hands"))]
@@ -1171,20 +1153,80 @@ impl App {
         false
     }
 
-    /// What the hands' thread says about the tracker that is on: the
-    /// camera opened, or could not be had, or stopped giving frames —
-    /// which turns the hands off — or one more reading.
+    /// Opens the camera when the hand gestures or the presenter's card
+    /// want it and it is shut, lets go of it when neither does, and tells
+    /// it which of the two to read for. The camera is `SINOPIA_CAMERA`
+    /// when set — an index, or a video file played as one — and the
+    /// models are read from the data directory's `models/`.
+    #[cfg(feature = "hands")]
+    fn sync_webcam(&mut self) {
+        let card = self.show.is_some() && self.show_camera;
+        if !self.gesturing && !card {
+            if self.webcam.take().is_some() {
+                log::info!("camera: let go of");
+            }
+            return self.redraw();
+        }
+        if self.webcam.is_none() {
+            let models = self.store.root().join("models");
+            let camera = std::env::var("SINOPIA_CAMERA").unwrap_or_else(|_| "0".into());
+            let proxy = self.proxy.clone();
+            self.webcams += 1;
+            let started = self.webcams;
+            let sink = move |news| proxy.send_event(UserEvent::Hands(started, news)).is_ok();
+            match hands::camera::Tracker::start(&models, &camera, sink) {
+                Ok(tracker) => {
+                    log::info!("camera: opening {camera}");
+                    self.webcam = Some(Webcam {
+                        started,
+                        tracker,
+                        gestures: hands::gesture::Gestures::default(),
+                        origin: Instant::now(),
+                        last_tick: 0.0,
+                        card: None,
+                        card_alpha: 0.0,
+                    });
+                }
+                Err(e) => log::error!("camera: {e:#}"),
+            }
+        }
+        if let Some(cam) = &mut self.webcam {
+            cam.tracker.want_hands(self.gesturing);
+            cam.tracker.want_card(card);
+            if !self.gesturing {
+                // What the hands were doing is let go of with them: no
+                // laser left glowing, no spring still pulling the board.
+                cam.gestures = hands::gesture::Gestures::default();
+            }
+        }
+        self.redraw();
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn sync_webcam(&mut self) {}
+
+    /// What the camera's thread says about the camera that is open: it
+    /// opened, or could not be had, or stopped giving frames — which turns
+    /// the hands and the card off — or the models could not be had, which
+    /// turns the hands off alone; or one more reading.
     #[cfg(feature = "hands")]
     fn hands_news(&mut self, started: u64, news: hands::camera::News) {
-        if self.hands.as_ref().is_none_or(|on| on.started != started) {
+        if self.webcam.as_ref().is_none_or(|cam| cam.started != started) {
             return;
         }
         match news {
-            hands::camera::News::Opened(Ok(())) => log::info!("hands: on"),
+            hands::camera::News::Opened(Ok(())) => log::info!("camera: open"),
             hands::camera::News::Opened(Err(e)) | hands::camera::News::Lost(e) => {
-                log::error!("hands: {e}");
-                self.hands = None;
+                log::error!("camera: {e}");
+                self.webcam = None;
+                self.gesturing = false;
+                self.show_camera = false;
                 self.redraw();
+            }
+            hands::camera::News::Models(e) => {
+                log::error!("hands: {e}");
+                self.gesturing = false;
+                self.sync_webcam();
             }
             hands::camera::News::Read(reading) => self.hands_read(reading),
         }
@@ -1195,10 +1237,14 @@ impl App {
     /// GPU.
     #[cfg(feature = "hands")]
     fn hands_read(&mut self, reading: hands::camera::Reading) {
-        let Some(on) = self.hands.as_mut() else { return };
+        let Some(on) = self.webcam.as_mut() else { return };
         let now = on.origin.elapsed().as_secs_f64();
         let found: Vec<_> = reading.hands.iter().map(|h| h.points).collect();
-        let turn = on.gestures.read(&found, reading.size, now, self.show.is_some());
+        let turn = if self.gesturing {
+            on.gestures.read(&found, reading.size, now, self.show.is_some())
+        } else {
+            None
+        };
         let mut seen = on.gestures.moving() || !on.gestures.pinches.is_empty();
         if let Some((w, h, rgba)) = reading.card
             && let Some(gfx) = &mut self.gfx
@@ -1227,11 +1273,10 @@ impl App {
     #[cfg(feature = "hands")]
     fn hands_tick(&mut self) {
         let wanted = self.show.is_some() && self.show_camera;
-        let Some(on) = self.hands.as_mut() else { return };
+        let Some(on) = self.webcam.as_mut() else { return };
         let now = on.origin.elapsed().as_secs_f64();
         let dt = (now - on.last_tick).clamp(0.0, 0.1);
         on.last_tick = now;
-        on.tracker.want_card(wanted);
         let fade = dt as f32 / CARD_FADE_S;
         on.card_alpha = if wanted && on.card.is_some() {
             (on.card_alpha + fade).min(1.0)
@@ -1274,7 +1319,7 @@ impl App {
 
     #[cfg(feature = "hands")]
     fn hands_animating(&self) -> bool {
-        self.hands
+        self.webcam
             .as_ref()
             .is_some_and(|on| on.gestures.moving() || (on.card_alpha > 0.0 && on.card_alpha < 1.0))
     }
@@ -1289,7 +1334,7 @@ impl App {
     /// laser, the pinches and a turned slide's chevron.
     #[cfg(feature = "hands")]
     fn hand_marks(&self, frame: &mut Frame, view: &View) {
-        let Some(on) = &self.hands else { return };
+        let Some(on) = &self.webcam else { return };
         let now = on.origin.elapsed().as_secs_f64();
         if self.show.is_some()
             && on.card_alpha > 0.0
@@ -6088,9 +6133,11 @@ pub fn run(
         #[cfg(feature = "hands")]
         show_camera: false,
         #[cfg(feature = "hands")]
-        hands: None,
+        gesturing: false,
         #[cfg(feature = "hands")]
-        hands_started: 0,
+        webcam: None,
+        #[cfg(feature = "hands")]
+        webcams: 0,
     };
     // The first tab is built before the theme is in hand, so it is told
     // what a new frame's ground is once the window owns both.
