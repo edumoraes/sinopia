@@ -111,6 +111,14 @@ pub fn marks(g: &Gestures, view: &View, now: f64) -> Marks {
 /// How fast a blob card's outline moves on: its phase, a second.
 const BLOB_TURN: f64 = 0.6;
 
+/// The shape after `card`, and the first after the last: what `Shift+C`
+/// steps to while presenting.
+pub fn next_card(card: Card) -> Card {
+    const ALL: [Card; 4] = [Card::Rounded, Card::Round, Card::Square, Card::Blob];
+    let at = ALL.iter().position(|c| *c == card).unwrap_or(0);
+    ALL[(at + 1) % ALL.len()]
+}
+
 /// The presenter's camera in the bottom right corner of the window, in
 /// the `shape` the board asks for, over a soft shadow and with a hairline
 /// round it, faded in by `alpha`. `size` is the picture's: the rounded
@@ -268,4 +276,15 @@ mod tests {
         assert!(edges.iter().filter(|p| p.kind == KIND_BLOB).count() >= 3, "{edges:?}");
     }
 
+    #[test]
+    fn shift_c_steps_through_every_shape_and_round_again() {
+        let mut card = Card::default();
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(card);
+            card = next_card(card);
+        }
+        assert_eq!(seen, [Card::Rounded, Card::Round, Card::Square, Card::Blob]);
+        assert_eq!(card, Card::Rounded);
+    }
 }

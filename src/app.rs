@@ -1084,13 +1084,20 @@ impl App {
 
     /// A key while a show is on: the arrows, the page keys, Space and
     /// Enter move it; Home and End go to either end; Esc and F5 end it;
-    /// with hand gestures, `C` turns the presenter's camera on or off.
-    /// Nothing else reaches the board.
+    /// with hand gestures, `C` turns the presenter's camera on or off and
+    /// `Shift+C` steps it through its shapes. Nothing else reaches the
+    /// board.
     fn show_key(&mut self, key: &Key) {
         #[cfg(feature = "hands")]
         if let Key::Character(c) = key
             && c.eq_ignore_ascii_case("c")
         {
+            if self.modifiers.state().shift_key() {
+                // The shape is the board's: a step of it, kept with it.
+                let (_, doc) = self.active();
+                doc.presentation.camera = hands::marks::next_card(doc.presentation.camera);
+                return self.apply(Change::Scene);
+            }
             self.show_camera = !self.show_camera;
             // The card's frames are asked of the camera on the next frame
             // of the screen, which nothing else may be asking for.
