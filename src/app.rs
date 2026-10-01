@@ -3161,6 +3161,10 @@ impl App {
     /// was unlinked. A refusal says why and changes nothing.
     fn deck_op(&mut self, req: Request) -> Result<Vec<String>, String> {
         self.end_typing();
+        // What was there, to tell a change from none: a link laid where it
+        // already was is no work, and a named file it marked unsaved
+        // would ask to be saved for nothing.
+        let before = self.doc().clone();
         let (_, doc) = self.active();
         let ids = match req {
             Request::Link { from, to } => {
@@ -3181,7 +3185,9 @@ impl App {
             }
             _ => return Err("not an op on the decks".into()),
         };
-        self.apply(Change::Scene);
+        if !self.doc().same_board(&before) {
+            self.apply(Change::Scene);
+        }
         Ok(ids)
     }
 
