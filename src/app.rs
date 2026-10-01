@@ -3896,7 +3896,7 @@ impl App {
             ));
         }
         if let Some((from, to)) = self.editor().linking() {
-            let target = self.editor().link_target(self.doc(), to);
+            let target = self.editor().link_target(self.doc(), view, to);
             frame.extend(present::pulling(
                 self.doc(),
                 view,
@@ -5335,7 +5335,7 @@ impl App {
             CursorIcon::Crosshair
         } else if self.editor().is_moving() {
             CursorIcon::Move
-        } else if self.editor().link_refused(self.doc()) {
+        } else if self.view().is_some_and(|view| self.editor().link_refused(self.doc(), &view)) {
             // Over a frame that will not take the link in the hand.
             CursorIcon::NotAllowed
         } else if linking {
