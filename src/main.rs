@@ -32,6 +32,7 @@ mod menubar;
 mod merge;
 mod omarchy;
 mod palette;
+mod present;
 mod project;
 mod props;
 mod scene;

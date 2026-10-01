@@ -47,6 +47,7 @@ use crate::menu;
 use crate::menubar::{self, Action, Bar, Title};
 use crate::omarchy::{self, Style};
 use crate::palette::{self, IconSheet, Palette};
+use crate::present;
 use crate::slots::{self, Strip};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
@@ -3477,11 +3478,23 @@ impl App {
             Some(Element::Line(line)) => frame.extend(scene::line_prims(&line, view)),
             _ => {}
         }
+        // The links between frames: the sequence a presentation walks —
+        // less the one in the pointer's hand, drawn to the pointer below.
+        let held = self.editor().linking().map(|(from, _)| from);
+        frame.extend(present::links(self.doc(), view, self.theme.selection, held));
         // A lone line wears its ends; anything else, its frame.
         if let Some(line) = self.editor().lone_line(self.doc()) {
             frame.extend(select::end_prims(line, view, &self.theme));
         } else if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
+        }
+        // A frame selected alone wears the handle a link is pulled out
+        // of, and the link in the hand runs from it to the pointer.
+        if let Some(f) = self.editor().linkable(self.doc()) {
+            frame.extend(present::handle_prims(f, view, self.theme.selection, self.theme.handle));
+        }
+        if let Some((from, to)) = self.editor().linking() {
+            frame.extend(present::pulling(self.doc(), view, from, to, self.theme.selection));
         }
         if let Some((a, b)) = self.editor().marquee() {
             frame.extend(select::marquee_prims(a, b, &self.theme));
@@ -4829,6 +4842,18 @@ impl App {
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
+        // A link is pulled out of a frame's handle, and carried to the
+        // frame it is let go of over.
+        let linking = self.editor().linking().is_some()
+            || match (self.view(), self.cursor) {
+                (Some(view), Some(at)) => !over_chrome && self.editor().over_link(self.doc(), &view, at),
+                _ => false,
+            };
+        // An arrow is taken hold of, and pulled.
+        let over_arrow = match (self.view(), self.cursor) {
+            (Some(view), Some(at)) => !over_chrome && self.editor().over_arrow(self.doc(), &view, at),
+            _ => false,
+        };
         // Over the dialog's box the pointer is the I-beam that says a
         // press there puts the caret down; over the rest of it, and over
         // the board behind it, an arrow.
@@ -4857,6 +4882,13 @@ impl App {
             CursorIcon::Crosshair
         } else if self.editor().is_moving() {
             CursorIcon::Move
+        } else if self.editor().link_refused(self.doc()) {
+            // Over a frame that will not take the link in the hand.
+            CursorIcon::NotAllowed
+        } else if linking {
+            CursorIcon::Alias
+        } else if over_arrow {
+            CursorIcon::Grab
         } else if over_chrome {
             CursorIcon::Default
         } else if refused {

@@ -384,6 +384,20 @@ pub struct Editor {
     /// The session the last change belongs to, until `app` has written
     /// it down.
     folding: Option<u64>,
+    /// A link being pulled, out of a frame's handle or by its arrow.
+    linking: Option<Linking>,
+}
+
+/// A link in the pointer's hand: the frame it comes from, where the press
+/// was (screen px) and where the pointer is now (world units), and
+/// whether it has travelled past the click slop — a click on a handle or
+/// an arrow is not a pull, and lets go of nothing.
+#[derive(Debug, Clone)]
+struct Linking {
+    from: String,
+    press: (f64, f64),
+    to: Point,
+    pulled: bool,
 }
 
 /// One layer as the command line lists it: where it stands in the tree,
@@ -495,6 +509,48 @@ impl Editor {
     /// The area being dragged out, while there is one.
     pub fn framing(&self) -> Option<(Point, Point)> {
         self.framing
+    }
+
+    /// The frame whose link handle is offered: the one selected, when it
+    /// is the whole of the selection and the Select tool is in hand.
+    pub fn linkable<'a>(&self, doc: &'a Document) -> Option<&'a crate::doc::Frame> {
+        if self.active_tool() != Tool::Select {
+            return None;
+        }
+        let [id] = self.selection.as_slice() else {
+            return None;
+        };
+        doc.frame(id)
+    }
+
+    /// Whether `screen` is on the link handle of the frame selected.
+    pub fn over_link(&self, doc: &Document, view: &View, screen: (f64, f64)) -> bool {
+        self.linkable(doc)
+            .is_some_and(|f| crate::present::on_handle(f, view, screen))
+    }
+
+    /// Whether `screen` is on the arrow of a link, with the Select tool in
+    /// hand: a press there takes hold of it.
+    pub fn over_arrow(&self, doc: &Document, view: &View, screen: (f64, f64)) -> bool {
+        self.active_tool() == Tool::Select && crate::present::link_at(doc, view, screen).is_some()
+    }
+
+    /// Whether the link in the pointer's hand is over a frame that will
+    /// not take it — itself, or one another frame already leads to — so
+    /// the cursor can say so before the release does nothing.
+    pub fn link_refused(&self, doc: &Document) -> bool {
+        self.linking().is_some_and(|(from, to)| {
+            crate::present::frame_under(doc, to).is_some_and(|t| !crate::present::takes(doc, from, t))
+        })
+    }
+
+    /// The link being pulled, once it has been: the frame it comes from,
+    /// and the pointer in world units.
+    pub fn linking(&self) -> Option<(&str, Point)> {
+        self.linking
+            .as_ref()
+            .filter(|l| l.pulled)
+            .map(|l| (l.from.as_str(), l.to))
     }
 
     /// The tool the dock shows.
@@ -1580,6 +1636,7 @@ impl Editor {
     /// `Drag::Move` that had already passed the click slop.
     pub fn busy(&self) -> bool {
         self.stroke.is_some()
+            || self.linking.is_some()
             || self.framing.is_some()
             || self.shaping.is_some()
             || self.placing.is_some()
@@ -1611,6 +1668,7 @@ impl Editor {
             || self.framing.is_some()
             || self.shaping.is_some()
             || self.placing.is_some()
+            || self.linking.is_some()
         {
             return Change::None;
         }
@@ -1681,6 +1739,23 @@ impl Editor {
     /// the base.
     fn select_press(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
+        // A frame selected alone wears a handle a link is pulled out of,
+        // out past its right edge, where nothing else of it stands.
+        // An arrow is a link to take hold of: pulled onto another frame
+        // it leads there, pulled off into nothing it is gone.
+        let held = self
+            .linkable(doc)
+            .filter(|f| crate::present::on_handle(f, view, screen))
+            .or_else(|| crate::present::link_at(doc, view, screen));
+        if let Some(f) = held {
+            self.linking = Some(Linking {
+                from: f.id.clone(),
+                press: screen,
+                to: world,
+                pulled: false,
+            });
+            return Change::Selection;
+        }
         if let Some(handle) = self.hover(doc, view, screen) {
             let snapshot = self.snapshot(doc);
             let map = Affine::IDENTITY;
@@ -1749,6 +1824,26 @@ impl Editor {
             moved: false,
         });
         Change::Selection
+    }
+
+    /// Lays the link pulled out of frame `from` and let go of at `to`:
+    /// onto the frame there — the next slide after `from`, wherever the
+    /// two stand — or, let go of over no frame, taking away the link it
+    /// had. Let go of over itself, or over a frame another one already
+    /// leads to, nothing changes: a slide comes after one slide at most.
+    fn lay_link(doc: &mut Document, from: &str, to: Point) -> Change {
+        let target = match crate::present::frame_under(doc, to) {
+            Some(t) if !crate::present::takes(doc, from, t) => return Change::Selection,
+            Some(t) => Some(t.id.clone()),
+            None => None,
+        };
+        match doc.frame_mut(from) {
+            Some(f) if f.next != target => {
+                f.next = target;
+                Change::Scene
+            }
+            _ => Change::Selection,
+        }
     }
 
     /// Lays a frame over the area dragged from `from` to `to`, and
@@ -1890,6 +1985,12 @@ impl Editor {
     /// physical px to the last one are dropped so jitter does not bloat the
     /// path.
     pub fn moved(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
+        if let Some(l) = &mut self.linking {
+            l.to = point(view.screen_to_world(screen.0, screen.1));
+            let (dx, dy) = (screen.0 - l.press.0, screen.1 - l.press.1);
+            l.pulled |= dx.hypot(dy) >= CLICK_SLOP_PX * view.scale;
+            return Change::Selection;
+        }
         if let Some((_, to, _)) = &mut self.placing {
             let world = view.screen_to_world(screen.0, screen.1);
             *to = [world.0, world.1];
@@ -2170,6 +2271,14 @@ impl Editor {
     ) -> Change {
         let _ = screen;
         if button == Button::Left
+            && let Some(l) = self.linking.take()
+        {
+            if !l.pulled {
+                return Change::Selection;
+            }
+            return Self::lay_link(doc, &l.from, l.to);
+        }
+        if button == Button::Left
             && let Some((from, to)) = self.framing.take()
         {
             return self.lay_frame(doc, view, from, to);
@@ -2319,7 +2428,7 @@ impl Editor {
     /// back whatever the drag had moved. True if there was one. The
     /// selection stays.
     pub fn cancel(&mut self, doc: &mut Document) -> bool {
-        let had_stroke = self.stroke.take().is_some();
+        let had_stroke = self.stroke.take().is_some() | self.linking.take().is_some();
         let had_area =
             self.framing.take().is_some() | self.shaping.take().is_some() | self.placing.take().is_some();
         let had_nav = self.nav.take().is_some();
@@ -4433,6 +4542,172 @@ mod tests {
         let _ = e.press(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, &brush().tip(Face::Round));
         let _ = e.release(Button::Left, &v, at(&v, 25.0, 25.0), &mut doc, "#111");
         assert_eq!(doc.context(&layer), None);
+    }
+
+    /// Frames `fa` at 0..200 and `fb` at 300..500 side by side, and `fc`
+    /// under `fb`, and a view that shows them: world (x, y) lands at
+    /// (x + 250, y + 200) on screen.
+    fn two_frames() -> (Document, View) {
+        let doc = Document::from_json(
+            r##"{
+            "schema": 1, "id": "01JXXXXXXXXXXXXXXXXXXXXXXX", "title": "t",
+            "camera": { "x": 0, "y": 0, "zoom": 1 },
+            "layers": [ { "id": "fa-l", "name": "A", "kind": "frame" },
+                        { "id": "fb-l", "name": "B", "kind": "frame" },
+                        { "id": "fc-l", "name": "C", "kind": "frame" } ],
+            "elements": [
+                { "id": "fa", "type": "frame", "layer": "fa-l", "x": 0, "y": 0, "w": 200, "h": 100,
+                  "layers": [ { "id": "fa-in", "name": "Layer 1" } ] },
+                { "id": "fb", "type": "frame", "layer": "fb-l", "x": 300, "y": 0, "w": 200, "h": 100,
+                  "layers": [ { "id": "fb-in", "name": "Layer 1" } ] },
+                { "id": "fc", "type": "frame", "layer": "fc-l", "x": 300, "y": 200, "w": 200, "h": 100,
+                  "layers": [ { "id": "fc-in", "name": "Layer 1" } ] }
+            ]
+        }"##,
+        )
+        .unwrap();
+        let view = View {
+            camera: Camera {
+                x: 250.0,
+                y: 50.0,
+                zoom: 1.0,
+            },
+            viewport: Viewport { w: 1000, h: 500 },
+            scale: 1.0,
+        };
+        (doc, view)
+    }
+
+    /// Pulls a link out of `fa`'s handle and lets go of it at `to`
+    /// (world): what the release answers.
+    fn pull_link(e: &mut Editor, doc: &mut Document, v: &View, to: (f64, f64)) -> Change {
+        let handle = crate::present::handle_at(doc.frame("fa").unwrap(), v);
+        pull_from(e, doc, v, handle, to)
+    }
+
+    /// Presses at `from` (screen) and pulls what is there to `to`
+    /// (world): what the release answers.
+    fn pull_from(e: &mut Editor, doc: &mut Document, v: &View, from: (f64, f64), to: (f64, f64)) -> Change {
+        let tip = brush().tip(Face::Round);
+        assert_eq!(e.press(Button::Left, v, from, doc, &tip), Change::Selection);
+        assert!(e.busy(), "a link in the hand is a gesture");
+        assert!(e.linking().is_none(), "not pulled until it travels");
+        let _ = e.moved(v, at(v, to.0, to.1), doc);
+        assert_eq!(e.linking().map(|(f, _)| f), Some("fa"));
+        e.release(Button::Left, v, at(v, to.0, to.1), doc, "#111")
+    }
+
+    /// Where the arrow of `fa`'s link to `fb` passes, on screen: the
+    /// middle of its bend between a's edge at 450 and b's at 550.
+    const ARROW_MIDDLE: (f64, f64) = (500.0, 244.0);
+
+    #[test]
+    fn an_arrow_pulled_onto_another_frame_leads_there_and_off_into_nothing_is_gone() {
+        let (mut doc, v) = two_frames();
+        doc.frame_mut("fa").unwrap().next = Some("fb".into());
+        let mut e = Editor::new();
+        assert!(e.over_arrow(&doc, &v, ARROW_MIDDLE));
+        assert_eq!(pull_from(&mut e, &mut doc, &v, ARROW_MIDDLE, (400.0, 250.0)), Change::Scene);
+        assert_eq!(doc.frame("fa").unwrap().next.as_deref(), Some("fc"), "pulled onto c");
+        assert!(e.selection.is_empty(), "taking hold of an arrow selects nothing");
+        let (mut doc, v) = two_frames();
+        doc.frame_mut("fa").unwrap().next = Some("fb".into());
+        assert_eq!(pull_from(&mut e, &mut doc, &v, ARROW_MIDDLE, (-50.0, 250.0)), Change::Scene);
+        assert_eq!(doc.frame("fa").unwrap().next, None, "pulled off into nothing");
+    }
+
+    #[test]
+    fn a_link_is_not_laid_on_a_frame_another_one_already_leads_to() {
+        let (mut doc, v) = two_frames();
+        doc.frame_mut("fc").unwrap().next = Some("fb".into());
+        let mut e = Editor::new();
+        e.selection = vec!["fa".into()];
+        let handle = crate::present::handle_at(doc.frame("fa").unwrap(), &v);
+        let tip = brush().tip(Face::Round);
+        let _ = e.press(Button::Left, &v, handle, &mut doc, &tip);
+        let _ = e.moved(&v, at(&v, 400.0, 50.0), &mut doc);
+        assert!(e.link_refused(&doc), "c already leads to b");
+        assert_eq!(e.release(Button::Left, &v, at(&v, 400.0, 50.0), &mut doc, "#111"), Change::Selection);
+        assert_eq!(doc.frame("fa").unwrap().next, None, "b keeps its one link in");
+        // b is free once c lets go of it.
+        doc.frame_mut("fc").unwrap().next = None;
+        assert_eq!(pull_link(&mut e, &mut doc, &v, (400.0, 50.0)), Change::Scene);
+        assert_eq!(doc.frame("fa").unwrap().next.as_deref(), Some("fb"));
+    }
+
+    #[test]
+    fn a_click_on_the_handle_or_an_arrow_lets_go_of_nothing() {
+        let (mut doc, v) = two_frames();
+        doc.frame_mut("fa").unwrap().next = Some("fb".into());
+        let mut e = Editor::new();
+        e.selection = vec!["fa".into()];
+        let tip = brush().tip(Face::Round);
+        let handle = crate::present::handle_at(doc.frame("fa").unwrap(), &v);
+        for at in [handle, ARROW_MIDDLE] {
+            assert_eq!(e.press(Button::Left, &v, at, &mut doc, &tip), Change::Selection);
+            let _ = e.moved(&v, (at.0 + 1.0, at.1), &mut doc);
+            assert_eq!(e.release(Button::Left, &v, (at.0 + 1.0, at.1), &mut doc, "#111"), Change::Selection);
+            assert_eq!(doc.frame("fa").unwrap().next.as_deref(), Some("fb"), "a click at {at:?}");
+            assert!(!e.busy());
+        }
+        e.hold_space(true);
+        assert!(!e.over_arrow(&doc, &v, ARROW_MIDDLE), "only the Select tool takes hold of an arrow");
+    }
+
+    #[test]
+    fn a_link_pulled_onto_another_frame_makes_it_the_next_slide() {
+        let (mut doc, v) = two_frames();
+        let mut e = Editor::new();
+        e.selection = vec!["fa".into()];
+        assert!(e.over_link(&doc, &v, crate::present::handle_at(doc.frame("fa").unwrap(), &v)));
+        assert_eq!(pull_link(&mut e, &mut doc, &v, (400.0, 50.0)), Change::Scene);
+        assert_eq!(doc.frame("fa").unwrap().next.as_deref(), Some("fb"));
+        assert!(!e.busy());
+        assert_eq!(e.selection, ["fa"], "the frame stays selected");
+        // Pulled onto it again, nothing is left to change.
+        assert_eq!(pull_link(&mut e, &mut doc, &v, (400.0, 50.0)), Change::Selection);
+    }
+
+    #[test]
+    fn a_link_let_go_of_over_nothing_is_taken_away_and_over_itself_changes_nothing() {
+        let (mut doc, v) = two_frames();
+        doc.frame_mut("fa").unwrap().next = Some("fb".into());
+        let mut e = Editor::new();
+        e.selection = vec!["fa".into()];
+        assert_eq!(pull_link(&mut e, &mut doc, &v, (100.0, 50.0)), Change::Selection);
+        assert_eq!(doc.frame("fa").unwrap().next.as_deref(), Some("fb"), "over itself");
+        assert_eq!(pull_link(&mut e, &mut doc, &v, (250.0, 400.0)), Change::Scene);
+        assert_eq!(doc.frame("fa").unwrap().next, None, "over nothing");
+    }
+
+    #[test]
+    fn esc_puts_a_link_back_unlaid() {
+        let (mut doc, v) = two_frames();
+        let mut e = Editor::new();
+        e.selection = vec!["fa".into()];
+        let handle = crate::present::handle_at(doc.frame("fa").unwrap(), &v);
+        let _ = e.press(Button::Left, &v, handle, &mut doc, &brush().tip(Face::Round));
+        let _ = e.moved(&v, at(&v, 400.0, 50.0), &mut doc);
+        assert!(e.escape(&mut doc));
+        assert!(!e.busy());
+        assert_eq!(doc.frame("fa").unwrap().next, None);
+    }
+
+    #[test]
+    fn the_handle_is_offered_for_a_frame_selected_alone_with_the_select_tool() {
+        let (doc, _) = two_frames();
+        let mut e = Editor::new();
+        assert!(e.linkable(&doc).is_none(), "nothing selected");
+        e.selection = vec!["fa".into(), "fb".into()];
+        assert!(e.linkable(&doc).is_none(), "two frames");
+        e.selection = vec!["fa".into()];
+        assert_eq!(e.linkable(&doc).map(|f| f.id.as_str()), Some("fa"));
+        e.hold_space(true);
+        assert!(e.linkable(&doc).is_none(), "the hand is panning");
+        e.hold_space(false);
+        set_tool(&mut e, Tool::Pencil);
+        e.selection = vec!["fa".into()];
+        assert!(e.linkable(&doc).is_none(), "another tool");
     }
 
     /// The frame of `framed_editor_doc`, with a rect inside it and a
