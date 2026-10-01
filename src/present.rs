@@ -305,6 +305,8 @@ pub fn sequence(doc: &Document, start: &str) -> Vec<String> {
 /// else the first layer that leads somewhere and that nothing leads to,
 /// the head of a deck; else the first that leads anywhere, since a deck
 /// that loops has no head; else the first frame on show, a deck of one.
+/// A deck with nothing on show is passed over for the next, so a deck
+/// put away keeps no other from being presented.
 pub fn first(doc: &Document, selected: Option<&str>) -> Option<String> {
     if let Some(id) = selected
         && stop(doc, id).is_some_and(|s| s.slide || in_deck(doc, id))
@@ -313,10 +315,11 @@ pub fn first(doc: &Document, selected: Option<&str>) -> Option<String> {
     }
     let links = linked(doc);
     let led_to: HashSet<&str> = links.iter().map(|&(_, to)| to).collect();
+    let shows = |from: &str| !sequence(doc, from).is_empty();
     links
         .iter()
-        .find(|&&(from, _)| !led_to.contains(from))
-        .or_else(|| links.first())
+        .find(|&&(from, _)| !led_to.contains(from) && shows(from))
+        .or_else(|| links.iter().find(|&&(from, _)| shows(from)))
         .map(|&(from, _)| from.to_owned())
         .or_else(|| {
             layers(doc)
@@ -1376,6 +1379,24 @@ mod tests {
         assert_eq!(first(&doc, Some("b")).as_deref(), Some("b"));
         assert_eq!(first(&doc, Some("not-a-layer")).as_deref(), Some("c"), "the head");
         assert_eq!(first(&doc, None).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn a_deck_with_nothing_on_show_keeps_no_other_from_being_presented() {
+        let mut doc = deck(&["a", "b", "c", "d"]);
+        tie(&mut doc, "a", "b");
+        tie(&mut doc, "c", "d");
+        hide(&mut doc, "a");
+        hide(&mut doc, "b");
+        assert_eq!(first(&doc, None).as_deref(), Some("c"), "the first deck with a stop on show");
+        assert!(presentable(&doc, None));
+        // A loop with nothing on show, and a frame alone that is.
+        let mut doc = deck(&["a", "b", "x"]);
+        tie(&mut doc, "a", "b");
+        tie(&mut doc, "b", "a");
+        hide(&mut doc, "a");
+        hide(&mut doc, "b");
+        assert_eq!(first(&doc, None).as_deref(), Some("x"));
     }
 
     #[test]
