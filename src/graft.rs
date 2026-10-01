@@ -801,17 +801,30 @@ mod tests {
     }
 
     /// What the skill teaches an agent to write is what the board takes:
-    /// its example fragment, read out of the skill itself, grafts.
+    /// every fragment in it, read out of the skill itself, grafts — and the
+    /// deck the presentation's carries arrives with it, stop by stop.
     #[test]
-    fn the_fragment_the_skill_teaches_grafts() {
+    fn every_fragment_the_skill_teaches_grafts() {
         let skill = include_str!("../skills/sinopia/SKILL.md");
         let open = "```json\n{\n  \"schema\"";
-        let start = skill.find(open).expect("the skill shows a fragment") + "```json\n".len();
-        let end = start + skill[start..].find("```").expect("and closes it");
-        let fragment = Document::from_json(&skill[start..end]).expect("the skill's fragment parses");
+        let fragments: Vec<Document> = skill
+            .match_indices(open)
+            .map(|(at, _)| {
+                let start = at + "```json\n".len();
+                let end = start + skill[start..].find("```").expect("a fragment is closed");
+                Document::from_json(&skill[start..end]).expect("the skill's fragment parses")
+            })
+            .collect();
+        assert_eq!(fragments.len(), 2, "a diagram and a presentation");
         let mut b = board();
-        plant(&mut b, &fragment).expect("and grafts");
+        plant(&mut b, &fragments[0]).expect("and grafts");
         assert!(b.elements.iter().any(|e| matches!(e, Element::Shape(_))), "a box");
         assert!(b.elements.iter().any(|e| matches!(e, Element::Line(_))), "an arrow");
+        let mut b = board();
+        plant(&mut b, &fragments[1]).expect("the presentation grafts");
+        let decks = crate::present::decks(&b);
+        assert_eq!(decks.len(), 1, "{decks:?}");
+        let names: Vec<&str> = decks[0].iter().map(|id| b.layer(id).unwrap().name.as_str()).collect();
+        assert_eq!(names, ["Overview", "Pipeline", "API"]);
     }
 }
