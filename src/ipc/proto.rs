@@ -71,9 +71,11 @@ pub enum Request {
     /// A frame handed over, in a file the caller wrote. A path and not
     /// the content: §5 says the socket speaks intent and never scene
     /// content, and a frame with ink in it would not fit the frame
-    /// anyway.
+    /// anyway. Its top left corner lands `at` the point asked, or where
+    /// the board picks.
     AddFrame {
         path: PathBuf,
+        at: Option<[f64; 2]>,
     },
     /// The open board's layers, the whole tree top first. It and every
     /// op under it are the command line's hold on the layers: answered by
@@ -415,8 +417,18 @@ pub enum Event {
     /// The frames the open board has, in paint order.
     Frames { frames: Vec<Card> },
     /// A frame an agent handed over is on the board, under the id and
-    /// the name it now goes by — enough to read it straight back.
-    Framed { id: String, name: String },
+    /// the name it now goes by — enough to read it straight back — with
+    /// its layer's id and the id each layer it brought was minted as,
+    /// keyed by the id it was written with. An instance from before
+    /// either answers without them, and is still read.
+    Framed {
+        id: String,
+        name: String,
+        #[serde(default)]
+        layer: String,
+        #[serde(default)]
+        layers: std::collections::BTreeMap<String, String>,
+    },
     /// The open board's layers, the whole tree top first.
     Layers { layers: Vec<Listed> },
     /// A change to the layers landed, and these are the layers it left
@@ -531,6 +543,7 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         },
         "add_frame" => Request::AddFrame {
             path: absolute(take_string(&mut map, "path")?)?,
+            at: take_point(&mut map, "at")?,
         },
         "layers" => Request::Layers,
         "add_layer" => Request::AddLayer {
@@ -711,8 +724,11 @@ pub fn request_line(req: &Request) -> String {
             map.insert("id".into(), id.clone().into());
             map.insert("dir".into(), path(dir));
         }
-        Request::AddFrame { path: at } => {
-            map.insert("path".into(), path(at));
+        Request::AddFrame { path: from, at } => {
+            map.insert("path".into(), path(from));
+            if let Some([x, y]) = at {
+                map.insert("at".into(), vec![*x, *y].into());
+            }
         }
         Request::AddLayer { group, name, above } => {
             if *group {
@@ -999,6 +1015,25 @@ fn take_ids(map: &mut Map<String, Value>) -> anyhow::Result<Vec<String>> {
             other => anyhow::bail!("ids must be layer ids, got {other}"),
         })
         .collect()
+}
+
+/// A point in world units, `[x, y]` — two numbers a board can hold —
+/// when there is one.
+fn take_point(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<Option<[f64; 2]>> {
+    let Some(value) = map.remove(key) else {
+        return Ok(None);
+    };
+    let number = |v: &Value| v.as_f64().filter(|n| n.is_finite());
+    match &value {
+        Value::Array(items) => match items.as_slice() {
+            [x, y] => match (number(x), number(y)) {
+                (Some(x), Some(y)) => Ok(Some([x, y])),
+                _ => anyhow::bail!("field {key} must be two numbers, got {value}"),
+            },
+            _ => anyhow::bail!("field {key} must be [x, y], got {value}"),
+        },
+        _ => anyhow::bail!("field {key} must be [x, y], got {value}"),
+    }
 }
 
 /// A slide's place, counted from 1 as the show counts them.
@@ -1339,6 +1374,7 @@ mod tests {
             },
             Request::AddFrame {
                 path: PathBuf::from("/home/you/Work/foo/frame.json"),
+                at: None,
             },
         ];
         for req in all.into_iter().chain(layer_ops()) {
@@ -1401,6 +1437,7 @@ mod tests {
             parse_request(r#"{ "v": 1, "op": "add_frame", "path": "/tmp/w/f.json" }"#).unwrap(),
             Request::AddFrame {
                 path: PathBuf::from("/tmp/w/f.json"),
+                at: None,
             }
         );
     }
@@ -1424,7 +1461,7 @@ mod tests {
         for line in [
             r#"{ "v": 1, "op": "frames", "of": "board" }"#,
             r#"{ "v": 1, "op": "read_frame", "id": "01J", "dir": "/tmp", "scale": 2 }"#,
-            r#"{ "v": 1, "op": "add_frame", "path": "/tmp/f.json", "at": [0, 0] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/tmp/f.json", "where": [0, 0] }"#,
             // A missing field is not a shorter sentence, it is an error.
             r#"{ "v": 1, "op": "read_frame", "id": "01J" }"#,
             r#"{ "v": 1, "op": "add_frame" }"#,
@@ -1448,6 +1485,8 @@ mod tests {
         let line = event_line(&Event::Framed {
             id: "01K".into(),
             name: "Auth Flow".into(),
+            layer: "01KL".into(),
+            layers: Default::default(),
         });
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["ev"], "framed");
@@ -1667,6 +1706,37 @@ mod tests {
                 ids: ids(&["01JA", "01JB", "01JC"]),
             },
         ]
+    }
+
+    #[test]
+    fn a_frame_is_added_where_it_is_asked_to_and_answers_what_it_minted() {
+        let req = Request::AddFrame {
+            path: PathBuf::from("/home/you/Work/foo/frame.json"),
+            at: Some([120.5, -40.0]),
+        };
+        assert_eq!(parse_request(&request_line(&req)).unwrap(), req);
+        for line in [
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": [1] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": [1, 2, 3] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": ["1", 2] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": { "x": 1, "y": 2 } }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+        let ev = Event::Framed {
+            id: "01K".into(),
+            name: "Intro".into(),
+            layer: "01KL".into(),
+            layers: [("fl".to_owned(), "01KL".to_owned()), ("in".to_owned(), "01KM".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        let v: Value = serde_json::from_str(&event_line(&ev)).unwrap();
+        assert_eq!((v["layer"].as_str(), v["layers"]["in"].as_str()), (Some("01KL"), Some("01KM")));
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
+        // An instance from before it answered with neither, and is read.
+        let old = r#"{"ev":"framed","id":"01K","name":"Intro","v":1}"#;
+        assert!(matches!(parse_event(old).unwrap(), Event::Framed { layers, .. } if layers.is_empty()));
     }
 
     #[test]

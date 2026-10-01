@@ -3014,8 +3014,13 @@ impl App {
                 },
                 Err(e) => denied(&e),
             },
-            Request::AddFrame { path } => match self.add_frame(&path) {
-                Ok((id, name)) => Event::Framed { id, name },
+            Request::AddFrame { path, at } => match self.add_frame(&path, at) {
+                Ok(planted) => Event::Framed {
+                    id: planted.id,
+                    name: planted.name,
+                    layer: planted.layer,
+                    layers: planted.layers.into_iter().collect(),
+                },
                 Err(e) => denied(&e),
             },
             Request::Layers => Event::Layers {
@@ -3394,7 +3399,7 @@ impl App {
     /// A frame an agent handed over, on the board. It lands as a scene
     /// change like any other, so it is one undo step and a draft owes
     /// the disk a save for it.
-    fn add_frame(&mut self, path: &Path) -> anyhow::Result<(String, String)> {
+    fn add_frame(&mut self, path: &Path, at: Option<[f64; 2]>) -> anyhow::Result<graft::Planted> {
         self.end_typing();
         let mut fragment = read_fragment(path)?;
         // An agent sets text it cannot measure: its artistic boxes are
@@ -3403,7 +3408,7 @@ impl App {
         // Worked out before anything is committed: the bytes below go
         // into the store on the way in, and a fragment refused after
         // that would leave images there that nothing on the board names.
-        let planned = graft::planned(self.active().1, &fragment)?;
+        let planned = graft::planned(self.active().1, &fragment, at)?;
         // Then the bytes: an image whose blob nobody has would paint a
         // placeholder for as long as the board lives.
         self.keep_blobs(&fragment, path)?;

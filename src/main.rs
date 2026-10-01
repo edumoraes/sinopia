@@ -98,6 +98,7 @@ fn main() -> anyhow::Result<()> {
         Action::Add(file) => Request::AddFrame {
             path: std::fs::canonicalize(file)
                 .with_context(|| format!("reading the fragment {file:?}"))?,
+            at: None,
         },
         Action::Layer(verb) => {
             // One listing, fetched the first time a name needs it and
