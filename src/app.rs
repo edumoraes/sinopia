@@ -78,6 +78,16 @@ const MAX_STEP: f32 = 0.05;
 /// the board, and the board has to be under it.
 const VEIL: Rgba = [0.0, 0.0, 0.0, 1.0];
 
+/// What `add_frame` answers for a frame that landed.
+fn framed(planted: graft::Planted) -> Event {
+    Event::Framed {
+        id: planted.id,
+        name: planted.name,
+        layer: planted.layer,
+        layers: planted.layers.into_iter().collect(),
+    }
+}
+
 /// What a build without the `hands` feature says when it is asked for the
 /// camera, the gestures or the presenter's card.
 #[cfg(not(feature = "hands"))]
@@ -3017,12 +3027,7 @@ impl App {
                 Err(e) => denied(&e),
             },
             Request::AddFrame { path, at } => match self.add_frame(&path, at) {
-                Ok(planted) => Event::Framed {
-                    id: planted.id,
-                    name: planted.name,
-                    layer: planted.layer,
-                    layers: planted.layers.into_iter().collect(),
-                },
+                Ok(planted) => framed(planted),
                 Err(e) => denied(&e),
             },
             Request::Layers => Event::Layers {
@@ -3497,6 +3502,15 @@ impl App {
         // into the store on the way in, and a fragment refused after
         // that would leave images there that nothing on the board names.
         let planned = graft::planned(self.active().1, &fragment, at)?;
+        // The answer names what every layer it brings became, and one too
+        // large for the socket's frame would come back refused after the
+        // frame had landed — and an agent told no hands it over again.
+        let answer = framed(planned.planted());
+        anyhow::ensure!(
+            crate::ipc::proto::fits(answer.clone(), "add_frame") == answer,
+            "the frame brings {} layers, and the answer saying what each became would not fit the socket's frame: hand it over as smaller frames",
+            planned.planted().layers.len()
+        );
         // Then the bytes: an image whose blob nobody has would paint a
         // placeholder for as long as the board lives.
         self.keep_blobs(&fragment, path)?;

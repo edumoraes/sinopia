@@ -121,6 +121,20 @@ pub struct Planted {
     pub layers: Vec<(String, String)>,
 }
 
+impl Planned {
+    /// What the graft will answer once it lands, known before it does:
+    /// every id is minted already, so whatever cannot be said of the
+    /// graft refuses it before the board is touched.
+    pub fn planted(&self) -> Planted {
+        Planted {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            layer: self.stem.id.clone(),
+            layers: self.minted.clone(),
+        }
+    }
+}
+
 /// The frame [`planned`] worked out, on the board. On top: a frame an
 /// agent hands over arrives over the work that is already there, never
 /// under it.
@@ -521,6 +535,14 @@ mod tests {
             r.x = 1.5e308;
         }
         assert!(planned(&board, &far, Some([1e308, 0.0])).is_err(), "past the numbers a board can hold");
+    }
+
+    #[test]
+    fn what_a_graft_will_answer_is_known_before_it_lands() {
+        let mut board = board();
+        let plan = planned(&board, &grouped_fragment(), None).unwrap();
+        let foreseen = plan.planted();
+        assert_eq!(apply(&mut board, plan), foreseen);
     }
 
     #[test]
