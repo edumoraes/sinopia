@@ -16,6 +16,7 @@
 //! is pulled out of, are drawn here too, so the canvas and the press
 //! cannot disagree about where they are.
 
+use std::collections::HashSet;
 use std::f64::consts::PI;
 
 use crate::doc::{Camera, Document, Frame, Kind, Layer};
@@ -198,11 +199,24 @@ pub fn stop(doc: &Document, id: &str) -> Option<Stop> {
         });
     }
     let within = doc.frame_holding(id).map(Area::of);
-    let held = doc.subtree(layer);
-    doc.painted()
-        .filter(|p| held.iter().any(|h| h == p.element.layer()))
-        .filter_map(|p| {
-            let (lo, hi) = select::frame(p.element)?.aabb();
+    // The layers under it on show — a hidden one takes what it holds with
+    // it, as painting does — and then one walk of the elements: this is
+    // asked for every stop on every frame of the screen.
+    fn shown_under<'a>(doc: &'a Document, layer: &'a Layer, out: &mut HashSet<&'a str>) {
+        if layer.visible {
+            out.insert(&layer.id);
+            for inner in doc.inner(layer) {
+                shown_under(doc, inner, out);
+            }
+        }
+    }
+    let mut held = HashSet::new();
+    shown_under(doc, layer, &mut held);
+    doc.elements
+        .iter()
+        .filter(|el| held.contains(el.layer()))
+        .filter_map(|el| {
+            let (lo, hi) = select::frame(el)?.aabb();
             let ink = Area {
                 x: lo[0],
                 y: lo[1],
@@ -210,8 +224,8 @@ pub fn stop(doc: &Document, id: &str) -> Option<Stop> {
                 h: hi[1] - lo[1],
             };
             // What the frame's boundary cuts away is not there to show.
-            match p.within {
-                Some(f) => ink.meet(&Area::of(f)),
+            match within {
+                Some(f) => ink.meet(&f),
                 None => Some(ink),
             }
         })
@@ -245,9 +259,24 @@ fn layers(doc: &Document) -> Vec<&Layer> {
     out
 }
 
+/// Every link on the board — a layer, and another layer of the board it
+/// leads to — in paint order, read in one walk of the tree: what every
+/// question about the decks asked of each layer, each with a walk of its
+/// own, is asked once here.
+fn linked(doc: &Document) -> Vec<(&str, &str)> {
+    let all = layers(doc);
+    let ids: HashSet<&str> = all.iter().map(|l| l.id.as_str()).collect();
+    all.iter()
+        .filter_map(|l| {
+            let to = l.next.as_deref()?;
+            (to != l.id && ids.contains(to)).then_some((l.id.as_str(), to))
+        })
+        .collect()
+}
+
 /// Whether a link leads out of `id` or into it.
 fn in_deck(doc: &Document, id: &str) -> bool {
-    next_of(doc, id).is_some() || layers(doc).iter().any(|l| next_of(doc, &l.id) == Some(id))
+    linked(doc).iter().any(|&(from, to)| from == id || to == id)
 }
 
 /// The stops from `start` on: it, then every layer its links lead to,
@@ -282,18 +311,19 @@ pub fn first(doc: &Document, selected: Option<&str>) -> Option<String> {
     {
         return Some(id.to_owned());
     }
-    let all = layers(doc);
-    let led_to: Vec<&str> = all.iter().filter_map(|l| next_of(doc, &l.id)).collect();
-    let leads = |l: &&&Layer| next_of(doc, &l.id).is_some();
-    all.iter()
-        .filter(leads)
-        .find(|l| !led_to.contains(&l.id.as_str()))
-        .or_else(|| all.iter().find(leads))
+    let links = linked(doc);
+    let led_to: HashSet<&str> = links.iter().map(|&(_, to)| to).collect();
+    links
+        .iter()
+        .find(|&&(from, _)| !led_to.contains(from))
+        .or_else(|| links.first())
+        .map(|&(from, _)| from.to_owned())
         .or_else(|| {
-            all.iter()
+            layers(doc)
+                .into_iter()
                 .find(|l| l.kind == Kind::Frame && stop(doc, &l.id).is_some())
+                .map(|l| l.id.clone())
         })
-        .map(|l| l.id.clone())
 }
 
 /// Whether a show started with `selected` would have a stop to show.
@@ -797,13 +827,14 @@ impl Curve {
     }
 }
 
-/// The arrow of `id`'s link, when it leads to a stop and both are on
-/// show: from the one's box to the other's, each where the line between
-/// their middles crosses it. A stop and what it holds — a frame and a
-/// group in it — have no room between them for an arrow, and get none.
-fn arrow_of(doc: &Document, view: &View, id: &str) -> Option<Curve> {
-    let from = stop(doc, id)?.ink;
-    let to = stop(doc, next_of(doc, id)?)?.ink;
+/// The arrow of the link out of layer `from` into layer `to`, when both
+/// are stops on show: from the one's box to the other's, each where the
+/// line between their middles crosses it. A stop and what it holds — a
+/// frame and a group in it — have no room between them for an arrow, and
+/// get none.
+fn arrow_between(doc: &Document, view: &View, from: &str, to: &str) -> Option<Curve> {
+    let from = stop(doc, from)?.ink;
+    let to = stop(doc, to)?.ink;
     if from.holds(&to) || to.holds(&from) {
         return None;
     }
@@ -821,17 +852,17 @@ const ARROW_HIT_PX: f64 = 6.0;
 /// which has none. A layer passed over — hidden, or with nothing painted
 /// — is no stop of it, as it is no slide; and a stop is in one deck.
 pub fn decks(doc: &Document) -> Vec<Vec<String>> {
-    let all = layers(doc);
-    let led_to: Vec<&str> = all.iter().filter_map(|l| next_of(doc, &l.id)).collect();
-    let leading: Vec<&&Layer> = all.iter().filter(|l| next_of(doc, &l.id).is_some()).collect();
-    let heads = leading.iter().filter(|l| !led_to.contains(&l.id.as_str()));
+    let links = linked(doc);
+    let led_to: HashSet<&str> = links.iter().map(|&(_, to)| to).collect();
+    let leading: Vec<&str> = links.iter().map(|&(from, _)| from).collect();
+    let heads = leading.iter().filter(|from| !led_to.contains(*from));
     let mut out: Vec<Vec<String>> = Vec::new();
     for start in heads.chain(leading.iter()) {
         let had = |id: &str| out.iter().flatten().any(|o| o == id);
-        if had(&start.id) {
+        if had(start) {
             continue;
         }
-        let deck: Vec<String> = sequence(doc, &start.id).into_iter().filter(|id| !had(id)).collect();
+        let deck: Vec<String> = sequence(doc, start).into_iter().filter(|id| !had(id)).collect();
         if !deck.is_empty() {
             out.push(deck);
         }
@@ -1006,10 +1037,10 @@ pub fn badges(doc: &Document, view: &View, atlas: &Atlas, slot: u32, ink: Rgba, 
 /// the next one's, in `ink` — all but the one out of `held`, which is in
 /// the pointer's hand.
 pub fn links(doc: &Document, view: &View, ink: Rgba, held: Option<&str>) -> Vec<Prim> {
-    layers(doc)
+    linked(doc)
         .into_iter()
-        .filter(|l| Some(l.id.as_str()) != held)
-        .filter_map(|l| arrow_of(doc, view, &l.id))
+        .filter(|&(from, _)| Some(from) != held)
+        .filter_map(|(from, to)| arrow_between(doc, view, from, to))
         .flat_map(|curve| curve.prims(view, with_alpha(ink, 0.85)))
         .collect()
 }
@@ -1019,12 +1050,12 @@ pub fn links(doc: &Document, view: &View, ink: Rgba, held: Option<&str>) -> Vec<
 /// or off into nothing. The nearest, where two pass close.
 pub fn link_at(doc: &Document, view: &View, screen: (f64, f64)) -> Option<String> {
     let reach = ARROW_HIT_PX * view.scale;
-    layers(doc)
+    linked(doc)
         .into_iter()
-        .filter_map(|l| Some((arrow_of(doc, view, &l.id)?.distance(screen), l)))
+        .filter_map(|(from, to)| Some((arrow_between(doc, view, from, to)?.distance(screen), from)))
         .filter(|(d, _)| *d <= reach)
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, l)| l.id.clone())
+        .map(|(_, from)| from.to_owned())
 }
 
 /// Whether layer `target` takes a link from layer `from`: it is another
@@ -1033,10 +1064,7 @@ pub fn link_at(doc: &Document, view: &View, screen: (f64, f64)) -> Option<String
 /// one stop. A board that already holds two links into one layer still
 /// opens; it is only that no new one is laid.
 pub fn takes(doc: &Document, from: &str, target: &str) -> bool {
-    target != from
-        && !layers(doc)
-            .iter()
-            .any(|l| l.id != from && next_of(doc, &l.id) == Some(target))
+    target != from && !linked(doc).iter().any(|&(by, to)| by != from && to == target)
 }
 
 /// A link being pulled out of stop `from` to `to` (world): the arrow to
@@ -1915,6 +1943,32 @@ mod tests {
         assert_eq!(digits, 2, "a 1 and a 2");
     }
 
+    /// What every frame of the screen and every move of the pointer pays:
+    /// the arrows of a board of many layers, only two of them linked. A
+    /// walk of the whole board for every layer was a tenth of a second a
+    /// frame on a real board of 265 layers; this one is a few walks.
+    #[test]
+    fn the_arrows_of_a_board_of_many_layers_cost_a_few_walks_of_it_not_one_a_layer() {
+        let mut doc = deck(&[]);
+        for i in 0..200 {
+            rect(&mut doc, None, &format!("l{i}"), &format!("e{i}"), (20.0 * f64::from(i), 0.0, 10.0, 10.0));
+        }
+        tie(&mut doc, "l0", "l199");
+        let v = view(Camera {
+            x: 0.0,
+            y: 0.0,
+            zoom: 1.0,
+        });
+        let began = std::time::Instant::now();
+        for _ in 0..5 {
+            assert!(!links(&doc, &v, [1.0; 4], None).is_empty());
+            let _ = link_at(&doc, &v, (500.0, 250.0));
+            assert_eq!(numbers(&doc).len(), 2);
+        }
+        let took = began.elapsed();
+        assert!(took.as_millis() < 400, "five frames' arrows and numbers took {took:?}");
+    }
+
     #[test]
     fn a_press_on_an_arrow_takes_hold_of_its_link() {
         let mut doc = deck(&["a", "b"]);
@@ -1927,7 +1981,7 @@ mod tests {
         // at the middle height 250; the arrow bends up between them.
         assert!(link_at(&doc, &v, (500.0, 250.0)).is_none(), "nothing linked");
         tie(&mut doc, "a", "b");
-        let curve = arrow_of(&doc, &v, "a").unwrap();
+        let curve = arrow_between(&doc, &v, "a", "b").unwrap();
         let middle = curve.at(0.5);
         assert!(middle.1 < 250.0, "bent: {middle:?}");
         assert_eq!(link_at(&doc, &v, middle).as_deref(), Some("a"));
