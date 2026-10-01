@@ -520,6 +520,22 @@ impl Editor {
     /// picking it in the panel selects it. None for a selection that is
     /// no one stop: things from here and there are not one place to go.
     pub fn selected_stop(&self, doc: &Document) -> Option<String> {
+        let mut selected: Vec<&str> = self.selection.iter().map(String::as_str).collect();
+        selected.sort_unstable();
+        let holds_it_all = |id: &str| {
+            let mut held = self.held_by(doc, &[id]);
+            held.sort_unstable();
+            !held.is_empty() && held == selected
+        };
+        // A layer picked alone in the panel is the stop whatever it holds
+        // on show: a group with one child left showing is still the group
+        // that was picked.
+        if self.in_panel
+            && let [one] = self.picked.as_slice()
+            && holds_it_all(one)
+        {
+            return Some(one.clone());
+        }
         let mut layers: Vec<&str> = Vec::new();
         for id in &self.selection {
             let layer = doc.elements.iter().find(|el| el.id() == id)?.layer();
@@ -541,13 +557,7 @@ impl Editor {
                 could.push(holder.id.clone());
             }
         }
-        let mut selected: Vec<&str> = self.selection.iter().map(String::as_str).collect();
-        selected.sort_unstable();
-        could.into_iter().find(|id| {
-            let mut held = self.held_by(doc, &[id.as_str()]);
-            held.sort_unstable();
-            held == selected
-        })
+        could.into_iter().find(|id| holds_it_all(id))
     }
 
     /// The stop whose link handle is offered: the selection's, with the
@@ -4856,6 +4866,19 @@ mod tests {
         e.selection = e.held_by(&doc, &["g"]);
         assert_eq!(e.selected_stop(&doc).as_deref(), Some("g"));
         assert_eq!(e.linkable(&doc).as_deref(), Some("g"), "with the Select tool in hand");
+    }
+
+    #[test]
+    fn a_group_picked_in_the_panel_is_the_stop_even_with_one_child_on_show() {
+        let (mut doc, _) = stops();
+        doc.layer_mut("r2-l").unwrap().visible = false;
+        let mut e = Editor::new();
+        e.pick_ids(&doc, &["g".into()]).unwrap();
+        assert_eq!(e.selection, ["r1"], "the panel selects what the group holds on show");
+        assert_eq!(e.selected_stop(&doc).as_deref(), Some("g"), "the group picked, not its one child");
+        let mut e = Editor::new();
+        e.selection = vec!["r1".into()];
+        assert_eq!(e.selected_stop(&doc).as_deref(), Some("r1-l"), "picked on the canvas, the object");
     }
 
     #[test]
