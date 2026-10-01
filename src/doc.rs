@@ -21,6 +21,47 @@ pub struct Document {
     #[serde(default)]
     pub layers: Vec<Layer>,
     pub elements: Vec<Element>,
+    /// How the board is presented, beyond the stops its layers lead
+    /// through: absent on disk while it is all as it comes.
+    #[serde(default, skip_serializing_if = "Presentation::is_default")]
+    pub presentation: Presentation,
+}
+
+/// How a board is presented: what a deck says of itself beyond its
+/// stops. The presenter's camera is shown in the shape the board asks
+/// for, so a deck that is designed — by its person or by an agent —
+/// carries its look with it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Presentation {
+    #[serde(default, skip_serializing_if = "Card::is_default")]
+    pub camera: Card,
+}
+
+impl Presentation {
+    fn is_default(&self) -> bool {
+        *self == Presentation::default()
+    }
+}
+
+/// The shapes the presenter's camera is cut to, in the corner of a show.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Card {
+    /// The camera's own shape, its corners rounded.
+    #[default]
+    Rounded,
+    /// A circle.
+    Round,
+    /// A square.
+    Square,
+    /// An irregular shape whose outline moves, slowly, as if alive.
+    Blob,
+}
+
+impl Card {
+    fn is_default(&self) -> bool {
+        *self == Card::default()
+    }
 }
 
 /// What a layer holds. A raster layer accumulates — every brush stroke
@@ -1757,6 +1798,7 @@ impl Document {
             camera: Camera::default(),
             layers: vec![Layer::new("Layer 1")],
             elements: Vec::new(),
+            presentation: Presentation::default(),
         }
     }
 
@@ -1979,12 +2021,14 @@ impl Document {
             camera: _,
             layers,
             elements,
+            presentation,
         } = self;
         *schema == other.schema
             && *id == other.id
             && *title == other.title
             && *layers == other.layers
             && *elements == other.elements
+            && *presentation == other.presentation
     }
 
     /// The elements in paint order — bottom layer first, document order
@@ -2155,6 +2199,7 @@ mod tests {
                     blob: BLOB.into(),
                 }),
             ],
+            presentation: Presentation::default(),
         }
     }
 
@@ -3514,6 +3559,25 @@ mod tests {
             ]
         }"##;
         Document::from_json(json).unwrap()
+    }
+
+    #[test]
+    fn how_a_board_is_presented_is_absent_on_disk_until_it_is_said() {
+        let mut doc = framed();
+        assert!(!doc.to_json().unwrap().contains("presentation"));
+        for card in [Card::Rounded, Card::Round, Card::Square, Card::Blob] {
+            doc.presentation.camera = card;
+            let back = Document::from_json(&doc.to_json().unwrap()).unwrap();
+            assert_eq!(back.presentation.camera, card);
+        }
+        doc.presentation.camera = Card::Blob;
+        let json = doc.to_json().unwrap();
+        assert!(json.contains("\"presentation\": {\n    \"camera\": \"blob\""), "{json}");
+        let back = Document::from_json(&json).unwrap();
+        assert!(back.same_board(&doc));
+        let mut round = back.clone();
+        round.presentation.camera = Card::Round;
+        assert!(!round.same_board(&back), "the camera's shape is the board's, and a step of it");
     }
 
     #[test]
