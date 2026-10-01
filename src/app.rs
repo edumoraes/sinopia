@@ -374,6 +374,9 @@ struct App {
     show: Option<Show>,
     /// The show put the window in full screen, and ending it takes it out.
     show_full: bool,
+    /// The decks' arrows and numbers are on the board: View →
+    /// Presentation Path puts them away while the board is drawn on.
+    path_shown: bool,
     /// The presenter's camera is wanted in the corner while presenting:
     /// `C` turns it on and off, and the hand gestures' camera is what is
     /// drawn there.
@@ -2321,6 +2324,7 @@ impl App {
             hidden: !picked.is_empty() && picked.iter().all(|l| !l.visible),
             merge: editor.merge_name(doc),
             present: present::presentable(doc, editor.selected_stop(doc).as_deref()),
+            path: self.path_shown,
             hands: cfg!(feature = "hands").then(|| self.hands_on()),
         }
     }
@@ -3875,10 +3879,23 @@ impl App {
             Some(Element::Line(line)) => frame.extend(scene::line_prims(&line, view)),
             _ => {}
         }
-        // The links between frames: the sequence a presentation walks —
-        // less the one in the pointer's hand, drawn to the pointer below.
-        let held = self.editor().linking().map(|(from, _)| from);
-        frame.extend(present::links(self.doc(), view, self.theme.selection, held));
+        // The decks: an arrow for every link between stops — less the one
+        // in the pointer's hand, drawn to the pointer below — and every
+        // stop's number, unless the path is put away.
+        if self.path_shown {
+            let held = self.editor().linking().map(|(from, _)| from);
+            frame.extend(present::links(self.doc(), view, self.theme.selection, held));
+            if let Some(atlas) = &self.atlas {
+                frame.extend(present::badges(
+                    self.doc(),
+                    view,
+                    atlas,
+                    self.atlas_slot,
+                    self.theme.selection,
+                    self.theme.handle,
+                ));
+            }
+        }
         // A lone line wears its ends; anything else, its frame.
         if let Some(line) = self.editor().lone_line(self.doc()) {
             frame.extend(select::end_prims(line, view, &self.theme));
@@ -5094,6 +5111,10 @@ impl App {
                 return self.redraw();
             }
             Action::Present => return self.start_show(),
+            Action::Path => {
+                self.path_shown = !self.path_shown;
+                return self.redraw();
+            }
             Action::Hands => return self.toggle_hands(),
             Action::Layer(command) if command.merges() => return self.merge_layers(command),
             Action::Delete => {
@@ -6055,6 +6076,7 @@ pub fn run(
         exit_error: None,
         show: None,
         show_full: false,
+        path_shown: true,
         #[cfg(feature = "hands")]
         show_camera: false,
         #[cfg(feature = "hands")]

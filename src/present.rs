@@ -21,6 +21,7 @@ use std::f64::consts::PI;
 use crate::doc::{Camera, Document, Frame, Kind, Layer};
 use crate::scene::{Prim, Rgba, ScreenRect, View, Viewport, with_alpha};
 use crate::select;
+use crate::text::Atlas;
 
 /// A box in world units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -770,6 +771,70 @@ fn arrow_of(doc: &Document, view: &View, id: &str) -> Option<Curve> {
 /// px.
 const ARROW_HIT_PX: f64 = 6.0;
 
+/// The place every stop of every deck goes by — from 1, in the order its
+/// deck walks it: from each head, in paint order, then from the first
+/// layer of each loop, which has none. A layer passed over — hidden, or
+/// with nothing painted — takes no place, as it takes no slide.
+pub fn numbers(doc: &Document) -> Vec<(String, usize)> {
+    let all = layers(doc);
+    let led_to: Vec<&str> = all.iter().filter_map(|l| next_of(doc, &l.id)).collect();
+    let leading: Vec<&&Layer> = all.iter().filter(|l| next_of(doc, &l.id).is_some()).collect();
+    let heads = leading.iter().filter(|l| !led_to.contains(&l.id.as_str()));
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for start in heads.chain(leading.iter()) {
+        if out.iter().any(|(id, _)| *id == start.id) {
+            continue;
+        }
+        for (i, id) in sequence(doc, &start.id).into_iter().enumerate() {
+            if !out.iter().any(|(had, _)| *had == id) {
+                out.push((id, i + 1));
+            }
+        }
+    }
+    out
+}
+
+/// A badge's least radius, the room round its number, and how far clear
+/// of its stop's box it stands, in logical px.
+const BADGE_PX: f64 = 9.0;
+const BADGE_PAD_PX: f64 = 4.0;
+const BADGE_CLEAR_PX: f64 = 3.0;
+
+/// A numbered disc over the top left corner of every stop of a deck, so
+/// the order it walks reads at a glance — between a stop and what it
+/// holds too, where no arrow is drawn: in `ink`, the number in `ground`,
+/// its glyphs out of the chrome's `atlas` in texture `slot`. It stands
+/// just above the box and in from its corner, clear of the handles a
+/// selected stop wears there.
+pub fn badges(doc: &Document, view: &View, atlas: &Atlas, slot: u32, ink: Rgba, ground: Rgba) -> Vec<Prim> {
+    let s = view.scale as f32;
+    let mut out = Vec::new();
+    for (id, n) in numbers(doc) {
+        let Some(at) = stop(doc, &id) else {
+            continue;
+        };
+        let (x, y) = view.world_to_screen(at.ink.x, at.ink.y);
+        let (x, y) = (x as f32, y as f32);
+        let label = n.to_string();
+        let w = atlas.measure(&label);
+        let r = (BADGE_PX as f32 * s).max(w / 2.0 + BADGE_PAD_PX as f32 * s);
+        let clear = BADGE_CLEAR_PX as f32 * s;
+        let (x, y) = (x + r + clear, y - r - clear);
+        out.push(Prim::circle(x, y, r, ink));
+        let disc = ScreenRect {
+            x: x - r,
+            y: y - r,
+            w: 2.0 * r,
+            h: 2.0 * r,
+        };
+        let baseline = atlas.baseline_in(disc);
+        for g in atlas.layout(&label, x - w / 2.0, baseline) {
+            out.push(Prim::glyph(g.rect, g.uv, slot, ground));
+        }
+    }
+    out
+}
+
 /// The links between stops on show, each an arrow from its stop's box to
 /// the next one's, in `ink` — all but the one out of `held`, which is in
 /// the pointer's hand.
@@ -1505,6 +1570,55 @@ mod tests {
         assert!(links(&doc, &v, ink, None).is_empty(), "the frame and a rect in it");
         link(&mut doc, "r", "b");
         assert!(!links(&doc, &v, ink, None).is_empty(), "the rect and the next frame");
+    }
+
+    #[test]
+    fn every_stop_of_a_deck_is_numbered_by_its_place_in_it() {
+        let mut doc = deck(&["a", "b", "c", "d", "e"]);
+        assert!(numbers(&doc).is_empty(), "no deck, no numbers");
+        link(&mut doc, "c", "a");
+        link(&mut doc, "a", "d");
+        // A second deck, a loop with no head.
+        link(&mut doc, "b", "e");
+        link(&mut doc, "e", "b");
+        let mut got = numbers(&doc);
+        got.sort();
+        let want: Vec<(String, usize)> = [("a", 2), ("b", 1), ("c", 1), ("d", 3), ("e", 2)]
+            .into_iter()
+            .map(|(id, n)| (id.to_owned(), n))
+            .collect();
+        assert_eq!(got, want);
+        hide(&mut doc, "a");
+        assert!(
+            numbers(&doc).iter().all(|(id, n)| id != "a" && (id != "d" || *n == 2)),
+            "a stop passed over takes no place: {:?}",
+            numbers(&doc)
+        );
+    }
+
+    #[test]
+    fn a_badge_stands_on_the_top_left_corner_of_every_stop_numbered() {
+        let atlas = crate::text::Atlas::build(&crate::text::Font::bundled(), 13);
+        let mut doc = deck(&["a", "b"]);
+        let v = view(Camera {
+            x: 250.0,
+            y: 50.0,
+            zoom: 1.0,
+        });
+        let (ink, ground) = ([1.0, 0.0, 0.0, 1.0], [1.0; 4]);
+        assert!(badges(&doc, &v, &atlas, 7, ink, ground).is_empty());
+        link(&mut doc, "a", "b");
+        let prims = badges(&doc, &v, &atlas, 7, ink, ground);
+        // a's corner is at (0, 0) of the world: (250, 200) on screen; b's
+        // at (300, 0): (550, 200). Each badge stands just above it and in
+        // from it, by its radius and a little more.
+        let discs: Vec<&Prim> = prims.iter().filter(|p| p.color == ink).collect();
+        assert_eq!(discs.len(), 2);
+        let middles: Vec<(f32, f32)> = discs.iter().map(|p| (p.geom[0] + p.geom[2] / 2.0, p.geom[1] + p.geom[3] / 2.0)).collect();
+        let off = BADGE_PX as f32 + BADGE_CLEAR_PX as f32;
+        assert_eq!(middles, [(250.0 + off, 200.0 - off), (550.0 + off, 200.0 - off)]);
+        let digits = prims.iter().filter(|p| p.slot == 7).count();
+        assert_eq!(digits, 2, "a 1 and a 2");
     }
 
     #[test]

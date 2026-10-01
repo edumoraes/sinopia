@@ -148,8 +148,10 @@ pub enum Action {
     Layers,
     /// The brush library shown or hidden.
     Library,
-    /// The board's frames presented, one slide at a time.
+    /// The board's decks presented, one stop at a time.
     Present,
+    /// The decks' arrows and numbers shown on the board or put away.
+    Path,
     /// Hand gestures through the webcam turned on or off.
     Hands,
     NewLayer,
@@ -185,6 +187,8 @@ pub struct State {
     /// Whether hand gestures are on, in a build that has them; `None` in
     /// one that does not, which offers no line for them.
     pub hands: Option<bool>,
+    /// Whether the decks' arrows and numbers are on the board.
+    pub path: bool,
 }
 
 /// The `Ctrl` shortcut for `key` — read lower case, with `Shift` and
@@ -269,6 +273,7 @@ pub fn items(
                 false,
             ),
             ("Present", "F5", Action::Present, state.present, true),
+            ("Presentation Path", "", Action::Path, true, false),
             ("Hand Gestures", "Ctrl+Shift+H", Action::Hands, state.hands.is_some(), false),
         ],
         Title::Layer => {
@@ -345,6 +350,7 @@ pub fn items(
                 Action::Layers => item.checked(state.layers),
                 Action::Library => item.checked(state.library == Some(true)),
                 Action::Hands => item.checked(state.hands == Some(true)),
+                Action::Path => item.checked(state.path),
                 _ => item,
             };
             (item, action)
@@ -441,6 +447,7 @@ mod tests {
             merge: "Merge Down",
             present: true,
             hands: Some(false),
+            path: true,
         }
     }
 
@@ -648,6 +655,18 @@ mod tests {
         let (items, actions) = super::items(Title::View, &hidden, |_| true);
         assert!(!line(&items, &actions, Action::Layers).checked);
         assert!(!line(&items, &actions, Action::Library).checked);
+    }
+
+    #[test]
+    fn the_presentation_path_is_a_line_of_the_view_menu_checked_while_it_shows() {
+        let (items, actions) = super::items(Title::View, &state(), |_| true);
+        assert!(line(&items, &actions, Action::Path).checked);
+        let hidden = State {
+            path: false,
+            ..state()
+        };
+        let (items, actions) = super::items(Title::View, &hidden, |_| true);
+        assert!(!line(&items, &actions, Action::Path).checked);
     }
 
     #[test]
