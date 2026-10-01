@@ -1088,7 +1088,9 @@ impl App {
             && c.eq_ignore_ascii_case("c")
         {
             self.show_camera = !self.show_camera;
-            return;
+            // The card's frames are asked of the camera on the next frame
+            // of the screen, which nothing else may be asking for.
+            return self.redraw();
         }
         let action = match key {
             Key::Named(
