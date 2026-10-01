@@ -1788,6 +1788,7 @@ impl Editor {
             w: hi[0] - lo[0],
             h: hi[1] - lo[1],
             background: Some(self.surface.clone()),
+            next: None,
             layers: vec![crate::doc::Layer::new("Layer 1")],
         }));
         let claimed: Vec<String> = doc
@@ -4407,6 +4408,7 @@ mod tests {
             w: 200.0,
             h: 200.0,
             background: None,
+            next: None,
             layers: vec![Layer::new("Layer 1")],
         }));
         let mut e = Editor::new();
