@@ -590,6 +590,10 @@ pub struct Gfx {
     /// The export dialog's picture of what is leaving: a slot of its own,
     /// replaced in place each time the picture is taken again.
     picture: Option<u32>,
+    /// The presenter's camera, a frame of it at a time: a slot of its
+    /// own, replaced in place like the picture.
+    #[cfg(feature = "hands")]
+    camera: Option<u32>,
     /// The layers panel's sheet of thumbnails: drawn onto on the GPU and
     /// sampled like an image, its slot kept when it changes size.
     thumbs: Option<Target>,
@@ -843,6 +847,8 @@ impl Gfx {
             shapes: None,
             agent_logos: None,
             picture: None,
+            #[cfg(feature = "hands")]
+            camera: None,
             letters: None,
             thumbs: None,
             atlas: None,
@@ -1100,6 +1106,32 @@ impl Gfx {
             }
         };
         self.picture = Some(slot);
+        Ok(slot)
+    }
+
+    /// Uploads a frame of the presenter's camera into its slot, replacing
+    /// the last one, and answers the slot.
+    #[cfg(feature = "hands")]
+    pub fn upload_camera(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        let group = upload(
+            &self.device,
+            &self.queue,
+            &self.tex_bgl,
+            &self.sampler,
+            texture_format(self.config.format),
+            bmp,
+        )?;
+        let slot = match self.camera {
+            Some(slot) => {
+                self.textures[slot as usize] = group;
+                slot
+            }
+            None => {
+                self.textures.push(group);
+                (self.textures.len() - 1) as u32
+            }
+        };
+        self.camera = Some(slot);
         Ok(slot)
     }
 

@@ -1,8 +1,10 @@
 //! Hand gestures through the webcam, behind the `hands` feature: OpenCV
 //! reads the camera and runs MediaPipe's palm and hand models through its
 //! `dnn` module ([`camera`], with their arithmetic in [`model`]); what
-//! the hands do to the board is [`gesture`]'s.
+//! the hands do to the board is [`gesture`]'s, and what they put on
+//! screen is [`marks`]'s — drawn by the board itself, over everything.
 
 pub mod camera;
 pub mod gesture;
+pub mod marks;
 pub mod model;
