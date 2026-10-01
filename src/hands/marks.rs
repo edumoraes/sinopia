@@ -14,8 +14,9 @@ pub struct Marks {
 }
 
 /// Where a point of the camera's frame lands on the window: the frame
-/// covers it, cut at the long side, the way the presenter sees it.
-fn cover(size: (u32, u32), view: &View) -> impl Fn(Pt) -> (f32, f32) + use<> {
+/// covers it, cut at the long side, the way the presenter sees it. What
+/// the hands point at and what they zoom about are both read through it.
+pub fn cover(size: (u32, u32), view: &View) -> impl Fn(Pt) -> (f32, f32) + use<> {
     let (cw, ch) = (f64::from(size.0.max(1)), f64::from(size.1.max(1)));
     let (vw, vh) = (f64::from(view.viewport.w), f64::from(view.viewport.h));
     let k = (vw / cw).max(vh / ch);

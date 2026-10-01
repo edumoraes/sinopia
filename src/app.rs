@@ -1196,8 +1196,34 @@ impl App {
         } else {
             (on.card_alpha - fade).max(0.0)
         };
-        if let Some((dx, dy, factor)) = on.gestures.tick(now, dt) {
-            self.gestured(Gesture::Pinch { dx, dy, factor });
+        if let Some(motion) = on.gestures.tick(now, dt) {
+            let size = on.gestures.size;
+            self.hands_moved(motion, size);
+        }
+    }
+
+    /// The board moved as the hands say, through the trackpad's own door
+    /// — so a show holds it inside the slide — and zoomed about the
+    /// middle of the pinches the zoom was read off, laid over the window
+    /// as the marks are: never about the pointer, which is wherever the
+    /// mouse was left.
+    #[cfg(feature = "hands")]
+    fn hands_moved(&mut self, motion: hands::gesture::Motion, size: (u32, u32)) {
+        let Some(view) = self.view() else { return };
+        let about = match motion.about {
+            Some(p) => {
+                let (x, y) = hands::marks::cover(size, &view)(p);
+                (f64::from(x), f64::from(y))
+            }
+            None => (f64::from(view.viewport.w) / 2.0, f64::from(view.viewport.h) / 2.0),
+        };
+        let pinch = Gesture::Pinch {
+            dx: motion.dx,
+            dy: motion.dy,
+            factor: motion.factor,
+        };
+        if let Some(camera) = self.active().0.gesture(&view, about, pinch) {
+            self.apply(Change::Camera(camera));
         }
     }
 

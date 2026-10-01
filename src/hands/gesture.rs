@@ -446,6 +446,24 @@ pub struct Gestures {
     pub flash: Option<(Turn, f64)>,
     /// Where the hands pinching are.
     pub pinches: Vec<Pt>,
+    /// The middle of the two pinches the last zoom was read off: what
+    /// the zoom is about, until the hands zoom again.
+    about: Option<Pt>,
+}
+
+/// How the hands move the board in one frame of the screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Motion {
+    /// Logical px across and down.
+    pub dx: f64,
+    pub dy: f64,
+    /// The zoom, as a factor on the frame before's.
+    pub factor: f64,
+    /// What the zoom is about, in the camera's frame: the middle of the
+    /// two pinches it was read off — none while the hands have zoomed
+    /// nothing, for a zoom about the pointer would be about whatever the
+    /// mouse was left on.
+    pub about: Option<Pt>,
 }
 
 impl Default for Gestures {
@@ -467,6 +485,7 @@ impl Default for Gestures {
             laser: Laser::default(),
             flash: None,
             pinches: Vec::new(),
+            about: None,
         }
     }
 }
@@ -569,6 +588,9 @@ impl Gestures {
         }
         self.last = doing;
         self.pinches = pinching;
+        if let Some(Doing::Zoom(middle, _)) = doing {
+            self.about = Some(middle);
+        }
         self.aim(match doing {
             Some(Doing::Laser(p)) => Some(p),
             _ => None,
@@ -594,7 +616,7 @@ impl Gestures {
     /// the springs, the laser gliding and fading, the chevron going.
     /// Answers how the board moves — logical px and a zoom factor — when
     /// it moves enough to say.
-    pub fn tick(&mut self, now: f64, dt: f64) -> Option<(f64, f64, f64)> {
+    pub fn tick(&mut self, now: f64, dt: f64) -> Option<Motion> {
         if self.coast != (0.0, 0.0) {
             self.pan_x.target += self.coast.0 * dt;
             self.pan_y.target += self.coast.1 * dt;
@@ -624,7 +646,12 @@ impl Gestures {
         if self.flash.is_some_and(|(_, at)| now - at > FLASH_S) {
             self.flash = None;
         }
-        (dx.abs() >= 0.05 || dy.abs() >= 0.05 || (factor - 1.0).abs() >= 1e-4).then_some((dx, dy, factor))
+        (dx.abs() >= 0.05 || dy.abs() >= 0.05 || (factor - 1.0).abs() >= 1e-4).then_some(Motion {
+            dx,
+            dy,
+            factor,
+            about: self.about,
+        })
     }
 
     /// Whether anything is still moving, so the next frame of the screen
@@ -719,13 +746,13 @@ mod tests {
         for i in 0..35 {
             let t = 0.2 + i as f64 / 30.0;
             g.read(&[hand(0.5 + 0.01 * i.min(9) as f32, 0.7, OPEN, 0.0)], SIZE, t, true);
-            if let Some((dx, _, _)) = g.tick(t, 1.0 / 30.0) {
-                moved += dx;
+            if let Some(m) = g.tick(t, 1.0 / 30.0) {
+                moved += m.dx;
             }
         }
         for i in 0..60 {
-            if let Some((dx, _, _)) = g.tick(1.4 + i as f64 / 60.0, 1.0 / 60.0) {
-                moved += dx;
+            if let Some(m) = g.tick(1.4 + i as f64 / 60.0, 1.0 / 60.0) {
+                moved += m.dx;
             }
         }
         let want = 0.09 * PAN_GAIN;
@@ -739,8 +766,8 @@ mod tests {
         for i in 0..20 {
             let t = i as f64 / 30.0;
             g.read(&[hand(0.3 + 0.02 * i as f32, 0.7, POINT, 0.1)], SIZE, t, true);
-            if let Some((dx, dy, _)) = g.tick(t, 1.0 / 30.0) {
-                moved += dx.abs() + dy.abs();
+            if let Some(m) = g.tick(t, 1.0 / 30.0) {
+                moved += m.dx.abs() + m.dy.abs();
             }
         }
         assert!(g.laser.tip.is_some() && g.laser.glow > 0.0, "{:?}", g.laser);
@@ -759,18 +786,56 @@ mod tests {
             let t = 0.2 + i as f64 / 30.0;
             let d = 0.01 * i.min(9) as f32;
             g.read(&[hand(0.4 - d, 0.7, OPEN, 0.0), hand(0.6 + d, 0.7, OPEN, 0.0)], SIZE, t, true);
-            if let Some((_, _, f)) = g.tick(t, 1.0 / 30.0) {
-                zoom *= f;
+            if let Some(m) = g.tick(t, 1.0 / 30.0) {
+                zoom *= m.factor;
             }
         }
         for i in 0..90 {
-            if let Some((_, _, f)) = g.tick(1.4 + i as f64 / 60.0, 1.0 / 60.0) {
-                zoom *= f;
+            if let Some(m) = g.tick(1.4 + i as f64 / 60.0, 1.0 / 60.0) {
+                zoom *= m.factor;
             }
         }
         // The pinches went from 0.2 apart to 0.38.
         let want = 0.38 / 0.2;
         assert!((zoom - want).abs() < 0.05, "{zoom} for {want}");
+    }
+
+    #[test]
+    fn two_pinches_zoom_about_where_they_meet_and_not_about_the_mouse() {
+        // Two hands off to the left of the frame: the zoom is about the
+        // middle of their pinches, wherever the pointer happens to be.
+        let mut g = Gestures::default();
+        feed(&mut g, 0.0, 4, |_| vec![hand(0.15, 0.7, OPEN, 0.0), hand(0.35, 0.7, OPEN, 0.0)]);
+        let mut about = None;
+        for i in 0..20 {
+            let t = 0.2 + i as f64 / 30.0;
+            let d = 0.01 * i.min(9) as f32;
+            g.read(&[hand(0.15 - d, 0.7, OPEN, 0.0), hand(0.35 + d, 0.7, OPEN, 0.0)], SIZE, t, true);
+            if let Some(m) = g.tick(t, 1.0 / 30.0)
+                && m.factor != 1.0
+            {
+                about = m.about;
+            }
+        }
+        let [a, b] = g.pinches[..] else {
+            panic!("two pinches: {:?}", g.pinches);
+        };
+        let middle = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let about = about.expect("a zoom says what it is about");
+        assert!(dist(about, middle) < 0.01, "{about:?} for {middle:?}");
+        // Let go of, the zoom settles about the same place.
+        let last = (0..30).filter_map(|i| g.tick(1.0 + i as f64 / 60.0, 1.0 / 60.0)).last();
+        assert_eq!(last.and_then(|m| m.about), Some(about));
+        // A drag alone has never zoomed, and says nothing about where.
+        let mut g = Gestures::default();
+        feed(&mut g, 0.0, 4, |_| vec![hand(0.5, 0.7, OPEN, 0.0)]);
+        for i in 0..20 {
+            let t = 0.2 + i as f64 / 30.0;
+            g.read(&[hand(0.5 + 0.01 * i as f32, 0.7, OPEN, 0.0)], SIZE, t, true);
+            if let Some(m) = g.tick(t, 1.0 / 30.0) {
+                assert_eq!((m.factor, m.about), (1.0, None));
+            }
+        }
     }
 
     #[test]
