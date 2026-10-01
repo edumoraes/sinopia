@@ -1092,10 +1092,19 @@ impl App {
 
     /// A key while a show is on: the arrows, the page keys, Space and
     /// Enter move it; Home and End go to either end; Esc and F5 end it;
-    /// with hand gestures in the build, `C` turns the presenter's camera
-    /// on or off and `Shift+C` steps it through its shapes. Nothing else
+    /// with hand gestures in the build, `Ctrl+Shift+H` turns them on or
+    /// off without leaving the show, `C` turns the presenter's camera on
+    /// or off and `Shift+C` steps it through its shapes. Nothing else
     /// reaches the board.
     fn show_key(&mut self, key: &Key) {
+        #[cfg(feature = "hands")]
+        if let Key::Character(c) = key
+            && c.eq_ignore_ascii_case("h")
+            && self.modifiers.state().control_key()
+            && self.modifiers.state().shift_key()
+        {
+            return self.toggle_hands();
+        }
         #[cfg(feature = "hands")]
         if let Key::Character(c) = key
             && c.eq_ignore_ascii_case("c")
