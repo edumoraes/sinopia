@@ -73,9 +73,10 @@ use crate::theme::{INKS, Theme};
 /// without this, whatever just started would be over before it drew.
 const MAX_STEP: f32 = 0.05;
 
-/// What a show covers everything that is not the slide in, and clears the
-/// window to.
-const SHOW_GROUND: Rgba = [0.0, 0.0, 0.0, 1.0];
+/// What a show covers everything round a slide in. The window itself is
+/// cleared to the board's own ground: a stop that is no frame is shown on
+/// the board, and the board has to be under it.
+const VEIL: Rgba = [0.0, 0.0, 0.0, 1.0];
 
 /// How much of the ink the brush's ring is drawn with.
 const RING_ALPHA: f32 = 0.6;
@@ -1316,7 +1317,7 @@ impl App {
         if let Some((area, strength)) = self.show.as_ref().and_then(|s| s.shown(self.doc(), view))
             && strength > 0.0
         {
-            let ground = scene::with_alpha(SHOW_GROUND, strength as f32);
+            let ground = scene::with_alpha(VEIL, strength as f32);
             frame.extend(present::veil(area, view).into_iter().map(|band| Prim::rect(band, ground)));
         }
         frame
@@ -5631,12 +5632,7 @@ impl App {
                 let frame = self.frame(&view);
                 let Some(gfx) = &mut self.gfx else { return };
                 gfx.sync_letters(&self.glyphs);
-                let ground = if self.show.is_some() {
-                    SHOW_GROUND
-                } else {
-                    self.theme.bg
-                };
-                let drawn = gfx.render(ground, &frame);
+                let drawn = gfx.render(self.theme.bg, &frame);
                 if self.start_letters_over() {
                     self.redraw();
                 }
