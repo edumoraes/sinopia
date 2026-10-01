@@ -481,7 +481,13 @@ impl Show {
     /// A show from [`first`], flying in from what `view` shows. None when
     /// the board has no stop on show to present.
     pub fn start(doc: &Document, selected: Option<&str>, view: &View) -> Option<Show> {
-        let slides = sequence(doc, &first(doc, selected)?);
+        Show::from(doc, &first(doc, selected)?, view)
+    }
+
+    /// A show from the stop on layer `start`, its deck from there on —
+    /// alone, when it leads nowhere. None when it is no stop on show.
+    pub fn from(doc: &Document, start: &str, view: &View) -> Option<Show> {
+        let slides = sequence(doc, start);
         let to = stop(doc, slides.first()?)?;
         Some(Show {
             slides,
@@ -495,14 +501,12 @@ impl Show {
         })
     }
 
-    /// The stop on show, and how many there are.
-    #[cfg(test)]
+    /// The stop on show, counted from 0, and how many there are.
     pub fn place(&self) -> (usize, usize) {
         (self.at, self.slides.len())
     }
 
-    /// The layer on show.
-    #[cfg(test)]
+    /// The layer of the stop on show.
     pub fn slide(&self) -> &str {
         &self.slides[self.at]
     }
@@ -771,27 +775,36 @@ fn arrow_of(doc: &Document, view: &View, id: &str) -> Option<Curve> {
 /// px.
 const ARROW_HIT_PX: f64 = 6.0;
 
-/// The place every stop of every deck goes by — from 1, in the order its
-/// deck walks it: from each head, in paint order, then from the first
-/// layer of each loop, which has none. A layer passed over — hidden, or
-/// with nothing painted — takes no place, as it takes no slide.
-pub fn numbers(doc: &Document) -> Vec<(String, usize)> {
+/// Every deck on the board, its stops in the order it walks them: from
+/// each head, in paint order, then from the first layer of each loop,
+/// which has none. A layer passed over — hidden, or with nothing painted
+/// — is no stop of it, as it is no slide; and a stop is in one deck.
+pub fn decks(doc: &Document) -> Vec<Vec<String>> {
     let all = layers(doc);
     let led_to: Vec<&str> = all.iter().filter_map(|l| next_of(doc, &l.id)).collect();
     let leading: Vec<&&Layer> = all.iter().filter(|l| next_of(doc, &l.id).is_some()).collect();
     let heads = leading.iter().filter(|l| !led_to.contains(&l.id.as_str()));
-    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut out: Vec<Vec<String>> = Vec::new();
     for start in heads.chain(leading.iter()) {
-        if out.iter().any(|(id, _)| *id == start.id) {
+        let had = |id: &str| out.iter().flatten().any(|o| o == id);
+        if had(&start.id) {
             continue;
         }
-        for (i, id) in sequence(doc, &start.id).into_iter().enumerate() {
-            if !out.iter().any(|(had, _)| *had == id) {
-                out.push((id, i + 1));
-            }
+        let deck: Vec<String> = sequence(doc, &start.id).into_iter().filter(|id| !had(id)).collect();
+        if !deck.is_empty() {
+            out.push(deck);
         }
     }
     out
+}
+
+/// The place every stop of every deck goes by: from 1, in the order its
+/// deck walks it.
+pub fn numbers(doc: &Document) -> Vec<(String, usize)> {
+    decks(doc)
+        .into_iter()
+        .flat_map(|deck| deck.into_iter().enumerate().map(|(i, id)| (id, i + 1)))
+        .collect()
 }
 
 /// A badge's least radius, the room round its number, and how far clear
@@ -944,7 +957,9 @@ mod tests {
         doc
     }
 
-    fn link(doc: &mut Document, from: &str, to: &str) {
+    /// Ties `from` to `to` as a board on disk could, past every check
+    /// [`link`] makes.
+    fn tie(doc: &mut Document, from: &str, to: &str) {
         doc.layer_mut(from).unwrap().next = Some(to.into());
     }
 
@@ -1001,8 +1016,8 @@ mod tests {
     #[test]
     fn a_sequence_follows_the_links_wherever_the_stops_stand() {
         let mut doc = deck(&["a", "b", "c", "d"]);
-        link(&mut doc, "c", "a");
-        link(&mut doc, "a", "d");
+        tie(&mut doc, "c", "a");
+        tie(&mut doc, "a", "d");
         assert_eq!(sequence(&doc, "c"), ["c", "a", "d"]);
         assert_eq!(sequence(&doc, "b"), ["b"], "a frame linked to nothing is a deck of one");
     }
@@ -1010,12 +1025,12 @@ mod tests {
     #[test]
     fn a_loop_ends_where_it_would_repeat_and_a_link_to_itself_goes_nowhere() {
         let mut doc = deck(&["a", "b", "c"]);
-        link(&mut doc, "a", "b");
-        link(&mut doc, "b", "c");
-        link(&mut doc, "c", "a");
+        tie(&mut doc, "a", "b");
+        tie(&mut doc, "b", "c");
+        tie(&mut doc, "c", "a");
         assert_eq!(sequence(&doc, "b"), ["b", "c", "a"]);
         let mut doc = deck(&["a"]);
-        link(&mut doc, "a", "a");
+        tie(&mut doc, "a", "a");
         assert_eq!(sequence(&doc, "a"), ["a"]);
         assert!(next_of(&doc, "a").is_none());
     }
@@ -1023,7 +1038,7 @@ mod tests {
     #[test]
     fn a_link_to_a_layer_that_has_gone_goes_nowhere() {
         let mut doc = deck(&["a", "b"]);
-        link(&mut doc, "a", "gone");
+        tie(&mut doc, "a", "gone");
         assert_eq!(sequence(&doc, "a"), ["a"]);
         assert!(next_of(&doc, "a").is_none());
     }
@@ -1031,8 +1046,8 @@ mod tests {
     #[test]
     fn a_hidden_stop_is_passed_through_and_not_shown() {
         let mut doc = deck(&["a", "b", "c"]);
-        link(&mut doc, "a", "b");
-        link(&mut doc, "b", "c");
+        tie(&mut doc, "a", "b");
+        tie(&mut doc, "b", "c");
         hide(&mut doc, "b");
         assert_eq!(sequence(&doc, "a"), ["a", "c"]);
     }
@@ -1046,10 +1061,10 @@ mod tests {
         rect(&mut doc, Some("a"), "r2", "r2-el", (100.0, 50.0, 40.0, 30.0));
         group(&mut doc, Some("a"), "g", &["r1", "r2"]);
         rect(&mut doc, None, "loose", "loose-el", (0.0, 500.0, 50.0, 50.0));
-        link(&mut doc, "a", "g");
-        link(&mut doc, "g", "r2");
-        link(&mut doc, "r2", "loose");
-        link(&mut doc, "loose", "b");
+        tie(&mut doc, "a", "g");
+        tie(&mut doc, "g", "r2");
+        tie(&mut doc, "r2", "loose");
+        tie(&mut doc, "loose", "b");
         assert_eq!(sequence(&doc, "a"), ["a", "g", "r2", "loose", "b"]);
         let g = stop(&doc, "g").unwrap();
         assert!(!g.slide);
@@ -1061,8 +1076,8 @@ mod tests {
     fn a_layer_with_nothing_painted_is_no_stop_and_is_passed_through() {
         let mut doc = deck(&["a", "b"]);
         // `a-in`, the frame's own first layer, holds nothing.
-        link(&mut doc, "a", "a-in");
-        link(&mut doc, "a-in", "b");
+        tie(&mut doc, "a", "a-in");
+        tie(&mut doc, "a-in", "b");
         assert!(stop(&doc, "a-in").is_none());
         assert_eq!(sequence(&doc, "a"), ["a", "b"]);
         rect(&mut doc, None, "r", "r-el", (0.0, 300.0, 10.0, 10.0));
@@ -1114,8 +1129,8 @@ mod tests {
     #[test]
     fn a_show_starts_at_the_stop_selected_then_at_the_head_of_a_deck() {
         let mut doc = deck(&["a", "b", "c"]);
-        link(&mut doc, "c", "b");
-        link(&mut doc, "b", "a");
+        tie(&mut doc, "c", "b");
+        tie(&mut doc, "b", "a");
         assert_eq!(first(&doc, Some("b")).as_deref(), Some("b"));
         assert_eq!(first(&doc, Some("not-a-layer")).as_deref(), Some("c"), "the head");
         assert_eq!(first(&doc, None).as_deref(), Some("c"));
@@ -1124,18 +1139,18 @@ mod tests {
     #[test]
     fn an_object_selected_in_no_deck_starts_no_show_of_its_own() {
         let mut doc = deck(&["a", "b"]);
-        link(&mut doc, "a", "b");
+        tie(&mut doc, "a", "b");
         rect(&mut doc, None, "r", "r-el", (0.0, 300.0, 10.0, 10.0));
         assert_eq!(first(&doc, Some("r")).as_deref(), Some("a"), "the head of the deck");
-        link(&mut doc, "b", "r");
+        tie(&mut doc, "b", "r");
         assert_eq!(first(&doc, Some("r")).as_deref(), Some("r"), "once it is in one");
     }
 
     #[test]
     fn a_deck_that_loops_starts_at_its_first_layer_and_a_board_without_links_at_its_first_frame() {
         let mut doc = deck(&["a", "b", "c"]);
-        link(&mut doc, "b", "c");
-        link(&mut doc, "c", "b");
+        tie(&mut doc, "b", "c");
+        tie(&mut doc, "c", "b");
         assert_eq!(first(&doc, None).as_deref(), Some("b"), "the first that leads anywhere");
         assert_eq!(first(&deck(&["x", "y"]), None).as_deref(), Some("x"));
         assert_eq!(first(&Document::new("t"), None), None, "nothing to present");
@@ -1365,8 +1380,8 @@ mod tests {
 
     fn deck_of_three() -> Document {
         let mut doc = deck(&["a", "b", "c"]);
-        link(&mut doc, "a", "b");
-        link(&mut doc, "b", "c");
+        tie(&mut doc, "a", "b");
+        tie(&mut doc, "b", "c");
         doc
     }
 
@@ -1466,7 +1481,7 @@ mod tests {
     fn the_veil_comes_and_goes_with_a_flight_between_a_slide_and_a_stop_on_the_board() {
         let mut doc = deck(&["a"]);
         rect(&mut doc, None, "r", "r-el", (0.0, 400.0, 100.0, 50.0));
-        link(&mut doc, "a", "r");
+        tie(&mut doc, "a", "r");
         let v = view(fit(stop(&doc, "a").unwrap().ink, VP, 1.0));
         let mut show = Show::start(&doc, None, &v).unwrap();
         assert!(close(show.shown(&doc, &v).unwrap().1, 0.0), "nothing covered before the show");
@@ -1543,7 +1558,7 @@ mod tests {
         });
         let ink = [1.0, 0.0, 0.0, 1.0];
         assert!(links(&doc, &v, ink, None).is_empty(), "nothing linked, nothing drawn");
-        link(&mut doc, "a", "b");
+        tie(&mut doc, "a", "b");
         let prims = links(&doc, &v, ink, None);
         assert!(links(&doc, &v, ink, Some("a")).is_empty(), "the link in the hand is not drawn twice");
         assert!(!prims.is_empty());
@@ -1560,7 +1575,7 @@ mod tests {
     fn no_arrow_runs_between_a_stop_and_what_it_holds() {
         let mut doc = deck(&["a", "b"]);
         rect(&mut doc, Some("a"), "r", "r-el", (20.0, 20.0, 60.0, 40.0));
-        link(&mut doc, "a", "r");
+        tie(&mut doc, "a", "r");
         let v = view(Camera {
             x: 250.0,
             y: 50.0,
@@ -1568,7 +1583,7 @@ mod tests {
         });
         let ink = [1.0, 0.0, 0.0, 1.0];
         assert!(links(&doc, &v, ink, None).is_empty(), "the frame and a rect in it");
-        link(&mut doc, "r", "b");
+        tie(&mut doc, "r", "b");
         assert!(!links(&doc, &v, ink, None).is_empty(), "the rect and the next frame");
     }
 
@@ -1576,11 +1591,11 @@ mod tests {
     fn every_stop_of_a_deck_is_numbered_by_its_place_in_it() {
         let mut doc = deck(&["a", "b", "c", "d", "e"]);
         assert!(numbers(&doc).is_empty(), "no deck, no numbers");
-        link(&mut doc, "c", "a");
-        link(&mut doc, "a", "d");
+        tie(&mut doc, "c", "a");
+        tie(&mut doc, "a", "d");
         // A second deck, a loop with no head.
-        link(&mut doc, "b", "e");
-        link(&mut doc, "e", "b");
+        tie(&mut doc, "b", "e");
+        tie(&mut doc, "e", "b");
         let mut got = numbers(&doc);
         got.sort();
         let want: Vec<(String, usize)> = [("a", 2), ("b", 1), ("c", 1), ("d", 3), ("e", 2)]
@@ -1607,7 +1622,7 @@ mod tests {
         });
         let (ink, ground) = ([1.0, 0.0, 0.0, 1.0], [1.0; 4]);
         assert!(badges(&doc, &v, &atlas, 7, ink, ground).is_empty());
-        link(&mut doc, "a", "b");
+        tie(&mut doc, "a", "b");
         let prims = badges(&doc, &v, &atlas, 7, ink, ground);
         // a's corner is at (0, 0) of the world: (250, 200) on screen; b's
         // at (300, 0): (550, 200). Each badge stands just above it and in
@@ -1632,7 +1647,7 @@ mod tests {
         // a's right edge is at 450 on screen and b's left at 550, both
         // at the middle height 250; the arrow bends up between them.
         assert!(link_at(&doc, &v, (500.0, 250.0)).is_none(), "nothing linked");
-        link(&mut doc, "a", "b");
+        tie(&mut doc, "a", "b");
         let curve = arrow_of(&doc, &v, "a").unwrap();
         let middle = curve.at(0.5);
         assert!(middle.1 < 250.0, "bent: {middle:?}");
@@ -1644,14 +1659,14 @@ mod tests {
     #[test]
     fn a_layer_takes_one_link_in_and_never_its_own() {
         let mut doc = deck(&["a", "b", "c"]);
-        link(&mut doc, "a", "b");
+        tie(&mut doc, "a", "b");
         assert!(!takes(&doc, "c", "b"), "a already leads to b");
         assert!(takes(&doc, "a", "b"), "a's own link, laid again");
         assert!(takes(&doc, "c", "a"), "nothing leads to a");
         assert!(takes(&doc, "b", "a"), "a loop back to the head is one link in");
         assert!(!takes(&doc, "a", "a"), "never itself");
         let mut gone = deck(&["a", "b"]);
-        link(&mut gone, "a", "a");
+        tie(&mut gone, "a", "a");
         assert!(takes(&gone, "b", "a"), "a link to itself leads nowhere");
     }
 
@@ -1668,7 +1683,7 @@ mod tests {
         assert!(ringed(&doc, Some("b")), "over b");
         assert!(!ringed(&doc, Some("a")), "over itself");
         assert!(!ringed(&doc, None), "over nothing");
-        link(&mut doc, "c", "b");
+        tie(&mut doc, "c", "b");
         assert!(!ringed(&doc, Some("b")), "b has its one link in");
     }
 }

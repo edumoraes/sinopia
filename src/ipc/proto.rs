@@ -48,10 +48,11 @@ pub enum Request {
         colors: Option<ThemeColors>,
     },
     Shutdown,
-    /// The presentation of the open board: started from the frame
-    /// selected or the head of its deck, moved a slide on or back or to
-    /// either end, or stopped. Acked and forwarded: what it moves is on
-    /// screen, and a remote that turns a slide does not wait to be told.
+    /// The presentation of the open board: started — from a stop named,
+    /// the stop selected or the head of a deck — moved a slide on or back,
+    /// to either end or to a slide by its place, or stopped. Answered with
+    /// where the show stands, so whoever moved it knows where it landed,
+    /// or why it did not.
     Present {
         action: Presenting,
     },
@@ -313,31 +314,38 @@ impl Request {
                 | Request::Export { .. }
                 | Request::Theme { .. }
                 | Request::Shutdown
-                | Request::Present { .. }
         )
     }
 }
 
 /// What `present` asks of the show.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Presenting {
-    Start,
+    /// From the stop on layer `from`, or from where F5 would start.
+    Start {
+        from: Option<String>,
+    },
     Stop,
     Next,
     Prev,
     First,
     Last,
+    /// To slide `to`, counted from 1.
+    Go {
+        to: usize,
+    },
 }
 
 impl Presenting {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Presenting::Start => "start",
+            Presenting::Start { .. } => "start",
             Presenting::Stop => "stop",
             Presenting::Next => "next",
             Presenting::Prev => "prev",
             Presenting::First => "first",
             Presenting::Last => "last",
+            Presenting::Go { .. } => "go",
         }
     }
 }
@@ -392,6 +400,14 @@ pub enum Event {
     Texts { texts: Vec<TextCard> },
     /// A text landed or changed: its id, and its layer's.
     Texted { id: String, layer: String },
+    /// Where the show stands: the slide on show, counted from 1, of how
+    /// many, and the layer of the stop it is — none of either while no
+    /// show is on.
+    Showing {
+        slide: Option<usize>,
+        of: usize,
+        stop: Option<String>,
+    },
 }
 
 /// `ev`, or `denied` in its place when it would not fit a frame. An
@@ -459,13 +475,20 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         },
         "present" => Request::Present {
             action: match take_string(&mut map, "action")?.as_str() {
-                "start" => Presenting::Start,
+                "start" => Presenting::Start {
+                    from: take_optional_string(&mut map, "from")?,
+                },
                 "stop" => Presenting::Stop,
                 "next" => Presenting::Next,
                 "prev" => Presenting::Prev,
                 "first" => Presenting::First,
                 "last" => Presenting::Last,
-                other => anyhow::bail!("a show starts, stops, goes next, prev, first or last, not {other:?}"),
+                "go" => Presenting::Go {
+                    to: take_slide(&mut map)?,
+                },
+                other => {
+                    anyhow::bail!("a show starts, stops, goes next, prev, first, last or to a slide, not {other:?}")
+                }
             },
         },
         "frames" => Request::Frames,
@@ -624,6 +647,15 @@ pub fn request_line(req: &Request) -> String {
         }
         Request::Present { action } => {
             map.insert("action".into(), action.as_str().into());
+            match action {
+                Presenting::Start { from: Some(from) } => {
+                    map.insert("from".into(), from.clone().into());
+                }
+                Presenting::Go { to } => {
+                    map.insert("to".into(), (*to).into());
+                }
+                _ => {}
+            }
         }
         Request::ReadFrame { id, dir } => {
             map.insert("id".into(), id.clone().into());
@@ -917,6 +949,18 @@ fn take_ids(map: &mut Map<String, Value>) -> anyhow::Result<Vec<String>> {
             other => anyhow::bail!("ids must be layer ids, got {other}"),
         })
         .collect()
+}
+
+/// A slide's place, counted from 1 as the show counts them.
+fn take_slide(map: &mut Map<String, Value>) -> anyhow::Result<usize> {
+    match map.remove("to") {
+        Some(Value::Number(n)) => match n.as_u64().filter(|to| *to >= 1).and_then(|to| usize::try_from(to).ok()) {
+            Some(to) => Ok(to),
+            None => anyhow::bail!("field to must be a slide, counted from 1, got {n}"),
+        },
+        Some(other) => anyhow::bail!("field to must be a number, got {other}"),
+        None => anyhow::bail!("field to missing: go takes the slide to go to"),
+    }
 }
 
 fn take_bool(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<bool> {
@@ -1523,29 +1567,60 @@ mod tests {
     }
 
     #[test]
-    fn a_show_is_moved_by_an_action_that_is_acked_and_nothing_else() {
+    fn a_show_is_moved_by_an_action_and_answers_where_it_stands() {
         for action in [
-            Presenting::Start,
+            Presenting::Start { from: None },
+            Presenting::Start {
+                from: Some("01JLAYER".into()),
+            },
             Presenting::Stop,
             Presenting::Next,
             Presenting::Prev,
             Presenting::First,
             Presenting::Last,
+            Presenting::Go { to: 3 },
         ] {
             let present = Request::Present { action };
             assert_eq!(parse_request(&request_line(&present)).unwrap(), present);
-            assert!(!present.is_asked(), "acked and forwarded");
+            assert!(present.is_asked(), "the answer is where the show stands");
         }
         for line in [
             r#"{ "v": 1, "op": "present" }"#,
             r#"{ "v": 1, "op": "present", "action": "rewind" }"#,
             r#"{ "v": 1, "op": "present", "action": "next", "slide": 2 }"#,
+            r#"{ "v": 1, "op": "present", "action": "next", "from": "01J" }"#,
+            r#"{ "v": 1, "op": "present", "action": "start", "to": 2 }"#,
+            r#"{ "v": 1, "op": "present", "action": "go" }"#,
+            r#"{ "v": 1, "op": "present", "action": "go", "to": 0 }"#,
+            r#"{ "v": 1, "op": "present", "action": "go", "to": 2.5 }"#,
+            r#"{ "v": 1, "op": "present", "action": "go", "to": "2" }"#,
             r#"{ "v": 1, "op": "nudge", "dx": 0, "dy": 0, "factor": 1 }"#,
             r#"{ "v": 1, "op": "pen", "phase": "down", "x": 0, "y": 0 }"#,
             r#"{ "v": 1, "op": "showing" }"#,
         ] {
             assert!(parse_request(line).is_err(), "line: {line}");
         }
+    }
+
+    #[test]
+    fn where_a_show_stands_matches_the_wire_format() {
+        let on = Event::Showing {
+            slide: Some(2),
+            of: 5,
+            stop: Some("01J".into()),
+        };
+        let v: Value = serde_json::from_str(&event_line(&on)).unwrap();
+        assert_eq!((v["ev"].as_str(), v["slide"].as_u64(), v["of"].as_u64()), (Some("showing"), Some(2), Some(5)));
+        assert_eq!(v["stop"], "01J");
+        assert_eq!(parse_event(&event_line(&on)).unwrap(), on);
+        let off = Event::Showing {
+            slide: None,
+            of: 0,
+            stop: None,
+        };
+        let v: Value = serde_json::from_str(&event_line(&off)).unwrap();
+        assert!(v["slide"].is_null() && v["stop"].is_null(), "no show: {v}");
+        assert_eq!(parse_event(&event_line(&off)).unwrap(), off);
     }
 
     #[test]

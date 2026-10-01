@@ -1018,10 +1018,30 @@ impl App {
     /// window goes full screen and every panel goes away; a board with no
     /// frame on show has nothing to present, and nothing happens.
     fn start_show(&mut self) {
-        if self.show.is_some() {
-            return;
+        if let Err(reason) = self.start_show_from(None) {
+            log::info!("nothing presented: {reason}");
         }
-        let Some(view) = self.view() else { return };
+    }
+
+    /// Starts a presentation from the stop on layer `from` — or, given
+    /// none, from where F5 starts one. A refusal says why, and nothing
+    /// starts.
+    fn start_show_from(&mut self, from: Option<&str>) -> Result<(), String> {
+        if self.show.is_some() {
+            return Err("a show is on already: go to a slide, or stop it first".into());
+        }
+        let view = self.view().ok_or("the board has no window to show it in")?;
+        let show = match from {
+            Some(from) => Show::from(self.doc(), from, &view).ok_or_else(|| {
+                format!("layer {from:?} is no stop on show: it is hidden, holds nothing painted, or is not on the board")
+            })?,
+            None => {
+                let selected = self.editor().selected_stop(self.doc());
+                Show::start(self.doc(), selected.as_deref(), &view).ok_or(
+                    "the board has no stop on show to present: link one layer to the next first",
+                )?
+            }
+        };
         self.end_typing();
         self.close_menu(None);
         self.sending = None;
@@ -1029,11 +1049,6 @@ impl App {
         self.searching = None;
         let (editor, doc) = self.active();
         editor.cancel(doc);
-        let selected = editor.selected_stop(doc);
-        let Some(show) = Show::start(self.doc(), selected.as_deref(), &view) else {
-            log::info!("nothing to present: the board has no stop on show");
-            return;
-        };
         self.show = Some(show);
         if let Some(w) = &self.window
             && w.fullscreen().is_none()
@@ -1045,6 +1060,7 @@ impl App {
         self.sync_webcam();
         self.redraw();
         self.update_cursor_icon();
+        Ok(())
     }
 
     /// Ends the presentation: the board looks where it did before it, and
@@ -1064,17 +1080,22 @@ impl App {
     }
 
     /// What `present` asks, from the socket or the keys: the show started,
-    /// stopped, or moved a slide on or back or to either end.
-    fn present(&mut self, action: Presenting) {
-        if action == Presenting::Start {
-            return self.start_show();
-        }
-        if action == Presenting::Stop {
-            return self.end_show();
-        }
-        let Some(view) = self.view() else { return };
+    /// stopped, or moved a slide on or back, to either end or to a slide
+    /// by its place. A step past either end is no refusal — the show is
+    /// where it was — but a show that is not on, or a slide it does not
+    /// have, is.
+    fn present(&mut self, action: Presenting) -> Result<(), String> {
+        let action = match action {
+            Presenting::Start { from } => return self.start_show_from(from.as_deref()),
+            Presenting::Stop => {
+                self.end_show();
+                return Ok(());
+            }
+            other => other,
+        };
+        let view = self.view().ok_or("the board has no window to show it in")?;
         let doc = &self.open[self.active].project.doc;
-        let Some(show) = self.show.as_mut() else { return };
+        let show = self.show.as_mut().ok_or("no show is on: start one first")?;
         let moved = match action {
             Presenting::Next => show.step(doc, &view, true),
             Presenting::Prev => show.step(doc, &view, false),
@@ -1083,10 +1104,34 @@ impl App {
                 let last = show.last();
                 show.go(doc, &view, last)
             }
-            Presenting::Start | Presenting::Stop => false,
+            Presenting::Go { to } => {
+                let of = show.place().1;
+                if to > of {
+                    return Err(format!("slide {to} is past the last: the show has {of}"));
+                }
+                show.go(doc, &view, to - 1)
+            }
+            Presenting::Start { .. } | Presenting::Stop => false,
         };
         if moved {
             self.redraw();
+        }
+        Ok(())
+    }
+
+    /// Where the show stands, as `present` answers it.
+    fn showing(&self) -> Event {
+        match &self.show {
+            Some(show) => Event::Showing {
+                slide: Some(show.place().0 + 1),
+                of: show.place().1,
+                stop: Some(show.slide().to_owned()),
+            },
+            None => Event::Showing {
+                slide: None,
+                of: 0,
+                stop: None,
+            },
         }
     }
 
@@ -1134,7 +1179,8 @@ impl App {
             Key::Named(NamedKey::Escape | NamedKey::F5) => Presenting::Stop,
             _ => return,
         };
-        self.present(action);
+        // A step past either end leaves the show where it was.
+        let _ = self.present(action);
     }
 
     /// Turns hand gestures on or off. The camera they read is opened when
@@ -1267,8 +1313,12 @@ impl App {
             }
         }
         match turn {
-            Some(hands::gesture::Turn::Next) => self.present(Presenting::Next),
-            Some(hands::gesture::Turn::Prev) => self.present(Presenting::Prev),
+            Some(hands::gesture::Turn::Next) => {
+                let _ = self.present(Presenting::Next);
+            }
+            Some(hands::gesture::Turn::Prev) => {
+                let _ = self.present(Presenting::Prev);
+            }
             None => {}
         }
         if seen || turn.is_some() {
@@ -2974,6 +3024,13 @@ impl App {
             Request::Texts => Event::Texts {
                 texts: export::texts(self.doc()),
             },
+            Request::Present { action } => match self.present(action) {
+                Ok(()) => self.showing(),
+                Err(reason) => Event::Denied {
+                    op: op.to_owned(),
+                    reason,
+                },
+            },
             Request::AddText { .. } | Request::SetText { .. } => match self.text_op(req) {
                 Ok((id, layer)) => Event::Texted { id, layer },
                 Err(e) => denied(&e),
@@ -2987,8 +3044,7 @@ impl App {
             | Request::Raise
             | Request::Export { .. }
             | Request::Theme { .. }
-            | Request::Shutdown
-            | Request::Present { .. } => Event::Denied {
+            | Request::Shutdown => Event::Denied {
                 op: op.to_owned(),
                 reason: "not an op the board answers".into(),
             },
@@ -4242,8 +4298,12 @@ impl App {
         // the right.
         if self.show.is_some() {
             match button {
-                Button::Left => self.present(Presenting::Next),
-                Button::Right => self.present(Presenting::Prev),
+                Button::Left => {
+                    let _ = self.present(Presenting::Next);
+                }
+                Button::Right => {
+                    let _ = self.present(Presenting::Prev);
+                }
                 Button::Middle => {}
             }
             return;
@@ -5799,7 +5859,6 @@ impl App {
                 }
             }
             Request::Shutdown => self.quit(),
-            Request::Present { action } => self.present(action),
             Request::Theme { colors } => match colors {
                 // The plugin's own three, which is how a host that is not
                 // Omarchy dresses the board.
@@ -5840,7 +5899,8 @@ impl App {
             | Request::OpenLayers { .. }
             | Request::Texts
             | Request::AddText { .. }
-            | Request::SetText { .. } => {}
+            | Request::SetText { .. }
+            | Request::Present { .. } => {}
         }
     }
 }
