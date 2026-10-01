@@ -591,9 +591,10 @@ pub struct Gfx {
     /// replaced in place each time the picture is taken again.
     picture: Option<u32>,
     /// The presenter's camera, a frame of it at a time: a slot of its
-    /// own, replaced in place like the picture.
+    /// own and the texture behind it, written over in place thirty times
+    /// a second — a new one only when the frame changes size.
     #[cfg(feature = "hands")]
-    camera: Option<u32>,
+    camera: Option<(u32, wgpu::Texture)>,
     /// The layers panel's sheet of thumbnails: drawn onto on the GPU and
     /// sampled like an image, its slot kept when it changes size.
     thumbs: Option<Target>,
@@ -1113,25 +1114,26 @@ impl Gfx {
     /// the last one, and answers the slot.
     #[cfg(feature = "hands")]
     pub fn upload_camera(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
-        let group = upload(
-            &self.device,
-            &self.queue,
-            &self.tex_bgl,
-            &self.sampler,
-            texture_format(self.config.format),
-            bmp,
-        )?;
-        let slot = match self.camera {
-            Some(slot) => {
-                self.textures[slot as usize] = group;
-                slot
+        if let Some((slot, texture)) = &self.camera
+            && (texture.width(), texture.height()) == (bmp.w.max(1), bmp.h.max(1))
+        {
+            write_texture(&self.queue, texture, bmp)?;
+            return Ok(*slot);
+        }
+        let texture = texture_of(&self.device, &self.queue, texture_format(self.config.format), bmp)?;
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let group = bind_group(&self.device, &self.tex_bgl, &self.sampler, &view);
+        let slot = match &self.camera {
+            Some((slot, _)) => {
+                self.textures[*slot as usize] = group;
+                *slot
             }
             None => {
                 self.textures.push(group);
                 (self.textures.len() - 1) as u32
             }
         };
-        self.camera = Some(slot);
+        self.camera = Some((slot, texture));
         Ok(slot)
     }
 
@@ -1700,6 +1702,38 @@ fn upload(
     format: wgpu::TextureFormat,
     bmp: &Bitmap,
 ) -> anyhow::Result<wgpu::BindGroup> {
+    let texture = texture_of(device, queue, format, bmp)?;
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Ok(bind_group(device, layout, sampler, &view))
+}
+
+/// A texture holding `bmp`.
+fn texture_of(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    bmp: &Bitmap,
+) -> anyhow::Result<wgpu::Texture> {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("image"),
+        size: wgpu::Extent3d {
+            width: bmp.w.max(1),
+            height: bmp.h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_texture(queue, &texture, bmp)?;
+    Ok(texture)
+}
+
+/// Writes `bmp` over the whole of `texture`, which is its size.
+fn write_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, bmp: &Bitmap) -> anyhow::Result<()> {
     anyhow::ensure!(
         bmp.rgba.len() as u64 == 4 * u64::from(bmp.w) * u64::from(bmp.h),
         "{}x{} px needs {} bytes, got {}",
@@ -1708,24 +1742,9 @@ fn upload(
         4 * u64::from(bmp.w) * u64::from(bmp.h),
         bmp.rgba.len()
     );
-    let size = wgpu::Extent3d {
-        width: bmp.w.max(1),
-        height: bmp.h.max(1),
-        depth_or_array_layers: 1,
-    };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("image"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
-            texture: &texture,
+            texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -1736,10 +1755,9 @@ fn upload(
             bytes_per_row: Some(4 * bmp.w),
             rows_per_image: Some(bmp.h),
         },
-        size,
+        texture.size(),
     );
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    Ok(bind_group(device, layout, sampler, &view))
+    Ok(())
 }
 
 /// The group 1 that samples `view`.
