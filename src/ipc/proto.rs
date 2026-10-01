@@ -194,6 +194,18 @@ pub enum Request {
     Path {
         ids: Vec<String>,
     },
+    /// The presenter's camera: the shape it is shown in, which is the
+    /// board's and a step of its history, and whether it is shown while
+    /// presenting — each when said, and answered with how both stand.
+    Camera {
+        shape: Option<crate::doc::Card>,
+        shown: Option<bool>,
+    },
+    /// The hand gestures turned on or off — or, said nothing, how they
+    /// stand.
+    Hands {
+        on: Option<bool>,
+    },
 }
 
 impl TextSpec {
@@ -325,6 +337,8 @@ impl Request {
             Request::Unlink { .. } => "unlink",
             Request::UnlinkAll => "unlink_all",
             Request::Path { .. } => "path",
+            Request::Camera { .. } => "camera",
+            Request::Hands { .. } => "hands",
         }
     }
 
@@ -441,6 +455,11 @@ pub enum Event {
     Texted { id: String, layer: String },
     /// The decks of the open board.
     Decks { decks: Vec<Deck> },
+    /// The presenter's camera: the board's shape for it, and whether it
+    /// is shown while presenting.
+    Camera { shape: crate::doc::Card, shown: bool },
+    /// Whether the hand gestures are on.
+    Hands { on: bool },
     /// Where the show stands: the slide on show, counted from 1, of how
     /// many, and the layer of the stop it is — none of either while no
     /// show is on.
@@ -657,6 +676,19 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         "path" => Request::Path {
             ids: take_ids(&mut map)?,
         },
+        "camera" => Request::Camera {
+            shape: map
+                .contains_key("shape")
+                .then(|| take_named(&mut map, "shape"))
+                .transpose()?,
+            shown: map
+                .contains_key("shown")
+                .then(|| take_bool(&mut map, "shown"))
+                .transpose()?,
+        },
+        "hands" => Request::Hands {
+            on: map.contains_key("on").then(|| take_bool(&mut map, "on")).transpose()?,
+        },
         other => anyhow::bail!("unknown op: {other:?}"),
     };
 
@@ -687,6 +719,19 @@ pub fn request_line(req: &Request) -> String {
         }
         Request::Unlink { ids } | Request::Path { ids } => {
             map.insert("ids".into(), ids.clone().into());
+        }
+        Request::Camera { shape, shown } => {
+            if let Some(shape) = shape {
+                map.insert("shape".into(), serde_json::to_value(shape).expect("a shape is a string"));
+            }
+            if let Some(shown) = shown {
+                map.insert("shown".into(), (*shown).into());
+            }
+        }
+        Request::Hands { on } => {
+            if let Some(on) = on {
+                map.insert("on".into(), (*on).into());
+            }
         }
         Request::Open { id } => {
             map.insert("id".into(), id.clone().into());
@@ -1737,6 +1782,49 @@ mod tests {
         // An instance from before it answered with neither, and is read.
         let old = r#"{"ev":"framed","id":"01K","name":"Intro","v":1}"#;
         assert!(matches!(parse_event(old).unwrap(), Event::Framed { layers, .. } if layers.is_empty()));
+    }
+
+    #[test]
+    fn the_camera_and_the_hands_are_asked_what_they_are_told_or_how_they_stand() {
+        use crate::doc::Card;
+        for req in [
+            Request::Camera {
+                shape: Some(Card::Blob),
+                shown: Some(true),
+            },
+            Request::Camera {
+                shape: None,
+                shown: Some(false),
+            },
+            Request::Camera {
+                shape: Some(Card::Square),
+                shown: None,
+            },
+            Request::Camera { shape: None, shown: None },
+            Request::Hands { on: Some(true) },
+            Request::Hands { on: None },
+        ] {
+            assert_eq!(parse_request(&request_line(&req)).unwrap(), req, "{}", req.op());
+            assert!(req.is_asked(), "{}: the answer is how it stands", req.op());
+        }
+        for line in [
+            r#"{ "v": 1, "op": "camera", "shape": "hexagon" }"#,
+            r#"{ "v": 1, "op": "camera", "shown": "yes" }"#,
+            r#"{ "v": 1, "op": "camera", "corner": "left" }"#,
+            r#"{ "v": 1, "op": "hands", "on": 1 }"#,
+            r#"{ "v": 1, "op": "hands", "camera": 0 }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+        let ev = Event::Camera {
+            shape: Card::Round,
+            shown: true,
+        };
+        let v: Value = serde_json::from_str(&event_line(&ev)).unwrap();
+        assert_eq!((v["ev"].as_str(), v["shape"].as_str(), v["shown"].as_bool()), (Some("camera"), Some("round"), Some(true)));
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
+        let ev = Event::Hands { on: false };
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
     }
 
     #[test]

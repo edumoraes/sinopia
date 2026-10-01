@@ -78,6 +78,11 @@ const MAX_STEP: f32 = 0.05;
 /// the board, and the board has to be under it.
 const VEIL: Rgba = [0.0, 0.0, 0.0, 1.0];
 
+/// What a build without the `hands` feature says when it is asked for the
+/// camera, the gestures or the presenter's card.
+#[cfg(not(feature = "hands"))]
+const NO_CAMERA: &str = "this build reads no camera: it is built without the hands feature (cargo build --features hands)";
+
 /// How much of the ink the brush's ring is drawn with.
 const RING_ALPHA: f32 = 0.6;
 
@@ -3039,6 +3044,23 @@ impl App {
             Request::Decks => Event::Decks {
                 decks: export::decks(self.doc()),
             },
+            Request::Camera { shape, shown } => match self.camera_op(shape, shown) {
+                Ok(()) => Event::Camera {
+                    shape: self.doc().presentation.camera,
+                    shown: self.camera_shown(),
+                },
+                Err(reason) => Event::Denied {
+                    op: op.to_owned(),
+                    reason,
+                },
+            },
+            Request::Hands { on } => match on.map_or(Ok(()), |on| self.set_hands(on)) {
+                Ok(()) => Event::Hands { on: self.hands_on() },
+                Err(reason) => Event::Denied {
+                    op: op.to_owned(),
+                    reason,
+                },
+            },
             Request::Link { .. } | Request::Unlink { .. } | Request::UnlinkAll | Request::Path { .. } => {
                 match self.deck_op(req) {
                     Ok(ids) => Event::Done { ids },
@@ -3070,6 +3092,66 @@ impl App {
                 Err(e) => denied(&e),
             },
         }
+    }
+
+    /// What the presenter's camera is told: its shape, the board's and a
+    /// step of its history, and whether it is shown while presenting,
+    /// which is the show's. Shown is refused by a build without a camera
+    /// to show, before the shape is set; the shape alone is the board's,
+    /// whatever builds it.
+    fn camera_op(&mut self, shape: Option<crate::doc::Card>, shown: Option<bool>) -> Result<(), String> {
+        if let Some(shown) = shown {
+            self.show_camera(shown)?;
+        }
+        if let Some(shape) = shape
+            && self.doc().presentation.camera != shape
+        {
+            self.active().1.presentation.camera = shape;
+            self.apply(Change::Scene);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "hands")]
+    fn show_camera(&mut self, shown: bool) -> Result<(), String> {
+        self.show_camera = shown;
+        self.sync_webcam();
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn show_camera(&mut self, shown: bool) -> Result<(), String> {
+        if shown {
+            return Err(NO_CAMERA.into());
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "hands")]
+    fn camera_shown(&self) -> bool {
+        self.show_camera
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn camera_shown(&self) -> bool {
+        false
+    }
+
+    /// The hand gestures turned on or off, as asked.
+    #[cfg(feature = "hands")]
+    fn set_hands(&mut self, on: bool) -> Result<(), String> {
+        if on != self.gesturing {
+            self.toggle_hands();
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn set_hands(&mut self, on: bool) -> Result<(), String> {
+        if on {
+            return Err(NO_CAMERA.into());
+        }
+        Ok(())
     }
 
     /// A change to the decks asked for on the command line — links laid,
@@ -5953,7 +6035,9 @@ impl App {
             | Request::Link { .. }
             | Request::Unlink { .. }
             | Request::UnlinkAll
-            | Request::Path { .. } => {}
+            | Request::Path { .. }
+            | Request::Camera { .. }
+            | Request::Hands { .. } => {}
         }
     }
 }
