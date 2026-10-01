@@ -4,7 +4,8 @@
 //! prims, drawn over everything at the screen's rate.
 
 use super::gesture::{FLASH_S, Gestures, Pt, TRAIL_S, Turn};
-use crate::scene::{Prim, Rgba, ScreenRect, View, parse_color, with_alpha};
+use crate::doc::Card;
+use crate::scene::{KIND_BLOB, Prim, Rgba, ScreenRect, View, parse_color, with_alpha};
 
 /// The marks of a frame: the laser's trail, to be laid down as one union
 /// so its spans do not bead where they meet, and the rest, over it.
@@ -107,31 +108,86 @@ pub fn marks(g: &Gestures, view: &View, now: f64) -> Marks {
     Marks { trail, over }
 }
 
-/// The presenter's camera in the bottom right corner of the window: a
-/// card of rounded corners over a soft shadow, with a hairline round it,
-/// faded in by `alpha`. `size` is the picture's, which keeps its shape.
-pub fn card(slot: u32, size: (u32, u32), alpha: f32, view: &View) -> Vec<Prim> {
+/// How fast a blob card's outline moves on: its phase, a second.
+const BLOB_TURN: f64 = 0.6;
+
+/// The presenter's camera in the bottom right corner of the window, in
+/// the `shape` the board asks for, over a soft shadow and with a hairline
+/// round it, faded in by `alpha`. `size` is the picture's: the rounded
+/// card keeps its shape, and the round, the square and the blob are a
+/// square as tall as that card, showing the picture's middle square. A
+/// blob's outline moves on with `now`, in seconds.
+pub fn card(slot: u32, size: (u32, u32), alpha: f32, view: &View, shape: Card, now: f64) -> Vec<Prim> {
     let s = view.scale as f32;
     let (vw, vh) = (view.viewport.w as f32, view.viewport.h as f32);
-    let w = (vw * 0.22).min(460.0 * s);
-    let h = w * size.1 as f32 / size.0.max(1) as f32;
+    let (cw, ch) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    let wide = (vw * 0.22).min(460.0 * s);
+    let tall = wide * ch / cw;
+    let (w, h, uv) = match shape {
+        Card::Rounded => (wide, tall, [0.0, 0.0, 1.0, 1.0]),
+        Card::Round | Card::Square | Card::Blob => (tall, tall, middle_square(cw, ch)),
+    };
     let r = ScreenRect {
         x: vw - w - 28.0 * s,
         y: vh - h - 28.0 * s,
         w,
         h,
     };
-    let round = 18.0 * s;
     let shadow = ScreenRect { y: r.y + 6.0 * s, ..r };
+    let (shade, rim, edge) = ([0.0, 0.0, 0.0, 0.35 * alpha], [1.0, 1.0, 1.0, 0.55 * alpha], 2.0 * s);
+    let round = match shape {
+        Card::Blob => {
+            let phase = (now * BLOB_TURN) as f32;
+            return vec![
+                Prim {
+                    feather: 16.0 * s,
+                    ..blob(shadow, phase, shade)
+                },
+                Prim {
+                    uv,
+                    slot,
+                    paper: [phase, 1.0, 0.0, 0.0],
+                    ..blob(r, phase, [1.0, 1.0, 1.0, alpha])
+                },
+                blob(r, phase, rim).ring(edge),
+            ];
+        }
+        Card::Round => w / 2.0,
+        Card::Square => 6.0 * s,
+        Card::Rounded => 18.0 * s,
+    };
     vec![
-        Prim::soft(shadow, round, 16.0 * s, [0.0, 0.0, 0.0, 0.35 * alpha]),
+        Prim::soft(shadow, round, 16.0 * s, shade),
         Prim {
             radius: round,
+            uv,
             color: [1.0, 1.0, 1.0, alpha],
             ..Prim::image(r, r.center(), 0.0, slot)
         },
-        Prim::rounded(r, round, [1.0, 1.0, 1.0, 0.55 * alpha]).ring(2.0 * s),
+        Prim::rounded(r, round, rim).ring(edge),
     ]
+}
+
+/// The middle square of a picture `cw` by `ch` px, as the slice of it to
+/// map: its long side cut evenly at both ends.
+fn middle_square(cw: f32, ch: f32) -> [f32; 4] {
+    if cw >= ch {
+        let cut = (1.0 - ch / cw) / 2.0;
+        [cut, 0.0, 1.0 - cut, 1.0]
+    } else {
+        let cut = (1.0 - cw / ch) / 2.0;
+        [0.0, cut, 1.0, 1.0 - cut]
+    }
+}
+
+/// The blob inscribed in box `r` at `phase`, in flat `color` — and, given
+/// a slice and a slot and `paper[1]` set, the picture cut to it.
+fn blob(r: ScreenRect, phase: f32, color: Rgba) -> Prim {
+    Prim {
+        kind: KIND_BLOB,
+        paper: [phase, 0.0, 0.0, 0.0],
+        ..Prim::rect(r, color)
+    }
 }
 
 #[cfg(test)]
@@ -170,13 +226,46 @@ mod tests {
 
     #[test]
     fn the_card_stands_in_the_bottom_right_corner_keeping_the_pictures_shape() {
-        let prims = card(7, (480, 360), 1.0, &view());
+        let prims = card(7, (480, 360), 1.0, &view(), Card::Rounded, 0.0);
         let picture = prims.iter().find(|p| p.slot == 7).expect("the picture");
         let [x, y, w, h] = picture.geom;
         assert!((w - 1920.0 * 0.22).abs() < 0.01 && (h - w * 0.75).abs() < 0.01);
         assert!((x + w - (1920.0 - 28.0)).abs() < 0.01 && (y + h - (1080.0 - 28.0)).abs() < 0.01);
         assert_eq!(picture.radius, 18.0, "rounded");
-        let faded = card(7, (480, 360), 0.5, &view());
+        assert_eq!(picture.uv, [0.0, 0.0, 1.0, 1.0], "the whole picture");
+        let faded = card(7, (480, 360), 0.5, &view(), Card::Rounded, 0.0);
         assert_eq!(faded.iter().find(|p| p.slot == 7).unwrap().color[3], 0.5);
     }
+
+    #[test]
+    fn the_card_is_cut_to_the_shape_the_board_asks_for() {
+        let v = view();
+        let picture = |shape, now| {
+            card(7, (640, 480), 1.0, &v, shape, now)
+                .into_iter()
+                .find(|p| p.slot == 7)
+                .expect("the picture")
+        };
+        let rounded = picture(Card::Rounded, 0.0);
+        // Round: a square as tall as the rounded card, rounded all the
+        // way, in the same corner, showing the picture's middle square.
+        let round = picture(Card::Round, 0.0);
+        let [x, y, w, h] = round.geom;
+        assert_eq!(w, h);
+        assert!((h - rounded.geom[3]).abs() < 0.01, "as tall as the rounded one");
+        assert_eq!(round.radius, w / 2.0, "a circle");
+        assert_eq!(round.uv, [0.125, 0.0, 0.875, 1.0]);
+        assert!((x + w - (1920.0 - 28.0)).abs() < 0.01 && (y + h - (1080.0 - 28.0)).abs() < 0.01);
+        let square = picture(Card::Square, 0.0);
+        assert_eq!((square.geom, square.uv), (round.geom, round.uv));
+        assert!(square.radius > 0.0 && square.radius < 10.0, "a square, its corners barely softened");
+        let blob = picture(Card::Blob, 0.0);
+        assert_eq!((blob.kind, blob.geom, blob.uv), (KIND_BLOB, round.geom, round.uv));
+        assert_eq!(blob.paper[1], 1.0, "it carries the picture");
+        assert_ne!(picture(Card::Blob, 1.0).paper[0], blob.paper[0], "its outline moves with the clock");
+        // Its edge and its shadow are blobs too, moving with it.
+        let edges = card(7, (640, 480), 1.0, &v, Card::Blob, 0.0);
+        assert!(edges.iter().filter(|p| p.kind == KIND_BLOB).count() >= 3, "{edges:?}");
+    }
+
 }

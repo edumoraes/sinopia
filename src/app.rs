@@ -1288,7 +1288,8 @@ impl App {
             && on.card_alpha > 0.0
             && let Some((slot, size)) = on.card
         {
-            frame.extend(hands::marks::card(slot, size, on.card_alpha, view));
+            let shape = self.doc().presentation.camera;
+            frame.extend(hands::marks::card(slot, size, on.card_alpha, view, shape, now));
         }
         let marks = hands::marks::marks(&on.gestures, view, now);
         if !marks.trail.is_empty() {
