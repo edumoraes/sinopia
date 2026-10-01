@@ -3031,6 +3031,18 @@ impl App {
                     reason,
                 },
             },
+            Request::Decks => Event::Decks {
+                decks: export::decks(self.doc()),
+            },
+            Request::Link { .. } | Request::Unlink { .. } | Request::UnlinkAll | Request::Path { .. } => {
+                match self.deck_op(req) {
+                    Ok(ids) => Event::Done { ids },
+                    Err(reason) => Event::Denied {
+                        op: op.to_owned(),
+                        reason,
+                    },
+                }
+            }
             Request::AddText { .. } | Request::SetText { .. } => match self.text_op(req) {
                 Ok((id, layer)) => Event::Texted { id, layer },
                 Err(e) => denied(&e),
@@ -3053,6 +3065,37 @@ impl App {
                 Err(e) => denied(&e),
             },
         }
+    }
+
+    /// A change to the decks asked for on the command line — links laid,
+    /// taken away, or laid as one path — on the terms the canvas lays a
+    /// link, and one step of the history. Answers the deck the first
+    /// layer named is in now, as a show from there would walk it, or what
+    /// was unlinked. A refusal says why and changes nothing.
+    fn deck_op(&mut self, req: Request) -> Result<Vec<String>, String> {
+        self.end_typing();
+        let (_, doc) = self.active();
+        let ids = match req {
+            Request::Link { from, to } => {
+                present::link(doc, &from, &to)?;
+                present::deck_of(doc, &from)
+            }
+            Request::Unlink { ids } => {
+                present::unlink(doc, &ids)?;
+                ids
+            }
+            Request::UnlinkAll => {
+                present::unlink_all(doc);
+                Vec::new()
+            }
+            Request::Path { ids } => {
+                present::lay_path(doc, &ids)?;
+                present::deck_of(doc, &ids[0])
+            }
+            _ => return Err("not an op on the decks".into()),
+        };
+        self.apply(Change::Scene);
+        Ok(ids)
     }
 
     /// A text added or changed from the command line: one step of the
@@ -5900,7 +5943,12 @@ impl App {
             | Request::Texts
             | Request::AddText { .. }
             | Request::SetText { .. }
-            | Request::Present { .. } => {}
+            | Request::Present { .. }
+            | Request::Decks
+            | Request::Link { .. }
+            | Request::Unlink { .. }
+            | Request::UnlinkAll
+            | Request::Path { .. } => {}
         }
     }
 }

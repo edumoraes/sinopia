@@ -163,6 +163,53 @@ pub fn texts(doc: &Document) -> Vec<TextCard> {
         .collect()
 }
 
+/// One stop of a deck, as the command line is told about it: its layer,
+/// what that is called and what kind of layer it is, and the box of what
+/// it shows — a frame's own, or the box round what the layer paints —
+/// read through the same `present::stop` the show reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StopCard {
+    pub id: String,
+    pub name: String,
+    pub kind: Kind,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// One deck: its stops in the order a show walks them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Deck {
+    pub stops: Vec<StopCard>,
+}
+
+/// Every deck on the board, each as a show would walk it: a layer passed
+/// over — hidden, or with nothing painted — is no stop of it.
+pub fn decks(doc: &Document) -> Vec<Deck> {
+    crate::present::decks(doc)
+        .into_iter()
+        .map(|ids| Deck {
+            stops: ids.into_iter().filter_map(|id| stop_card(doc, id)).collect(),
+        })
+        .collect()
+}
+
+/// Layer `id` as a stop, when it is one.
+pub fn stop_card(doc: &Document, id: String) -> Option<StopCard> {
+    let ink = crate::present::stop(doc, &id)?.ink;
+    let layer = doc.layer(&id)?;
+    Some(StopCard {
+        name: layer.name.clone(),
+        kind: layer.kind,
+        x: ink.x,
+        y: ink.y,
+        w: ink.w,
+        h: ink.h,
+        id,
+    })
+}
+
 /// A document holding only what the scope covers, in paint order, with
 /// the layers those elements stand on and nothing else — the groups they
 /// stand in included, so a page keeps the shape it had on the board. It is
@@ -592,6 +639,26 @@ mod tests {
         doc.elements
             .push(Element::Rect(rect("outside", "l0", 500.0, 500.0, 10.0, 10.0)));
         doc
+    }
+
+    #[test]
+    fn a_deck_is_listed_stop_by_stop_with_what_each_layer_is_and_shows() {
+        let mut doc = board();
+        assert!(decks(&doc).is_empty(), "nothing linked");
+        // The frame leads into the rect inside it, and that out to the one
+        // on the board.
+        doc.layer_mut("fl").unwrap().next = Some("in".into());
+        doc.layer_mut("in").unwrap().next = Some("l0".into());
+        let listed = decks(&doc);
+        assert_eq!(listed.len(), 1);
+        let stops = &listed[0].stops;
+        let ids: Vec<&str> = stops.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["fl", "in", "l0"]);
+        assert_eq!((stops[0].name.as_str(), stops[0].kind), ("Auth Flow", Kind::Frame));
+        assert_eq!((stops[0].x, stops[0].y, stops[0].w, stops[0].h), (0.0, 0.0, 100.0, 50.0));
+        assert_eq!((stops[1].x, stops[1].y, stops[1].w, stops[1].h), (10.0, 10.0, 20.0, 20.0), "what it paints");
+        let line = serde_json::to_string(&listed).unwrap();
+        assert!(line.contains("\"kind\":\"frame\""), "{line}");
     }
 
     #[test]

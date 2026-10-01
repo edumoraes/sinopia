@@ -807,6 +807,119 @@ pub fn numbers(doc: &Document) -> Vec<(String, usize)> {
         .collect()
 }
 
+/// The stops of the deck layer `id` is in, walked from its head — or
+/// round a loop from the stop the walk back up it came round to. None
+/// for a layer in no deck.
+pub fn deck_of(doc: &Document, id: &str) -> Vec<String> {
+    if !in_deck(doc, id) {
+        return Vec::new();
+    }
+    let all = layers(doc);
+    let mut head = id.to_owned();
+    let mut seen = vec![head.clone()];
+    while let Some(before) = all.iter().find(|l| next_of(doc, &l.id) == Some(head.as_str())) {
+        if seen.contains(&before.id) {
+            break;
+        }
+        seen.push(before.id.clone());
+        head = before.id.clone();
+    }
+    sequence(doc, &head)
+}
+
+/// Lays a link out of layer `from` to layer `to`, the stop after it, on
+/// the terms the canvas lays one: two layers of the board, never one, and
+/// a stop no other layer leads to already. A refusal says why, and
+/// changes nothing.
+pub fn link(doc: &mut Document, from: &str, to: &str) -> Result<(), String> {
+    for id in [from, to] {
+        if doc.layer(id).is_none() {
+            return Err(format!("no layer {id:?} on the board that is open"));
+        }
+    }
+    if from == to {
+        return Err(format!("layer {from:?} cannot lead to itself"));
+    }
+    let before = layers(doc)
+        .into_iter()
+        .find(|l| l.id != from && next_of(doc, &l.id) == Some(to))
+        .map(|l| l.id.clone());
+    if let Some(before) = before {
+        return Err(format!(
+            "layer {to:?} already comes after {before:?}: a stop comes after one stop at most — unlink that one first"
+        ));
+    }
+    if let Some(l) = doc.layer_mut(from) {
+        l.next = Some(to.to_owned());
+    }
+    Ok(())
+}
+
+/// Takes away the links out of `ids`. Refused whole, and nothing changed,
+/// when one of them names no layer.
+pub fn unlink(doc: &mut Document, ids: &[String]) -> Result<(), String> {
+    if let Some(missing) = ids.iter().find(|id| doc.layer(id).is_none()) {
+        return Err(format!("no layer {missing:?} on the board that is open"));
+    }
+    for id in ids {
+        if let Some(l) = doc.layer_mut(id) {
+            l.next = None;
+        }
+    }
+    Ok(())
+}
+
+/// Takes away every link on the board, and answers how many there were.
+pub fn unlink_all(doc: &mut Document) -> usize {
+    let linked: Vec<String> = layers(doc)
+        .into_iter()
+        .filter(|l| l.next.is_some())
+        .map(|l| l.id.clone())
+        .collect();
+    for id in &linked {
+        if let Some(l) = doc.layer_mut(id) {
+            l.next = None;
+        }
+    }
+    linked.len()
+}
+
+/// Lays `ids` as one deck, exactly as named: each leads to the one after
+/// it and the last to nothing, and whatever led into any of them from
+/// outside lets go — a stop taken out of the deck it was in leaves the
+/// rest of that deck where it stands. Refused whole, and nothing changed,
+/// for fewer than two, a layer named twice, or one the board does not
+/// have.
+pub fn lay_path(doc: &mut Document, ids: &[String]) -> Result<(), String> {
+    if ids.len() < 2 {
+        return Err("a path is two stops or more".into());
+    }
+    for (i, id) in ids.iter().enumerate() {
+        if doc.layer(id).is_none() {
+            return Err(format!("no layer {id:?} on the board that is open"));
+        }
+        if ids[..i].contains(id) {
+            return Err(format!("layer {id:?} is named twice: a deck stops at each stop once"));
+        }
+    }
+    let into: Vec<String> = layers(doc)
+        .into_iter()
+        .filter(|l| !ids.contains(&l.id) && next_of(doc, &l.id).is_some_and(|n| ids.iter().any(|i| i == n)))
+        .map(|l| l.id.clone())
+        .collect();
+    for id in &into {
+        if let Some(l) = doc.layer_mut(id) {
+            l.next = None;
+        }
+    }
+    for (i, id) in ids.iter().enumerate() {
+        if let Some(l) = doc.layer_mut(id) {
+            l.next = ids.get(i + 1).cloned();
+        }
+    }
+    Ok(())
+}
+
 /// A badge's least radius, the room round its number, and how far clear
 /// of its stop's box it stands, in logical px.
 const BADGE_PX: f64 = 9.0;
@@ -1609,6 +1722,71 @@ mod tests {
             "a stop passed over takes no place: {:?}",
             numbers(&doc)
         );
+    }
+
+    #[test]
+    fn a_link_is_laid_where_a_stop_takes_it_and_refused_with_the_reason_where_not() {
+        let mut doc = deck(&["a", "b", "c"]);
+        assert_eq!(link(&mut doc, "a", "b"), Ok(()));
+        assert_eq!(next_of(&doc, "a"), Some("b"));
+        let refused = link(&mut doc, "c", "b").unwrap_err();
+        assert!(refused.contains("\"a\""), "it names the layer that leads there: {refused}");
+        assert!(link(&mut doc, "a", "a").is_err(), "never itself");
+        assert!(link(&mut doc, "a", "nowhere").unwrap_err().contains("nowhere"));
+        assert!(link(&mut doc, "nobody", "a").is_err());
+        assert_eq!(link(&mut doc, "a", "c"), Ok(()), "a link laid again elsewhere moves");
+        assert_eq!(next_of(&doc, "a"), Some("c"));
+    }
+
+    #[test]
+    fn unlinking_takes_away_the_links_out_of_the_layers_named_or_every_one() {
+        let mut doc = deck(&["a", "b", "c"]);
+        link(&mut doc, "a", "b").unwrap();
+        link(&mut doc, "b", "c").unwrap();
+        assert_eq!(unlink(&mut doc, &["b".to_owned()]), Ok(()));
+        assert_eq!((next_of(&doc, "a"), next_of(&doc, "b")), (Some("b"), None));
+        assert!(unlink(&mut doc, &["ghost".to_owned()]).is_err());
+        link(&mut doc, "b", "c").unwrap();
+        assert_eq!(unlink_all(&mut doc), 2);
+        assert!(numbers(&doc).is_empty());
+    }
+
+    #[test]
+    fn a_path_is_laid_exactly_and_takes_its_stops_out_of_any_deck_they_were_in() {
+        let mut doc = deck(&["a", "b", "c", "d", "e"]);
+        // A deck that runs e -> b -> d, and a link out of c.
+        link(&mut doc, "e", "b").unwrap();
+        link(&mut doc, "b", "d").unwrap();
+        link(&mut doc, "c", "a").unwrap();
+        let ids: Vec<String> = ["c", "b", "a"].iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(lay_path(&mut doc, &ids), Ok(()));
+        assert_eq!(sequence(&doc, "c"), ["c", "b", "a"], "exactly that");
+        assert_eq!(next_of(&doc, "e"), None, "b is taken out of the deck it was in");
+        assert_eq!(next_of(&doc, "a"), None, "and the path ends where it says");
+        assert_eq!(first(&doc, None).as_deref(), Some("c"));
+        let twice: Vec<String> = ["a", "b", "a"].iter().map(|s| (*s).to_owned()).collect();
+        assert!(lay_path(&mut doc, &twice).is_err(), "a stop once");
+        assert!(lay_path(&mut doc, &["a".to_owned()]).is_err(), "a path is two stops or more");
+        let stray: Vec<String> = ["a", "zz"].iter().map(|s| (*s).to_owned()).collect();
+        assert!(lay_path(&mut doc, &stray).is_err());
+        assert_eq!(sequence(&doc, "c"), ["c", "b", "a"], "a refusal changes nothing");
+    }
+
+    #[test]
+    fn the_deck_a_layer_is_in_is_walked_from_its_head() {
+        let mut doc = deck(&["a", "b", "c", "d"]);
+        link(&mut doc, "c", "a").unwrap();
+        link(&mut doc, "a", "d").unwrap();
+        assert_eq!(deck_of(&doc, "d"), ["c", "a", "d"]);
+        assert_eq!(deck_of(&doc, "c"), ["c", "a", "d"]);
+        assert_eq!(deck_of(&doc, "b"), Vec::<String>::new(), "in no deck");
+        link(&mut doc, "d", "c").unwrap();
+        assert_eq!(deck_of(&doc, "a").len(), 3, "a loop is walked once round");
+        assert_eq!(decks(&doc), [vec!["a".to_owned(), "d".to_owned(), "c".to_owned()]]);
+        let mut two = deck(&["a", "b", "c", "d"]);
+        link(&mut two, "a", "b").unwrap();
+        link(&mut two, "d", "c").unwrap();
+        assert_eq!(decks(&two), [vec!["a".to_owned(), "b".to_owned()], vec!["d".to_owned(), "c".to_owned()]]);
     }
 
     #[test]

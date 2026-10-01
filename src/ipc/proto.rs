@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::doc::{Align, BlendMode, Tag, TextMode, Valign};
 use crate::editor::Listed;
-use crate::export::{Card, TextCard};
+use crate::export::{Card, Deck, TextCard};
 use crate::tree::{Arrange, Place};
 
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -170,6 +170,28 @@ pub enum Request {
         id: String,
         spec: TextSpec,
     },
+    /// The decks of the open board, each its stops in the order a show
+    /// walks them. It and the four under it are the command line's hold
+    /// on the presentation: a change each one step of the history, and
+    /// every layer named by its id.
+    Decks,
+    /// A link out of layer `from` to layer `to`: the stop after it.
+    Link {
+        from: String,
+        to: String,
+    },
+    /// The links out of these layers taken away.
+    Unlink {
+        ids: Vec<String>,
+    },
+    /// Every link on the board taken away.
+    UnlinkAll,
+    /// These layers laid as one deck, exactly as named: each leads to the
+    /// next, the last to nothing, and whatever led into any of them from
+    /// outside lets go.
+    Path {
+        ids: Vec<String>,
+    },
 }
 
 impl TextSpec {
@@ -296,6 +318,11 @@ impl Request {
             Request::Texts => "texts",
             Request::AddText { .. } => "add_text",
             Request::SetText { .. } => "set_text",
+            Request::Decks => "decks",
+            Request::Link { .. } => "link",
+            Request::Unlink { .. } => "unlink",
+            Request::UnlinkAll => "unlink_all",
+            Request::Path { .. } => "path",
         }
     }
 
@@ -400,6 +427,8 @@ pub enum Event {
     Texts { texts: Vec<TextCard> },
     /// A text landed or changed: its id, and its layer's.
     Texted { id: String, layer: String },
+    /// The decks of the open board.
+    Decks { decks: Vec<Deck> },
     /// Where the show stands: the slide on show, counted from 1, of how
     /// many, and the layer of the stop it is — none of either while no
     /// show is on.
@@ -603,6 +632,18 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
             );
             Request::SetText { id, spec }
         }
+        "decks" => Request::Decks,
+        "link" => Request::Link {
+            from: take_string(&mut map, "from")?,
+            to: take_string(&mut map, "to")?,
+        },
+        "unlink" => Request::Unlink {
+            ids: take_ids(&mut map)?,
+        },
+        "unlink_all" => Request::UnlinkAll,
+        "path" => Request::Path {
+            ids: take_ids(&mut map)?,
+        },
         other => anyhow::bail!("unknown op: {other:?}"),
     };
 
@@ -624,7 +665,16 @@ pub fn request_line(req: &Request) -> String {
         | Request::Frames
         | Request::Layers
         | Request::MergeVisible
-        | Request::Flatten => {}
+        | Request::Flatten
+        | Request::Decks
+        | Request::UnlinkAll => {}
+        Request::Link { from, to } => {
+            map.insert("from".into(), from.clone().into());
+            map.insert("to".into(), to.clone().into());
+        }
+        Request::Unlink { ids } | Request::Path { ids } => {
+            map.insert("ids".into(), ids.clone().into());
+        }
         Request::Open { id } => {
             map.insert("id".into(), id.clone().into());
         }
@@ -1075,6 +1125,7 @@ fn reject_leftovers(map: &Map<String, Value>, ctx: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::StopCard;
     use crate::doc::Kind;
 
     #[test]
@@ -1600,6 +1651,68 @@ mod tests {
         ] {
             assert!(parse_request(line).is_err(), "line: {line}");
         }
+    }
+
+    fn deck_ops() -> Vec<Request> {
+        let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        vec![
+            Request::Decks,
+            Request::Link {
+                from: "01JA".into(),
+                to: "01JB".into(),
+            },
+            Request::Unlink { ids: ids(&["01JA"]) },
+            Request::UnlinkAll,
+            Request::Path {
+                ids: ids(&["01JA", "01JB", "01JC"]),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_deck_ops_round_trip_and_are_asked() {
+        for req in deck_ops() {
+            assert_eq!(parse_request(&request_line(&req)).unwrap(), req, "{}", req.op());
+            assert!(req.is_asked(), "{}: the answer is the deck", req.op());
+        }
+    }
+
+    #[test]
+    fn a_deck_op_is_as_closed_as_every_other() {
+        for line in [
+            r#"{ "v": 1, "op": "link", "from": "a" }"#,
+            r#"{ "v": 1, "op": "link", "to": "b" }"#,
+            r#"{ "v": 1, "op": "link", "from": "a", "to": "b", "slide": 1 }"#,
+            r#"{ "v": 1, "op": "unlink" }"#,
+            r#"{ "v": 1, "op": "unlink", "ids": [] }"#,
+            r#"{ "v": 1, "op": "unlink_all", "ids": ["a"] }"#,
+            r#"{ "v": 1, "op": "path", "ids": "a,b" }"#,
+            r#"{ "v": 1, "op": "decks", "all": true }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn the_decks_match_the_wire_format() {
+        let ev = Event::Decks {
+            decks: vec![Deck {
+                stops: vec![StopCard {
+                    id: "01JA".into(),
+                    name: "Intro".into(),
+                    kind: crate::doc::Kind::Frame,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1600.0,
+                    h: 900.0,
+                }],
+            }],
+        };
+        let v: Value = serde_json::from_str(&event_line(&ev)).unwrap();
+        assert_eq!(v["ev"], "decks");
+        assert_eq!(v["decks"][0]["stops"][0]["name"], "Intro");
+        assert_eq!(v["decks"][0]["stops"][0]["kind"], "frame");
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
     }
 
     #[test]
