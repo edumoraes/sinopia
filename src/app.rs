@@ -39,6 +39,8 @@ use crate::history::History;
 use crate::gfx::Gfx;
 use crate::graft;
 use crate::guest::Guest;
+#[cfg(feature = "hands")]
+use crate::hands;
 use crate::grid;
 use crate::ipc::proto::{Event, Presenting, Request};
 use crate::ipc::server::Server;
@@ -140,7 +142,28 @@ enum UserEvent {
     PastedLayers(Box<Document>),
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
+    /// What the camera saw: the hands in one frame, and the frame itself
+    /// while the presenter's card wants it.
+    #[cfg(feature = "hands")]
+    Hands(hands::camera::Reading),
 }
+
+/// Hand gestures while they are on: the thread reading the camera, what
+/// the hands are doing, the clock that is read on, and the presenter's
+/// camera on the GPU — its slot and size, and how far it has faded in.
+#[cfg(feature = "hands")]
+struct HandsOn {
+    tracker: hands::camera::Tracker,
+    gestures: hands::gesture::Gestures,
+    origin: Instant,
+    last_tick: f64,
+    card: Option<(u32, (u32, u32))>,
+    card_alpha: f32,
+}
+
+/// How long the presenter's camera takes to come and go.
+#[cfg(feature = "hands")]
+const CARD_FADE_S: f32 = 0.2;
 
 /// What happens to a project once the dialog it is waiting on answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +369,14 @@ struct App {
     show: Option<Show>,
     /// The show put the window in full screen, and ending it takes it out.
     show_full: bool,
+    /// The presenter's camera is wanted in the corner while presenting:
+    /// `C` turns it on and off, and the hand gestures' camera is what is
+    /// drawn there.
+    #[cfg(feature = "hands")]
+    show_camera: bool,
+    /// Hand gestures through the webcam, while they are on.
+    #[cfg(feature = "hands")]
+    hands: Option<HandsOn>,
 }
 
 /// A send being composed. It holds the agents as they were when the
@@ -951,6 +982,7 @@ impl App {
             show.tick(f64::from(dt));
         }
         self.hold_show();
+        self.hands_tick();
     }
 
     /// Puts the camera where the show says: along the flight, or held
@@ -1040,9 +1072,17 @@ impl App {
     }
 
     /// A key while a show is on: the arrows, the page keys, Space and
-    /// Enter move it; Home and End go to either end; Esc and F5 end it.
+    /// Enter move it; Home and End go to either end; Esc and F5 end it;
+    /// with hand gestures, `C` turns the presenter's camera on or off.
     /// Nothing else reaches the board.
     fn show_key(&mut self, key: &Key) {
+        #[cfg(feature = "hands")]
+        if let Key::Character(c) = key
+            && c.eq_ignore_ascii_case("c")
+        {
+            self.show_camera = !self.show_camera;
+            return;
+        }
         let action = match key {
             Key::Named(
                 NamedKey::ArrowRight
@@ -1061,6 +1101,143 @@ impl App {
         };
         self.present(action);
     }
+
+    /// Turns hand gestures on — the camera opened, the models loaded from
+    /// the data directory's `models/` — or off, letting go of the camera.
+    /// The camera is `SINOPIA_CAMERA` when set: an index, or a video file
+    /// played as one.
+    #[cfg(feature = "hands")]
+    fn toggle_hands(&mut self) {
+        if self.hands.take().is_some() {
+            log::info!("hands: off");
+            return self.redraw();
+        }
+        let models = self.store.root().join("models");
+        let camera = std::env::var("SINOPIA_CAMERA").unwrap_or_else(|_| "0".into());
+        let proxy = self.proxy.clone();
+        let sink = move |reading| proxy.send_event(UserEvent::Hands(reading)).is_ok();
+        match hands::camera::Tracker::start(&models, &camera, sink) {
+            Ok(tracker) => {
+                log::info!("hands: on, camera {camera}");
+                self.hands = Some(HandsOn {
+                    tracker,
+                    gestures: hands::gesture::Gestures::default(),
+                    origin: Instant::now(),
+                    last_tick: 0.0,
+                    card: None,
+                    card_alpha: 0.0,
+                });
+            }
+            Err(e) => log::error!("hands: {e:#}"),
+        }
+        self.redraw();
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn toggle_hands(&mut self) {
+        log::info!("this build has no hand gestures: it is built with --features hands");
+    }
+
+    #[cfg(feature = "hands")]
+    fn hands_on(&self) -> bool {
+        self.hands.is_some()
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hands_on(&self) -> bool {
+        false
+    }
+
+    /// One reading of the camera: the hands move what they move, a sweep
+    /// turns a slide, and a frame for the presenter's card goes up to the
+    /// GPU.
+    #[cfg(feature = "hands")]
+    fn hands_read(&mut self, reading: hands::camera::Reading) {
+        let Some(on) = self.hands.as_mut() else { return };
+        let now = on.origin.elapsed().as_secs_f64();
+        let found: Vec<_> = reading.hands.iter().map(|h| h.points).collect();
+        let turn = on.gestures.read(&found, reading.size, now, self.show.is_some());
+        let mut seen = on.gestures.moving() || !on.gestures.pinches.is_empty();
+        if let Some((w, h, rgba)) = reading.card
+            && let Some(gfx) = &mut self.gfx
+        {
+            match gfx.upload_camera(&Bitmap { w, h, rgba }) {
+                Ok(slot) => {
+                    on.card = Some((slot, (w, h)));
+                    seen = true;
+                }
+                Err(e) => log::warn!("hands: the camera's frame did not upload: {e:#}"),
+            }
+        }
+        match turn {
+            Some(hands::gesture::Turn::Next) => self.present(Presenting::Next),
+            Some(hands::gesture::Turn::Prev) => self.present(Presenting::Prev),
+            None => {}
+        }
+        if seen || turn.is_some() {
+            self.redraw();
+        }
+    }
+
+    /// One frame of the screen for the hands: the springs and the coast
+    /// move the board — through the trackpad's own door, so a show holds
+    /// it inside the slide — the laser glides, and the card fades.
+    #[cfg(feature = "hands")]
+    fn hands_tick(&mut self) {
+        let wanted = self.show.is_some() && self.show_camera;
+        let Some(on) = self.hands.as_mut() else { return };
+        let now = on.origin.elapsed().as_secs_f64();
+        let dt = (now - on.last_tick).clamp(0.0, 0.1);
+        on.last_tick = now;
+        on.tracker.want_card(wanted);
+        let fade = dt as f32 / CARD_FADE_S;
+        on.card_alpha = if wanted && on.card.is_some() {
+            (on.card_alpha + fade).min(1.0)
+        } else {
+            (on.card_alpha - fade).max(0.0)
+        };
+        if let Some((dx, dy, factor)) = on.gestures.tick(now, dt) {
+            self.gestured(Gesture::Pinch { dx, dy, factor });
+        }
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hands_tick(&mut self) {}
+
+    #[cfg(feature = "hands")]
+    fn hands_animating(&self) -> bool {
+        self.hands
+            .as_ref()
+            .is_some_and(|on| on.gestures.moving() || (on.card_alpha > 0.0 && on.card_alpha < 1.0))
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hands_animating(&self) -> bool {
+        false
+    }
+
+    /// What the hands put on screen, over everything: the presenter's
+    /// camera in a show, the laser's trail laid as one union, then the
+    /// laser, the pinches and a turned slide's chevron.
+    #[cfg(feature = "hands")]
+    fn hand_marks(&self, frame: &mut Frame, view: &View) {
+        let Some(on) = &self.hands else { return };
+        let now = on.origin.elapsed().as_secs_f64();
+        if self.show.is_some()
+            && on.card_alpha > 0.0
+            && let Some((slot, size)) = on.card
+        {
+            frame.extend(hands::marks::card(slot, size, on.card_alpha, view));
+        }
+        let marks = hands::marks::marks(&on.gestures, view, now);
+        if !marks.trail.is_empty() {
+            frame.group(marks.trail, 1.0, scene::Blend::Union, scene::Blend::Over);
+        }
+        frame.extend(marks.over);
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hand_marks(&self, _frame: &mut Frame, _view: &View) {}
 
     /// What a show puts on screen: the board as it is, with nothing over
     /// it but the bands that cover what is not the slide — no grid, no
@@ -1152,6 +1329,7 @@ impl App {
             || self.slides.moving()
             || self.scrolling.moving()
             || self.show.as_ref().is_some_and(Show::flying)
+            || self.hands_animating()
     }
 
     fn redraw(&self) {
@@ -2085,6 +2263,7 @@ impl App {
             hidden: !picked.is_empty() && picked.iter().all(|l| !l.visible),
             merge: editor.merge_name(doc),
             present: present::presentable(doc, editor.selection()),
+            hands: cfg!(feature = "hands").then(|| self.hands_on()),
         }
     }
 
@@ -3596,7 +3775,9 @@ impl App {
     /// dock, the layers handle and panel, the strip.
     fn frame(&self, view: &View) -> Frame {
         if self.show.is_some() {
-            return self.show_frame(view);
+            let mut frame = self.show_frame(view);
+            self.hand_marks(&mut frame, view);
+            return frame;
         }
         // Before the window exists there are no textures, so every image
         // is a placeholder — which is what an empty map says.
@@ -3861,6 +4042,7 @@ impl App {
             };
             frame.extend(panel.prims(&look, &ink));
         }
+        self.hand_marks(&mut frame, view);
         frame
     }
 
@@ -4840,6 +5022,7 @@ impl App {
                 return self.redraw();
             }
             Action::Present => return self.start_show(),
+            Action::Hands => return self.toggle_hands(),
             Action::Layer(command) if command.merges() => return self.merge_layers(command),
             Action::Delete => {
                 let (editor, doc) = self.active();
@@ -5424,6 +5607,8 @@ impl App {
             UserEvent::PastedText(text) => return self.pasted_text(&text),
             UserEvent::PastedLayers(clip) => return self.pasted_layers(*clip),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
+            #[cfg(feature = "hands")]
+            UserEvent::Hands(reading) => return self.hands_read(reading),
         };
         match req {
             Request::Raise => {
@@ -5803,6 +5988,10 @@ pub fn run(
         exit_error: None,
         show: None,
         show_full: false,
+        #[cfg(feature = "hands")]
+        show_camera: false,
+        #[cfg(feature = "hands")]
+        hands: None,
     };
     // The first tab is built before the theme is in hand, so it is told
     // what a new frame's ground is once the window owns both.

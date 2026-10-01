@@ -150,6 +150,8 @@ pub enum Action {
     Library,
     /// The board's frames presented, one slide at a time.
     Present,
+    /// Hand gestures through the webcam turned on or off.
+    Hands,
     NewLayer,
     NewGroup,
     Rename,
@@ -180,6 +182,9 @@ pub struct State {
     pub merge: &'static str,
     /// The board has a frame on show to present.
     pub present: bool,
+    /// Whether hand gestures are on, in a build that has them; `None` in
+    /// one that does not, which offers no line for them.
+    pub hands: Option<bool>,
 }
 
 /// The `Ctrl` shortcut for `key` — read lower case, with `Shift` and
@@ -213,6 +218,7 @@ pub fn shortcut(key: &str, shift: bool, alt: bool) -> Option<Action> {
         (",", false, false) => Action::Layer(Command::Show),
         ("e", false, true) => Action::Layer(Command::Merge),
         ("e", true, false) => Action::Layer(Command::MergeVisible),
+        ("h", true, false) => Action::Hands,
         _ => return None,
     })
 }
@@ -263,6 +269,7 @@ pub fn items(
                 false,
             ),
             ("Present", "F5", Action::Present, state.present, true),
+            ("Hand Gestures", "Ctrl+Shift+H", Action::Hands, state.hands.is_some(), false),
         ],
         Title::Layer => {
             let run = |label, keys, command, rule| {
@@ -325,6 +332,7 @@ pub fn items(
     };
     lines
         .into_iter()
+        .filter(|(_, _, action, _, _)| *action != Action::Hands || state.hands.is_some())
         .map(|(label, keys, action, enabled, rule)| {
             let item = Item::new(label).enabled(enabled);
             let item = if keys.is_empty() {
@@ -336,6 +344,7 @@ pub fn items(
             let item = match action {
                 Action::Layers => item.checked(state.layers),
                 Action::Library => item.checked(state.library == Some(true)),
+                Action::Hands => item.checked(state.hands == Some(true)),
                 _ => item,
             };
             (item, action)
@@ -431,6 +440,7 @@ mod tests {
             hidden: false,
             merge: "Merge Down",
             present: true,
+            hands: Some(false),
         }
     }
 
@@ -638,6 +648,19 @@ mod tests {
         let (items, actions) = super::items(Title::View, &hidden, |_| true);
         assert!(!line(&items, &actions, Action::Layers).checked);
         assert!(!line(&items, &actions, Action::Library).checked);
+    }
+
+    #[test]
+    fn hand_gestures_are_offered_only_by_a_build_that_has_them() {
+        let (_, actions) = super::items(Title::View, &State { hands: None, ..state() }, |_| true);
+        assert!(!actions.contains(&Action::Hands), "no line for what the build lacks");
+        let on = State {
+            hands: Some(true),
+            ..state()
+        };
+        let (items, actions) = super::items(Title::View, &on, |_| true);
+        assert!(line(&items, &actions, Action::Hands).checked);
+        assert_eq!(shortcut("h", true, false), Some(Action::Hands));
     }
 
     #[test]
