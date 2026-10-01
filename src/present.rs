@@ -1,21 +1,26 @@
-//! A presentation: the frames linked one to the next, shown one at a
-//! time. A frame's `next` names the frame after it, wherever the two
-//! stand; a show walks those links from where it starts, fits each slide
-//! to the window and holds the camera inside it — zoom out stops at the
-//! whole slide, and a pan never looks past its edges. Between two slides
-//! the camera flies, from what is on screen to the next slide, opening
-//! out on the way as far as it takes to keep both in sight.
+//! A presentation: the stops of a deck, shown one at a time. A stop is a
+//! layer — a frame, a group, or the layer one object stands on — and a
+//! layer's `next` names the stop after it, wherever the two stand. A show
+//! walks those links from where it starts, fits each stop to the window
+//! and holds the camera inside it: zoom out stops at the whole of it, and
+//! a pan never looks past its edges. A frame is shown as a slide, the
+//! window round it covered; anything else is shown on the board, with
+//! room round it and the board in sight. Between two stops the camera
+//! flies along the path van Wijk and Nuij worked out for zooming and
+//! panning together: straight in to what is already in sight, out only
+//! as far as it takes to reach what is not.
 //!
 //! Pure, like the rest of the core: `app` keeps a [`Show`] while
 //! presenting, ages it on its clock and asks it for the camera and for
-//! what to cover. The arrows between linked frames, and the handle a
-//! link is pulled out of, are drawn here too, so the canvas and the
-//! press cannot disagree about where the handle is.
+//! what to cover. The arrows between linked stops, and the handle a link
+//! is pulled out of, are drawn here too, so the canvas and the press
+//! cannot disagree about where they are.
 
 use std::f64::consts::PI;
 
-use crate::doc::{Camera, Document, Element, Frame};
+use crate::doc::{Camera, Document, Frame, Kind, Layer};
 use crate::scene::{Prim, Rgba, ScreenRect, View, Viewport, with_alpha};
+use crate::select;
 
 /// A box in world units.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,6 +67,26 @@ impl Area {
         (w > 0.0 && h > 0.0).then_some(Area { x, y, w, h })
     }
 
+    /// The box round both.
+    fn union(&self, other: &Area) -> Area {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Area {
+            x,
+            y,
+            w: (self.x + self.w).max(other.x + other.w) - x,
+            h: (self.y + self.h).max(other.y + other.h) - y,
+        }
+    }
+
+    /// Whether `other` is wholly inside it.
+    fn holds(&self, other: &Area) -> bool {
+        other.x >= self.x
+            && other.y >= self.y
+            && other.x + other.w <= self.x + self.w
+            && other.y + other.h <= self.y + self.h
+    }
+
     /// Where it falls on screen, in physical px.
     fn on_screen(&self, view: &View) -> (f64, f64, f64, f64) {
         let (x0, y0) = view.world_to_screen(self.x, self.y);
@@ -70,67 +95,168 @@ impl Area {
     }
 }
 
-/// The frame `f` links to, when that is a frame on the board and not `f`
-/// itself. A link to a frame that has gone leads nowhere.
-pub fn next_of<'a>(doc: &'a Document, f: &Frame) -> Option<&'a Frame> {
-    let id = f.next.as_deref()?;
-    doc.frame(id).filter(|n| n.id != f.id)
+/// How much room a stop that is not a frame is shown with, on every
+/// side, as a share of its longer side: what it holds does not touch the
+/// window's edges.
+const ROOM: f64 = 0.08;
+
+/// What a stop shows: the box of what it paints, and whether it is a
+/// slide — a frame, shown with the window round it covered.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stop {
+    /// A frame's own box; else the box round the ink of everything the
+    /// layer holds that is painted, as far as the frame it stands in
+    /// lets it show.
+    pub ink: Area,
+    pub slide: bool,
 }
 
-/// Every frame on the board, in paint order.
-fn frames(doc: &Document) -> impl Iterator<Item = &Frame> {
-    doc.elements.iter().filter_map(|el| match el {
-        Element::Frame(f) => Some(f),
-        _ => None,
-    })
+impl Stop {
+    /// What a show fits to a window of `viewport`'s shape: a slide's own
+    /// box; anything else its ink with room round it, made as wide or as
+    /// tall as it takes to have the window's shape — so nothing round it
+    /// is covered, and a pan inside it can reach every part of the window.
+    pub fn area(&self, viewport: Viewport) -> Area {
+        if self.slide {
+            return self.ink;
+        }
+        let room = ROOM * self.ink.w.max(self.ink.h);
+        let (w, h) = ((self.ink.w + 2.0 * room).max(1.0), (self.ink.h + 2.0 * room).max(1.0));
+        let shape = aspect(viewport);
+        let (w, h) = if w / h < shape { (h * shape, h) } else { (w, w / shape) };
+        let (cx, cy) = self.ink.center();
+        Area {
+            x: cx - w / 2.0,
+            y: cy - h / 2.0,
+            w,
+            h,
+        }
+    }
+
+    /// How strongly the window round its area is covered: all of it for
+    /// a slide, none of it for anything else.
+    pub fn veil(&self) -> f64 {
+        if self.slide { 1.0 } else { 0.0 }
+    }
 }
 
-/// The slides from `start` on: it, then every frame its links lead to,
+/// A window's shape: its width over its height.
+fn aspect(viewport: Viewport) -> f64 {
+    f64::from(viewport.w.max(1)) / f64::from(viewport.h.max(1))
+}
+
+/// The stop layer `id` is, when it is one: a frame layer is its frame;
+/// any other layer is the box round what it paints — its own object, or
+/// everything under a group. A layer hidden, or holding nothing painted,
+/// is no stop: what is not painted cannot be shown.
+pub fn stop(doc: &Document, id: &str) -> Option<Stop> {
+    if !doc.shown(id) {
+        return None;
+    }
+    let layer = doc.layer(id)?;
+    if layer.kind == Kind::Frame {
+        return doc.frame_on(id).map(|f| Stop {
+            ink: Area::of(f),
+            slide: true,
+        });
+    }
+    let held = doc.subtree(layer);
+    doc.painted()
+        .filter(|p| held.iter().any(|h| h == p.element.layer()))
+        .filter_map(|p| {
+            let (lo, hi) = select::frame(p.element)?.aabb();
+            let ink = Area {
+                x: lo[0],
+                y: lo[1],
+                w: hi[0] - lo[0],
+                h: hi[1] - lo[1],
+            };
+            // What the frame's boundary cuts away is not there to show.
+            match p.within {
+                Some(f) => ink.meet(&Area::of(f)),
+                None => Some(ink),
+            }
+        })
+        .reduce(|a, b| a.union(&b))
+        .map(|ink| Stop { ink, slide: false })
+}
+
+/// The layer `id` leads to, when that is another layer on the board. A
+/// link to a layer that has gone leads nowhere, and so does a link to
+/// itself.
+pub fn next_of<'a>(doc: &'a Document, id: &str) -> Option<&'a str> {
+    let next = doc.layer(id)?.next.as_deref()?;
+    (next != id).then(|| doc.layer(next).map(|l| l.id.as_str())).flatten()
+}
+
+/// Every layer on the board in paint order: the board's stack bottom to
+/// top, with what a group or a frame holds right after it.
+fn layers(doc: &Document) -> Vec<&Layer> {
+    fn walk<'a>(doc: &'a Document, stack: &'a [Layer], out: &mut Vec<&'a Layer>) {
+        for layer in stack {
+            out.push(layer);
+            walk(doc, doc.inner(layer), out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(doc, &doc.layers, &mut out);
+    out
+}
+
+/// Whether a link leads out of `id` or into it.
+fn in_deck(doc: &Document, id: &str) -> bool {
+    next_of(doc, id).is_some() || layers(doc).iter().any(|l| next_of(doc, &l.id) == Some(id))
+}
+
+/// The stops from `start` on: it, then every layer its links lead to,
 /// each once — a deck that loops back ends where it would repeat. A
-/// hidden frame is passed through rather than shown: what is not painted
-/// is not a slide, and the frames after it still are.
+/// layer that is no stop — hidden, or with nothing painted — is passed
+/// through rather than shown, and the stops after it still are.
 pub fn sequence(doc: &Document, start: &str) -> Vec<String> {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = Vec::new();
-    let mut at = doc.frame(start);
-    while let Some(f) = at {
-        if seen.contains(&f.id.as_str()) {
+    let mut at = doc.layer(start).map(|l| l.id.as_str());
+    while let Some(id) = at {
+        if seen.contains(&id) {
             break;
         }
-        seen.push(&f.id);
-        if doc.shown(&f.layer) {
-            out.push(f.id.clone());
+        seen.push(id);
+        if stop(doc, id).is_some() {
+            out.push(id.to_owned());
         }
-        at = next_of(doc, f);
+        at = next_of(doc, id);
     }
     out
 }
 
-/// Where a show starts: the frame selected, if one is; else the first
-/// frame that leads somewhere and that nothing leads to — the head of a
-/// deck; else the first frame that leads anywhere, since a deck that
-/// loops has no head; else the first frame there is.
-pub fn first(doc: &Document, selection: &[String]) -> Option<String> {
-    let selected = selection.iter().find_map(|id| doc.frame(id));
-    if let Some(f) = selected {
-        return Some(f.id.clone());
+/// Where a show starts: the stop selected, when it is a frame or in a
+/// deck — an object linked to nothing is no reason to show it alone —
+/// else the first layer that leads somewhere and that nothing leads to,
+/// the head of a deck; else the first that leads anywhere, since a deck
+/// that loops has no head; else the first frame on show, a deck of one.
+pub fn first(doc: &Document, selected: Option<&str>) -> Option<String> {
+    if let Some(id) = selected
+        && stop(doc, id).is_some_and(|s| s.slide || in_deck(doc, id))
+    {
+        return Some(id.to_owned());
     }
-    let led_to: Vec<&str> = frames(doc)
-        .filter_map(|f| next_of(doc, f))
-        .map(|n| n.id.as_str())
-        .collect();
-    let leads = |f: &&Frame| next_of(doc, f).is_some();
-    frames(doc)
+    let all = layers(doc);
+    let led_to: Vec<&str> = all.iter().filter_map(|l| next_of(doc, &l.id)).collect();
+    let leads = |l: &&&Layer| next_of(doc, &l.id).is_some();
+    all.iter()
         .filter(leads)
-        .find(|f| !led_to.contains(&f.id.as_str()))
-        .or_else(|| frames(doc).find(leads))
-        .or_else(|| frames(doc).next())
-        .map(|f| f.id.clone())
+        .find(|l| !led_to.contains(&l.id.as_str()))
+        .or_else(|| all.iter().find(leads))
+        .or_else(|| {
+            all.iter()
+                .find(|l| l.kind == Kind::Frame && stop(doc, &l.id).is_some())
+        })
+        .map(|l| l.id.clone())
 }
 
-/// Whether a show started with `selection` would have a slide to show.
-pub fn presentable(doc: &Document, selection: &[String]) -> bool {
-    first(doc, selection).is_some_and(|start| !sequence(doc, &start).is_empty())
+/// Whether a show started with `selected` would have a stop to show.
+pub fn presentable(doc: &Document, selected: Option<&str>) -> bool {
+    first(doc, selected).is_some_and(|start| !sequence(doc, &start).is_empty())
 }
 
 /// The camera that shows `area` whole, as large as the window allows and
@@ -171,44 +297,117 @@ pub fn hold(camera: Camera, area: Area, viewport: Viewport, scale: f64) -> Camer
     }
 }
 
-/// How far a flight opens out at its middle, as a power of what it
-/// would take to keep both ends in sight: all of it would pull back to
-/// an overview between every pair of slides, none would slide flat
-/// across whatever is between them.
-const LIFT: f64 = 0.6;
-/// How long a flight takes at the least, and how much longer for every
-/// e-fold it opens out by.
-const FLIGHT_S: f64 = 0.7;
-const FLIGHT_PER_LIFT_S: f64 = 0.3;
+/// How willing a flight is to zoom out to get somewhere rather than pan:
+/// van Wijk and Nuij's ρ, and √2 is what they found people prefer.
+const RHO: f64 = std::f64::consts::SQRT_2;
+
+/// How long a flight takes: a base, and more for every unit of the path's
+/// length, within a floor and a ceiling.
+const FLIGHT_S: f64 = 0.45;
+const FLIGHT_PER_S: f64 = 0.4;
+const FLIGHT_MIN_S: f64 = 0.6;
 const FLIGHT_MAX_S: f64 = 1.6;
 
-/// The camera on its way from one area to another.
+/// The way from one view to another — a middle and a width in world
+/// units — along the path of van Wijk and Nuij's "Smooth and efficient
+/// zooming and panning" (2003): the mix of zooming and panning that is
+/// shortest for the eye. Into what is already in sight it goes straight
+/// in; to what is not, it opens out only as far as it takes to have both
+/// in sight on the way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Path {
+    from: (f64, f64),
+    to: (f64, f64),
+    w0: f64,
+    /// How far the middle travels.
+    u1: f64,
+    r0: f64,
+    /// The path's length, in their units.
+    s: f64,
+    /// For a zoom with nowhere to go: which way the width moves.
+    zoom: Option<f64>,
+}
+
+impl Path {
+    fn new(from: (f64, f64), w0: f64, to: (f64, f64), w1: f64) -> Path {
+        let (w0, w1) = (w0.max(1e-9), w1.max(1e-9));
+        let u1 = (to.0 - from.0).hypot(to.1 - from.1);
+        if u1 <= 1e-9 * w0.max(w1) {
+            let ratio = (w1 / w0).ln();
+            return Path {
+                from,
+                to,
+                w0,
+                u1,
+                r0: 0.0,
+                s: ratio.abs() / RHO,
+                zoom: Some(ratio.signum()),
+            };
+        }
+        let rho2 = RHO * RHO;
+        let b = |w: f64, sign: f64| (w1 * w1 - w0 * w0 + sign * rho2 * rho2 * u1 * u1) / (2.0 * w * rho2 * u1);
+        // ln(−b + √(b² + 1)), written so a large b keeps its precision.
+        let (r0, r1) = (-b(w0, 1.0).asinh(), -b(w1, -1.0).asinh());
+        Path {
+            from,
+            to,
+            w0,
+            u1,
+            r0,
+            s: (r1 - r0) / RHO,
+            zoom: None,
+        }
+    }
+
+    /// The middle and the width `s` along the path.
+    fn at(&self, s: f64) -> ((f64, f64), f64) {
+        let along = |u: f64| {
+            let t = if self.u1 > 0.0 { u / self.u1 } else { 0.0 };
+            (
+                self.from.0 + (self.to.0 - self.from.0) * t,
+                self.from.1 + (self.to.1 - self.from.1) * t,
+            )
+        };
+        match self.zoom {
+            Some(way) => (along(0.0), self.w0 * (way * RHO * s).exp()),
+            None => {
+                let (ch, sh) = (self.r0.cosh(), self.r0.sinh());
+                let r = RHO * s + self.r0;
+                let u = self.w0 / (RHO * RHO) * (ch * r.tanh() - sh);
+                (along(u), self.w0 * ch / r.cosh())
+            }
+        }
+    }
+}
+
+/// The camera on its way from one area to another, and the veil on its
+/// way from one end's to the other's.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Flight {
     from: Area,
     to: Area,
+    /// How strongly the window round the area is covered at either end.
+    veil: (f64, f64),
+    /// The window's shape when it set off.
+    aspect: f64,
+    path: Path,
     /// Seconds flown, and how long the whole flight takes.
     t: f64,
     length: f64,
-    /// How many times larger than the plain blend of the two the area
-    /// shown is at the middle.
-    lift: f64,
 }
 
 impl Flight {
-    fn new(from: Area, to: Area) -> Flight {
-        let (a, b) = (from.center(), to.center());
-        let wide = (b.0 - a.0).abs() + from.w.max(to.w);
-        let tall = (b.1 - a.1).abs() + from.h.max(to.h);
-        let need = (wide / (from.w * to.w).sqrt()).max(tall / (from.h * to.h).sqrt());
-        let lift = need.max(1.0).powf(LIFT);
-        let length = (FLIGHT_S + FLIGHT_PER_LIFT_S * lift.ln()).min(FLIGHT_MAX_S);
+    fn new(from: (Area, f64), to: (Area, f64), aspect: f64) -> Flight {
+        let width = |a: Area| a.w.max(a.h * aspect);
+        let path = Path::new(from.0.center(), width(from.0), to.0.center(), width(to.0));
         Flight {
-            from,
-            to,
+            from: from.0,
+            to: to.0,
+            veil: (from.1, to.1),
+            aspect,
+            path,
             t: 0.0,
-            length,
-            lift,
+            length: (FLIGHT_S + FLIGHT_PER_S * path.s).clamp(FLIGHT_MIN_S, FLIGHT_MAX_S),
         }
     }
 
@@ -216,23 +415,43 @@ impl Flight {
         self.t >= self.length
     }
 
-    /// The area shown so far along: the middle eased across, the size
-    /// blended geometrically — a zoom feels even when it multiplies — and
-    /// opened out by the lift, most at the middle and not at all at
-    /// either end.
+    /// How far along it is, eased.
+    fn progress(&self) -> f64 {
+        ease((self.t / self.length).clamp(0.0, 1.0))
+    }
+
+    /// The area shown so far along: the middle and the width the path
+    /// says, and a shape going from one end's to the other's, filling the
+    /// window across or down all the way — the width is the path's.
     fn area(&self) -> Area {
-        let e = ease((self.t / self.length).clamp(0.0, 1.0));
-        let (a, b) = (self.from.center(), self.to.center());
-        let open = self.lift.powf((PI * e).sin());
-        let w = self.from.w.powf(1.0 - e) * self.to.w.powf(e) * open;
-        let h = self.from.h.powf(1.0 - e) * self.to.h.powf(e) * open;
-        let (x, y) = (a.0 + (b.0 - a.0) * e, a.1 + (b.1 - a.1) * e);
+        let e = self.progress();
+        if e <= 0.0 {
+            return self.from;
+        }
+        if e >= 1.0 {
+            return self.to;
+        }
+        let ((x, y), width) = self.path.at(e * self.path.s);
+        let fill = |a: Area| {
+            let w = a.w.max(a.h * self.aspect);
+            (a.w / w, a.h * self.aspect / w)
+        };
+        let (a, b) = (fill(self.from), fill(self.to));
+        let (fw, fh) = (a.0 + (b.0 - a.0) * e, a.1 + (b.1 - a.1) * e);
+        let most = fw.max(fh);
+        let (w, h) = (width * fw / most, width / self.aspect * fh / most);
         Area {
             x: x - w / 2.0,
             y: y - h / 2.0,
             w,
             h,
         }
+    }
+
+    /// How strongly the window round the area is covered so far along.
+    fn veil(&self) -> f64 {
+        let e = self.progress();
+        self.veil.0 + (self.veil.1 - self.veil.0) * e
     }
 }
 
@@ -245,9 +464,9 @@ pub fn ease(t: f64) -> f64 {
     }
 }
 
-/// A presentation in progress: the slides it walks, the one it is on,
-/// the flight to it while there is one, and the camera to put back at
-/// the end.
+/// A presentation in progress: the stops it walks, by their layers' ids,
+/// the one it is on, the flight to it while there is one, and the camera
+/// to put back at the end.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Show {
     slides: Vec<String>,
@@ -259,61 +478,74 @@ pub struct Show {
 
 impl Show {
     /// A show from [`first`], flying in from what `view` shows. None when
-    /// the board has no frame on show to present.
-    pub fn start(doc: &Document, selection: &[String], view: &View) -> Option<Show> {
-        let slides = sequence(doc, &first(doc, selection)?);
-        let to = Area::of(doc.frame(slides.first()?)?);
+    /// the board has no stop on show to present.
+    pub fn start(doc: &Document, selected: Option<&str>, view: &View) -> Option<Show> {
+        let slides = sequence(doc, &first(doc, selected)?);
+        let to = stop(doc, slides.first()?)?;
         Some(Show {
             slides,
             at: 0,
-            flight: Some(Flight::new(Area::seen(view), to)),
+            flight: Some(Flight::new(
+                (Area::seen(view), 0.0),
+                (to.area(view.viewport), to.veil()),
+                aspect(view.viewport),
+            )),
             before: view.camera,
         })
     }
 
-    /// The slide on show, and how many there are.
+    /// The stop on show, and how many there are.
     #[cfg(test)]
     pub fn place(&self) -> (usize, usize) {
         (self.at, self.slides.len())
     }
 
-    /// The frame on show — none once it has gone from the board, which
-    /// ends the show.
-    pub fn slide<'a>(&self, doc: &'a Document) -> Option<&'a Frame> {
-        doc.frame(self.slides.get(self.at)?)
+    /// The layer on show.
+    #[cfg(test)]
+    pub fn slide(&self) -> &str {
+        &self.slides[self.at]
     }
 
-    /// Goes to slide `to`, flying there from whatever is on screen. False
-    /// when that is where it already is, or past either end.
+    /// What the stop on show shows — none once it has gone from the
+    /// board, or been hidden, which ends the show.
+    pub fn stop(&self, doc: &Document) -> Option<Stop> {
+        stop(doc, self.slides.get(self.at)?)
+    }
+
+    /// Goes to stop `to`, flying there from whatever is on screen. False
+    /// when that is where it already is, past either end, or no longer
+    /// a stop.
     pub fn go(&mut self, doc: &Document, view: &View, to: usize) -> bool {
         if to == self.at || to >= self.slides.len() {
             return false;
         }
-        let Some(target) = doc.frame(&self.slides[to]) else {
+        let Some(target) = stop(doc, &self.slides[to]) else {
             return false;
         };
         let Some(from) = self.shown(doc, view) else {
             return false;
         };
         self.at = to;
-        self.flight = Some(Flight::new(from, Area::of(target)));
+        self.flight = Some(Flight::new(
+            from,
+            (target.area(view.viewport), target.veil()),
+            aspect(view.viewport),
+        ));
         true
     }
 
-    /// One slide on or back.
+    /// One stop on or back — past any that has stopped being one since
+    /// the show began.
     pub fn step(&mut self, doc: &Document, view: &View, forward: bool) -> bool {
-        let to = if forward {
-            self.at + 1
+        let next = if forward {
+            (self.at + 1..self.slides.len()).find(|&i| stop(doc, &self.slides[i]).is_some())
         } else {
-            match self.at.checked_sub(1) {
-                Some(to) => to,
-                None => return false,
-            }
+            (0..self.at).rev().find(|&i| stop(doc, &self.slides[i]).is_some())
         };
-        self.go(doc, view, to)
+        next.is_some_and(|to| self.go(doc, view, to))
     }
 
-    /// The last slide's place.
+    /// The last stop's place.
     pub fn last(&self) -> usize {
         self.slides.len().saturating_sub(1)
     }
@@ -332,25 +564,31 @@ impl Show {
         }
     }
 
-    /// What is shown of the slide: the area flown through, during a
-    /// flight; else as much of the slide as `view` shows. The window
-    /// around it is covered.
-    pub fn shown(&self, doc: &Document, view: &View) -> Option<Area> {
+    /// What is shown, and how strongly the window round it is covered:
+    /// the area flown through, and the veil on its way, during a flight;
+    /// else a slide as far as `view` shows it, covered round, or the
+    /// whole window for a stop on the board.
+    pub fn shown(&self, doc: &Document, view: &View) -> Option<(Area, f64)> {
         if let Some(f) = &self.flight {
-            return Some(f.area());
+            return Some((f.area(), f.veil()));
         }
-        let slide = Area::of(self.slide(doc)?);
-        Area::seen(view).meet(&slide).or(Some(slide))
+        let stop = self.stop(doc)?;
+        let seen = Area::seen(view);
+        if !stop.slide {
+            return Some((seen, 0.0));
+        }
+        let area = stop.area(view.viewport);
+        Some((seen.meet(&area).unwrap_or(area), 1.0))
     }
 
     /// The camera the show asks for: the one that fits the area flown
-    /// through, during a flight; else `camera` held inside the slide.
+    /// through, during a flight; else `camera` held inside the stop.
     pub fn camera(&self, doc: &Document, view: &View, camera: Camera) -> Option<Camera> {
         if let Some(f) = &self.flight {
             return Some(fit(f.area(), view.viewport, view.scale));
         }
-        let slide = Area::of(self.slide(doc)?);
-        Some(hold(camera, slide, view.viewport, view.scale))
+        let area = self.stop(doc)?.area(view.viewport);
+        Some(hold(camera, area, view.viewport, view.scale))
     }
 }
 
@@ -382,7 +620,7 @@ pub fn veil(area: Area, view: &View) -> Vec<ScreenRect> {
     .collect()
 }
 
-/// How far out of a frame's right edge its link handle stands, and how
+/// How far out of a stop's right edge its link handle stands, and how
 /// large it is drawn and hit, in logical px.
 const HANDLE_OUT_PX: f64 = 18.0;
 const HANDLE_PX: f64 = 7.0;
@@ -395,22 +633,25 @@ const HEAD_ANGLE: f64 = 0.5;
 const BEND: f64 = 0.12;
 const ARROW_STEPS: usize = 16;
 
-/// Where `f`'s link handle stands on screen: out of the middle of its
-/// right edge, the way a sequence reads.
-pub fn handle_at(f: &Frame, view: &View) -> (f64, f64) {
-    let (x, y) = view.world_to_screen(f.x + f.w, f.y + f.h / 2.0);
-    (x + HANDLE_OUT_PX * view.scale, y)
+/// Where the link handle of stop `id` stands on screen: out of the
+/// middle of its box's right edge, the way a sequence reads.
+pub fn handle_at(doc: &Document, view: &View, id: &str) -> Option<(f64, f64)> {
+    let ink = stop(doc, id)?.ink;
+    let (x, y) = view.world_to_screen(ink.x + ink.w, ink.y + ink.h / 2.0);
+    Some((x + HANDLE_OUT_PX * view.scale, y))
 }
 
-/// Whether `screen` is on `f`'s link handle.
-pub fn on_handle(f: &Frame, view: &View, screen: (f64, f64)) -> bool {
-    let (x, y) = handle_at(f, view);
-    (screen.0 - x).hypot(screen.1 - y) <= HANDLE_HIT_PX * view.scale
+/// Whether `screen` is on stop `id`'s link handle.
+pub fn on_handle(doc: &Document, view: &View, id: &str, screen: (f64, f64)) -> bool {
+    handle_at(doc, view, id).is_some_and(|(x, y)| (screen.0 - x).hypot(screen.1 - y) <= HANDLE_HIT_PX * view.scale)
 }
 
-/// `f`'s link handle: a ring with a dot in it, in `ink` on `ground`.
-pub fn handle_prims(f: &Frame, view: &View, ink: Rgba, ground: Rgba) -> Vec<Prim> {
-    let (x, y) = handle_at(f, view);
+/// Stop `id`'s link handle: a ring with a dot in it, in `ink` on
+/// `ground`.
+pub fn handle_prims(doc: &Document, view: &View, id: &str, ink: Rgba, ground: Rgba) -> Vec<Prim> {
+    let Some((x, y)) = handle_at(doc, view, id) else {
+        return Vec::new();
+    };
     let (x, y, s) = (x as f32, y as f32, view.scale as f32);
     let r = HANDLE_PX as f32 * s;
     vec![
@@ -448,7 +689,7 @@ struct Curve {
 
 impl Curve {
     /// From `a` to `b`, bent a little to its left so two links between
-    /// the same frames, one each way, do not lie on each other. None when
+    /// the same stops, one each way, do not lie on each other. None when
     /// the two ends are too close for an arrow to show.
     fn between(a: (f64, f64), b: (f64, f64), view: &View) -> Option<Curve> {
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -510,74 +751,76 @@ impl Curve {
     }
 }
 
-/// The arrow of `f`'s link, when it leads to a frame and both are on
-/// show: from `f`'s edge to the next one's, each where the line between
-/// their middles crosses it.
-fn arrow_of(doc: &Document, view: &View, f: &Frame) -> Option<Curve> {
-    if !doc.shown(&f.layer) {
+/// The arrow of `id`'s link, when it leads to a stop and both are on
+/// show: from the one's box to the other's, each where the line between
+/// their middles crosses it. A stop and what it holds — a frame and a
+/// group in it — have no room between them for an arrow, and get none.
+fn arrow_of(doc: &Document, view: &View, id: &str) -> Option<Curve> {
+    let from = stop(doc, id)?.ink;
+    let to = stop(doc, next_of(doc, id)?)?.ink;
+    if from.holds(&to) || to.holds(&from) {
         return None;
     }
-    let n = next_of(doc, f).filter(|n| doc.shown(&n.layer))?;
-    let (from, to) = (screen_box(Area::of(f), view), screen_box(Area::of(n), view));
+    let (a, b) = (screen_box(from, view), screen_box(to, view));
     let centre = |b: (f64, f64, f64, f64)| ((b.0 + b.2) / 2.0, (b.1 + b.3) / 2.0);
-    Curve::between(exit(from, centre(to)), exit(to, centre(from)), view)
+    Curve::between(exit(a, centre(b)), exit(b, centre(a)), view)
 }
 
 /// How near an arrow a press has to land to take hold of it, in logical
 /// px.
 const ARROW_HIT_PX: f64 = 6.0;
 
-/// The links between frames on show, each an arrow from its frame's edge
-/// to the next one's, in `ink` — all but the one out of `held`, which is
-/// in the pointer's hand.
+/// The links between stops on show, each an arrow from its stop's box to
+/// the next one's, in `ink` — all but the one out of `held`, which is in
+/// the pointer's hand.
 pub fn links(doc: &Document, view: &View, ink: Rgba, held: Option<&str>) -> Vec<Prim> {
-    frames(doc)
-        .filter(|f| Some(f.id.as_str()) != held)
-        .filter_map(|f| arrow_of(doc, view, f))
+    layers(doc)
+        .into_iter()
+        .filter(|l| Some(l.id.as_str()) != held)
+        .filter_map(|l| arrow_of(doc, view, &l.id))
         .flat_map(|curve| curve.prims(view, with_alpha(ink, 0.85)))
         .collect()
 }
 
-/// The frame whose link's arrow passes within reach of `screen`: pressed
-/// there, the link is taken hold of and can be pulled onto another frame
+/// The layer whose link's arrow passes within reach of `screen`: pressed
+/// there, the link is taken hold of and can be pulled onto another stop
 /// or off into nothing. The nearest, where two pass close.
-pub fn link_at<'a>(doc: &'a Document, view: &View, screen: (f64, f64)) -> Option<&'a Frame> {
+pub fn link_at(doc: &Document, view: &View, screen: (f64, f64)) -> Option<String> {
     let reach = ARROW_HIT_PX * view.scale;
-    frames(doc)
-        .filter_map(|f| Some((arrow_of(doc, view, f)?.distance(screen), f)))
+    layers(doc)
+        .into_iter()
+        .filter_map(|l| Some((arrow_of(doc, view, &l.id)?.distance(screen), l)))
         .filter(|(d, _)| *d <= reach)
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, f)| f)
+        .map(|(_, l)| l.id.clone())
 }
 
-/// The frame under `world` a link could be pulled onto: the topmost one
-/// on show holding the point.
-pub fn frame_under(doc: &Document, world: [f64; 2]) -> Option<&Frame> {
-    doc.stack_at(world).and_then(|layer| doc.frame_on(layer))
-}
-
-/// Whether `target` takes a link from frame `from`: it is another frame,
-/// and no frame but `from` leads to it already. A slide comes after one
-/// slide at most, so a deck stays a chain — two decks never merge into
-/// one slide. A board that already holds two links into one frame still
+/// Whether layer `target` takes a link from layer `from`: it is another
+/// layer, and none but `from` leads to it already. A stop comes after one
+/// stop at most, so a deck stays a chain — two decks never merge into
+/// one stop. A board that already holds two links into one layer still
 /// opens; it is only that no new one is laid.
-pub fn takes(doc: &Document, from: &str, target: &Frame) -> bool {
-    target.id != from
-        && !frames(doc).any(|f| f.id != from && next_of(doc, f).is_some_and(|n| n.id == target.id))
+pub fn takes(doc: &Document, from: &str, target: &str) -> bool {
+    target != from
+        && !layers(doc)
+            .iter()
+            .any(|l| l.id != from && next_of(doc, &l.id) == Some(target))
 }
 
-/// A link being pulled out of frame `from` to `to` (world): the arrow to
-/// the pointer, and the frame it would land on ringed — only one that
+/// A link being pulled out of stop `from` to `to` (world): the arrow to
+/// the pointer, and `target` — what it would land on — ringed when it
 /// takes it.
-pub fn pulling(doc: &Document, view: &View, from: &str, to: [f64; 2], ink: Rgba) -> Vec<Prim> {
-    let Some(f) = doc.frame(from) else {
+pub fn pulling(doc: &Document, view: &View, from: &str, to: [f64; 2], target: Option<&str>, ink: Rgba) -> Vec<Prim> {
+    let Some(source) = stop(doc, from) else {
         return Vec::new();
     };
     let point = view.world_to_screen(to[0], to[1]);
     let mut out = Vec::new();
-    let target = frame_under(doc, to).filter(|t| takes(doc, from, t));
-    if let Some(t) = target {
-        let (x0, y0, x1, y1) = screen_box(Area::of(t), view);
+    let ringed = target
+        .filter(|t| takes(doc, from, t))
+        .and_then(|t| stop(doc, t));
+    if let Some(t) = ringed {
+        let (x0, y0, x1, y1) = screen_box(t.ink, view);
         let s = view.scale as f32;
         let r = ScreenRect {
             x: x0 as f32 - 2.0 * s,
@@ -587,7 +830,7 @@ pub fn pulling(doc: &Document, view: &View, from: &str, to: [f64; 2], ink: Rgba)
         };
         out.push(Prim::rect(r, ink).ring(2.0 * s));
     }
-    let a = exit(screen_box(Area::of(f), view), point);
+    let a = exit(screen_box(source.ink, view), point);
     if let Some(curve) = Curve::between(a, point, view) {
         out.extend(curve.prims(view, ink));
     }
@@ -597,7 +840,7 @@ pub fn pulling(doc: &Document, view: &View, from: &str, to: [f64; 2], ink: Rgba)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{Kind, Layer};
+    use crate::doc::{Element, Rect};
 
     const VP: Viewport = Viewport { w: 1000, h: 500 };
 
@@ -609,37 +852,81 @@ mod tests {
         }
     }
 
-    /// A board of frames `ids`, side by side, each 200 by 100, none
-    /// linked yet.
+    /// A board of frames on layers `ids`, side by side, each 200 by 100,
+    /// none linked yet: frame `x` stands on layer `x`, as `x-f`, and holds
+    /// a stack whose one layer is `x-in`.
     fn deck(ids: &[&str]) -> Document {
         let mut doc = Document::new("t");
         for (i, id) in ids.iter().enumerate() {
-            let layer = format!("{id}-layer");
             doc.layers.push(Layer {
-                id: layer.clone(),
+                id: (*id).into(),
                 ..Layer::of(id, Kind::Frame)
             });
             doc.elements.push(Element::Frame(Frame {
-                id: (*id).into(),
-                layer,
+                id: format!("{id}-f"),
+                layer: (*id).into(),
                 x: 300.0 * i as f64,
                 y: 0.0,
                 w: 200.0,
                 h: 100.0,
                 background: None,
-                next: None,
-                layers: vec![Layer::new("Layer 1")],
+                layers: vec![Layer {
+                    id: format!("{id}-in"),
+                    ..Layer::new("Layer 1")
+                }],
             }));
         }
         doc
     }
 
     fn link(doc: &mut Document, from: &str, to: &str) {
-        doc.frame_mut(from).unwrap().next = Some(to.into());
+        doc.layer_mut(from).unwrap().next = Some(to.into());
+    }
+
+    fn hide(doc: &mut Document, id: &str) {
+        doc.layer_mut(id).unwrap().visible = false;
+    }
+
+    /// A rect `id` on a vector layer `layer` of its own, pushed onto the
+    /// stack `owner` holds — the board's for none.
+    fn rect(doc: &mut Document, owner: Option<&str>, layer: &str, id: &str, at: (f64, f64, f64, f64)) {
+        doc.stack_mut(owner).unwrap().push(Layer {
+            id: layer.into(),
+            ..Layer::of(layer, Kind::Vector)
+        });
+        doc.elements.push(Element::Rect(Rect {
+            id: id.into(),
+            layer: layer.into(),
+            x: at.0,
+            y: at.1,
+            w: at.2,
+            h: at.3,
+            rotation: 0.0,
+            stroke: None,
+            fill: Some("#123456".into()),
+            text: None,
+        }));
+    }
+
+    /// A group `id` on the stack `owner` holds, holding layers `inner`.
+    fn group(doc: &mut Document, owner: Option<&str>, id: &str, inner: &[&str]) {
+        let stack = doc.stack_mut(owner).unwrap();
+        let held: Vec<Layer> = inner
+            .iter()
+            .map(|i| {
+                let at = stack.iter().position(|l| l.id == *i).unwrap();
+                stack.remove(at)
+            })
+            .collect();
+        stack.push(Layer {
+            id: id.into(),
+            layers: held,
+            ..Layer::of(id, Kind::Group)
+        });
     }
 
     fn close(a: f64, b: f64) -> bool {
-        (a - b).abs() < 1e-6
+        (a - b).abs() < 1e-6 * a.abs().max(b.abs()).max(1.0)
     }
 
     fn same(a: Area, b: Area) -> bool {
@@ -647,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sequence_follows_the_links_wherever_the_frames_stand() {
+    fn a_sequence_follows_the_links_wherever_the_stops_stand() {
         let mut doc = deck(&["a", "b", "c", "d"]);
         link(&mut doc, "c", "a");
         link(&mut doc, "a", "d");
@@ -665,48 +952,133 @@ mod tests {
         let mut doc = deck(&["a"]);
         link(&mut doc, "a", "a");
         assert_eq!(sequence(&doc, "a"), ["a"]);
-        assert!(next_of(&doc, doc.frame("a").unwrap()).is_none());
+        assert!(next_of(&doc, "a").is_none());
     }
 
     #[test]
-    fn a_link_to_a_frame_that_has_gone_goes_nowhere() {
+    fn a_link_to_a_layer_that_has_gone_goes_nowhere() {
         let mut doc = deck(&["a", "b"]);
         link(&mut doc, "a", "gone");
         assert_eq!(sequence(&doc, "a"), ["a"]);
+        assert!(next_of(&doc, "a").is_none());
     }
 
     #[test]
-    fn a_hidden_frame_is_passed_through_and_not_shown() {
+    fn a_hidden_stop_is_passed_through_and_not_shown() {
         let mut doc = deck(&["a", "b", "c"]);
         link(&mut doc, "a", "b");
         link(&mut doc, "b", "c");
-        doc.layers.iter_mut().find(|l| l.id == "b-layer").unwrap().visible = false;
+        hide(&mut doc, "b");
         assert_eq!(sequence(&doc, "a"), ["a", "c"]);
     }
 
     #[test]
-    fn a_show_starts_at_the_frame_selected_then_at_the_head_of_a_deck() {
-        let mut doc = deck(&["a", "b", "c"]);
-        link(&mut doc, "c", "b");
-        link(&mut doc, "b", "a");
-        assert_eq!(first(&doc, &["b".into()]).as_deref(), Some("b"));
-        assert_eq!(first(&doc, &["not-a-frame".into()]).as_deref(), Some("c"), "the head");
-        assert_eq!(first(&doc, &[]).as_deref(), Some("c"));
+    fn any_layer_is_a_stop_a_frame_a_group_or_the_layer_of_one_object() {
+        // Frame a, then a group in it, then one object in the group, then
+        // a rect out on the board, then frame b: zooming in and out.
+        let mut doc = deck(&["a", "b"]);
+        rect(&mut doc, Some("a"), "r1", "r1-el", (20.0, 20.0, 40.0, 20.0));
+        rect(&mut doc, Some("a"), "r2", "r2-el", (100.0, 50.0, 40.0, 30.0));
+        group(&mut doc, Some("a"), "g", &["r1", "r2"]);
+        rect(&mut doc, None, "loose", "loose-el", (0.0, 500.0, 50.0, 50.0));
+        link(&mut doc, "a", "g");
+        link(&mut doc, "g", "r2");
+        link(&mut doc, "r2", "loose");
+        link(&mut doc, "loose", "b");
+        assert_eq!(sequence(&doc, "a"), ["a", "g", "r2", "loose", "b"]);
+        let g = stop(&doc, "g").unwrap();
+        assert!(!g.slide);
+        assert!(same(g.ink, Area { x: 20.0, y: 20.0, w: 120.0, h: 60.0 }), "{:?}", g.ink);
+        assert!(same(stop(&doc, "r2").unwrap().ink, Area { x: 100.0, y: 50.0, w: 40.0, h: 30.0 }));
     }
 
     #[test]
-    fn a_deck_that_loops_starts_at_its_first_frame_and_a_board_without_links_at_the_first() {
+    fn a_layer_with_nothing_painted_is_no_stop_and_is_passed_through() {
+        let mut doc = deck(&["a", "b"]);
+        // `a-in`, the frame's own first layer, holds nothing.
+        link(&mut doc, "a", "a-in");
+        link(&mut doc, "a-in", "b");
+        assert!(stop(&doc, "a-in").is_none());
+        assert_eq!(sequence(&doc, "a"), ["a", "b"]);
+        rect(&mut doc, None, "r", "r-el", (0.0, 300.0, 10.0, 10.0));
+        hide(&mut doc, "r");
+        assert!(stop(&doc, "r").is_none(), "a hidden one");
+    }
+
+    #[test]
+    fn a_frame_is_a_slide_its_own_box_whatever_the_window() {
+        let doc = deck(&["a"]);
+        let s = stop(&doc, "a").unwrap();
+        let frame = Area { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
+        assert!(s.slide && same(s.ink, frame));
+        assert!(same(s.area(VP), frame));
+        assert!(same(s.area(Viewport { w: 300, h: 900 }), frame));
+        assert_eq!(s.veil(), 1.0);
+    }
+
+    #[test]
+    fn an_object_is_shown_on_the_board_with_room_round_it_in_the_windows_shape() {
+        let mut doc = deck(&[]);
+        rect(&mut doc, None, "r", "r-el", (10.0, 10.0, 100.0, 50.0));
+        let s = stop(&doc, "r").unwrap();
+        assert_eq!(s.veil(), 0.0, "nothing round it is covered");
+        // Room of 8 on every side makes it 116 by 66; a window twice as
+        // wide as it is tall makes that 132 by 66, about the same middle.
+        let area = s.area(VP);
+        assert!(same(area, Area { x: -6.0, y: 2.0, w: 132.0, h: 66.0 }), "{area:?}");
+        let tall = s.area(Viewport { w: 500, h: 1000 });
+        assert!(same(tall, Area { x: 2.0, y: -81.0, w: 116.0, h: 232.0 }), "{tall:?}");
+    }
+
+    #[test]
+    fn what_a_frame_cuts_away_is_no_part_of_a_stop_and_a_turned_object_is_boxed_round_its_corners() {
+        let mut doc = deck(&["a"]);
+        // Half of it out past the frame's right edge, at 200.
+        rect(&mut doc, Some("a"), "r", "r-el", (150.0, 10.0, 100.0, 20.0));
+        assert!(same(stop(&doc, "r").unwrap().ink, Area { x: 150.0, y: 10.0, w: 50.0, h: 20.0 }));
+        let mut doc = deck(&[]);
+        rect(&mut doc, None, "t", "t-el", (0.0, 0.0, 100.0, 100.0));
+        if let Element::Rect(r) = &mut doc.elements[0] {
+            r.rotation = 45.0;
+        }
+        let ink = stop(&doc, "t").unwrap().ink;
+        let reach = 50.0 * 2.0_f64.sqrt();
+        assert!(same(ink, Area { x: 50.0 - reach, y: 50.0 - reach, w: 2.0 * reach, h: 2.0 * reach }), "{ink:?}");
+    }
+
+    #[test]
+    fn a_show_starts_at_the_stop_selected_then_at_the_head_of_a_deck() {
+        let mut doc = deck(&["a", "b", "c"]);
+        link(&mut doc, "c", "b");
+        link(&mut doc, "b", "a");
+        assert_eq!(first(&doc, Some("b")).as_deref(), Some("b"));
+        assert_eq!(first(&doc, Some("not-a-layer")).as_deref(), Some("c"), "the head");
+        assert_eq!(first(&doc, None).as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn an_object_selected_in_no_deck_starts_no_show_of_its_own() {
+        let mut doc = deck(&["a", "b"]);
+        link(&mut doc, "a", "b");
+        rect(&mut doc, None, "r", "r-el", (0.0, 300.0, 10.0, 10.0));
+        assert_eq!(first(&doc, Some("r")).as_deref(), Some("a"), "the head of the deck");
+        link(&mut doc, "b", "r");
+        assert_eq!(first(&doc, Some("r")).as_deref(), Some("r"), "once it is in one");
+    }
+
+    #[test]
+    fn a_deck_that_loops_starts_at_its_first_layer_and_a_board_without_links_at_its_first_frame() {
         let mut doc = deck(&["a", "b", "c"]);
         link(&mut doc, "b", "c");
         link(&mut doc, "c", "b");
-        assert_eq!(first(&doc, &[]).as_deref(), Some("b"), "the first that leads anywhere");
-        assert_eq!(first(&deck(&["x", "y"]), &[]).as_deref(), Some("x"));
-        assert_eq!(first(&Document::new("t"), &[]), None, "nothing to present");
-        assert!(!presentable(&Document::new("t"), &[]));
+        assert_eq!(first(&doc, None).as_deref(), Some("b"), "the first that leads anywhere");
+        assert_eq!(first(&deck(&["x", "y"]), None).as_deref(), Some("x"));
+        assert_eq!(first(&Document::new("t"), None), None, "nothing to present");
+        assert!(!presentable(&Document::new("t"), None));
         let mut hidden = deck(&["x"]);
-        hidden.layers.iter_mut().find(|l| l.id == "x-layer").unwrap().visible = false;
-        assert!(!presentable(&hidden, &[]), "a hidden frame is no slide");
-        assert!(presentable(&deck(&["x"]), &[]));
+        hide(&mut hidden, "x");
+        assert!(!presentable(&hidden, None), "a hidden frame is no slide");
+        assert!(presentable(&deck(&["x"]), None));
     }
 
     #[test]
@@ -796,6 +1168,27 @@ mod tests {
         assert_eq!(nudged, c);
     }
 
+    /// A flight from `from` to `to`, both uncovered, in a window of `VP`'s
+    /// shape, and the areas it shows at `n + 1` evenly spaced moments.
+    fn flown(from: Area, to: Area, n: usize) -> (Flight, Vec<Area>) {
+        let mut f = Flight::new((from, 0.0), (to, 0.0), aspect(VP));
+        let length = f.length;
+        let areas = (0..=n)
+            .map(|i| {
+                f.t = length * i as f64 / n as f64;
+                f.area()
+            })
+            .collect();
+        f.t = 0.0;
+        (f, areas)
+    }
+
+    /// The width of the world a window of `VP`'s shape shows to have all
+    /// of `a` in it.
+    fn width(a: Area) -> f64 {
+        a.w.max(a.h * aspect(VP))
+    }
+
     #[test]
     fn a_flight_leaves_from_one_area_and_lands_on_the_other() {
         let from = Area {
@@ -808,16 +1201,52 @@ mod tests {
             x: 3000.0,
             y: 400.0,
             w: 400.0,
-            h: 200.0,
+            h: 300.0,
         };
-        let mut f = Flight::new(from, to);
-        assert!(same(f.area(), from));
-        f.t = f.length;
-        assert!(same(f.area(), to), "{:?}", f.area());
+        let (f, areas) = flown(from, to, 100);
+        assert!(same(areas[0], from) && same(areas[100], to));
+        // The path's own ends are the two views, not only the clamps.
+        let ((x, y), w) = f.path.at(f.path.s);
+        assert!(close(x, 3200.0) && close(y, 550.0) && close(w, width(to)), "({x}, {y}) {w}");
+        // Every area on the way fills the window across or down.
+        for a in &areas {
+            let filled = (a.w / width(*a)).max(a.h * aspect(VP) / width(*a));
+            assert!(close(filled, 1.0), "{a:?}");
+        }
     }
 
     #[test]
-    fn a_flight_opens_out_on_the_way_further_the_further_it_goes() {
+    fn a_flight_into_what_is_in_sight_goes_straight_in_and_keeps_it_in_sight() {
+        // From a wide view to a small box near its bottom right corner.
+        let from = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 2000.0,
+            h: 1000.0,
+        };
+        let to = Area {
+            x: 1800.0,
+            y: 880.0,
+            w: 100.0,
+            h: 50.0,
+        };
+        let (_, areas) = flown(from, to, 200);
+        for pair in areas.windows(2) {
+            assert!(width(pair[1]) <= width(pair[0]) * (1.0 + 1e-9), "never out: {pair:?}");
+        }
+        for a in &areas {
+            let seen = Area {
+                x: a.center().0 - width(*a) / 2.0,
+                y: a.center().1 - width(*a) / aspect(VP) / 2.0,
+                w: width(*a),
+                h: width(*a) / aspect(VP),
+            };
+            assert!(seen.holds(&to) || seen.meet(&to).is_some(), "lost sight of it at {a:?}");
+        }
+    }
+
+    #[test]
+    fn a_flight_far_opens_out_on_the_way_further_the_further_it_goes() {
         let a = Area {
             x: 0.0,
             y: 0.0,
@@ -826,16 +1255,39 @@ mod tests {
         };
         let near = Area { x: 300.0, ..a };
         let far = Area { x: 3000.0, ..a };
-        let middle = |to| {
-            let mut f = Flight::new(a, to);
-            f.t = f.length / 2.0;
-            f.area().w
+        let widest = |to| {
+            let (_, areas) = flown(a, to, 100);
+            areas.into_iter().map(width).fold(0.0, f64::max)
         };
-        assert!(middle(near) > a.w, "even next door: {}", middle(near));
-        assert!(middle(far) > middle(near));
-        assert_eq!(Flight::new(a, a).lift, 1.0, "nowhere to go, nothing to open");
-        assert!(Flight::new(a, far).length > Flight::new(a, near).length);
-        assert!(Flight::new(a, far).length <= FLIGHT_MAX_S);
+        assert!(widest(near) > width(a), "even next door: {}", widest(near));
+        assert!(widest(far) > widest(near));
+        let (here, _) = flown(a, a, 1);
+        assert_eq!(here.path.s, 0.0, "nowhere to go");
+        let (n, _) = flown(a, near, 1);
+        let (f, _) = flown(a, far, 1);
+        assert!(f.length > n.length);
+        assert!(f.length <= FLIGHT_MAX_S && n.length >= FLIGHT_MIN_S);
+    }
+
+    #[test]
+    fn a_zoom_with_nowhere_to_go_only_zooms() {
+        let a = Area {
+            x: -500.0,
+            y: -250.0,
+            w: 1000.0,
+            h: 500.0,
+        };
+        let small = Area {
+            x: -5.0,
+            y: -2.5,
+            w: 10.0,
+            h: 5.0,
+        };
+        let (_, areas) = flown(a, small, 50);
+        for area in &areas {
+            assert!(close(area.center().0, 0.0) && close(area.center().1, 0.0), "{area:?}");
+        }
+        assert!(same(areas[50], small));
     }
 
     #[test]
@@ -854,14 +1306,14 @@ mod tests {
     }
 
     #[test]
-    fn a_show_flies_in_and_lands_on_its_first_slide() {
+    fn a_show_flies_in_and_lands_on_its_first_stop() {
         let doc = deck_of_three();
         let v = view(Camera {
             x: 5000.0,
             y: 5000.0,
             zoom: 1.0,
         });
-        let mut show = Show::start(&doc, &[], &v).unwrap();
+        let mut show = Show::start(&doc, None, &v).unwrap();
         assert_eq!(show.place(), (0, 3));
         assert_eq!(show.before, v.camera);
         assert!(show.flying());
@@ -869,7 +1321,7 @@ mod tests {
         assert!(close(leaving.x, 5000.0) && close(leaving.zoom, 1.0), "it leaves from the view");
         show.tick(10.0);
         assert!(!show.flying());
-        let slide = Area::of(doc.frame("a").unwrap());
+        let slide = stop(&doc, "a").unwrap().ink;
         assert_eq!(show.camera(&doc, &v, v.camera), Some(fit(slide, VP, 1.0)));
     }
 
@@ -881,48 +1333,89 @@ mod tests {
             y: 50.0,
             zoom: 1.0,
         });
-        let mut show = Show::start(&doc, &[], &v).unwrap();
+        let mut show = Show::start(&doc, None, &v).unwrap();
         show.tick(10.0);
         assert!(!show.step(&doc, &v, false), "nothing before the first");
         assert!(show.step(&doc, &v, true));
-        assert_eq!(show.slide(&doc).unwrap().id, "b");
+        assert_eq!(show.slide(), "b");
         assert!(show.flying());
         assert!(show.step(&doc, &v, true));
         assert!(!show.step(&doc, &v, true), "nothing after the last");
         assert_eq!(show.place(), (2, 3));
         assert!(show.go(&doc, &v, 0));
-        assert_eq!(show.slide(&doc).unwrap().id, "a");
+        assert_eq!(show.slide(), "a");
         assert!(!show.go(&doc, &v, 7));
+    }
+
+    #[test]
+    fn a_stop_hidden_mid_show_is_stepped_over_and_the_one_on_show_ends_it() {
+        let mut doc = deck_of_three();
+        let v = view(Camera {
+            x: 100.0,
+            y: 50.0,
+            zoom: 1.0,
+        });
+        let mut show = Show::start(&doc, None, &v).unwrap();
+        show.tick(10.0);
+        hide(&mut doc, "b");
+        assert!(show.step(&doc, &v, true));
+        assert_eq!(show.slide(), "c", "b is passed over");
+        show.tick(10.0);
+        hide(&mut doc, "c");
+        assert!(show.camera(&doc, &v, v.camera).is_none(), "nothing left to show");
     }
 
     #[test]
     fn a_step_mid_flight_leaves_from_where_the_camera_is() {
         let doc = deck_of_three();
-        let v = view(fit(Area::of(doc.frame("a").unwrap()), VP, 1.0));
-        let mut show = Show::start(&doc, &[], &v).unwrap();
+        let v = view(fit(stop(&doc, "a").unwrap().ink, VP, 1.0));
+        let mut show = Show::start(&doc, None, &v).unwrap();
         show.tick(10.0);
         show.step(&doc, &v, true);
         show.tick(0.3);
         let midway = show.shown(&doc, &v).unwrap();
         show.step(&doc, &v, true);
-        assert!(same(show.shown(&doc, &v).unwrap(), midway), "no jump");
+        let leaving = show.shown(&doc, &v).unwrap();
+        assert!(same(leaving.0, midway.0) && close(leaving.1, midway.1), "no jump");
     }
 
     #[test]
-    fn what_is_shown_is_the_slide_or_the_part_of_it_in_the_window() {
+    fn what_is_shown_of_a_slide_is_the_part_of_it_in_the_window_covered_round() {
         let doc = deck_of_three();
-        let slide = Area::of(doc.frame("a").unwrap());
-        let mut show = Show::start(&doc, &[], &view(fit(slide, VP, 1.0))).unwrap();
+        let slide = stop(&doc, "a").unwrap().ink;
+        let mut show = Show::start(&doc, None, &view(fit(slide, VP, 1.0))).unwrap();
         show.tick(10.0);
         let at_fit = view(fit(slide, VP, 1.0));
-        assert!(same(show.shown(&doc, &at_fit).unwrap(), slide), "the whole slide");
+        let (area, veil) = show.shown(&doc, &at_fit).unwrap();
+        assert!(same(area, slide) && veil == 1.0, "the whole slide");
         let zoomed = view(Camera {
             x: 50.0,
             y: 50.0,
             zoom: 20.0,
         });
-        let part = show.shown(&doc, &zoomed).unwrap();
+        let (part, _) = show.shown(&doc, &zoomed).unwrap();
         assert!(close(part.w, 50.0) && close(part.h, 25.0), "{part:?}");
+    }
+
+    #[test]
+    fn the_veil_comes_and_goes_with_a_flight_between_a_slide_and_a_stop_on_the_board() {
+        let mut doc = deck(&["a"]);
+        rect(&mut doc, None, "r", "r-el", (0.0, 400.0, 100.0, 50.0));
+        link(&mut doc, "a", "r");
+        let v = view(fit(stop(&doc, "a").unwrap().ink, VP, 1.0));
+        let mut show = Show::start(&doc, None, &v).unwrap();
+        assert!(close(show.shown(&doc, &v).unwrap().1, 0.0), "nothing covered before the show");
+        show.tick(10.0);
+        assert_eq!(show.shown(&doc, &v).unwrap().1, 1.0, "a slide is covered round");
+        assert!(show.step(&doc, &v, true));
+        show.tick(show.flight.unwrap().length / 2.0);
+        let midway = show.shown(&doc, &v).unwrap().1;
+        assert!(midway > 0.0 && midway < 1.0, "{midway}");
+        show.tick(10.0);
+        let on_board = view(show.camera(&doc, &v, v.camera).unwrap());
+        let (area, veil) = show.shown(&doc, &on_board).unwrap();
+        assert_eq!(veil, 0.0);
+        assert!(same(area, Area::seen(&on_board)), "the board in sight round it");
     }
 
     #[test]
@@ -959,21 +1452,24 @@ mod tests {
 
     #[test]
     fn the_handle_stands_out_of_the_right_edge_and_is_hit_round_it() {
-        let doc = deck(&["a"]);
-        let f = doc.frame("a").unwrap();
+        let mut doc = deck(&["a"]);
         let v = view(Camera {
             x: 100.0,
             y: 50.0,
             zoom: 1.0,
         });
-        let (x, y) = handle_at(f, &v);
+        let (x, y) = handle_at(&doc, &v, "a").unwrap();
         assert_eq!((x, y), (600.0 + HANDLE_OUT_PX, 250.0));
-        assert!(on_handle(f, &v, (x + 5.0, y - 5.0)));
-        assert!(!on_handle(f, &v, (590.0, 250.0)), "inside the frame is the frame's");
+        assert!(on_handle(&doc, &v, "a", (x + 5.0, y - 5.0)));
+        assert!(!on_handle(&doc, &v, "a", (590.0, 250.0)), "inside the frame is the frame's");
+        // An object's stands off its own box.
+        rect(&mut doc, Some("a"), "r", "r-el", (20.0, 20.0, 60.0, 40.0));
+        assert_eq!(handle_at(&doc, &v, "r"), Some((480.0 + HANDLE_OUT_PX, 240.0)));
+        assert_eq!(handle_at(&doc, &v, "a-in"), None, "nothing painted, no handle");
     }
 
     #[test]
-    fn an_arrow_runs_from_one_frames_edge_to_the_others() {
+    fn an_arrow_runs_from_one_stops_edge_to_the_others() {
         let mut doc = deck(&["a", "b"]);
         let v = view(Camera {
             x: 250.0,
@@ -991,8 +1487,24 @@ mod tests {
         let last_shaft = prims[ARROW_STEPS - 1].geom;
         assert!((first[0] - 450.0).abs() < 0.01, "from a's edge: {first:?}");
         assert!((last_shaft[2] - 550.0).abs() < 0.01, "to b's edge: {last_shaft:?}");
-        doc.layers.iter_mut().find(|l| l.id == "b-layer").unwrap().visible = false;
-        assert!(links(&doc, &v, ink, None).is_empty(), "no arrow into a hidden frame");
+        hide(&mut doc, "b");
+        assert!(links(&doc, &v, ink, None).is_empty(), "no arrow into a hidden stop");
+    }
+
+    #[test]
+    fn no_arrow_runs_between_a_stop_and_what_it_holds() {
+        let mut doc = deck(&["a", "b"]);
+        rect(&mut doc, Some("a"), "r", "r-el", (20.0, 20.0, 60.0, 40.0));
+        link(&mut doc, "a", "r");
+        let v = view(Camera {
+            x: 250.0,
+            y: 50.0,
+            zoom: 1.0,
+        });
+        let ink = [1.0, 0.0, 0.0, 1.0];
+        assert!(links(&doc, &v, ink, None).is_empty(), "the frame and a rect in it");
+        link(&mut doc, "r", "b");
+        assert!(!links(&doc, &v, ink, None).is_empty(), "the rect and the next frame");
     }
 
     #[test]
@@ -1007,41 +1519,42 @@ mod tests {
         // at the middle height 250; the arrow bends up between them.
         assert!(link_at(&doc, &v, (500.0, 250.0)).is_none(), "nothing linked");
         link(&mut doc, "a", "b");
-        let curve = arrow_of(&doc, &v, doc.frame("a").unwrap()).unwrap();
+        let curve = arrow_of(&doc, &v, "a").unwrap();
         let middle = curve.at(0.5);
         assert!(middle.1 < 250.0, "bent: {middle:?}");
-        assert_eq!(link_at(&doc, &v, middle).map(|f| f.id.as_str()), Some("a"));
-        assert_eq!(link_at(&doc, &v, (middle.0, middle.1 + 5.0)).map(|f| f.id.as_str()), Some("a"));
+        assert_eq!(link_at(&doc, &v, middle).as_deref(), Some("a"));
+        assert_eq!(link_at(&doc, &v, (middle.0, middle.1 + 5.0)).as_deref(), Some("a"));
         assert!(link_at(&doc, &v, (middle.0, middle.1 + 30.0)).is_none(), "too far off it");
     }
 
     #[test]
-    fn a_frame_takes_one_link_in_and_never_its_own() {
+    fn a_layer_takes_one_link_in_and_never_its_own() {
         let mut doc = deck(&["a", "b", "c"]);
         link(&mut doc, "a", "b");
-        let frame = |id| doc.frame(id).unwrap();
-        assert!(!takes(&doc, "c", frame("b")), "a already leads to b");
-        assert!(takes(&doc, "a", frame("b")), "a's own link, laid again");
-        assert!(takes(&doc, "c", frame("a")), "nothing leads to a");
-        assert!(takes(&doc, "b", frame("a")), "a loop back to the head is one link in");
-        assert!(!takes(&doc, "a", frame("a")), "never itself");
+        assert!(!takes(&doc, "c", "b"), "a already leads to b");
+        assert!(takes(&doc, "a", "b"), "a's own link, laid again");
+        assert!(takes(&doc, "c", "a"), "nothing leads to a");
+        assert!(takes(&doc, "b", "a"), "a loop back to the head is one link in");
+        assert!(!takes(&doc, "a", "a"), "never itself");
         let mut gone = deck(&["a", "b"]);
         link(&mut gone, "a", "a");
-        assert!(takes(&gone, "b", gone.frame("a").unwrap()), "a link to itself leads nowhere");
+        assert!(takes(&gone, "b", "a"), "a link to itself leads nowhere");
     }
 
     #[test]
-    fn pulling_rings_the_frame_it_would_land_on_and_not_its_own() {
-        let doc = deck(&["a", "b"]);
+    fn pulling_rings_the_stop_it_would_land_on_when_it_takes_it() {
+        let mut doc = deck(&["a", "b", "c"]);
         let v = view(Camera {
             x: 250.0,
             y: 50.0,
             zoom: 1.0,
         });
         let ink = [1.0, 0.0, 0.0, 1.0];
-        let ringed = |to| pulling(&doc, &v, "a", to, ink).iter().any(|p| p.line > 0.0);
-        assert!(ringed([350.0, 50.0]), "over b");
-        assert!(!ringed([100.0, 50.0]), "over itself");
-        assert!(!ringed([250.0, 400.0]), "over nothing");
+        let ringed = |doc: &Document, target| pulling(doc, &v, "a", [350.0, 50.0], target, ink).iter().any(|p| p.line > 0.0);
+        assert!(ringed(&doc, Some("b")), "over b");
+        assert!(!ringed(&doc, Some("a")), "over itself");
+        assert!(!ringed(&doc, None), "over nothing");
+        link(&mut doc, "c", "b");
+        assert!(!ringed(&doc, Some("b")), "b has its one link in");
     }
 }

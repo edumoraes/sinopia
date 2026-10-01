@@ -582,7 +582,6 @@ mod tests {
             w: 100.0,
             h: 50.0,
             background: Some("#ffffff".into()),
-            next: None,
             layers: vec![Layer {
                 id: "in".into(),
                 ..Layer::of("Layer 1", Kind::Raster)
@@ -719,7 +718,6 @@ mod tests {
             w: 10.0,
             h: 10.0,
             background: None,
-            next: None,
             layers: vec![Layer::new("Layer 1")],
         }));
         let ids: Vec<_> = frames(&doc).into_iter().map(|c| c.id).collect();

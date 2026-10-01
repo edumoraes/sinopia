@@ -430,8 +430,6 @@ impl Document {
             el.set_id(&new_id());
             if let Element::Frame(f) = &mut el {
                 renamed(&mut f.layers, &minted);
-                // A copy is not a slide of the deck it was copied from.
-                f.next = None;
             }
             elements.push(el);
         }
@@ -493,9 +491,6 @@ impl Document {
             el.set_id(&new_id());
             if let Element::Frame(f) = &mut el {
                 renamed(&mut f.layers, &minted);
-                // What is pasted is new: it joins no sequence until it
-                // is linked into one.
-                f.next = None;
             }
             select::transform(&mut el, by);
             if !graft::placed(&el) {
@@ -1283,22 +1278,6 @@ pub(crate) mod tests {
         assert_ne!(b.id, "B", "minted anew");
         assert_eq!(b.next.as_ref(), Some(&c.id));
         assert_eq!(c.next, None);
-    }
-
-    #[test]
-    fn a_copy_or_a_paste_of_a_linked_frame_joins_no_deck() {
-        let mut doc = nested();
-        doc.frame_mut("fr").unwrap().next = Some("elsewhere".into());
-        let made = doc.duplicate_layers(&ids(&["F"]));
-        assert_eq!(doc.frame_on(&made[0]).unwrap().next, None, "a duplicate");
-        let clip = doc.clip(&ids(&["F"])).unwrap();
-        let planted = doc.paste(&clip, "A", &Affine::IDENTITY);
-        assert_eq!(doc.frame_on(&planted[0]).unwrap().next, None, "a paste");
-        assert_eq!(
-            doc.frame("fr").unwrap().next.as_deref(),
-            Some("elsewhere"),
-            "the original keeps its link"
-        );
     }
 
     #[test]

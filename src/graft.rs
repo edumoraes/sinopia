@@ -166,9 +166,6 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
                 f.id = id.clone();
                 f.layer = stem.id.clone();
                 renamed(&mut f.layers, &links);
-                // A link names a frame of the board the page was read
-                // from; what is planted joins no sequence on its own.
-                f.next = None;
             }
             other => {
                 let to = minted(&inner, other.layer()).with_context(|| {
@@ -302,7 +299,6 @@ mod tests {
                 w: 100.0,
                 h: 50.0,
                 background: Some("#ffffff".into()),
-                next: None,
                 layers: vec![Layer {
                     id: "in".into(),
                     ..Layer::of("Layer 1", Kind::Raster)
@@ -400,7 +396,6 @@ mod tests {
             w: 10.0,
             h: 10.0,
             background: None,
-            next: None,
             layers: vec![Layer::new("Layer 1")],
         }));
         let e = only_frame(&doc).unwrap_err().to_string();
@@ -477,15 +472,13 @@ mod tests {
     }
 
     #[test]
-    fn a_planted_frame_joins_no_deck() {
+    fn a_planted_frame_joins_no_deck_of_the_board_it_was_read_from() {
         let mut board = board();
         let mut frag = fragment();
-        let Some(Element::Frame(f)) = frag.elements.iter_mut().find(|e| matches!(e, Element::Frame(_))) else {
-            panic!("the fragment holds a frame");
-        };
-        f.next = Some("a-frame-of-the-board-it-was-read-from".into());
+        frag.layers[0].next = Some("a-layer-of-the-board-it-was-read-from".into());
         let (id, _) = plant(&mut board, &frag).unwrap();
-        assert_eq!(frame_of(&board, &id).next, None);
+        let stem = &frame_of(&board, &id).layer;
+        assert_eq!(board.layer(stem).unwrap().next, None);
     }
 
     #[test]

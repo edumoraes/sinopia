@@ -1021,9 +1021,9 @@ impl App {
         self.searching = None;
         let (editor, doc) = self.active();
         editor.cancel(doc);
-        let selection = editor.selection().to_vec();
-        let Some(show) = Show::start(self.doc(), &selection, &view) else {
-            log::info!("nothing to present: the board has no frame on show");
+        let selected = editor.selected_stop(doc);
+        let Some(show) = Show::start(self.doc(), selected.as_deref(), &view) else {
+            log::info!("nothing to present: the board has no stop on show");
             return;
         };
         self.show = Some(show);
@@ -1297,8 +1297,9 @@ impl App {
     fn hand_marks(&self, _frame: &mut Frame, _view: &View) {}
 
     /// What a show puts on screen: the board as it is, with nothing over
-    /// it but the bands that cover what is not the slide — no grid, no
-    /// panel, no selection, and no edge round the slide.
+    /// it but the bands that cover what is not a slide, as strongly as
+    /// the show says — no grid, no panel, no selection, and no edge round
+    /// the slide.
     fn show_frame(&self, view: &View) -> Frame {
         let none = ImageSlots::new();
         let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
@@ -1312,12 +1313,11 @@ impl App {
             [0.0; 4],
             None,
         ));
-        if let Some(area) = self.show.as_ref().and_then(|s| s.shown(self.doc(), view)) {
-            frame.extend(
-                present::veil(area, view)
-                    .into_iter()
-                    .map(|band| Prim::rect(band, SHOW_GROUND)),
-            );
+        if let Some((area, strength)) = self.show.as_ref().and_then(|s| s.shown(self.doc(), view))
+            && strength > 0.0
+        {
+            let ground = scene::with_alpha(SHOW_GROUND, strength as f32);
+            frame.extend(present::veil(area, view).into_iter().map(|band| Prim::rect(band, ground)));
         }
         frame
     }
@@ -2319,7 +2319,7 @@ impl App {
             locked: !picked.is_empty() && picked.iter().all(|l| l.locked),
             hidden: !picked.is_empty() && picked.iter().all(|l| !l.visible),
             merge: editor.merge_name(doc),
-            present: present::presentable(doc, editor.selection()),
+            present: present::presentable(doc, editor.selected_stop(doc).as_deref()),
             hands: cfg!(feature = "hands").then(|| self.hands_on()),
         }
     }
@@ -3884,13 +3884,27 @@ impl App {
         } else if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
         }
-        // A frame selected alone wears the handle a link is pulled out
-        // of, and the link in the hand runs from it to the pointer.
-        if let Some(f) = self.editor().linkable(self.doc()) {
-            frame.extend(present::handle_prims(f, view, self.theme.selection, self.theme.handle));
+        // A stop selected wears the handle a link is pulled out of, and
+        // the link in the hand runs from it to the pointer.
+        if let Some(id) = self.editor().linkable(self.doc()) {
+            frame.extend(present::handle_prims(
+                self.doc(),
+                view,
+                &id,
+                self.theme.selection,
+                self.theme.handle,
+            ));
         }
         if let Some((from, to)) = self.editor().linking() {
-            frame.extend(present::pulling(self.doc(), view, from, to, self.theme.selection));
+            let target = self.editor().link_target(self.doc(), to);
+            frame.extend(present::pulling(
+                self.doc(),
+                view,
+                from,
+                to,
+                target.as_deref(),
+                self.theme.selection,
+            ));
         }
         if let Some((a, b)) = self.editor().marquee() {
             frame.extend(select::marquee_prims(a, b, &self.theme));

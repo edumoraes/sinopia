@@ -445,13 +445,6 @@ pub struct Frame {
     pub h: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
-    /// The frame a presentation goes to after this one, by its id: the
-    /// sequence is the person's to draw, link by link, wherever the
-    /// frames stand. Absent on disk while it goes nowhere. A link to a
-    /// frame that has gone goes nowhere — and undoing the delete brings
-    /// it back — so it is never a reason to refuse a board.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next: Option<String>,
     #[serde(default)]
     pub layers: Vec<Layer>,
 }
@@ -3480,7 +3473,6 @@ mod tests {
             w: 10.0,
             h: 10.0,
             background: None,
-            next: None,
             layers: Vec::new(),
         };
         assert!(f.contains([5.0, 5.0]));
@@ -3536,16 +3528,6 @@ mod tests {
     }
 
     #[test]
-    fn a_frames_link_is_absent_on_disk_until_there_is_one() {
-        let mut doc = framed();
-        assert!(!doc.to_json().unwrap().contains("\"next\""));
-        doc.frame_mut("fr").unwrap().next = Some("gone".into());
-        let back = Document::from_json(&doc.to_json().unwrap())
-            .expect("a link to a frame that has gone is no reason to refuse a board");
-        assert_eq!(back.frame("fr").unwrap().next.as_deref(), Some("gone"));
-    }
-
-    #[test]
     fn stack_answers_the_board_or_one_frame() {
         let doc = framed();
         assert_eq!(doc.stack(None).len(), 2, "the board's own");
@@ -3591,7 +3573,6 @@ mod tests {
             w: 100.0,
             h: 100.0,
             background: None,
-            next: None,
             layers: vec![layer("in2", "Layer 1")],
         }));
         assert_eq!(doc.stack_at([50.0, 50.0]), Some("fl2"));
