@@ -14,7 +14,7 @@ selection, navigation, pasted images, projects in tabs, frames, text,
 shapes and arrows, export to the agent, the CLI an agent asks the board through,
 presentations, hand gestures, and the packaging that distributes it (item 7):
 
-- `cargo build` clean, `cargo test` with 1439 tests — 1465 with
+- `cargo build` clean, `cargo test` with 1447 tests — 1473 with
   `--features hands` — and the plugin's own suite under `qmltestrunner`.
 - Releases: a `v*` tag builds the binary, publishes it with its source
   and checksums, and fills in three AUR recipes — `sinopia-bin`,
@@ -704,7 +704,7 @@ anywhere.
 | Select a group in the panel, then drag the handle | The group is the stop: the camera zooms to everything it holds |
 | Drag a link's arrow (Select) | Pull the link onto another stop, or off into nothing to unlink; a click changes nothing |
 | Pull a link onto a stop another one already leads to | Refused: a stop comes after one stop at most |
-| View → Presentation Path | The decks' numbers and arrows on the board, or put away |
+| View → Presentation Path | The decks' numbers and arrows on the board, or put away (an arrow put away takes no press) |
 | `F5`, View → Present | Present: from the stop selected, or the head of a deck of links |
 | `→` `↓` `Space` `Enter` `PageDown`, click (presenting) | Next stop |
 | `←` `↑` `Backspace` `PageUp`, right-click (presenting) | Stop before |
