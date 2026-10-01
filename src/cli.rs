@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::doc::{Align, BlendMode, Tag, TextMode, Valign};
+use crate::doc::{Align, BlendMode, Card, Tag, TextMode, Valign};
 use crate::editor::Listed;
 use crate::export::TextCard;
-use crate::ipc::proto::{Request, TextSpec};
+use crate::ipc::proto::{Presenting, Request, TextSpec};
 use crate::tree::{Arrange, Place};
 
 #[derive(Debug, Parser)]
@@ -75,11 +75,122 @@ pub enum Command {
         #[command(subcommand)]
         verb: TextVerb,
     },
+    /// Build the open board's presentation and run it (needs a live board)
+    Present {
+        #[command(subcommand)]
+        verb: PresentVerb,
+    },
+    /// Turn the hand gestures on or off, or ask how they stand (needs a live board)
+    Hands {
+        /// on or off; leave it out to ask
+        #[arg(value_parser = on_off)]
+        state: Option<bool>,
+    },
     /// Bring in brush sets you downloaded for Sketchbook
     Brushes {
         #[command(subcommand)]
         verb: BrushVerb,
     },
+}
+
+/// What can be done with the presentation of the board that is open. A
+/// stop is a layer — a frame, a group, or the layer of one object — named
+/// by its id or by a name only it goes by; a deck is the stops one layer
+/// after another leads through. Every change is one step the board can
+/// undo.
+#[derive(Debug, Clone, PartialEq, Subcommand)]
+pub enum PresentVerb {
+    /// List the decks, their stops in the order a show walks them, as JSON
+    List,
+    /// Link one layer to the next: the stop that comes after it
+    Link {
+        /// The stop the link leaves
+        from: String,
+        /// The stop it leads to
+        to: String,
+    },
+    /// Take away the links out of layers — or every link, with --all
+    #[command(group = clap::ArgGroup::new("what").required(true).multiple(false))]
+    Unlink {
+        #[arg(group = "what")]
+        layers: Vec<String>,
+        /// Every link on the board
+        #[arg(long, group = "what")]
+        all: bool,
+    },
+    /// Lay a deck exactly as named: each layer leads to the next, the last to nothing
+    Path {
+        /// The stops, in order: two or more
+        #[arg(required = true, num_args = 2..)]
+        layers: Vec<String>,
+    },
+    /// Start the show: from this stop, else the one selected, else the head of a deck
+    Start {
+        /// The stop to start from
+        from: Option<String>,
+    },
+    /// The next slide
+    Next,
+    /// The slide before
+    Prev,
+    /// The first slide
+    First,
+    /// The last slide
+    Last,
+    /// Go to a slide by its place, counted from 1
+    Go {
+        #[arg(value_parser = slide)]
+        slide: usize,
+    },
+    /// End the show
+    Stop,
+    /// The presenter's camera: the shape it is shown in, and whether it is shown while presenting
+    #[command(group = clap::ArgGroup::new("seen").multiple(false))]
+    Camera {
+        /// rounded, round, square or blob — the board's, kept with it
+        #[arg(value_parser = card)]
+        shape: Option<Card>,
+        /// Show it in the corner while presenting
+        #[arg(long, group = "seen")]
+        show: bool,
+        /// Put it away
+        #[arg(long, group = "seen")]
+        hide: bool,
+    },
+}
+
+/// The request a present verb asks, every layer it names turned into an
+/// id by `id` — which is where a name that is not there stops it.
+pub fn present_request(verb: &PresentVerb, id: impl Fn(&str) -> anyhow::Result<String>) -> anyhow::Result<Request> {
+    let ids = |names: &[String]| names.iter().map(|n| id(n)).collect::<anyhow::Result<Vec<String>>>();
+    let show = |action| Ok(Request::Present { action });
+    match verb {
+        PresentVerb::List => Ok(Request::Decks),
+        PresentVerb::Link { from, to } => Ok(Request::Link {
+            from: id(from)?,
+            to: id(to)?,
+        }),
+        PresentVerb::Unlink { all: true, .. } => Ok(Request::UnlinkAll),
+        PresentVerb::Unlink { layers, .. } => Ok(Request::Unlink { ids: ids(layers)? }),
+        PresentVerb::Path { layers } => Ok(Request::Path { ids: ids(layers)? }),
+        PresentVerb::Start { from } => show(Presenting::Start {
+            from: from.as_deref().map(&id).transpose()?,
+        }),
+        PresentVerb::Next => show(Presenting::Next),
+        PresentVerb::Prev => show(Presenting::Prev),
+        PresentVerb::First => show(Presenting::First),
+        PresentVerb::Last => show(Presenting::Last),
+        PresentVerb::Go { slide } => show(Presenting::Go { to: *slide }),
+        PresentVerb::Stop => show(Presenting::Stop),
+        PresentVerb::Camera { shape, show, hide } => Ok(Request::Camera {
+            shape: *shape,
+            shown: match (show, hide) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
+        }),
+    }
 }
 
 /// What can be done with the brush library. The sets are the person's
@@ -359,6 +470,26 @@ fn named<T: serde::de::DeserializeOwned>(s: &str, what: &str, all: &str) -> Resu
         .map_err(|_| format!("{s:?} is not {what}; one of: {all}"))
 }
 
+fn card(s: &str) -> Result<Card, String> {
+    named(s, "a shape for the camera", "rounded, round, square, blob")
+}
+
+fn on_off(s: &str) -> Result<bool, String> {
+    match s {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("{s:?} is not on or off")),
+    }
+}
+
+/// A slide's place, counted from 1 as a show counts them.
+fn slide(s: &str) -> Result<usize, String> {
+    s.parse::<usize>()
+        .ok()
+        .filter(|n| *n >= 1)
+        .ok_or_else(|| format!("{s:?} is not a slide: they are counted from 1"))
+}
+
 fn text_mode(s: &str) -> Result<TextMode, String> {
     named(s, "a kind of text", "artistic, frame")
 }
@@ -623,6 +754,9 @@ pub enum Verb {
     Add {
         /// The fragment: one frame and what stands in it
         file: PathBuf,
+        /// Where the frame's top left corner lands (default: right of everything)
+        #[arg(long, value_name = "X,Y", value_parser = point, allow_hyphen_values = true)]
+        at: Option<(f64, f64)>,
     },
 }
 
@@ -647,8 +781,9 @@ pub enum Action {
         frame: String,
         to: Option<PathBuf>,
     },
-    /// A frame handed over, from a fragment file.
-    Add(PathBuf),
+    /// A frame handed over, from a fragment file, and where its top left
+    /// corner lands when the caller says.
+    Add(PathBuf, Option<[f64; 2]>),
     /// The desktop's theme has changed. What a `theme-set` hook calls,
     /// and — like `Export` and `Shutdown` — never a reason to open a
     /// window: there is nothing to re-dress until there is one.
@@ -658,6 +793,11 @@ pub enum Action {
     Layer(LayerVerb),
     /// Something done with the open board's text, on the same terms.
     Text(TextVerb),
+    /// Something done with the open board's presentation, on the same
+    /// terms.
+    Present(PresentVerb),
+    /// The hand gestures turned on or off, or asked how they stand.
+    Hands(Option<bool>),
     /// Sketchbook sets to bring into the brush library. The person's own
     /// files into the person's own data directory: nothing a live board
     /// is asked, and nothing a window is opened for.
@@ -694,6 +834,8 @@ impl Cli {
             Some(Command::Agent { .. }) => "agent",
             Some(Command::Layer { .. }) => "layer",
             Some(Command::Text { .. }) => "text",
+            Some(Command::Present { .. }) => "present",
+            Some(Command::Hands { .. }) => "hands",
             Some(Command::Brushes { .. }) => "brushes",
             None => return Ok(self),
         };
@@ -717,11 +859,13 @@ impl Cli {
                         frame: frame.clone(),
                         to: to.clone(),
                     },
-                    Verb::Add { file } => Action::Add(file.clone()),
+                    Verb::Add { file, at } => Action::Add(file.clone(), at.map(|(x, y)| [x, y])),
                 };
             }
             Some(Command::Layer { verb }) => return Action::Layer(verb.clone()),
             Some(Command::Text { verb }) => return Action::Text(verb.clone()),
+            Some(Command::Present { verb }) => return Action::Present(verb.clone()),
+            Some(Command::Hands { state }) => return Action::Hands(*state),
             Some(Command::Brushes {
                 verb: BrushVerb::Import { files },
             }) => return Action::ImportBrushes(files.clone()),
@@ -833,8 +977,102 @@ mod tests {
         );
         assert_eq!(
             parse(&["agent", "add", "frame.json"]).unwrap().action(),
-            Action::Add(PathBuf::from("frame.json"))
+            Action::Add(PathBuf::from("frame.json"), None)
         );
+        assert_eq!(
+            parse(&["agent", "add", "frame.json", "--at", "-200,1500.5"]).unwrap().action(),
+            Action::Add(PathBuf::from("frame.json"), Some([-200.0, 1500.5]))
+        );
+        assert!(parse(&["agent", "add", "frame.json", "--at", "here"]).is_err());
+    }
+
+    fn present(args: &[&str]) -> PresentVerb {
+        match parse(&[&["present"][..], args].concat()).unwrap().action() {
+            Action::Present(verb) => verb,
+            other => panic!("{args:?} is a present verb, not {other:?}"),
+        }
+    }
+
+    /// What a present verb asks, every layer named turned into `id:` it.
+    fn asked(args: &[&str]) -> Request {
+        present_request(&present(args), |name| Ok(format!("id:{name}"))).unwrap()
+    }
+
+    #[test]
+    fn the_present_verbs_ask_their_ops_by_ids() {
+        use crate::ipc::proto::Presenting;
+        assert_eq!(asked(&["list"]), Request::Decks);
+        assert_eq!(
+            asked(&["link", "Intro", "Diagram"]),
+            Request::Link {
+                from: "id:Intro".into(),
+                to: "id:Diagram".into(),
+            }
+        );
+        assert_eq!(asked(&["unlink", "A", "B"]), Request::Unlink { ids: names(&["id:A", "id:B"]) });
+        assert_eq!(asked(&["unlink", "--all"]), Request::UnlinkAll);
+        assert_eq!(
+            asked(&["path", "A", "B", "C"]),
+            Request::Path {
+                ids: names(&["id:A", "id:B", "id:C"]),
+            }
+        );
+        let show = |action| Request::Present { action };
+        assert_eq!(asked(&["start"]), show(Presenting::Start { from: None }));
+        assert_eq!(
+            asked(&["start", "Intro"]),
+            show(Presenting::Start {
+                from: Some("id:Intro".into()),
+            })
+        );
+        assert_eq!(asked(&["next"]), show(Presenting::Next));
+        assert_eq!(asked(&["prev"]), show(Presenting::Prev));
+        assert_eq!(asked(&["first"]), show(Presenting::First));
+        assert_eq!(asked(&["last"]), show(Presenting::Last));
+        assert_eq!(asked(&["stop"]), show(Presenting::Stop));
+        assert_eq!(asked(&["go", "3"]), show(Presenting::Go { to: 3 }));
+        assert_eq!(
+            asked(&["camera", "blob", "--show"]),
+            Request::Camera {
+                shape: Some(crate::doc::Card::Blob),
+                shown: Some(true),
+            }
+        );
+        assert_eq!(
+            asked(&["camera", "--hide"]),
+            Request::Camera {
+                shape: None,
+                shown: Some(false),
+            }
+        );
+        assert_eq!(asked(&["camera"]), Request::Camera { shape: None, shown: None });
+    }
+
+    #[test]
+    fn a_present_verb_needs_what_it_acts_on_and_takes_nothing_it_cannot() {
+        for args in [
+            &["present", "link", "A"][..],
+            &["present", "unlink"],
+            &["present", "unlink", "A", "--all"],
+            &["present", "path", "A"],
+            &["present", "go"],
+            &["present", "go", "0"],
+            &["present", "go", "two"],
+            &["present", "camera", "hexagon"],
+            &["present", "camera", "--show", "--hide"],
+            &["present", "rewind"],
+            &["hands", "maybe"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_hands_are_turned_on_or_off_or_asked_how_they_stand() {
+        assert_eq!(parse(&["hands", "on"]).unwrap().action(), Action::Hands(Some(true)));
+        assert_eq!(parse(&["hands", "off"]).unwrap().action(), Action::Hands(Some(false)));
+        assert_eq!(parse(&["hands"]).unwrap().action(), Action::Hands(None));
+        assert!(parse(&["--new", "hands", "on"]).is_err(), "a verb is the whole of the action");
     }
 
     #[test]

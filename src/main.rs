@@ -95,10 +95,10 @@ fn main() -> anyhow::Result<()> {
             id: frame_id(&socket_path, frame)?,
             dir: destination(to.as_deref())?,
         },
-        Action::Add(file) => Request::AddFrame {
+        Action::Add(file, at) => Request::AddFrame {
             path: std::fs::canonicalize(file)
                 .with_context(|| format!("reading the fragment {file:?}"))?,
-            at: None,
+            at: *at,
         },
         Action::Layer(verb) => {
             // One listing, fetched the first time a name needs it and
@@ -115,6 +115,21 @@ fn main() -> anyhow::Result<()> {
                 cli::resolve_layer(listing, asked)
             })?
         }
+        // A stop is a layer, named the way `sinopia layer` names one.
+        Action::Present(verb) => {
+            let listing = std::cell::OnceCell::new();
+            cli::present_request(verb, |asked| {
+                let listing = match listing.get() {
+                    Some(l) => l,
+                    None => {
+                        let fetched = layer_listing(&socket_path)?;
+                        listing.get_or_init(|| fetched)
+                    }
+                };
+                cli::resolve_layer(listing, asked)
+            })?
+        }
+        Action::Hands(on) => Request::Hands { on: *on },
         Action::Text(verb) => cli::text_request(
             verb,
             |asked| frame_id(&socket_path, asked),
@@ -145,7 +160,13 @@ fn main() -> anyhow::Result<()> {
         // with the work nobody has saved yet inside it. There is nothing
         // to answer without one, and opening a window to answer would
         // answer about a different board.
-        Action::Frames | Action::Read { .. } | Action::Add(_) | Action::Layer(_) | Action::Text(_) => {
+        Action::Frames
+        | Action::Read { .. }
+        | Action::Add(..)
+        | Action::Layer(_)
+        | Action::Text(_)
+        | Action::Present(_)
+        | Action::Hands(_) => {
             anyhow::bail!("no sinopia instance running; open the board first")
         }
         Action::ImportBrushes(_) => unreachable!("imported before the socket was asked"),
