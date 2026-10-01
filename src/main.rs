@@ -21,6 +21,8 @@ mod geom;
 mod gestures;
 mod gfx;
 mod guest;
+#[cfg(feature = "hands")]
+mod hands;
 mod glyphs;
 mod graft;
 mod grid;

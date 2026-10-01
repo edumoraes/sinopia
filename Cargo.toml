@@ -28,6 +28,14 @@ wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
 wgpu = "30.0.1"
 winit = "0.30.13"
 zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+# Only with the `hands` feature: the system's OpenCV, through bindings
+# generated against its headers at build time.
+opencv = { version = "0.101", default-features = false, features = ["dnn", "imgproc", "videoio"], optional = true }
+
+[features]
+# Hand gestures through the webcam — an experiment, off by default, so a
+# build without it needs no OpenCV and pays nothing for it.
+hands = ["dep:opencv"]
 
 [dev-dependencies]
 # The same naga wgpu compiles the shader with: the suite parses and
