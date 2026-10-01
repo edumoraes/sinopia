@@ -359,10 +359,13 @@ pub fn hold(camera: Camera, area: Area, viewport: Viewport, scale: f64) -> Camer
         // A hair of slack: at the fit, one axis shows exactly the
         // area, and rounding must not turn that into a clamp that
         // moves it.
-        if 2.0 * half >= size - size * 1e-9 {
+        let (lo, hi) = (from + half, from + size - half);
+        // Far out on the board rounding can turn the two bounds round,
+        // and the area's middle is the only answer that is left.
+        if 2.0 * half >= size - size * 1e-9 || lo >= hi {
             from + size / 2.0
         } else {
-            at.clamp(from + half, from + size - half)
+            at.clamp(lo, hi)
         }
     };
     Camera {
@@ -420,9 +423,14 @@ impl Path {
             };
         }
         let rho2 = RHO * RHO;
-        let b = |w: f64, sign: f64| (w1 * w1 - w0 * w0 + sign * rho2 * rho2 * u1 * u1) / (2.0 * w * rho2 * u1);
+        // The path is the same at any scale: worked out in units of the
+        // longest of the three, so the squares of a board's far reaches
+        // do not overflow.
+        let unit = w0.max(w1).max(u1);
+        let (n0, n1, nu) = (w0 / unit, w1 / unit, u1 / unit);
+        let b = |w: f64, sign: f64| (n1 * n1 - n0 * n0 + sign * rho2 * rho2 * nu * nu) / (2.0 * w * rho2 * nu);
         // ln(−b + √(b² + 1)), written so a large b keeps its precision.
-        let (r0, r1) = (-b(w0, 1.0).asinh(), -b(w1, -1.0).asinh());
+        let (r0, r1) = (-b(n0, 1.0).asinh(), -b(n1, -1.0).asinh());
         Path {
             from,
             to,
@@ -507,6 +515,11 @@ impl Flight {
             return self.to;
         }
         let ((x, y), width) = self.path.at(e * self.path.s);
+        // Past what the numbers hold — two ends at the very edge of a
+        // board's reach — the flight lands where it is going.
+        if ![x, y, width].iter().all(|v| v.is_finite()) {
+            return self.to;
+        }
         let fill = |a: Area| {
             let w = a.w.max(a.h * self.aspect);
             (a.w / w, a.h * self.aspect / w)
@@ -1611,6 +1624,53 @@ mod tests {
         let (f, _) = flown(a, far, 1);
         assert!(f.length > n.length);
         assert!(f.length <= FLIGHT_MAX_S && n.length >= FLIGHT_MIN_S);
+    }
+
+    #[test]
+    fn a_flight_far_out_on_the_board_stays_a_number_all_the_way() {
+        let finite = |a: &Area| [a.x, a.y, a.w, a.h].iter().all(|v| v.is_finite());
+        // Far apart, far out: the squares of these would overflow.
+        let from = Area {
+            x: 1e200,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let to = Area {
+            x: -1e200,
+            y: 3e180,
+            w: 400.0,
+            h: 300.0,
+        };
+        let (_, areas) = flown(from, to, 50);
+        assert!(areas.iter().all(finite), "{areas:?}");
+        assert!(same(areas[50], to));
+        // So far apart the distance itself overflows: it lands, and lands
+        // on a number.
+        let edge = Area { x: -1.7e308, ..from };
+        let (_, areas) = flown(Area { x: 1.7e308, ..from }, edge, 10);
+        assert!(areas.iter().all(finite), "{areas:?}");
+    }
+
+    #[test]
+    fn hold_never_turns_its_bounds_round_far_out() {
+        // Rounding at three billion can put the lower bound of a clamp
+        // past the upper one, which `f64::clamp` panics on.
+        for size in [1.0, 7.0, 35.0] {
+            for k in 0..200 {
+                let area = Area {
+                    x: 3e9 + f64::from(k) * 0.37,
+                    y: -3e9,
+                    w: size,
+                    h: size * 0.6,
+                };
+                let fit = fit(area, VP, 1.0);
+                for nudge in [1.0, 1.0 + 1e-9, 1.0 + 1e-8, 1.0 - 1e-9] {
+                    let c = hold(Camera { zoom: fit.zoom * nudge, ..fit }, area, VP, 1.0);
+                    assert!(c.x.is_finite() && c.y.is_finite());
+                }
+            }
+        }
     }
 
     #[test]

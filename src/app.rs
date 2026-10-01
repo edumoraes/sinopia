@@ -1020,7 +1020,13 @@ impl App {
         let Some(show) = &self.show else { return };
         let doc = &self.open[self.active].project.doc;
         match show.camera(doc, &view, view.camera) {
-            Some(camera) => self.open[self.active].project.doc.camera = camera,
+            // The camera is the board's and is saved with it: one that is
+            // not a number would be written as null, and the draft would
+            // never open again.
+            Some(camera) if [camera.x, camera.y, camera.zoom].iter().all(|v| v.is_finite()) => {
+                self.open[self.active].project.doc.camera = camera;
+            }
+            Some(_) => {}
             None => self.end_show(),
         }
     }
