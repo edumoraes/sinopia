@@ -699,9 +699,10 @@ pub fn veil(area: Area, view: &View) -> Vec<ScreenRect> {
     .collect()
 }
 
-/// How far out of a stop's right edge its link handle stands, and how
-/// large it is drawn and hit, in logical px.
-const HANDLE_OUT_PX: f64 = 18.0;
+/// How far out of a stop's right edge its link handle stands — clear of
+/// the ring that turns a selection, which a turned object brings beside
+/// that edge — and how large it is drawn and hit, in logical px.
+const HANDLE_OUT_PX: f64 = 28.0;
 const HANDLE_PX: f64 = 7.0;
 const HANDLE_HIT_PX: f64 = 11.0;
 /// An arrow's line, its head and its bend, in logical px and as a share

@@ -1808,19 +1808,23 @@ impl Editor {
     /// the base.
     fn select_press(&mut self, view: &View, screen: (f64, f64), doc: &mut Document) -> Change {
         let world = point(view.screen_to_world(screen.0, screen.1));
-        // A stop selected wears a handle a link is pulled out of, out past
-        // its right edge, where nothing else of it stands. An arrow is a
-        // link to take hold of: pulled onto another stop it leads there,
-        // pulled off into nothing it is gone.
-        let held = self
-            .linkable(doc)
-            .filter(|id| crate::present::on_handle(doc, view, id, screen))
-            .or_else(|| {
-                self.path_shown()
-                    .then(|| crate::present::link_at(doc, view, screen))
-                    .flatten()
-            });
-        if let Some(from) = held {
+        // The selection's own handles first: a turned object's ring can
+        // stand where its link handle does, and the ring is what was aimed
+        // at. Then a stop selected wears a handle a link is pulled out of,
+        // out past its right edge, where nothing else of it stands; and an
+        // arrow on show is a link to take hold of — pulled onto another
+        // stop it leads there, pulled off into nothing it is gone.
+        let handle = self.hover(doc, view, screen);
+        let held = handle.is_none().then(|| {
+            self.linkable(doc)
+                .filter(|id| crate::present::on_handle(doc, view, id, screen))
+                .or_else(|| {
+                    (self.path_shown() && self.active_tool() == Tool::Select)
+                        .then(|| crate::present::link_at(doc, view, screen))
+                        .flatten()
+                })
+        });
+        if let Some(from) = held.flatten() {
             self.linking = Some(Linking {
                 from,
                 press: screen,
@@ -1829,7 +1833,7 @@ impl Editor {
             });
             return Change::Selection;
         }
-        if let Some(handle) = self.hover(doc, view, screen) {
+        if let Some(handle) = handle {
             let snapshot = self.snapshot(doc);
             let map = Affine::IDENTITY;
             let frame = self.selection_frame(doc);
@@ -4870,6 +4874,31 @@ mod tests {
         assert_eq!(e.link_target(&doc, &v, [480.0, 90.0]).as_deref(), Some("fb-l"));
         assert_eq!(e.link_target(&doc, &v, [120.0, 320.0]).as_deref(), Some("loose-l"));
         assert_eq!(e.link_target(&doc, &v, [250.0, 400.0]), None, "nothing there");
+    }
+
+    #[test]
+    fn a_handle_of_the_selection_answers_before_the_link_handle_beside_it() {
+        let (mut doc, v) = stops();
+        // The loose rect turned an eighth of a turn: its right corner
+        // stands at the middle of its box's right edge, and the ring that
+        // turns it, beside that corner, where the link handle stood.
+        if let Some(Element::Rect(r)) = doc.elements.iter_mut().find(|e| e.id() == "loose") {
+            r.rotation = 45.0;
+        }
+        let mut e = Editor::new();
+        e.selection = vec!["loose".into()];
+        let corner = 125.0 + 25.0 * 2f64.sqrt();
+        let ring = (corner + 250.0 + f64::from(select::ROTATE_OFFSET_PX), 325.0 + 200.0);
+        assert!(matches!(e.hover(&doc, &v, ring), Some(Handle::Rotate(_))), "the ring is there");
+        let tip = brush().tip(Face::Round);
+        let _ = e.press(Button::Left, &v, ring, &mut doc, &tip);
+        assert!(e.linking.is_none(), "the ring turns it");
+        assert!(matches!(e.drag, Some(Drag::Rotate { .. })));
+        e.cancel(&mut doc);
+        // The link handle stands clear of the ring, and is taken there.
+        let handle = crate::present::handle_at(&doc, &v, "loose-l").unwrap();
+        assert!(e.hover(&doc, &v, handle).is_none(), "no handle of the selection under the link's");
+        assert!(e.over_link(&doc, &v, handle));
     }
 
     #[test]
