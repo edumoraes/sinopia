@@ -1061,12 +1061,14 @@ impl App {
             }
         };
         self.end_typing();
-        self.close_menu(None);
         self.sending = None;
         self.renaming = None;
         self.searching = None;
-        let (editor, doc) = self.active();
-        editor.cancel(doc);
+        // Whatever the hand held is let go of as if the window had lost
+        // it: a show takes the pointer and every press, and a slider or
+        // a card still held would go on dragging after it with the
+        // button up.
+        self.focus_lost();
         self.show = Some(show);
         if let Some(w) = &self.window
             && w.fullscreen().is_none()
@@ -5545,7 +5547,8 @@ impl App {
         self.drag = None;
         self.fading = false;
         // A slider let go of this way is let go of: where it was dragged
-        // to is where the board rests.
+        // to is where the board, or the brush, rests.
+        self.grab = None;
         self.text_grab = None;
         self.shape_grab = None;
         self.close_menu(None);
