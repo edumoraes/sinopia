@@ -3103,6 +3103,9 @@ impl App {
         if let Some(shape) = shape
             && self.doc().presentation.camera != shape
         {
+            // A step of its own, never folded into the text the person
+            // is typing.
+            self.end_typing();
             self.active().1.presentation.camera = shape;
             self.apply(Change::Scene);
         }
