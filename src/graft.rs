@@ -127,21 +127,28 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
     // the frame it was read from. The id is all that is minted — the
     // rest of the layer is the fragment's own, so a frame staged hidden
     // arrives hidden, exactly as the layers inside it already do.
-    let stem = Layer {
-        id: new_id(),
-        ..fragment
-            .layers
-            .iter()
-            .find(|l| l.id == frame.layer)
-            .cloned()
-            .expect("only_frame checked the frame stands on a layer of the fragment")
-    };
+    let stem_id = new_id();
     let id = new_id();
     // Every layer of the frame's stack, however deep a group holds it.
     let inner: Vec<(String, String)> = ids_in(&frame.layers)
         .into_iter()
         .map(|was| (was.to_owned(), new_id()))
         .collect();
+    // Where a link may lead and still come with the frame: its own layer
+    // and every layer in its stack. The deck a page carries inside it is
+    // planted with it; a link out of it named a layer of the board it
+    // was read from, and leads nowhere here.
+    let links: Vec<(String, String)> = std::iter::once((frame.layer.clone(), stem_id.clone()))
+        .chain(inner.iter().cloned())
+        .collect();
+    let mut stem = fragment
+        .layers
+        .iter()
+        .find(|l| l.id == frame.layer)
+        .cloned()
+        .expect("only_frame checked the frame stands on a layer of the fragment");
+    stem.id = stem_id;
+    stem.next = stem.next.as_deref().and_then(|to| minted(&links, to));
 
     let at = spot(board);
     let by = Affine::translate(at[0] - frame.x, at[1] - frame.y);
@@ -158,7 +165,7 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
             Element::Frame(f) => {
                 f.id = id.clone();
                 f.layer = stem.id.clone();
-                renamed(&mut f.layers, &inner);
+                renamed(&mut f.layers, &links);
                 // A link names a frame of the board the page was read
                 // from; what is planted joins no sequence on its own.
                 f.next = None;
@@ -231,10 +238,12 @@ fn ids_in(layers: &[Layer]) -> Vec<&str> {
 }
 
 /// `layers`, and every group's under them, given the ids they were
-/// minted as.
+/// minted as — and where their links lead, or nowhere for a link out of
+/// what `pairs` mints.
 fn renamed(layers: &mut [Layer], pairs: &[(String, String)]) {
     for l in layers {
         l.id = minted(pairs, &l.id).expect("every inner layer was just minted");
+        l.next = l.next.as_deref().and_then(|to| minted(pairs, to));
         renamed(&mut l.layers, pairs);
     }
 }
@@ -477,6 +486,44 @@ mod tests {
         f.next = Some("a-frame-of-the-board-it-was-read-from".into());
         let (id, _) = plant(&mut board, &frag).unwrap();
         assert_eq!(frame_of(&board, &id).next, None);
+    }
+
+    #[test]
+    fn a_planted_frame_brings_the_deck_inside_it_and_nothing_out_of_it() {
+        let mut board = board();
+        let mut frag = grouped_fragment();
+        // The frame leads into its group, the group to the layer deep in
+        // it, that one back up to the frame's first layer — and that one
+        // out to a layer the fragment does not have.
+        frag.layers[0].next = Some("g".into());
+        let Element::Frame(f) = &mut frag.elements[0] else {
+            unreachable!("the fragment opens with its frame")
+        };
+        f.layers[1].next = Some("deep".into());
+        f.layers[1].layers[0].next = Some("in".into());
+        f.layers[0].next = Some("somewhere-on-the-board-it-was-read-from".into());
+        let (id, _) = plant(&mut board, &frag).unwrap();
+        let planted = frame_of(&board, &id);
+        let stem = board.layer(&planted.layer).unwrap();
+        let (inner, g) = (&planted.layers[0], &planted.layers[1]);
+        let deep = &g.layers[0];
+        assert_eq!(stem.next.as_ref(), Some(&g.id), "the frame into its group, by the group's new id");
+        assert_eq!(g.next.as_ref(), Some(&deep.id));
+        assert_eq!(deep.next.as_ref(), Some(&inner.id));
+        assert_eq!(inner.next, None, "out of the fragment is nowhere");
+    }
+
+    #[test]
+    fn a_link_into_the_frame_layer_itself_comes_with_it() {
+        let mut board = board();
+        let mut frag = fragment();
+        let Element::Frame(f) = &mut frag.elements[0] else {
+            unreachable!("the fragment opens with its frame")
+        };
+        f.layers[0].next = Some("fl".into());
+        let (id, _) = plant(&mut board, &frag).unwrap();
+        let planted = frame_of(&board, &id);
+        assert_eq!(planted.layers[0].next.as_ref(), Some(&planted.layer), "back out to the frame");
     }
 
     #[test]

@@ -241,6 +241,13 @@ pub struct Layer {
     pub locked: bool,
     #[serde(default, skip_serializing_if = "Tag::is_none")]
     pub color: Tag,
+    /// The layer a presentation goes to after this one, by its id: the
+    /// next stop, wherever the two stand — a frame, a group, or the layer
+    /// of one object. Absent on disk while it leads nowhere. A link to a
+    /// layer that has gone leads nowhere — and undoing the delete brings
+    /// it back — so it is never a reason to refuse a board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
     /// A group's children, bottom to top. Empty for every other kind — a
     /// frame's stack is its frame's, on the element.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -259,6 +266,7 @@ impl Layer {
             blend: BlendMode::Normal,
             locked: false,
             color: Tag::None,
+            next: None,
             layers: Vec::new(),
         }
     }
@@ -3514,6 +3522,17 @@ mod tests {
             ]
         }"##;
         Document::from_json(json).unwrap()
+    }
+
+    #[test]
+    fn a_layers_link_is_absent_on_disk_until_there_is_one() {
+        let mut doc = framed();
+        assert!(!doc.to_json().unwrap().contains("\"next\""));
+        doc.layer_mut("in").unwrap().next = Some("gone".into());
+        let back = Document::from_json(&doc.to_json().unwrap())
+            .expect("a link to a layer that has gone is no reason to refuse a board");
+        assert_eq!(back.layer("in").unwrap().next.as_deref(), Some("gone"));
+        assert_eq!(back.layer("bottom").unwrap().next, None);
     }
 
     #[test]
