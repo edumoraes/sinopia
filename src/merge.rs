@@ -238,7 +238,8 @@ impl Document {
 
     /// The other members out of the stack, and the kept one a raster layer
     /// under the run's name — normal and whole, since what it holds now
-    /// is what they drew — shown if any of them was.
+    /// is what they drew — shown if any of them was. It keeps its id and
+    /// with it its place in a deck: where it led, and what leads to it.
     fn settle_kept(&mut self, run: &Run) {
         let shown = run.members.iter().any(|id| self.layer(id).is_some_and(|l| l.visible));
         if let Some(stack) = self.stack_mut(run.owner.as_deref()) {
@@ -249,6 +250,7 @@ impl Document {
                 id: keep.id.clone(),
                 visible: shown,
                 color: keep.color,
+                next: keep.next.take(),
                 ..Layer::of(&run.name, Kind::Raster)
             };
         }
@@ -418,6 +420,15 @@ mod tests {
         assert_eq!(on(&doc, "L1"), ["l1", "l2"], "in paint order");
         assert_eq!(doc.layer("L1").unwrap().kind, Kind::Raster, "it holds more than one object now");
         assert!(Document::from_json(&doc.to_json().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn the_layer_a_merge_keeps_keeps_its_place_in_a_deck() {
+        let mut doc = board(TWO, &["L1", "L2"]);
+        doc.layer_mut("L1").unwrap().next = Some("elsewhere".into());
+        let runs = doc.merges(&Merge::Down("L2".into()));
+        doc.merge_structural(&runs[0]);
+        assert_eq!(doc.layer("L1").unwrap().next.as_deref(), Some("elsewhere"));
     }
 
     #[test]

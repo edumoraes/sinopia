@@ -1,16 +1,19 @@
 ---
 name: sinopia
 description: |
-  Read and write frames on an open Sinopia whiteboard from the command line.
-  Use when the user points at a board, a whiteboard, a frame, a sketch or a
-  diagram they have drawn and wants you to look at it; when they ask what is
-  on the board; or when they ask you to put a diagram, a flow, a layout or a
-  drawing onto the board. Exports a frame to yourself as PNG + JSON + an
-  inventory, and grafts new frames back on — text included; puts labels
-  and notes on the board and changes them; lists and arranges the board's
-  layers when the person asks. Triggers: sinopia, whiteboard, the board,
-  this frame, read my sketch, draw this on the board, write on the board,
-  label this, the layers.
+  Read and write frames on an open Sinopia whiteboard from the command line,
+  and build presentations on it. Use when the user points at a board, a
+  whiteboard, a frame, a sketch or a diagram they have drawn and wants you to
+  look at it; when they ask what is on the board; when they ask you to put a
+  diagram, a flow, a layout or a drawing onto the board; or when they ask for
+  a presentation, a talk, slides or a deck on the board. Exports a frame to
+  yourself as PNG + JSON + an inventory, and grafts new frames back on — text
+  included, placed where you choose; puts labels and notes on the board and
+  changes them; lists and arranges the board's layers when the person asks;
+  links frames, groups and objects into a deck the camera flies through, and
+  runs the show. Triggers: sinopia, whiteboard, the board, this frame, read
+  my sketch, draw this on the board, write on the board, label this, the
+  layers, presentation, slides, deck, present, talk.
 ---
 
 # Sinopia, from an agent's side
@@ -30,6 +33,9 @@ if a listing looks like the wrong board, ask rather than guess.
 Every command prints one line of JSON and exits `0`, or prints an error and
 exits `1`. `{"ev":"denied", ...}` is also exit `1`, and its `reason` says what
 went wrong.
+
+A board can also be **presented**: layers linked one to the next make a
+deck the camera flies through — see [Presentations](#presentations).
 
 ## Reading a frame
 
@@ -87,8 +93,17 @@ shape `board.json` already has — so the round trip is: read a frame, edit its
 fresh), so you never overwrite what you read.
 
 **The board decides where it goes** — to the right of everything already
-there. Your `x`/`y` on the frame are ignored; its `w`/`h` are yours. Place the
-contents relative to the frame's own box.
+there — unless you say: `--at X,Y` puts the frame's top left corner there,
+in world units. Your `x`/`y` on the frame itself are never read; its `w`/`h`
+are yours. Place the contents relative to the frame's own box.
+
+```sh
+sinopia agent add plan.json --at 0,1200
+# {"ev":"framed","id":"01M1SSA…","name":"Auth Flow","layer":"01M1SSB…","layers":{"L1":"01M1SSB…","L2":"01M1SSC…",…},"v":1}
+```
+
+`layers` maps every layer id you wrote to the id it has on the board now —
+what you use to link your layers into a deck later.
 
 ```json
 {
@@ -283,6 +298,159 @@ lock keeps, a move the tree refuses, or a merge that merges nothing is
 `flatten` take work away: list first, and do them only when that is what was
 asked.
 
+## Presentations
+
+A board presents itself. Layers linked one to the next make a **deck**, and
+a show flies the camera from each **stop** to the next. A stop is any
+layer:
+
+- a **frame** is shown as a **slide**: fitted to the screen, everything
+  round it covered black;
+- a **group**, or the layer of **one object**, is shown **on the board**:
+  fitted with some room round it, the board in sight beyond it.
+
+Between two stops the camera takes the shortest path for zooming and
+panning together — straight in to something already in sight, out and
+back in to reach something far. That is what makes a presentation on a
+board more than slides: an overview, a zoom into a part of it, a flight
+to the next idea. The person presents it with the keys (→ ↓ Space Enter
+next, ← ↑ back, Home, End, Esc to end), the mouse, or — on a build with
+hand gestures — their hands: an open hand swept sideways turns a slide,
+a pinch drags, two pinches zoom, a pointed index finger is a laser. Every
+stop wears its number on the board, and the arrows between them show the
+way.
+
+You build the deck; **start a show only when the person asks** — it takes
+the whole screen.
+
+### Laying a talk out on a board
+
+- **The camera fits each stop to the screen, so size is zoom.** A frame
+  1600×900 fills the screen; one 400×225 fills it too — four times closer
+  in. Size text for the stop it is seen in: a title of `size` 64 in a
+  1600-wide frame reads as large as one of 16 in a 400-wide frame.
+- **Shape frames like the screen** — 16:9: 1600×900, 800×450, 400×225 — to
+  fill it; any other shape is shown with black bars at its sides.
+- **Where things stand is the story's map.** Put the overview first and
+  large; put details inside it or near it, small, so the camera zooms in
+  to them; keep a change of subject far away, so the flight says so.
+  Leave room between frames — a flight across empty board reads as travel.
+- **A group is a stop without a frame**: group the parts of a diagram the
+  talk zooms into, and link the group. A single shape or text is a stop
+  too — the camera fits it with a little room round it.
+
+### Building one
+
+1. **Write each frame as a fragment with its part of the deck inside it.**
+   Any layer of the fragment — the frame's own, a group, the layer of one
+   object — names the stop after it with `"next"`: the id of another layer
+   *of the same fragment*. The deck comes onto the board with the frame,
+   every id minted anew; a `next` naming anything outside the fragment is
+   dropped.
+
+```json
+{
+  "schema": 1,
+  "id": "talk",
+  "title": "talk",
+  "camera": { "x": 0, "y": 0, "zoom": 1 },
+  "layers": [ { "id": "F", "name": "Overview", "kind": "frame", "next": "G" } ],
+  "elements": [
+    { "type": "frame", "id": "f", "layer": "F",
+      "x": 0, "y": 0, "w": 1600, "h": 900, "background": "#ffffff",
+      "layers": [
+        { "id": "T", "name": "Title", "kind": "text" },
+        { "id": "G", "name": "Pipeline", "kind": "group", "next": "S2", "layers": [
+            { "id": "S1", "name": "Client", "kind": "vector" },
+            { "id": "S2", "name": "API", "kind": "vector" },
+            { "id": "S3", "name": "Database", "kind": "vector" },
+            { "id": "A1", "name": "Arrow 1", "kind": "vector" },
+            { "id": "A2", "name": "Arrow 2", "kind": "vector" },
+            { "id": "L1", "name": "Client label", "kind": "text" },
+            { "id": "L2", "name": "API label", "kind": "text" },
+            { "id": "L3", "name": "Database label", "kind": "text" } ] } ] },
+
+    { "type": "text", "id": "t", "layer": "T", "x": 80, "y": 60, "w": 0, "h": 0,
+      "text": "How a request flows", "size": 64, "bold": true, "color": "#1f2937" },
+
+    { "type": "shape", "id": "s1", "layer": "S1", "model": "rectangle",
+      "x": 120, "y": 400, "w": 320, "h": 180, "radius": 16,
+      "fill": "#dbeafe", "stroke": "#1d4ed8", "width": 4 },
+    { "type": "shape", "id": "s2", "layer": "S2", "model": "rectangle",
+      "x": 640, "y": 400, "w": 320, "h": 180, "radius": 16,
+      "fill": "#dcfce7", "stroke": "#15803d", "width": 4 },
+    { "type": "shape", "id": "s3", "layer": "S3", "model": "ellipse",
+      "x": 1160, "y": 390, "w": 320, "h": 200,
+      "fill": "#fef3c7", "stroke": "#b45309", "width": 4 },
+    { "type": "line", "id": "a1", "layer": "A1", "from": [440, 490], "to": [640, 490],
+      "stroke": "#374151", "width": 4, "end": "arrow" },
+    { "type": "line", "id": "a2", "layer": "A2", "from": [960, 490], "to": [1160, 490],
+      "stroke": "#374151", "width": 4, "end": "arrow" },
+    { "type": "text", "id": "l1", "layer": "L1", "x": 220, "y": 466, "w": 0, "h": 0,
+      "text": "Client", "size": 40, "color": "#1d4ed8" },
+    { "type": "text", "id": "l2", "layer": "L2", "x": 762, "y": 466, "w": 0, "h": 0,
+      "text": "API", "size": 40, "color": "#15803d" },
+    { "type": "text", "id": "l3", "layer": "L3", "x": 1236, "y": 466, "w": 0, "h": 0,
+      "text": "Database", "size": 40, "color": "#b45309" }
+  ]
+}
+```
+
+   That deck is three stops: the overview slide, then the pipeline group —
+   the camera closes in on the diagram — then the API box alone.
+
+2. **Place each frame** with `--at`, and keep the `layers` map each answer
+   gives you:
+
+```sh
+sinopia agent add overview.json --at 0,0
+sinopia agent add api-detail.json --at 2400,300
+```
+
+3. **Link the frames' decks together** by the ids the board gave your
+   layers — or by names, where only one layer goes by each — or lay the
+   whole deck at once with `path`, which also takes its stops out of any
+   deck they were in:
+
+```sh
+sinopia present link 01MS2… 01MDETAIL…          # the API box, then the detail frame
+sinopia present path 01MF… 01MG… 01MS2… 01MDETAIL…   # exactly this order
+sinopia present unlink 01MS2…                   # the link out of one stop
+sinopia present unlink --all                    # every link on the board
+```
+
+4. **Check it**: `sinopia present list` prints every deck, stop by stop —
+   each stop's layer `id`, `name`, `kind` and the box it shows (`x`, `y`,
+   `w`, `h`) — and `sinopia agent read` shows you each frame as a picture.
+5. **Choose how the presenter's camera is cut**, when the person wants
+   their face on the slides — it is stored in the board, with the deck:
+   `sinopia present camera rounded|round|square|blob` (`blob` is an
+   irregular shape that slowly moves). `--show` and `--hide` put it in the
+   corner of the show or take it away, on a build with hand gestures.
+6. **Run it, when asked**:
+
+```sh
+sinopia present start                 # from the stop selected, else the head of a deck
+sinopia present start "Overview"      # from a stop named
+sinopia present next | prev | first | last
+sinopia present go 3                  # slides are counted from 1
+sinopia present stop
+# {"ev":"showing","slide":2,"of":5,"stop":"01MG…","v":1}
+```
+
+Rules a deck keeps:
+
+- **A stop comes after one stop at most.** `link` into a layer another one
+  already leads to is refused, naming that one: `unlink` it first, or lay
+  the deck with `path`.
+- A layer hidden, or holding nothing painted, is passed over by the show,
+  and takes no number.
+- Every `link`, `unlink` and `path` is one step the person can undo, and
+  so is a change of the camera's shape.
+
+`sinopia hands on|off` turns the hand gestures on or off, when the person
+asks; on a build without them it says so.
+
 ## Errors you will actually hit
 
 | reason | what to do |
@@ -300,11 +468,16 @@ asked.
 | `no text "X" on show on the board that is open` | `sinopia text list`, and name it by its id |
 | `field color must be #rgb or #rrggbb` | write colours as hex |
 | `"X" is locked, and a lock keeps …` | the person locked it: ask before unlocking |
+| `layer "X" already comes after "Y": a stop comes after one stop at most` | `sinopia present unlink Y`, or lay the deck with `path` |
+| `the board has no stop on show to present` | link layers first: `present path` or `present link` |
+| `layer "X" is no stop on show` | it is hidden or holds nothing painted; `layer list` says which |
+| `no show is on` | `sinopia present start`, when the person wants the show |
+| `this build reads no camera` | the person's build has no hand gestures; leave the camera be |
 
 ## Undo
 
 Anything you graft is one undo step for the person: `Ctrl+Z` takes your frame
-back off the board, and every `sinopia layer` and `sinopia text` change is one
-step too. You
+back off the board, and every `sinopia layer`, `sinopia text` and
+`sinopia present` change is one step too. You
 cannot undo from here. If you got it wrong, say so — and graft a corrected
 frame, or put the layers back the way the listing you took first had them.

@@ -148,6 +148,12 @@ pub enum Action {
     Layers,
     /// The brush library shown or hidden.
     Library,
+    /// The board's decks presented, one stop at a time.
+    Present,
+    /// The decks' arrows and numbers shown on the board or put away.
+    Path,
+    /// Hand gestures through the webcam turned on or off.
+    Hands,
     NewLayer,
     NewGroup,
     Rename,
@@ -176,6 +182,13 @@ pub struct State {
     pub hidden: bool,
     /// What a merge would be called: `Editor::merge_name`.
     pub merge: &'static str,
+    /// The board has a stop on show to present.
+    pub present: bool,
+    /// Whether hand gestures are on, in a build that has them; `None` in
+    /// one that does not, which offers no line for them.
+    pub hands: Option<bool>,
+    /// Whether the decks' arrows and numbers are on the board.
+    pub path: bool,
 }
 
 /// The `Ctrl` shortcut for `key` — read lower case, with `Shift` and
@@ -209,6 +222,7 @@ pub fn shortcut(key: &str, shift: bool, alt: bool) -> Option<Action> {
         (",", false, false) => Action::Layer(Command::Show),
         ("e", false, true) => Action::Layer(Command::Merge),
         ("e", true, false) => Action::Layer(Command::MergeVisible),
+        ("h", true, false) => Action::Hands,
         _ => return None,
     })
 }
@@ -258,6 +272,9 @@ pub fn items(
                 state.library.is_some(),
                 false,
             ),
+            ("Present", "F5", Action::Present, state.present, true),
+            ("Presentation Path", "", Action::Path, true, false),
+            ("Hand Gestures", "Ctrl+Shift+H", Action::Hands, state.hands.is_some(), false),
         ],
         Title::Layer => {
             let run = |label, keys, command, rule| {
@@ -320,6 +337,7 @@ pub fn items(
     };
     lines
         .into_iter()
+        .filter(|(_, _, action, _, _)| *action != Action::Hands || state.hands.is_some())
         .map(|(label, keys, action, enabled, rule)| {
             let item = Item::new(label).enabled(enabled);
             let item = if keys.is_empty() {
@@ -331,6 +349,8 @@ pub fn items(
             let item = match action {
                 Action::Layers => item.checked(state.layers),
                 Action::Library => item.checked(state.library == Some(true)),
+                Action::Hands => item.checked(state.hands == Some(true)),
+                Action::Path => item.checked(state.path),
                 _ => item,
             };
             (item, action)
@@ -425,6 +445,9 @@ mod tests {
             locked: false,
             hidden: false,
             merge: "Merge Down",
+            present: true,
+            hands: Some(false),
+            path: true,
         }
     }
 
@@ -442,6 +465,7 @@ mod tests {
         match hint {
             "Del" => return Some(Action::Delete),
             "F2" => return Some(Action::Rename),
+            "F5" => return Some(Action::Present),
             "Shift+L" => return Some(Action::Layers),
             "Shift+B" => return Some(Action::Library),
             _ => {}
@@ -631,6 +655,31 @@ mod tests {
         let (items, actions) = super::items(Title::View, &hidden, |_| true);
         assert!(!line(&items, &actions, Action::Layers).checked);
         assert!(!line(&items, &actions, Action::Library).checked);
+    }
+
+    #[test]
+    fn the_presentation_path_is_a_line_of_the_view_menu_checked_while_it_shows() {
+        let (items, actions) = super::items(Title::View, &state(), |_| true);
+        assert!(line(&items, &actions, Action::Path).checked);
+        let hidden = State {
+            path: false,
+            ..state()
+        };
+        let (items, actions) = super::items(Title::View, &hidden, |_| true);
+        assert!(!line(&items, &actions, Action::Path).checked);
+    }
+
+    #[test]
+    fn hand_gestures_are_offered_only_by_a_build_that_has_them() {
+        let (_, actions) = super::items(Title::View, &State { hands: None, ..state() }, |_| true);
+        assert!(!actions.contains(&Action::Hands), "no line for what the build lacks");
+        let on = State {
+            hands: Some(true),
+            ..state()
+        };
+        let (items, actions) = super::items(Title::View, &on, |_| true);
+        assert!(line(&items, &actions, Action::Hands).checked);
+        assert_eq!(shortcut("h", true, false), Some(Action::Hands));
     }
 
     #[test]

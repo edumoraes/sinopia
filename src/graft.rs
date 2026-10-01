@@ -106,19 +106,55 @@ pub struct Planned {
     elements: Vec<Element>,
     id: String,
     name: String,
+    minted: Vec<(String, String)>,
+}
+
+/// What landed: the frame's id and name, its layer's id, and the id each
+/// layer of the fragment was minted as, the frame's own among them — so
+/// whoever handed it over can go on naming its layers by the ids they
+/// wrote, a deck across two frames included.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Planted {
+    pub id: String,
+    pub name: String,
+    pub layer: String,
+    pub layers: Vec<(String, String)>,
+}
+
+impl Planned {
+    /// What the graft will answer once it lands, known before it does:
+    /// every id is minted already, so whatever cannot be said of the
+    /// graft refuses it before the board is touched.
+    pub fn planted(&self) -> Planted {
+        Planted {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            layer: self.stem.id.clone(),
+            layers: self.minted.clone(),
+        }
+    }
 }
 
 /// The frame [`planned`] worked out, on the board. On top: a frame an
 /// agent hands over arrives over the work that is already there, never
 /// under it.
-pub fn apply(board: &mut Document, planned: Planned) -> (String, String) {
+pub fn apply(board: &mut Document, planned: Planned) -> Planted {
+    let layer = planned.stem.id.clone();
     board.layers.push(planned.stem);
     board.elements.extend(planned.elements);
-    (planned.id, planned.name)
+    Planted {
+        id: planned.id,
+        name: planned.name,
+        layer,
+        layers: planned.minted,
+    }
 }
 
-/// Everything [`plant`] does except touching the board.
-pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned> {
+/// Everything [`plant`] does except touching the board. The frame's top
+/// left corner lands `at` the point asked, or — asked for none — where
+/// the board picks: to the right of everything, since an agent cannot
+/// see the board it is drawing on.
+pub fn planned(board: &Document, fragment: &Document, at: Option<[f64; 2]>) -> anyhow::Result<Planned> {
     let frame = only_frame(fragment)?;
     let name = name_of(fragment, frame);
 
@@ -127,23 +163,30 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
     // the frame it was read from. The id is all that is minted — the
     // rest of the layer is the fragment's own, so a frame staged hidden
     // arrives hidden, exactly as the layers inside it already do.
-    let stem = Layer {
-        id: new_id(),
-        ..fragment
-            .layers
-            .iter()
-            .find(|l| l.id == frame.layer)
-            .cloned()
-            .expect("only_frame checked the frame stands on a layer of the fragment")
-    };
+    let stem_id = new_id();
     let id = new_id();
     // Every layer of the frame's stack, however deep a group holds it.
     let inner: Vec<(String, String)> = ids_in(&frame.layers)
         .into_iter()
         .map(|was| (was.to_owned(), new_id()))
         .collect();
+    // Where a link may lead and still come with the frame: its own layer
+    // and every layer in its stack. The deck a page carries inside it is
+    // planted with it; a link out of it named a layer of the board it
+    // was read from, and leads nowhere here.
+    let links: Vec<(String, String)> = std::iter::once((frame.layer.clone(), stem_id.clone()))
+        .chain(inner.iter().cloned())
+        .collect();
+    let mut stem = fragment
+        .layers
+        .iter()
+        .find(|l| l.id == frame.layer)
+        .cloned()
+        .expect("only_frame checked the frame stands on a layer of the fragment");
+    stem.id = stem_id;
+    stem.next = stem.next.as_deref().and_then(|to| minted(&links, to));
 
-    let at = spot(board);
+    let at = at.unwrap_or_else(|| spot(board));
     let by = Affine::translate(at[0] - frame.x, at[1] - frame.y);
 
     // Read straight off `elements` and not through `painted()`: that one
@@ -158,7 +201,7 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
             Element::Frame(f) => {
                 f.id = id.clone();
                 f.layer = stem.id.clone();
-                renamed(&mut f.layers, &inner);
+                renamed(&mut f.layers, &links);
             }
             other => {
                 let to = minted(&inner, other.layer()).with_context(|| {
@@ -193,6 +236,7 @@ pub fn planned(board: &Document, fragment: &Document) -> anyhow::Result<Planned>
         elements: planted,
         id,
         name,
+        minted: links,
     })
 }
 
@@ -228,10 +272,12 @@ fn ids_in(layers: &[Layer]) -> Vec<&str> {
 }
 
 /// `layers`, and every group's under them, given the ids they were
-/// minted as.
+/// minted as — and where their links lead, or nowhere for a link out of
+/// what `pairs` mints.
 fn renamed(layers: &mut [Layer], pairs: &[(String, String)]) {
     for l in layers {
         l.id = minted(pairs, &l.id).expect("every inner layer was just minted");
+        l.next = l.next.as_deref().and_then(|to| minted(pairs, to));
         renamed(&mut l.layers, pairs);
     }
 }
@@ -252,8 +298,9 @@ mod tests {
     /// apart — the images go into the store between the two — but every
     /// test here is about what lands, not about when.
     fn plant(board: &mut Document, fragment: &Document) -> anyhow::Result<(String, String)> {
-        let planned = planned(board, fragment)?;
-        Ok(apply(board, planned))
+        let planned = planned(board, fragment, None)?;
+        let planted = apply(board, planned);
+        Ok((planted.id, planted.name))
     }
     use crate::doc::Rect;
     use crate::export::{self, Scope};
@@ -460,6 +507,95 @@ mod tests {
             (10.0, 10.0),
             "it keeps where it stood inside the frame"
         );
+    }
+
+    #[test]
+    fn a_planted_frame_joins_no_deck_of_the_board_it_was_read_from() {
+        let mut board = board();
+        let mut frag = fragment();
+        frag.layers[0].next = Some("a-layer-of-the-board-it-was-read-from".into());
+        let (id, _) = plant(&mut board, &frag).unwrap();
+        let stem = &frame_of(&board, &id).layer;
+        assert_eq!(board.layer(stem).unwrap().next, None);
+    }
+
+    #[test]
+    fn a_frame_lands_where_it_is_asked_to_with_what_it_holds() {
+        let mut board = board();
+        let plan = planned(&board, &fragment(), Some([500.0, -300.0])).unwrap();
+        let planted = apply(&mut board, plan);
+        let f = frame_of(&board, &planted.id);
+        assert_eq!((f.x, f.y), (500.0, -300.0));
+        let Some(Element::Rect(r)) = board.elements.iter().find(|e| e.layer() == f.layers[0].id) else {
+            panic!("the rect came with it");
+        };
+        assert_eq!((r.x, r.y), (510.0, -290.0), "as far in from the frame's corner as it was");
+        let mut far = fragment();
+        if let Element::Rect(r) = &mut far.elements[1] {
+            r.x = 1.5e308;
+        }
+        assert!(planned(&board, &far, Some([1e308, 0.0])).is_err(), "past the numbers a board can hold");
+    }
+
+    #[test]
+    fn what_a_graft_will_answer_is_known_before_it_lands() {
+        let mut board = board();
+        let plan = planned(&board, &grouped_fragment(), None).unwrap();
+        let foreseen = plan.planted();
+        assert_eq!(apply(&mut board, plan), foreseen);
+    }
+
+    #[test]
+    fn what_a_fragments_layers_were_minted_as_comes_back_with_the_frame() {
+        let mut board = board();
+        let plan = planned(&board, &grouped_fragment(), None).unwrap();
+        let planted = apply(&mut board, plan);
+        let f = frame_of(&board, &planted.id).clone();
+        let minted = |was: &str| planted.layers.iter().find(|(a, _)| a == was).map(|(_, b)| b.clone());
+        assert_eq!(planted.layer, f.layer, "the frame's own layer");
+        assert_eq!(minted("fl"), Some(f.layer.clone()));
+        assert_eq!(minted("in"), Some(f.layers[0].id.clone()));
+        assert_eq!(minted("g"), Some(f.layers[1].id.clone()));
+        assert_eq!(minted("deep"), Some(f.layers[1].layers[0].id.clone()));
+        assert_eq!(planted.layers.len(), 4);
+    }
+
+    #[test]
+    fn a_planted_frame_brings_the_deck_inside_it_and_nothing_out_of_it() {
+        let mut board = board();
+        let mut frag = grouped_fragment();
+        // The frame leads into its group, the group to the layer deep in
+        // it, that one back up to the frame's first layer — and that one
+        // out to a layer the fragment does not have.
+        frag.layers[0].next = Some("g".into());
+        let Element::Frame(f) = &mut frag.elements[0] else {
+            unreachable!("the fragment opens with its frame")
+        };
+        f.layers[1].next = Some("deep".into());
+        f.layers[1].layers[0].next = Some("in".into());
+        f.layers[0].next = Some("somewhere-on-the-board-it-was-read-from".into());
+        let (id, _) = plant(&mut board, &frag).unwrap();
+        let planted = frame_of(&board, &id);
+        let stem = board.layer(&planted.layer).unwrap();
+        let (inner, g) = (&planted.layers[0], &planted.layers[1]);
+        let deep = &g.layers[0];
+        assert_eq!(stem.next.as_ref(), Some(&g.id), "the frame into its group, by the group's new id");
+        assert_eq!(g.next.as_ref(), Some(&deep.id));
+        assert_eq!(deep.next.as_ref(), Some(&inner.id));
+        assert_eq!(inner.next, None, "out of the fragment is nowhere");
+    }
+
+    #[test]
+    fn a_link_into_the_frame_layer_itself_comes_with_it() {
+        let mut board = board();
+        let mut frag = fragment();
+        let Element::Frame(f) = &mut frag.elements[0] else {
+            unreachable!("the fragment opens with its frame")
+        };
+        f.layers[0].next = Some("fl".into());
+        let (id, _) = plant(&mut board, &frag).unwrap();
+        let planted = frame_of(&board, &id);
+        assert_eq!(planted.layers[0].next.as_ref(), Some(&planted.layer), "back out to the frame");
     }
 
     #[test]
@@ -687,17 +823,30 @@ mod tests {
     }
 
     /// What the skill teaches an agent to write is what the board takes:
-    /// its example fragment, read out of the skill itself, grafts.
+    /// every fragment in it, read out of the skill itself, grafts — and the
+    /// deck the presentation's carries arrives with it, stop by stop.
     #[test]
-    fn the_fragment_the_skill_teaches_grafts() {
+    fn every_fragment_the_skill_teaches_grafts() {
         let skill = include_str!("../skills/sinopia/SKILL.md");
         let open = "```json\n{\n  \"schema\"";
-        let start = skill.find(open).expect("the skill shows a fragment") + "```json\n".len();
-        let end = start + skill[start..].find("```").expect("and closes it");
-        let fragment = Document::from_json(&skill[start..end]).expect("the skill's fragment parses");
+        let fragments: Vec<Document> = skill
+            .match_indices(open)
+            .map(|(at, _)| {
+                let start = at + "```json\n".len();
+                let end = start + skill[start..].find("```").expect("a fragment is closed");
+                Document::from_json(&skill[start..end]).expect("the skill's fragment parses")
+            })
+            .collect();
+        assert_eq!(fragments.len(), 2, "a diagram and a presentation");
         let mut b = board();
-        plant(&mut b, &fragment).expect("and grafts");
+        plant(&mut b, &fragments[0]).expect("and grafts");
         assert!(b.elements.iter().any(|e| matches!(e, Element::Shape(_))), "a box");
         assert!(b.elements.iter().any(|e| matches!(e, Element::Line(_))), "an arrow");
+        let mut b = board();
+        plant(&mut b, &fragments[1]).expect("the presentation grafts");
+        let decks = crate::present::decks(&b);
+        assert_eq!(decks.len(), 1, "{decks:?}");
+        let names: Vec<&str> = decks[0].iter().map(|id| b.layer(id).unwrap().name.as_str()).collect();
+        assert_eq!(names, ["Overview", "Pipeline", "API"]);
     }
 }

@@ -193,6 +193,18 @@ fn sd_polygon(p: vec2<f32>, half: vec2<f32>, fit: vec4<f32>) -> f32 {
     return s * sqrt(d);
 }
 
+// The blob inscribed in a box of half extents `half` at `phase`: the
+// distance to its outline along the ray from the middle, over how steeply
+// that changes — `shape::blob`, line for line, its waves written in from
+// `shape::BLOB_WAVES` as `blob_waves`.
+fn sd_blob(p: vec2<f32>, half: vec2<f32>, phase: f32) -> f32 {
+    let radius = min(half.x, half.y) / (1.0 + BLOB_DEPTH);
+    let len = length(p);
+    let waves = blob_waves(atan2(p.y, p.x), phase);
+    let steep = radius * BLOB_DEPTH * waves.y / max(len, 1e-4);
+    return (len - radius * (1.0 + BLOB_DEPTH * waves.x)) / sqrt(1.0 + steep * steep);
+}
+
 // Straight alpha: what the window is blended with.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -232,6 +244,8 @@ fn shade(in: VsOut) -> vec4<f32> {
             d = sd_ellipse(local, half);
         } else if (in.kind == KIND_POLYGON) {
             d = sd_polygon(local, half, in.uv);
+        } else if (in.kind == KIND_BLOB) {
+            d = sd_blob(local, half, in.paper.x);
         } else {
             d = sd_box(local, half, r);
         }
@@ -243,7 +257,8 @@ fn shade(in: VsOut) -> vec4<f32> {
         } else if (in.line < 0.0) {
             d = d - in.line;
         }
-        if (in.kind == KIND_IMAGE || in.kind == KIND_GRAIN) {
+        let pictured = in.kind == KIND_BLOB && in.paper.y > 0.0;
+        if (in.kind == KIND_IMAGE || in.kind == KIND_GRAIN || pictured) {
             // The box's own axes are already the texture's: the corner at
             // -half is (0, 0). An image maps onto the whole sheet, a
             // glyph onto its cell of the atlas. There is no mip chain to
@@ -504,10 +519,21 @@ fn shader() -> String {
         ("GRAIN", scene::KIND_GRAIN),
         ("ELLIPSE", scene::KIND_ELLIPSE),
         ("POLYGON", scene::KIND_POLYGON),
+        ("BLOB", scene::KIND_BLOB),
     ] {
         out.push_str(&format!("const KIND_{name}: u32 = {kind}u;\n"));
     }
     out.push_str(&format!("const MAX_CORNERS: u32 = {}u;\n", crate::shape::MAX_CORNERS));
+    // A blob's waves, summed the way `shape::blob_reach` sums them, and
+    // their slope the way `shape::blob` does: how far out and how steep.
+    out.push_str(&format!("const BLOB_DEPTH: f32 = {:?};\n", crate::shape::BLOB_DEPTH));
+    out.push_str("fn blob_waves(a: f32, phase: f32) -> vec2<f32> {\n    var w = vec2<f32>(0.0, 0.0);\n");
+    for (lobes, share, turn) in crate::shape::BLOB_WAVES {
+        out.push_str(&format!(
+            "    w += vec2<f32>({share:?} * sin({lobes:?} * a + {turn:?} * phase), {share:?} * {lobes:?} * cos({lobes:?} * a + {turn:?} * phase));\n"
+        ));
+    }
+    out.push_str("    return w;\n}\n");
     for mode in BlendMode::ALL {
         out.push_str(&format!(
             "const MODE_{}: u32 = {}u;\n",
@@ -590,6 +616,11 @@ pub struct Gfx {
     /// The export dialog's picture of what is leaving: a slot of its own,
     /// replaced in place each time the picture is taken again.
     picture: Option<u32>,
+    /// The presenter's camera, a frame of it at a time: a slot of its
+    /// own and the texture behind it, written over in place thirty times
+    /// a second — a new one only when the frame changes size.
+    #[cfg(feature = "hands")]
+    camera: Option<(u32, wgpu::Texture)>,
     /// The layers panel's sheet of thumbnails: drawn onto on the GPU and
     /// sampled like an image, its slot kept when it changes size.
     thumbs: Option<Target>,
@@ -843,6 +874,8 @@ impl Gfx {
             shapes: None,
             agent_logos: None,
             picture: None,
+            #[cfg(feature = "hands")]
+            camera: None,
             letters: None,
             thumbs: None,
             atlas: None,
@@ -1100,6 +1133,33 @@ impl Gfx {
             }
         };
         self.picture = Some(slot);
+        Ok(slot)
+    }
+
+    /// Uploads a frame of the presenter's camera into its slot, replacing
+    /// the last one, and answers the slot.
+    #[cfg(feature = "hands")]
+    pub fn upload_camera(&mut self, bmp: &Bitmap) -> anyhow::Result<u32> {
+        if let Some((slot, texture)) = &self.camera
+            && (texture.width(), texture.height()) == (bmp.w.max(1), bmp.h.max(1))
+        {
+            write_texture(&self.queue, texture, bmp)?;
+            return Ok(*slot);
+        }
+        let texture = texture_of(&self.device, &self.queue, texture_format(self.config.format), bmp)?;
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let group = bind_group(&self.device, &self.tex_bgl, &self.sampler, &view);
+        let slot = match &self.camera {
+            Some((slot, _)) => {
+                self.textures[*slot as usize] = group;
+                *slot
+            }
+            None => {
+                self.textures.push(group);
+                (self.textures.len() - 1) as u32
+            }
+        };
+        self.camera = Some((slot, texture));
         Ok(slot)
     }
 
@@ -1668,6 +1728,38 @@ fn upload(
     format: wgpu::TextureFormat,
     bmp: &Bitmap,
 ) -> anyhow::Result<wgpu::BindGroup> {
+    let texture = texture_of(device, queue, format, bmp)?;
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Ok(bind_group(device, layout, sampler, &view))
+}
+
+/// A texture holding `bmp`.
+fn texture_of(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    bmp: &Bitmap,
+) -> anyhow::Result<wgpu::Texture> {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("image"),
+        size: wgpu::Extent3d {
+            width: bmp.w.max(1),
+            height: bmp.h.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    write_texture(queue, &texture, bmp)?;
+    Ok(texture)
+}
+
+/// Writes `bmp` over the whole of `texture`, which is its size.
+fn write_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, bmp: &Bitmap) -> anyhow::Result<()> {
     anyhow::ensure!(
         bmp.rgba.len() as u64 == 4 * u64::from(bmp.w) * u64::from(bmp.h),
         "{}x{} px needs {} bytes, got {}",
@@ -1676,24 +1768,9 @@ fn upload(
         4 * u64::from(bmp.w) * u64::from(bmp.h),
         bmp.rgba.len()
     );
-    let size = wgpu::Extent3d {
-        width: bmp.w.max(1),
-        height: bmp.h.max(1),
-        depth_or_array_layers: 1,
-    };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("image"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
-            texture: &texture,
+            texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -1704,10 +1781,9 @@ fn upload(
             bytes_per_row: Some(4 * bmp.w),
             rows_per_image: Some(bmp.h),
         },
-        size,
+        texture.size(),
     );
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    Ok(bind_group(device, layout, sampler, &view))
+    Ok(())
 }
 
 /// The group 1 that samples `view`.
@@ -1765,6 +1841,7 @@ mod tests {
             ("GRAIN", scene::KIND_GRAIN),
             ("ELLIPSE", scene::KIND_ELLIPSE),
             ("POLYGON", scene::KIND_POLYGON),
+            ("BLOB", scene::KIND_BLOB),
         ] {
             let line = format!("const KIND_{name}: u32 = {kind}u;");
             assert!(source.contains(&line), "{line}");

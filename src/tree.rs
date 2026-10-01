@@ -846,12 +846,18 @@ fn toggle<T: PartialEq>(list: &mut Vec<T>, v: T) {
     }
 }
 
-/// `layers` and every group's under them, given the ids `minted` says.
+/// `layers` and every group's under them, given the ids `minted` says —
+/// and where their links lead.
 fn renamed(layers: &mut [Layer], minted: &impl Fn(&str) -> Option<String>) {
     for l in layers {
         if let Some(to) = minted(&l.id) {
             l.id = to;
         }
+        // A link inside what is copied comes with it, to the copy of
+        // where it led; one out of it would be a second way into a stop
+        // that already has one, and a copy joins no deck it did not
+        // bring.
+        l.next = l.next.as_deref().and_then(minted);
         renamed(&mut l.layers, minted);
     }
 }
@@ -1225,6 +1231,53 @@ pub(crate) mod tests {
         assert_eq!(copy.layers.len(), 2);
         assert!(copy.layers.iter().all(|l| !["D", "K"].contains(&l.id.as_str())));
         Document::from_json(&doc.to_json().unwrap()).expect("still a board");
+    }
+
+    #[test]
+    fn a_copy_keeps_the_links_inside_it_and_lets_go_of_the_ones_out() {
+        let mut doc = nested();
+        // Inside group G: B leads to C (deeper in it) and C to A, out of it.
+        doc.layer_mut("B").unwrap().next = Some("C".into());
+        doc.layer_mut("C").unwrap().next = Some("A".into());
+        // Inside frame F: the frame leads into its own group K, and K to D.
+        doc.layer_mut("F").unwrap().next = Some("K".into());
+        doc.layer_mut("K").unwrap().next = Some("D".into());
+        let made = doc.duplicate_layers(&ids(&["G", "F"]));
+        assert_eq!(made.len(), 2);
+        let copy = |doc: &Document, of: &str| {
+            let original = doc.layer(of).unwrap();
+            let name = format!("{} copy", original.name);
+            let made = made.iter().find(|id| doc.layer(id).is_some_and(|l| l.name == name)).unwrap();
+            doc.layer(made).unwrap().clone()
+        };
+        let g = copy(&doc, "G");
+        let (b, h) = (&g.layers[0], &g.layers[1]);
+        let c = &h.layers[0];
+        assert_eq!(b.next.as_ref(), Some(&c.id), "B's copy leads to C's copy");
+        assert_eq!(c.next, None, "a link out of the copy is let go of");
+        let f = copy(&doc, "F");
+        let inner = doc.inner(&f).to_vec();
+        let (d, k) = (&inner[0], &inner[1]);
+        assert_eq!(f.next.as_ref(), Some(&k.id), "the frame's copy leads into its own group");
+        assert_eq!(k.next.as_ref(), Some(&d.id));
+        // The originals are as they were.
+        assert_eq!(doc.layer("B").unwrap().next.as_deref(), Some("C"));
+        assert_eq!(doc.layer("C").unwrap().next.as_deref(), Some("A"));
+        assert_eq!(doc.layer("F").unwrap().next.as_deref(), Some("K"));
+    }
+
+    #[test]
+    fn a_paste_keeps_the_links_inside_the_clip_and_lets_go_of_the_ones_out() {
+        let mut doc = nested();
+        doc.layer_mut("B").unwrap().next = Some("C".into());
+        doc.layer_mut("C").unwrap().next = Some("A".into());
+        let clip = doc.clip(&ids(&["G"])).unwrap();
+        let planted = doc.paste(&clip, "A", &Affine::IDENTITY);
+        let g = doc.layer(&planted[0]).unwrap();
+        let (b, c) = (&g.layers[0], &g.layers[1].layers[0]);
+        assert_ne!(b.id, "B", "minted anew");
+        assert_eq!(b.next.as_ref(), Some(&c.id));
+        assert_eq!(c.next, None);
     }
 
     #[test]

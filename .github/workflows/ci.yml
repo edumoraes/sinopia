@@ -36,6 +36,22 @@ jobs:
       # fails on the push rather than on the tag.
       - run: sh packaging/archive.sh v0.0.0 target/debug/sinopia "$RUNNER_TEMP/dist"
 
+  # The hand gestures, behind the `hands` feature: built, linted and
+  # tested against the system's OpenCV, whose bindings the build script
+  # generates from its headers with clang. Arch ships the OpenCV 5 they
+  # are written against — Ubuntu's is a major release behind — so the job
+  # runs in an Arch container. The suite needs no camera and no models.
+  hands:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm --needed base-devel rust clang opencv
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --features hands
+      - run: cargo clippy --locked --all-targets --features hands
+      - run: cargo test --locked --features hands
+
   # The plugin's reading of index.json, in plain QML: no shell needed,
   # only Qt's own test runner, offscreen.
   plugin:

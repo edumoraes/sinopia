@@ -220,6 +220,50 @@ pub fn ellipse(p: Point, half: Point) -> f64 {
 /// Small enough to be nothing, in world units.
 const TINY: f64 = 1e-9;
 
+/// How far a blob's outline swells out and sinks in, as a share of its
+/// radius: enough to read as alive, never enough to look torn.
+pub const BLOB_DEPTH: f64 = 0.07;
+
+/// The waves a blob's outline is made of: how many lobes each has, how
+/// much of the depth it takes — the shares add up to the whole — and how
+/// fast it turns as the phase moves on, some one way and some the other,
+/// so the shape never quite repeats. The shader is written these numbers
+/// from here.
+pub const BLOB_WAVES: [(f64, f64, f64); 3] = [(2.0, 0.55, 0.9), (3.0, 0.3, -1.3), (5.0, 0.15, 1.7)];
+
+/// How far a blob's outline stands out at angle `a`, as a share of its
+/// radius, at `phase`. Only the shader draws a blob, so this and
+/// [`blob`] are its mirror, here to be held to it by the tests.
+#[cfg(test)]
+fn blob_reach(a: f64, phase: f64) -> f64 {
+    1.0 + BLOB_DEPTH
+        * BLOB_WAVES
+            .iter()
+            .map(|(lobes, share, turn)| share * (lobes * a + turn * phase).sin())
+            .sum::<f64>()
+}
+
+/// The signed distance from `p` to the blob in a box of half extents
+/// `half` at `phase` — the presenter's camera in its irregular shape. Its
+/// radius is the box's smaller half, held in so that the furthest a wave
+/// can reach is the box's edge. The distance is the one to the outline
+/// along the ray from the middle, over how steeply that changes: exact on
+/// a circle, and within a fiftieth of the radius of the true one near
+/// the gentle swells a blob has — which is where an edge is antialiased.
+#[cfg(test)]
+fn blob(p: Point, half: Point, phase: f64) -> f64 {
+    let radius = half[0].min(half[1]) / (1.0 + BLOB_DEPTH);
+    let len = p[0].hypot(p[1]);
+    let a = p[1].atan2(p[0]);
+    let steep = radius
+        * BLOB_DEPTH
+        * BLOB_WAVES
+            .iter()
+            .map(|(lobes, share, turn)| share * lobes * (lobes * a + turn * phase).cos())
+            .sum::<f64>();
+    (len - radius * blob_reach(a, phase)) / (1.0 + (steep / len.max(TINY)).powi(2)).sqrt()
+}
+
 /// The signed distance from `p` to the polygon `corners`: the nearest of
 /// its edges, and inside where the edges crossing the line through `p`
 /// wind round it — Inigo Quilez's `sdPolygon`, which the shader walks too.
@@ -473,6 +517,56 @@ mod tests {
         assert!(close(d, -25.0, 1e-6), "{d}");
         let d = ellipse([0.0, 0.0], [40.0, 10.0]);
         assert!(close(d, -10.0, 1e-6), "the nearest edge is the near side: {d}");
+    }
+
+    /// The outline of the blob in a box of half extents `half` at `phase`,
+    /// as a polygon of `n` corners: what the distance is held to.
+    fn blob_outline(half: Point, phase: f64, n: usize) -> Vec<Point> {
+        let radius = half[0].min(half[1]) / (1.0 + BLOB_DEPTH);
+        (0..n)
+            .map(|i| {
+                let a = std::f64::consts::TAU * i as f64 / n as f64;
+                let r = radius * blob_reach(a, phase);
+                [r * a.cos(), r * a.sin()]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_blob_stays_inside_its_box_and_moves_with_its_phase() {
+        let half = [100.0, 80.0];
+        for phase in [0.0, 0.7, 3.1, 10.0] {
+            for [x, y] in blob_outline(half, phase, 720) {
+                assert!(x.hypot(y) <= 80.0 + 1e-9, "past the box at phase {phase}: ({x}, {y})");
+            }
+        }
+        assert!(blob([0.0, 0.0], half, 0.0) < 0.0, "the middle is inside");
+        assert!(blob([100.0, 80.0], half, 0.0) > 0.0, "the box's corner is outside");
+        let at = |phase| blob_reach(0.3, phase);
+        assert!((at(0.0) - at(1.0)).abs() > 1e-3, "the outline moves as the phase does");
+        assert!((at(0.0) - at(1e-6)).abs() < 1e-5, "and moves smoothly");
+    }
+
+    #[test]
+    fn a_blobs_distance_is_close_to_the_true_one_near_its_outline() {
+        let half = [120.0, 120.0];
+        let radius = 120.0 / (1.0 + BLOB_DEPTH);
+        for phase in [0.0, 2.0] {
+            let outline = blob_outline(half, phase, 2000);
+            for i in 0..72 {
+                let a = std::f64::consts::TAU * i as f64 / 72.0;
+                for by in [-0.08, -0.02, 0.02, 0.08] {
+                    let r = radius * (blob_reach(a, phase) + by);
+                    let p = [r * a.cos(), r * a.sin()];
+                    let truth = polygon(p, &outline);
+                    let got = blob(p, half, phase);
+                    assert!(
+                        (got - truth).abs() <= 0.02 * radius,
+                        "at {a:.2} rad, {by} out: {got} for {truth}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

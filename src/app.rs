@@ -17,7 +17,7 @@ use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::platform::wayland::WindowAttributesExtWayland as _;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{CursorIcon, Window, WindowId};
+use winit::window::{CursorIcon, Fullscreen, Window, WindowId};
 
 use crate::agents;
 use crate::bitmap::{self, Bitmap};
@@ -39,14 +39,17 @@ use crate::history::History;
 use crate::gfx::Gfx;
 use crate::graft;
 use crate::guest::Guest;
+#[cfg(feature = "hands")]
+use crate::hands;
 use crate::grid;
-use crate::ipc::proto::{Event, Request};
+use crate::ipc::proto::{Event, Presenting, Request};
 use crate::ipc::server::Server;
 use crate::layers::{self, Panel, PanelHit};
 use crate::menu;
 use crate::menubar::{self, Action, Bar, Title};
 use crate::omarchy::{self, Style};
 use crate::palette::{self, IconSheet, Palette};
+use crate::present::{self, Show};
 use crate::slots::{self, Strip};
 use crate::props::{self, Props};
 use crate::project::{self, Origin, Project};
@@ -69,6 +72,26 @@ use crate::theme::{INKS, Theme};
 /// that has been idle wakes with a huge gap since the last frame;
 /// without this, whatever just started would be over before it drew.
 const MAX_STEP: f32 = 0.05;
+
+/// What a show covers everything round a slide in. The window itself is
+/// cleared to the board's own ground: a stop that is no frame is shown on
+/// the board, and the board has to be under it.
+const VEIL: Rgba = [0.0, 0.0, 0.0, 1.0];
+
+/// What `add_frame` answers for a frame that landed.
+fn framed(planted: graft::Planted) -> Event {
+    Event::Framed {
+        id: planted.id,
+        name: planted.name,
+        layer: planted.layer,
+        layers: planted.layers.into_iter().collect(),
+    }
+}
+
+/// What a build without the `hands` feature says when it is asked for the
+/// camera, the gestures or the presenter's card.
+#[cfg(not(feature = "hands"))]
+const NO_CAMERA: &str = "this build reads no camera: it is built without the hands feature (cargo build --features hands)";
 
 /// How much of the ink the brush's ring is drawn with.
 const RING_ALPHA: f32 = 0.6;
@@ -135,7 +158,33 @@ enum UserEvent {
     PastedLayers(Box<Document>),
     /// A portal dialog came back, however long the user took.
     Dialog(Reply),
+    /// What the hands' thread says — the camera opened or lost, or what
+    /// it saw in one frame — and which tracker it is, by the count it
+    /// was started with: a tracker let go of may still be opening, and
+    /// what it says is not about the one that came after it.
+    #[cfg(feature = "hands")]
+    Hands(u64, hands::camera::News),
 }
+
+/// The webcam while it is open — for the hand gestures, the presenter's
+/// card, or both: the thread reading it, what the hands are doing, the
+/// clock that is read on, and the card on the GPU — its slot and size,
+/// and how far it has faded in.
+#[cfg(feature = "hands")]
+struct Webcam {
+    /// Which tracker this is: what `UserEvent::Hands` says it is about.
+    started: u64,
+    tracker: hands::camera::Tracker,
+    gestures: hands::gesture::Gestures,
+    origin: Instant,
+    last_tick: f64,
+    card: Option<(u32, (u32, u32))>,
+    card_alpha: f32,
+}
+
+/// How long the presenter's camera takes to come and go.
+#[cfg(feature = "hands")]
+const CARD_FADE_S: f32 = 0.2;
 
 /// What happens to a project once the dialog it is waiting on answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +385,25 @@ struct App {
     /// Smoke-test mode: exit cleanly after N presented frames.
     smoke_frames_left: Option<u32>,
     exit_error: Option<anyhow::Error>,
+    /// The presentation of the active board, while there is one: the
+    /// slides, the one on show and the flight to it.
+    show: Option<Show>,
+    /// The show put the window in full screen, and ending it takes it out.
+    show_full: bool,
+    /// The presenter's camera is wanted in the corner while presenting:
+    /// `C` turns it on and off. It is the very camera the gestures read,
+    /// since only one process can hold a webcam.
+    #[cfg(feature = "hands")]
+    show_camera: bool,
+    /// The hand gestures are on: `Ctrl+Shift+H`.
+    #[cfg(feature = "hands")]
+    gesturing: bool,
+    /// The webcam, while the gestures or the card want it.
+    #[cfg(feature = "hands")]
+    webcam: Option<Webcam>,
+    /// How many times the webcam has been opened: each one's count.
+    #[cfg(feature = "hands")]
+    webcams: u64,
 }
 
 /// A send being composed. It holds the agents as they were when the
@@ -937,6 +1005,457 @@ impl App {
         }
         self.follow_brush();
         self.follow_active();
+        if let Some(show) = &mut self.show {
+            show.tick(f64::from(dt));
+        }
+        self.hold_show();
+        self.hands_tick();
+    }
+
+    /// Puts the camera where the show says: along the flight, or held
+    /// inside the slide — which is what keeps it there when the window
+    /// changes size. A slide that has gone from the board ends the show.
+    fn hold_show(&mut self) {
+        let Some(view) = self.view() else { return };
+        let Some(show) = &self.show else { return };
+        let doc = &self.open[self.active].project.doc;
+        match show.camera(doc, &view, view.camera) {
+            // The camera is the board's and is saved with it: one that is
+            // not a number would be written as null, and the draft would
+            // never open again.
+            Some(camera) if [camera.x, camera.y, camera.zoom].iter().all(|v| v.is_finite()) => {
+                self.open[self.active].project.doc.camera = camera;
+            }
+            Some(_) => {}
+            None => self.end_show(),
+        }
+    }
+
+    /// Starts a presentation of the active board, from the frame selected
+    /// or the head of its deck, flying in from what is on screen. The
+    /// window goes full screen and every panel goes away; a board with no
+    /// frame on show has nothing to present, and nothing happens.
+    fn start_show(&mut self) {
+        if let Err(reason) = self.start_show_from(None) {
+            log::info!("nothing presented: {reason}");
+        }
+    }
+
+    /// Starts a presentation from the stop on layer `from` — or, given
+    /// none, from where F5 starts one. A refusal says why, and nothing
+    /// starts.
+    fn start_show_from(&mut self, from: Option<&str>) -> Result<(), String> {
+        if self.show.is_some() {
+            return Err("a show is on already: go to a slide, or stop it first".into());
+        }
+        let view = self.view().ok_or("the board has no window to show it in")?;
+        let show = match from {
+            Some(from) => Show::from(self.doc(), from, &view).ok_or_else(|| {
+                format!("layer {from:?} is no stop on show: it is hidden, holds nothing painted, or is not on the board")
+            })?,
+            None => {
+                let selected = self.editor().selected_stop(self.doc());
+                Show::start(self.doc(), selected.as_deref(), &view).ok_or(
+                    "the board has no stop on show to present: link one layer to the next first",
+                )?
+            }
+        };
+        self.end_typing();
+        self.sending = None;
+        self.renaming = None;
+        self.searching = None;
+        // Whatever the hand held is let go of as if the window had lost
+        // it: a show takes the pointer and every press, and a slider or
+        // a card still held would go on dragging after it with the
+        // button up.
+        self.focus_lost();
+        self.show = Some(show);
+        if let Some(w) = &self.window
+            && w.fullscreen().is_none()
+        {
+            w.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            self.show_full = true;
+        }
+        // The presenter's card, if it is wanted, wants the camera now.
+        self.sync_webcam();
+        self.redraw();
+        self.update_cursor_icon();
+        Ok(())
+    }
+
+    /// Ends the presentation: the board looks where it did before it, and
+    /// the window comes out of full screen if the show put it there.
+    fn end_show(&mut self) {
+        let Some(show) = self.show.take() else { return };
+        self.active().1.camera = show.before;
+        if std::mem::take(&mut self.show_full)
+            && let Some(w) = &self.window
+        {
+            w.set_fullscreen(None);
+        }
+        // And lets go of it, unless the hands still read it.
+        self.sync_webcam();
+        self.redraw();
+        self.update_cursor_icon();
+    }
+
+    /// What `present` asks, from the socket or the keys: the show started,
+    /// stopped, or moved a slide on or back, to either end or to a slide
+    /// by its place. A step past either end is no refusal — the show is
+    /// where it was — but a show that is not on, or a slide it does not
+    /// have, is.
+    fn present(&mut self, action: Presenting) -> Result<(), String> {
+        let action = match action {
+            Presenting::Start { from } => return self.start_show_from(from.as_deref()),
+            Presenting::Stop => {
+                self.end_show();
+                return Ok(());
+            }
+            other => other,
+        };
+        let view = self.view().ok_or("the board has no window to show it in")?;
+        let doc = &self.open[self.active].project.doc;
+        let show = self.show.as_mut().ok_or("no show is on: start one first")?;
+        let moved = match action {
+            Presenting::Next => show.step(doc, &view, true),
+            Presenting::Prev => show.step(doc, &view, false),
+            Presenting::First => show.go(doc, &view, 0),
+            Presenting::Last => {
+                let last = show.last();
+                show.go(doc, &view, last)
+            }
+            Presenting::Go { to } => {
+                let of = show.place().1;
+                if to > of {
+                    return Err(format!("slide {to} is past the last: the show has {of}"));
+                }
+                show.go(doc, &view, to - 1)
+            }
+            Presenting::Start { .. } | Presenting::Stop => false,
+        };
+        if moved {
+            self.redraw();
+        }
+        Ok(())
+    }
+
+    /// Where the show stands, as `present` answers it.
+    fn showing(&self) -> Event {
+        match &self.show {
+            Some(show) => Event::Showing {
+                slide: Some(show.place().0 + 1),
+                of: show.place().1,
+                stop: Some(show.slide().to_owned()),
+            },
+            None => Event::Showing {
+                slide: None,
+                of: 0,
+                stop: None,
+            },
+        }
+    }
+
+    /// A key while a show is on: the arrows, the page keys, Space and
+    /// Enter move it; Home and End go to either end; Esc and F5 end it;
+    /// with hand gestures in the build, `Ctrl+Shift+H` turns them on or
+    /// off without leaving the show, `C` turns the presenter's camera on
+    /// or off and `Shift+C` steps it through its shapes. Nothing else
+    /// reaches the board.
+    fn show_key(&mut self, key: &Key) {
+        #[cfg(feature = "hands")]
+        if let Key::Character(c) = key
+            && c.eq_ignore_ascii_case("h")
+            && self.modifiers.state().control_key()
+            && self.modifiers.state().shift_key()
+        {
+            return self.toggle_hands();
+        }
+        #[cfg(feature = "hands")]
+        if let Key::Character(c) = key
+            && c.eq_ignore_ascii_case("c")
+        {
+            if self.modifiers.state().shift_key() {
+                // The shape is the board's: a step of it, kept with it.
+                let (_, doc) = self.active();
+                doc.presentation.camera = hands::marks::next_card(doc.presentation.camera);
+                return self.apply(Change::Scene);
+            }
+            self.show_camera = !self.show_camera;
+            return self.sync_webcam();
+        }
+        let action = match key {
+            Key::Named(
+                NamedKey::ArrowRight
+                | NamedKey::ArrowDown
+                | NamedKey::PageDown
+                | NamedKey::Space
+                | NamedKey::Enter,
+            ) => Presenting::Next,
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp | NamedKey::PageUp | NamedKey::Backspace) => {
+                Presenting::Prev
+            }
+            Key::Named(NamedKey::Home) => Presenting::First,
+            Key::Named(NamedKey::End) => Presenting::Last,
+            Key::Named(NamedKey::Escape | NamedKey::F5) => Presenting::Stop,
+            _ => return,
+        };
+        // A step past either end leaves the show where it was.
+        let _ = self.present(action);
+    }
+
+    /// Turns hand gestures on or off. The camera they read is opened when
+    /// they are turned on and let go of when nothing wants it any more —
+    /// the presenter's card in a show may still want it.
+    #[cfg(feature = "hands")]
+    fn toggle_hands(&mut self) {
+        self.gesturing = !self.gesturing;
+        log::info!("hands: {}", if self.gesturing { "on" } else { "off" });
+        self.sync_webcam();
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn toggle_hands(&mut self) {
+        log::info!("this build has no hand gestures: it is built with --features hands");
+    }
+
+    #[cfg(feature = "hands")]
+    fn hands_on(&self) -> bool {
+        self.gesturing
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hands_on(&self) -> bool {
+        false
+    }
+
+    /// Opens the camera when the hand gestures or the presenter's card
+    /// want it and it is shut, lets go of it when neither does, and tells
+    /// it which of the two to read for. The camera is `SINOPIA_CAMERA`
+    /// when set — an index, or a video file played as one — and the
+    /// models are read from the data directory's `models/`.
+    #[cfg(feature = "hands")]
+    fn sync_webcam(&mut self) {
+        let card = self.show.is_some() && self.show_camera;
+        if !self.gesturing && !card {
+            if self.webcam.take().is_some() {
+                log::info!("camera: let go of");
+            }
+            return self.redraw();
+        }
+        if self.webcam.is_none() {
+            let models = self.store.root().join("models");
+            let camera = std::env::var("SINOPIA_CAMERA").unwrap_or_else(|_| "0".into());
+            let proxy = self.proxy.clone();
+            self.webcams += 1;
+            let started = self.webcams;
+            let sink = move |news| proxy.send_event(UserEvent::Hands(started, news)).is_ok();
+            match hands::camera::Tracker::start(&models, &camera, sink) {
+                Ok(tracker) => {
+                    log::info!("camera: opening {camera}");
+                    self.webcam = Some(Webcam {
+                        started,
+                        tracker,
+                        gestures: hands::gesture::Gestures::default(),
+                        origin: Instant::now(),
+                        last_tick: 0.0,
+                        card: None,
+                        card_alpha: 0.0,
+                    });
+                }
+                Err(e) => log::error!("camera: {e:#}"),
+            }
+        }
+        if let Some(cam) = &mut self.webcam {
+            cam.tracker.want_hands(self.gesturing);
+            cam.tracker.want_card(card);
+            if !self.gesturing {
+                // What the hands were doing is let go of with them: no
+                // laser left glowing, no spring still pulling the board.
+                cam.gestures = hands::gesture::Gestures::default();
+            }
+        }
+        self.redraw();
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn sync_webcam(&mut self) {}
+
+    /// What the camera's thread says about the camera that is open: it
+    /// opened, or could not be had, or stopped giving frames — which turns
+    /// the hands and the card off — or the models could not be had, which
+    /// turns the hands off alone; or one more reading.
+    #[cfg(feature = "hands")]
+    fn hands_news(&mut self, started: u64, news: hands::camera::News) {
+        if self.webcam.as_ref().is_none_or(|cam| cam.started != started) {
+            return;
+        }
+        match news {
+            hands::camera::News::Opened(Ok(())) => log::info!("camera: open"),
+            hands::camera::News::Opened(Err(e)) | hands::camera::News::Lost(e) => {
+                log::error!("camera: {e}");
+                self.webcam = None;
+                self.gesturing = false;
+                self.show_camera = false;
+                self.redraw();
+            }
+            hands::camera::News::Models(e) => {
+                log::error!("hands: {e}");
+                self.gesturing = false;
+                self.sync_webcam();
+            }
+            hands::camera::News::Read(reading) => self.hands_read(reading),
+        }
+    }
+
+    /// One reading of the camera: the hands move what they move, a sweep
+    /// turns a slide, and a frame for the presenter's card goes up to the
+    /// GPU.
+    #[cfg(feature = "hands")]
+    fn hands_read(&mut self, reading: hands::camera::Reading) {
+        let Some(on) = self.webcam.as_mut() else { return };
+        let now = on.origin.elapsed().as_secs_f64();
+        let found: Vec<_> = reading.hands.iter().map(|h| h.points).collect();
+        let turn = if self.gesturing {
+            on.gestures.read(&found, reading.size, now, self.show.is_some())
+        } else {
+            None
+        };
+        let mut seen = on.gestures.moving() || !on.gestures.pinches.is_empty();
+        if let Some((w, h, rgba)) = reading.card
+            && let Some(gfx) = &mut self.gfx
+        {
+            match gfx.upload_camera(&Bitmap { w, h, rgba }) {
+                Ok(slot) => {
+                    on.card = Some((slot, (w, h)));
+                    seen = true;
+                }
+                Err(e) => log::warn!("hands: the camera's frame did not upload: {e:#}"),
+            }
+        }
+        match turn {
+            Some(hands::gesture::Turn::Next) => {
+                let _ = self.present(Presenting::Next);
+            }
+            Some(hands::gesture::Turn::Prev) => {
+                let _ = self.present(Presenting::Prev);
+            }
+            None => {}
+        }
+        if seen || turn.is_some() {
+            self.redraw();
+        }
+    }
+
+    /// One frame of the screen for the hands: the springs and the coast
+    /// move the board — through the trackpad's own door, so a show holds
+    /// it inside the slide — the laser glides, and the card fades.
+    #[cfg(feature = "hands")]
+    fn hands_tick(&mut self) {
+        let wanted = self.show.is_some() && self.show_camera;
+        let Some(on) = self.webcam.as_mut() else { return };
+        let now = on.origin.elapsed().as_secs_f64();
+        let dt = (now - on.last_tick).clamp(0.0, 0.1);
+        on.last_tick = now;
+        let fade = dt as f32 / CARD_FADE_S;
+        on.card_alpha = if wanted && on.card.is_some() {
+            (on.card_alpha + fade).min(1.0)
+        } else {
+            (on.card_alpha - fade).max(0.0)
+        };
+        if let Some(motion) = on.gestures.tick(now, dt) {
+            let size = on.gestures.size;
+            self.hands_moved(motion, size);
+        }
+    }
+
+    /// The board moved as the hands say, through the trackpad's own door
+    /// — so a show holds it inside the slide — and zoomed about the
+    /// middle of the pinches the zoom was read off, laid over the window
+    /// as the marks are: never about the pointer, which is wherever the
+    /// mouse was left.
+    #[cfg(feature = "hands")]
+    fn hands_moved(&mut self, motion: hands::gesture::Motion, size: (u32, u32)) {
+        let Some(view) = self.view() else { return };
+        let about = match motion.about {
+            Some(p) => {
+                let (x, y) = hands::marks::cover(size, &view)(p);
+                (f64::from(x), f64::from(y))
+            }
+            None => (f64::from(view.viewport.w) / 2.0, f64::from(view.viewport.h) / 2.0),
+        };
+        let pinch = Gesture::Pinch {
+            dx: motion.dx,
+            dy: motion.dy,
+            factor: motion.factor,
+        };
+        if let Some(camera) = self.active().0.gesture(&view, about, pinch) {
+            self.apply(Change::Camera(camera));
+        }
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hands_tick(&mut self) {}
+
+    #[cfg(feature = "hands")]
+    fn hands_animating(&self) -> bool {
+        self.webcam
+            .as_ref()
+            .is_some_and(|on| on.gestures.moving() || (on.card_alpha > 0.0 && on.card_alpha < 1.0))
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hands_animating(&self) -> bool {
+        false
+    }
+
+    /// What the hands put on screen, over everything: the presenter's
+    /// camera in a show, the laser's trail laid as one union, then the
+    /// laser, the pinches and a turned slide's chevron.
+    #[cfg(feature = "hands")]
+    fn hand_marks(&self, frame: &mut Frame, view: &View) {
+        let Some(on) = &self.webcam else { return };
+        let now = on.origin.elapsed().as_secs_f64();
+        if self.show.is_some()
+            && on.card_alpha > 0.0
+            && let Some((slot, size)) = on.card
+        {
+            let shape = self.doc().presentation.camera;
+            frame.extend(hands::marks::card(slot, size, on.card_alpha, view, shape, now));
+        }
+        let marks = hands::marks::marks(&on.gestures, view, now);
+        if !marks.trail.is_empty() {
+            frame.group(marks.trail, 1.0, scene::Blend::Union, scene::Blend::Over);
+        }
+        frame.extend(marks.over);
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn hand_marks(&self, _frame: &mut Frame, _view: &View) {}
+
+    /// What a show puts on screen: the board as it is, with nothing over
+    /// it but the bands that cover what is not a slide, as strongly as
+    /// the show says — no grid, no panel, no selection, and no edge round
+    /// the slide.
+    fn show_frame(&self, view: &View) -> Frame {
+        let none = ImageSlots::new();
+        let images = self.gfx.as_ref().map_or(&none, Gfx::image_slots);
+        let mut frame = Frame::new();
+        frame.append(scene::document_prims(
+            self.doc(),
+            view,
+            images,
+            &self.shapes,
+            &self.letters(),
+            [0.0; 4],
+            None,
+        ));
+        if let Some((area, strength)) = self.show.as_ref().and_then(|s| s.shown(self.doc(), view))
+            && strength > 0.0
+        {
+            let ground = scene::with_alpha(VEIL, strength as f32);
+            frame.extend(present::veil(area, view).into_iter().map(|band| Prim::rect(band, ground)));
+        }
+        frame
     }
 
     /// Brings the active layer's card into the band when it has just
@@ -1002,6 +1521,8 @@ impl App {
         self.carry.as_ref().is_some_and(|c| !c.held || c.t < 1.0)
             || self.slides.moving()
             || self.scrolling.moving()
+            || self.show.as_ref().is_some_and(Show::flying)
+            || self.hands_animating()
     }
 
     fn redraw(&self) {
@@ -1158,6 +1679,10 @@ impl App {
         }
         if index != self.active {
             self.end_typing();
+            // A show is the board's that is on screen: another tab coming
+            // forward ends it, and the board it was showing looks where
+            // it did before.
+            self.end_show();
         }
         self.active = index;
         let mods = self.modifiers.state();
@@ -1930,6 +2455,9 @@ impl App {
             locked: !picked.is_empty() && picked.iter().all(|l| l.locked),
             hidden: !picked.is_empty() && picked.iter().all(|l| !l.visible),
             merge: editor.merge_name(doc),
+            present: present::presentable(doc, editor.selected_stop(doc).as_deref()),
+            path: editor.path_shown(),
+            hands: cfg!(feature = "hands").then(|| self.hands_on()),
         }
     }
 
@@ -2506,8 +3034,8 @@ impl App {
                 },
                 Err(e) => denied(&e),
             },
-            Request::AddFrame { path } => match self.add_frame(&path) {
-                Ok((id, name)) => Event::Framed { id, name },
+            Request::AddFrame { path, at } => match self.add_frame(&path, at) {
+                Ok(planted) => framed(planted),
                 Err(e) => denied(&e),
             },
             Request::Layers => Event::Layers {
@@ -2516,6 +3044,42 @@ impl App {
             Request::Texts => Event::Texts {
                 texts: export::texts(self.doc()),
             },
+            Request::Present { action } => match self.present(action) {
+                Ok(()) => self.showing(),
+                Err(reason) => Event::Denied {
+                    op: op.to_owned(),
+                    reason,
+                },
+            },
+            Request::Decks => Event::Decks {
+                decks: export::decks(self.doc()),
+            },
+            Request::Camera { shape, shown } => match self.camera_op(shape, shown) {
+                Ok(()) => Event::Camera {
+                    shape: self.doc().presentation.camera,
+                    shown: self.camera_shown(),
+                },
+                Err(reason) => Event::Denied {
+                    op: op.to_owned(),
+                    reason,
+                },
+            },
+            Request::Hands { on } => match on.map_or(Ok(()), |on| self.set_hands(on)) {
+                Ok(()) => Event::Hands { on: self.hands_on() },
+                Err(reason) => Event::Denied {
+                    op: op.to_owned(),
+                    reason,
+                },
+            },
+            Request::Link { .. } | Request::Unlink { .. } | Request::UnlinkAll | Request::Path { .. } => {
+                match self.deck_op(req) {
+                    Ok(ids) => Event::Done { ids },
+                    Err(reason) => Event::Denied {
+                        op: op.to_owned(),
+                        reason,
+                    },
+                }
+            }
             Request::AddText { .. } | Request::SetText { .. } => match self.text_op(req) {
                 Ok((id, layer)) => Event::Texted { id, layer },
                 Err(e) => denied(&e),
@@ -2538,6 +3102,106 @@ impl App {
                 Err(e) => denied(&e),
             },
         }
+    }
+
+    /// What the presenter's camera is told: its shape, the board's and a
+    /// step of its history, and whether it is shown while presenting,
+    /// which is the show's. Shown is refused by a build without a camera
+    /// to show, before the shape is set; the shape alone is the board's,
+    /// whatever builds it.
+    fn camera_op(&mut self, shape: Option<crate::doc::Card>, shown: Option<bool>) -> Result<(), String> {
+        if let Some(shown) = shown {
+            self.show_camera(shown)?;
+        }
+        if let Some(shape) = shape
+            && self.doc().presentation.camera != shape
+        {
+            // A step of its own, never folded into the text the person
+            // is typing.
+            self.end_typing();
+            self.active().1.presentation.camera = shape;
+            self.apply(Change::Scene);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "hands")]
+    fn show_camera(&mut self, shown: bool) -> Result<(), String> {
+        self.show_camera = shown;
+        self.sync_webcam();
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn show_camera(&mut self, shown: bool) -> Result<(), String> {
+        if shown {
+            return Err(NO_CAMERA.into());
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "hands")]
+    fn camera_shown(&self) -> bool {
+        self.show_camera
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn camera_shown(&self) -> bool {
+        false
+    }
+
+    /// The hand gestures turned on or off, as asked.
+    #[cfg(feature = "hands")]
+    fn set_hands(&mut self, on: bool) -> Result<(), String> {
+        if on != self.gesturing {
+            self.toggle_hands();
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "hands"))]
+    fn set_hands(&mut self, on: bool) -> Result<(), String> {
+        if on {
+            return Err(NO_CAMERA.into());
+        }
+        Ok(())
+    }
+
+    /// A change to the decks asked for on the command line — links laid,
+    /// taken away, or laid as one path — on the terms the canvas lays a
+    /// link, and one step of the history. Answers the deck the first
+    /// layer named is in now, as a show from there would walk it, or what
+    /// was unlinked. A refusal says why and changes nothing.
+    fn deck_op(&mut self, req: Request) -> Result<Vec<String>, String> {
+        self.end_typing();
+        // What was there, to tell a change from none: a link laid where it
+        // already was is no work, and a named file it marked unsaved
+        // would ask to be saved for nothing.
+        let before = self.doc().clone();
+        let (_, doc) = self.active();
+        let ids = match req {
+            Request::Link { from, to } => {
+                present::link(doc, &from, &to)?;
+                present::deck_of(doc, &from)
+            }
+            Request::Unlink { ids } => {
+                present::unlink(doc, &ids)?;
+                ids
+            }
+            Request::UnlinkAll => {
+                present::unlink_all(doc);
+                Vec::new()
+            }
+            Request::Path { ids } => {
+                present::lay_path(doc, &ids)?;
+                present::deck_of(doc, &ids[0])
+            }
+            _ => return Err("not an op on the decks".into()),
+        };
+        if !self.doc().same_board(&before) {
+            self.apply(Change::Scene);
+        }
+        Ok(ids)
     }
 
     /// A text added or changed from the command line: one step of the
@@ -2836,7 +3500,7 @@ impl App {
     /// A frame an agent handed over, on the board. It lands as a scene
     /// change like any other, so it is one undo step and a draft owes
     /// the disk a save for it.
-    fn add_frame(&mut self, path: &Path) -> anyhow::Result<(String, String)> {
+    fn add_frame(&mut self, path: &Path, at: Option<[f64; 2]>) -> anyhow::Result<graft::Planted> {
         self.end_typing();
         let mut fragment = read_fragment(path)?;
         // An agent sets text it cannot measure: its artistic boxes are
@@ -2845,7 +3509,16 @@ impl App {
         // Worked out before anything is committed: the bytes below go
         // into the store on the way in, and a fragment refused after
         // that would leave images there that nothing on the board names.
-        let planned = graft::planned(self.active().1, &fragment)?;
+        let planned = graft::planned(self.active().1, &fragment, at)?;
+        // The answer names what every layer it brings became, and one too
+        // large for the socket's frame would come back refused after the
+        // frame had landed — and an agent told no hands it over again.
+        let answer = framed(planned.planted());
+        anyhow::ensure!(
+            crate::ipc::proto::fits(answer.clone(), "add_frame") == answer,
+            "the frame brings {} layers, and the answer saying what each became would not fit the socket's frame: hand it over as smaller frames",
+            planned.planted().layers.len()
+        );
         // Then the bytes: an image whose blob nobody has would paint a
         // placeholder for as long as the board lives.
         self.keep_blobs(&fragment, path)?;
@@ -3439,6 +4112,11 @@ impl App {
     /// progress, the selection frame and marquee, the brush's ring, the
     /// dock, the layers handle and panel, the strip.
     fn frame(&self, view: &View) -> Frame {
+        if self.show.is_some() {
+            let mut frame = self.show_frame(view);
+            self.hand_marks(&mut frame, view);
+            return frame;
+        }
         // Before the window exists there are no textures, so every image
         // is a placeholder — which is what an empty map says.
         let none = ImageSlots::new();
@@ -3477,11 +4155,50 @@ impl App {
             Some(Element::Line(line)) => frame.extend(scene::line_prims(&line, view)),
             _ => {}
         }
+        // The decks: an arrow for every link between stops — less the one
+        // in the pointer's hand, drawn to the pointer below — and every
+        // stop's number, unless the path is put away.
+        if self.editor().path_shown() {
+            let held = self.editor().linking().map(|(from, _)| from);
+            frame.extend(present::links(self.doc(), view, self.theme.selection, held));
+            if let Some(atlas) = &self.atlas {
+                frame.extend(present::badges(
+                    self.doc(),
+                    view,
+                    atlas,
+                    self.atlas_slot,
+                    self.theme.selection,
+                    self.theme.handle,
+                ));
+            }
+        }
         // A lone line wears its ends; anything else, its frame.
         if let Some(line) = self.editor().lone_line(self.doc()) {
             frame.extend(select::end_prims(line, view, &self.theme));
         } else if let Some(selection) = self.editor().selection_frame(self.doc()) {
             frame.extend(select::prims(&selection, view, &self.theme));
+        }
+        // A stop selected wears the handle a link is pulled out of, and
+        // the link in the hand runs from it to the pointer.
+        if let Some(id) = self.editor().linkable(self.doc()) {
+            frame.extend(present::handle_prims(
+                self.doc(),
+                view,
+                &id,
+                self.theme.selection,
+                self.theme.handle,
+            ));
+        }
+        if let Some((from, to)) = self.editor().linking() {
+            let target = self.editor().link_target(self.doc(), view, to);
+            frame.extend(present::pulling(
+                self.doc(),
+                view,
+                from,
+                to,
+                target.as_deref(),
+                self.theme.selection,
+            ));
         }
         if let Some((a, b)) = self.editor().marquee() {
             frame.extend(select::marquee_prims(a, b, &self.theme));
@@ -3690,6 +4407,7 @@ impl App {
             };
             frame.extend(panel.prims(&look, &ink));
         }
+        self.hand_marks(&mut frame, view);
         frame
     }
 
@@ -3720,6 +4438,13 @@ impl App {
                 self.redraw();
             }
             Change::Camera(camera) => {
+                // A show holds the camera inside the slide, and has it to
+                // itself for the length of a flight.
+                let camera = match (&self.show, self.view()) {
+                    (Some(show), _) if show.flying() => return,
+                    (Some(show), Some(view)) => show.camera(self.doc(), &view, camera).unwrap_or(camera),
+                    _ => camera,
+                };
                 self.active().1.camera = camera;
                 self.redraw();
             }
@@ -3727,6 +4452,20 @@ impl App {
     }
 
     fn pointer_pressed(&mut self, button: Button) {
+        // A show is clicked through: on with the left button, back with
+        // the right.
+        if self.show.is_some() {
+            match button {
+                Button::Left => {
+                    let _ = self.present(Presenting::Next);
+                }
+                Button::Right => {
+                    let _ = self.present(Presenting::Prev);
+                }
+                Button::Middle => {}
+            }
+            return;
+        }
         let (Some(view), Some((x, y))) = (self.view(), self.cursor) else {
             return;
         };
@@ -4047,6 +4786,9 @@ impl App {
     }
 
     fn pointer_released(&mut self, button: Button) {
+        if self.show.is_some() {
+            return;
+        }
         // The box's own drag: the canvas never saw its press.
         if let Some(s) = self.sending.as_mut().filter(|s| s.selecting) {
             s.selecting = false;
@@ -4137,6 +4879,9 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         self.cursor = Some((x, y));
+        if self.show.is_some() {
+            return;
+        }
         // A press in the instruction's box is selecting for as long as
         // it is held, wherever the pointer wanders — past the box's top
         // or bottom edge it runs on into the lines scrolled out of sight.
@@ -4290,6 +5035,13 @@ impl App {
             f64::from(view.viewport.w) / 2.0,
             f64::from(view.viewport.h) / 2.0,
         ));
+        // A show has no panels to scroll: the wheel moves the camera, and
+        // the show holds it inside the slide.
+        if self.show.is_some() {
+            let shift = self.modifiers.state().shift_key();
+            let camera = self.active().0.scroll(&view, cursor, delta, shift);
+            return self.apply(Change::Camera(camera));
+        }
         // The dialog is modal for the wheel as it is for everything else:
         // over the instruction the wheel moves its lines, and anywhere
         // else it moves nothing — least of all the board behind it.
@@ -4357,6 +5109,13 @@ impl App {
             self.apply(change);
         }
         match key {
+            // A show takes the keyboard whole: nothing is edited while
+            // one is on.
+            _ if self.show.is_some() => {
+                if pressed {
+                    self.show_key(key);
+                }
+            }
             // The clipboard's keys come first for whichever field has the
             // keyboard: they are the window's to answer, not the field's.
             Key::Character(c)
@@ -4537,6 +5296,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::F2) if pressed => self.rename_active(),
+            Key::Named(NamedKey::F5) if pressed => self.start_show(),
             Key::Named(NamedKey::Delete | NamedKey::Backspace) if pressed => {
                 let (editor, doc) = self.active();
                 let change = editor.delete(doc);
@@ -4630,6 +5390,12 @@ impl App {
                 self.palette_shown = !self.palette_shown;
                 return self.redraw();
             }
+            Action::Present => return self.start_show(),
+            Action::Path => {
+                self.active().0.toggle_path();
+                return self.redraw();
+            }
+            Action::Hands => return self.toggle_hands(),
             Action::Layer(command) if command.merges() => return self.merge_layers(command),
             Action::Delete => {
                 let (editor, doc) = self.active();
@@ -4781,7 +5547,8 @@ impl App {
         self.drag = None;
         self.fading = false;
         // A slider let go of this way is let go of: where it was dragged
-        // to is where the board rests.
+        // to is where the board, or the brush, rests.
+        self.grab = None;
         self.text_grab = None;
         self.shape_grab = None;
         self.close_menu(None);
@@ -4829,6 +5596,20 @@ impl App {
         };
         // A layer card and the canvas are both held in a closed hand.
         let held = self.carry.as_ref().is_some_and(|c| c.held);
+        // A link is pulled out of a stop's handle, and carried to the stop
+        // it is let go of over — where no handle of the selection is, as
+        // a press there is that handle's.
+        let free = !over_chrome && handle.is_none();
+        let linking = self.editor().linking().is_some()
+            || match (self.view(), self.cursor) {
+                (Some(view), Some(at)) => free && self.editor().over_link(self.doc(), &view, at),
+                _ => false,
+            };
+        // An arrow is taken hold of, and pulled.
+        let over_arrow = match (self.view(), self.cursor) {
+            (Some(view), Some(at)) => free && self.editor().over_arrow(self.doc(), &view, at),
+            _ => false,
+        };
         // Over the dialog's box the pointer is the I-beam that says a
         // press there puts the caret down; over the rest of it, and over
         // the board behind it, an arrow.
@@ -4847,7 +5628,9 @@ impl App {
             }
             _ => false,
         };
-        let icon = if over_text == Some(true) || over_typed {
+        let icon = if self.show.is_some() {
+            CursorIcon::Default
+        } else if over_text == Some(true) || over_typed {
             CursorIcon::Text
         } else if over_text == Some(false) {
             CursorIcon::Default
@@ -4857,6 +5640,13 @@ impl App {
             CursorIcon::Crosshair
         } else if self.editor().is_moving() {
             CursorIcon::Move
+        } else if self.view().is_some_and(|view| self.editor().link_refused(self.doc(), &view)) {
+            // Over a frame that will not take the link in the hand.
+            CursorIcon::NotAllowed
+        } else if linking {
+            CursorIcon::Alias
+        } else if over_arrow {
+            CursorIcon::Grab
         } else if over_chrome {
             CursorIcon::Default
         } else if refused {
@@ -5188,6 +5978,8 @@ impl App {
             UserEvent::PastedText(text) => return self.pasted_text(&text),
             UserEvent::PastedLayers(clip) => return self.pasted_layers(*clip),
             UserEvent::Dialog(reply) => return self.dialog_replied(reply),
+            #[cfg(feature = "hands")]
+            UserEvent::Hands(started, news) => return self.hands_news(started, news),
         };
         match req {
             Request::Raise => {
@@ -5268,7 +6060,15 @@ impl App {
             | Request::OpenLayers { .. }
             | Request::Texts
             | Request::AddText { .. }
-            | Request::SetText { .. } => {}
+            | Request::SetText { .. }
+            | Request::Present { .. }
+            | Request::Decks
+            | Request::Link { .. }
+            | Request::Unlink { .. }
+            | Request::UnlinkAll
+            | Request::Path { .. }
+            | Request::Camera { .. }
+            | Request::Hands { .. } => {}
         }
     }
 }
@@ -5564,6 +6364,16 @@ pub fn run(
         cursor_icon: CursorIcon::Default,
         smoke_frames_left: smoke_frames,
         exit_error: None,
+        show: None,
+        show_full: false,
+        #[cfg(feature = "hands")]
+        show_camera: false,
+        #[cfg(feature = "hands")]
+        gesturing: false,
+        #[cfg(feature = "hands")]
+        webcam: None,
+        #[cfg(feature = "hands")]
+        webcams: 0,
     };
     // The first tab is built before the theme is in hand, so it is told
     // what a new frame's ground is once the window owns both.

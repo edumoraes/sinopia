@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::doc::{Align, BlendMode, Tag, TextMode, Valign};
 use crate::editor::Listed;
-use crate::export::{Card, TextCard};
+use crate::export::{Card, Deck, TextCard};
 use crate::tree::{Arrange, Place};
 
 pub const PROTOCOL_VERSION: u64 = 1;
@@ -48,6 +48,14 @@ pub enum Request {
         colors: Option<ThemeColors>,
     },
     Shutdown,
+    /// The presentation of the open board: started — from a stop named,
+    /// the stop selected or the head of a deck — moved a slide on or back,
+    /// to either end or to a slide by its place, or stopped. Answered with
+    /// where the show stands, so whoever moved it knows where it landed,
+    /// or why it did not.
+    Present {
+        action: Presenting,
+    },
     /// What frames the open board has. The three below are an agent's
     /// own door (§8): their answer *is* the work — the listing wants the
     /// live document and a picture wants the GPU — so unlike every op
@@ -63,9 +71,11 @@ pub enum Request {
     /// A frame handed over, in a file the caller wrote. A path and not
     /// the content: §5 says the socket speaks intent and never scene
     /// content, and a frame with ink in it would not fit the frame
-    /// anyway.
+    /// anyway. Its top left corner lands `at` the point asked, or where
+    /// the board picks.
     AddFrame {
         path: PathBuf,
+        at: Option<[f64; 2]>,
     },
     /// The open board's layers, the whole tree top first. It and every
     /// op under it are the command line's hold on the layers: answered by
@@ -162,6 +172,40 @@ pub enum Request {
         id: String,
         spec: TextSpec,
     },
+    /// The decks of the open board, each its stops in the order a show
+    /// walks them. It and the four under it are the command line's hold
+    /// on the presentation: a change each one step of the history, and
+    /// every layer named by its id.
+    Decks,
+    /// A link out of layer `from` to layer `to`: the stop after it.
+    Link {
+        from: String,
+        to: String,
+    },
+    /// The links out of these layers taken away.
+    Unlink {
+        ids: Vec<String>,
+    },
+    /// Every link on the board taken away.
+    UnlinkAll,
+    /// These layers laid as one deck, exactly as named: each leads to the
+    /// next, the last to nothing, and whatever led into any of them from
+    /// outside lets go.
+    Path {
+        ids: Vec<String>,
+    },
+    /// The presenter's camera: the shape it is shown in, which is the
+    /// board's and a step of its history, and whether it is shown while
+    /// presenting — each when said, and answered with how both stand.
+    Camera {
+        shape: Option<crate::doc::Card>,
+        shown: Option<bool>,
+    },
+    /// The hand gestures turned on or off — or, said nothing, how they
+    /// stand.
+    Hands {
+        on: Option<bool>,
+    },
 }
 
 impl TextSpec {
@@ -257,6 +301,7 @@ impl Request {
             Request::New => "new",
             Request::Raise => "raise",
             Request::Shutdown => "shutdown",
+            Request::Present { .. } => "present",
             Request::Open { .. } => "open",
             Request::OpenFile { .. } => "open_file",
             Request::Export { .. } => "export",
@@ -287,6 +332,13 @@ impl Request {
             Request::Texts => "texts",
             Request::AddText { .. } => "add_text",
             Request::SetText { .. } => "set_text",
+            Request::Decks => "decks",
+            Request::Link { .. } => "link",
+            Request::Unlink { .. } => "unlink",
+            Request::UnlinkAll => "unlink_all",
+            Request::Path { .. } => "path",
+            Request::Camera { .. } => "camera",
+            Request::Hands { .. } => "hands",
         }
     }
 
@@ -306,6 +358,38 @@ impl Request {
                 | Request::Theme { .. }
                 | Request::Shutdown
         )
+    }
+}
+
+/// What `present` asks of the show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Presenting {
+    /// From the stop on layer `from`, or from where F5 would start.
+    Start {
+        from: Option<String>,
+    },
+    Stop,
+    Next,
+    Prev,
+    First,
+    Last,
+    /// To slide `to`, counted from 1.
+    Go {
+        to: usize,
+    },
+}
+
+impl Presenting {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Presenting::Start { .. } => "start",
+            Presenting::Stop => "stop",
+            Presenting::Next => "next",
+            Presenting::Prev => "prev",
+            Presenting::First => "first",
+            Presenting::Last => "last",
+            Presenting::Go { .. } => "go",
+        }
     }
 }
 
@@ -347,8 +431,18 @@ pub enum Event {
     /// The frames the open board has, in paint order.
     Frames { frames: Vec<Card> },
     /// A frame an agent handed over is on the board, under the id and
-    /// the name it now goes by — enough to read it straight back.
-    Framed { id: String, name: String },
+    /// the name it now goes by — enough to read it straight back — with
+    /// its layer's id and the id each layer it brought was minted as,
+    /// keyed by the id it was written with. An instance from before
+    /// either answers without them, and is still read.
+    Framed {
+        id: String,
+        name: String,
+        #[serde(default)]
+        layer: String,
+        #[serde(default)]
+        layers: std::collections::BTreeMap<String, String>,
+    },
     /// The open board's layers, the whole tree top first.
     Layers { layers: Vec<Listed> },
     /// A change to the layers landed, and these are the layers it left
@@ -359,6 +453,21 @@ pub enum Event {
     Texts { texts: Vec<TextCard> },
     /// A text landed or changed: its id, and its layer's.
     Texted { id: String, layer: String },
+    /// The decks of the open board.
+    Decks { decks: Vec<Deck> },
+    /// The presenter's camera: the board's shape for it, and whether it
+    /// is shown while presenting.
+    Camera { shape: crate::doc::Card, shown: bool },
+    /// Whether the hand gestures are on.
+    Hands { on: bool },
+    /// Where the show stands: the slide on show, counted from 1, of how
+    /// many, and the layer of the stop it is — none of either while no
+    /// show is on.
+    Showing {
+        slide: Option<usize>,
+        of: usize,
+        stop: Option<String>,
+    },
 }
 
 /// `ev`, or `denied` in its place when it would not fit a frame. An
@@ -424,6 +533,24 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         "theme" => Request::Theme {
             colors: take_colors(&mut map)?,
         },
+        "present" => Request::Present {
+            action: match take_string(&mut map, "action")?.as_str() {
+                "start" => Presenting::Start {
+                    from: take_optional_string(&mut map, "from")?,
+                },
+                "stop" => Presenting::Stop,
+                "next" => Presenting::Next,
+                "prev" => Presenting::Prev,
+                "first" => Presenting::First,
+                "last" => Presenting::Last,
+                "go" => Presenting::Go {
+                    to: take_slide(&mut map)?,
+                },
+                other => {
+                    anyhow::bail!("a show starts, stops, goes next, prev, first, last or to a slide, not {other:?}")
+                }
+            },
+        },
         "frames" => Request::Frames,
         // Absolute, unlike `export`'s: the caller's working directory is
         // not the running instance's, so a relative destination would be
@@ -435,6 +562,7 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
         },
         "add_frame" => Request::AddFrame {
             path: absolute(take_string(&mut map, "path")?)?,
+            at: take_point(&mut map, "at")?,
         },
         "layers" => Request::Layers,
         "add_layer" => Request::AddLayer {
@@ -536,6 +664,31 @@ pub fn parse_request(line: &str) -> anyhow::Result<Request> {
             );
             Request::SetText { id, spec }
         }
+        "decks" => Request::Decks,
+        "link" => Request::Link {
+            from: take_string(&mut map, "from")?,
+            to: take_string(&mut map, "to")?,
+        },
+        "unlink" => Request::Unlink {
+            ids: take_ids(&mut map)?,
+        },
+        "unlink_all" => Request::UnlinkAll,
+        "path" => Request::Path {
+            ids: take_ids(&mut map)?,
+        },
+        "camera" => Request::Camera {
+            shape: map
+                .contains_key("shape")
+                .then(|| take_named(&mut map, "shape"))
+                .transpose()?,
+            shown: map
+                .contains_key("shown")
+                .then(|| take_bool(&mut map, "shown"))
+                .transpose()?,
+        },
+        "hands" => Request::Hands {
+            on: map.contains_key("on").then(|| take_bool(&mut map, "on")).transpose()?,
+        },
         other => anyhow::bail!("unknown op: {other:?}"),
     };
 
@@ -557,7 +710,29 @@ pub fn request_line(req: &Request) -> String {
         | Request::Frames
         | Request::Layers
         | Request::MergeVisible
-        | Request::Flatten => {}
+        | Request::Flatten
+        | Request::Decks
+        | Request::UnlinkAll => {}
+        Request::Link { from, to } => {
+            map.insert("from".into(), from.clone().into());
+            map.insert("to".into(), to.clone().into());
+        }
+        Request::Unlink { ids } | Request::Path { ids } => {
+            map.insert("ids".into(), ids.clone().into());
+        }
+        Request::Camera { shape, shown } => {
+            if let Some(shape) = shape {
+                map.insert("shape".into(), serde_json::to_value(shape).expect("a shape is a string"));
+            }
+            if let Some(shown) = shown {
+                map.insert("shown".into(), (*shown).into());
+            }
+        }
+        Request::Hands { on } => {
+            if let Some(on) = on {
+                map.insert("on".into(), (*on).into());
+            }
+        }
         Request::Open { id } => {
             map.insert("id".into(), id.clone().into());
         }
@@ -578,12 +753,27 @@ pub fn request_line(req: &Request) -> String {
                 map.insert("colors".into(), Value::Object(c));
             }
         }
+        Request::Present { action } => {
+            map.insert("action".into(), action.as_str().into());
+            match action {
+                Presenting::Start { from: Some(from) } => {
+                    map.insert("from".into(), from.clone().into());
+                }
+                Presenting::Go { to } => {
+                    map.insert("to".into(), (*to).into());
+                }
+                _ => {}
+            }
+        }
         Request::ReadFrame { id, dir } => {
             map.insert("id".into(), id.clone().into());
             map.insert("dir".into(), path(dir));
         }
-        Request::AddFrame { path: at } => {
-            map.insert("path".into(), path(at));
+        Request::AddFrame { path: from, at } => {
+            map.insert("path".into(), path(from));
+            if let Some([x, y]) = at {
+                map.insert("at".into(), vec![*x, *y].into());
+            }
         }
         Request::AddLayer { group, name, above } => {
             if *group {
@@ -872,6 +1062,37 @@ fn take_ids(map: &mut Map<String, Value>) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
+/// A point in world units, `[x, y]` — two numbers a board can hold —
+/// when there is one.
+fn take_point(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<Option<[f64; 2]>> {
+    let Some(value) = map.remove(key) else {
+        return Ok(None);
+    };
+    let number = |v: &Value| v.as_f64().filter(|n| n.is_finite());
+    match &value {
+        Value::Array(items) => match items.as_slice() {
+            [x, y] => match (number(x), number(y)) {
+                (Some(x), Some(y)) => Ok(Some([x, y])),
+                _ => anyhow::bail!("field {key} must be two numbers, got {value}"),
+            },
+            _ => anyhow::bail!("field {key} must be [x, y], got {value}"),
+        },
+        _ => anyhow::bail!("field {key} must be [x, y], got {value}"),
+    }
+}
+
+/// A slide's place, counted from 1 as the show counts them.
+fn take_slide(map: &mut Map<String, Value>) -> anyhow::Result<usize> {
+    match map.remove("to") {
+        Some(Value::Number(n)) => match n.as_u64().filter(|to| *to >= 1).and_then(|to| usize::try_from(to).ok()) {
+            Some(to) => Ok(to),
+            None => anyhow::bail!("field to must be a slide, counted from 1, got {n}"),
+        },
+        Some(other) => anyhow::bail!("field to must be a number, got {other}"),
+        None => anyhow::bail!("field to missing: go takes the slide to go to"),
+    }
+}
+
 fn take_bool(map: &mut Map<String, Value>, key: &str) -> anyhow::Result<bool> {
     match map.remove(key) {
         Some(Value::Bool(b)) => Ok(b),
@@ -984,6 +1205,7 @@ fn reject_leftovers(map: &Map<String, Value>, ctx: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::StopCard;
     use crate::doc::Kind;
 
     #[test]
@@ -1197,6 +1419,7 @@ mod tests {
             },
             Request::AddFrame {
                 path: PathBuf::from("/home/you/Work/foo/frame.json"),
+                at: None,
             },
         ];
         for req in all.into_iter().chain(layer_ops()) {
@@ -1259,6 +1482,7 @@ mod tests {
             parse_request(r#"{ "v": 1, "op": "add_frame", "path": "/tmp/w/f.json" }"#).unwrap(),
             Request::AddFrame {
                 path: PathBuf::from("/tmp/w/f.json"),
+                at: None,
             }
         );
     }
@@ -1282,7 +1506,7 @@ mod tests {
         for line in [
             r#"{ "v": 1, "op": "frames", "of": "board" }"#,
             r#"{ "v": 1, "op": "read_frame", "id": "01J", "dir": "/tmp", "scale": 2 }"#,
-            r#"{ "v": 1, "op": "add_frame", "path": "/tmp/f.json", "at": [0, 0] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/tmp/f.json", "where": [0, 0] }"#,
             // A missing field is not a shorter sentence, it is an error.
             r#"{ "v": 1, "op": "read_frame", "id": "01J" }"#,
             r#"{ "v": 1, "op": "add_frame" }"#,
@@ -1306,6 +1530,8 @@ mod tests {
         let line = event_line(&Event::Framed {
             id: "01K".into(),
             name: "Auth Flow".into(),
+            layer: "01KL".into(),
+            layers: Default::default(),
         });
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["ev"], "framed");
@@ -1473,6 +1699,199 @@ mod tests {
         for req in layer_ops() {
             assert!(req.is_asked(), "{}: the answer is the work", req.op());
         }
+    }
+
+    #[test]
+    fn a_show_is_moved_by_an_action_and_answers_where_it_stands() {
+        for action in [
+            Presenting::Start { from: None },
+            Presenting::Start {
+                from: Some("01JLAYER".into()),
+            },
+            Presenting::Stop,
+            Presenting::Next,
+            Presenting::Prev,
+            Presenting::First,
+            Presenting::Last,
+            Presenting::Go { to: 3 },
+        ] {
+            let present = Request::Present { action };
+            assert_eq!(parse_request(&request_line(&present)).unwrap(), present);
+            assert!(present.is_asked(), "the answer is where the show stands");
+        }
+        for line in [
+            r#"{ "v": 1, "op": "present" }"#,
+            r#"{ "v": 1, "op": "present", "action": "rewind" }"#,
+            r#"{ "v": 1, "op": "present", "action": "next", "slide": 2 }"#,
+            r#"{ "v": 1, "op": "present", "action": "next", "from": "01J" }"#,
+            r#"{ "v": 1, "op": "present", "action": "start", "to": 2 }"#,
+            r#"{ "v": 1, "op": "present", "action": "go" }"#,
+            r#"{ "v": 1, "op": "present", "action": "go", "to": 0 }"#,
+            r#"{ "v": 1, "op": "present", "action": "go", "to": 2.5 }"#,
+            r#"{ "v": 1, "op": "present", "action": "go", "to": "2" }"#,
+            r#"{ "v": 1, "op": "nudge", "dx": 0, "dy": 0, "factor": 1 }"#,
+            r#"{ "v": 1, "op": "pen", "phase": "down", "x": 0, "y": 0 }"#,
+            r#"{ "v": 1, "op": "showing" }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+    }
+
+    fn deck_ops() -> Vec<Request> {
+        let ids = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        vec![
+            Request::Decks,
+            Request::Link {
+                from: "01JA".into(),
+                to: "01JB".into(),
+            },
+            Request::Unlink { ids: ids(&["01JA"]) },
+            Request::UnlinkAll,
+            Request::Path {
+                ids: ids(&["01JA", "01JB", "01JC"]),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_frame_is_added_where_it_is_asked_to_and_answers_what_it_minted() {
+        let req = Request::AddFrame {
+            path: PathBuf::from("/home/you/Work/foo/frame.json"),
+            at: Some([120.5, -40.0]),
+        };
+        assert_eq!(parse_request(&request_line(&req)).unwrap(), req);
+        for line in [
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": [1] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": [1, 2, 3] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": ["1", 2] }"#,
+            r#"{ "v": 1, "op": "add_frame", "path": "/a.json", "at": { "x": 1, "y": 2 } }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+        let ev = Event::Framed {
+            id: "01K".into(),
+            name: "Intro".into(),
+            layer: "01KL".into(),
+            layers: [("fl".to_owned(), "01KL".to_owned()), ("in".to_owned(), "01KM".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        let v: Value = serde_json::from_str(&event_line(&ev)).unwrap();
+        assert_eq!((v["layer"].as_str(), v["layers"]["in"].as_str()), (Some("01KL"), Some("01KM")));
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
+        // An instance from before it answered with neither, and is read.
+        let old = r#"{"ev":"framed","id":"01K","name":"Intro","v":1}"#;
+        assert!(matches!(parse_event(old).unwrap(), Event::Framed { layers, .. } if layers.is_empty()));
+    }
+
+    #[test]
+    fn the_camera_and_the_hands_are_asked_what_they_are_told_or_how_they_stand() {
+        use crate::doc::Card;
+        for req in [
+            Request::Camera {
+                shape: Some(Card::Blob),
+                shown: Some(true),
+            },
+            Request::Camera {
+                shape: None,
+                shown: Some(false),
+            },
+            Request::Camera {
+                shape: Some(Card::Square),
+                shown: None,
+            },
+            Request::Camera { shape: None, shown: None },
+            Request::Hands { on: Some(true) },
+            Request::Hands { on: None },
+        ] {
+            assert_eq!(parse_request(&request_line(&req)).unwrap(), req, "{}", req.op());
+            assert!(req.is_asked(), "{}: the answer is how it stands", req.op());
+        }
+        for line in [
+            r#"{ "v": 1, "op": "camera", "shape": "hexagon" }"#,
+            r#"{ "v": 1, "op": "camera", "shown": "yes" }"#,
+            r#"{ "v": 1, "op": "camera", "corner": "left" }"#,
+            r#"{ "v": 1, "op": "hands", "on": 1 }"#,
+            r#"{ "v": 1, "op": "hands", "camera": 0 }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+        let ev = Event::Camera {
+            shape: Card::Round,
+            shown: true,
+        };
+        let v: Value = serde_json::from_str(&event_line(&ev)).unwrap();
+        assert_eq!((v["ev"].as_str(), v["shape"].as_str(), v["shown"].as_bool()), (Some("camera"), Some("round"), Some(true)));
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
+        let ev = Event::Hands { on: false };
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
+    }
+
+    #[test]
+    fn the_deck_ops_round_trip_and_are_asked() {
+        for req in deck_ops() {
+            assert_eq!(parse_request(&request_line(&req)).unwrap(), req, "{}", req.op());
+            assert!(req.is_asked(), "{}: the answer is the deck", req.op());
+        }
+    }
+
+    #[test]
+    fn a_deck_op_is_as_closed_as_every_other() {
+        for line in [
+            r#"{ "v": 1, "op": "link", "from": "a" }"#,
+            r#"{ "v": 1, "op": "link", "to": "b" }"#,
+            r#"{ "v": 1, "op": "link", "from": "a", "to": "b", "slide": 1 }"#,
+            r#"{ "v": 1, "op": "unlink" }"#,
+            r#"{ "v": 1, "op": "unlink", "ids": [] }"#,
+            r#"{ "v": 1, "op": "unlink_all", "ids": ["a"] }"#,
+            r#"{ "v": 1, "op": "path", "ids": "a,b" }"#,
+            r#"{ "v": 1, "op": "decks", "all": true }"#,
+        ] {
+            assert!(parse_request(line).is_err(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn the_decks_match_the_wire_format() {
+        let ev = Event::Decks {
+            decks: vec![Deck {
+                stops: vec![StopCard {
+                    id: "01JA".into(),
+                    name: "Intro".into(),
+                    kind: crate::doc::Kind::Frame,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1600.0,
+                    h: 900.0,
+                }],
+            }],
+        };
+        let v: Value = serde_json::from_str(&event_line(&ev)).unwrap();
+        assert_eq!(v["ev"], "decks");
+        assert_eq!(v["decks"][0]["stops"][0]["name"], "Intro");
+        assert_eq!(v["decks"][0]["stops"][0]["kind"], "frame");
+        assert_eq!(parse_event(&event_line(&ev)).unwrap(), ev);
+    }
+
+    #[test]
+    fn where_a_show_stands_matches_the_wire_format() {
+        let on = Event::Showing {
+            slide: Some(2),
+            of: 5,
+            stop: Some("01J".into()),
+        };
+        let v: Value = serde_json::from_str(&event_line(&on)).unwrap();
+        assert_eq!((v["ev"].as_str(), v["slide"].as_u64(), v["of"].as_u64()), (Some("showing"), Some(2), Some(5)));
+        assert_eq!(v["stop"], "01J");
+        assert_eq!(parse_event(&event_line(&on)).unwrap(), on);
+        let off = Event::Showing {
+            slide: None,
+            of: 0,
+            stop: None,
+        };
+        let v: Value = serde_json::from_str(&event_line(&off)).unwrap();
+        assert!(v["slide"].is_null() && v["stop"].is_null(), "no show: {v}");
+        assert_eq!(parse_event(&event_line(&off)).unwrap(), off);
     }
 
     #[test]
