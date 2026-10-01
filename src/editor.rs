@@ -386,6 +386,10 @@ pub struct Editor {
     folding: Option<u64>,
     /// A link being pulled, out of a stop's handle or by its arrow.
     linking: Option<Linking>,
+    /// The decks' arrows and numbers are put away — View → Presentation
+    /// Path — and an arrow out of sight takes no press. The tab's, as its
+    /// layer filter is.
+    path_hidden: bool,
 }
 
 /// A link in the pointer's hand: the stop it comes from, by its layer,
@@ -562,9 +566,21 @@ impl Editor {
     }
 
     /// Whether `screen` is on the arrow of a link, with the Select tool in
-    /// hand: a press there takes hold of it.
+    /// hand and the path on show: a press there takes hold of it.
     pub fn over_arrow(&self, doc: &Document, view: &View, screen: (f64, f64)) -> bool {
-        self.active_tool() == Tool::Select && crate::present::link_at(doc, view, screen).is_some()
+        self.path_shown()
+            && self.active_tool() == Tool::Select
+            && crate::present::link_at(doc, view, screen).is_some()
+    }
+
+    /// Whether the decks' arrows and numbers are on the board.
+    pub fn path_shown(&self) -> bool {
+        !self.path_hidden
+    }
+
+    /// Puts the decks' arrows and numbers away, or brings them back.
+    pub fn toggle_path(&mut self) {
+        self.path_hidden = !self.path_hidden;
     }
 
     /// What a link let go of at `to` (world) would land on, by its layer:
@@ -1799,7 +1815,11 @@ impl Editor {
         let held = self
             .linkable(doc)
             .filter(|id| crate::present::on_handle(doc, view, id, screen))
-            .or_else(|| crate::present::link_at(doc, view, screen));
+            .or_else(|| {
+                self.path_shown()
+                    .then(|| crate::present::link_at(doc, view, screen))
+                    .flatten()
+            });
         if let Some(from) = held {
             self.linking = Some(Linking {
                 from,
@@ -4683,6 +4703,26 @@ mod tests {
         doc.layer_mut("fc-l").unwrap().next = None;
         assert_eq!(pull_link(&mut e, &mut doc, &v, (400.0, 50.0)), Change::Scene);
         assert_eq!(doc.layer("fa-l").unwrap().next.as_deref(), Some("fb-l"));
+    }
+
+    #[test]
+    fn with_the_path_put_away_an_arrow_is_nothing_to_take_hold_of() {
+        let (mut doc, v) = two_frames();
+        doc.layer_mut("fa-l").unwrap().next = Some("fb-l".into());
+        let mut e = Editor::new();
+        assert!(e.path_shown(), "a board shows its decks");
+        e.toggle_path();
+        assert!(!e.path_shown());
+        assert!(!e.over_arrow(&doc, &v, ARROW_MIDDLE));
+        // A press where the arrow would be is a press on the board.
+        let tip = brush().tip(Face::Round);
+        let _ = e.press(Button::Left, &v, ARROW_MIDDLE, &mut doc, &tip);
+        let _ = e.moved(&v, (ARROW_MIDDLE.0 - 60.0, ARROW_MIDDLE.1 + 120.0), &mut doc);
+        assert!(e.linking().is_none());
+        let _ = e.release(Button::Left, &v, (ARROW_MIDDLE.0 - 60.0, ARROW_MIDDLE.1 + 120.0), &mut doc, "#111");
+        assert_eq!(doc.layer("fa-l").unwrap().next.as_deref(), Some("fb-l"), "the link stays");
+        e.toggle_path();
+        assert!(e.over_arrow(&doc, &v, ARROW_MIDDLE), "and is there again with the path");
     }
 
     #[test]
